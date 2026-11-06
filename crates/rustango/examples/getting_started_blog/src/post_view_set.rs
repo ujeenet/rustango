@@ -15,5 +15,6 @@ use crate::blog::models::Post;
     search_fields = "title, body",
     ordering      = "-published_at",
     page_size     = 20,
+    allow_anonymous,
 )]
 pub struct PostViewSet;

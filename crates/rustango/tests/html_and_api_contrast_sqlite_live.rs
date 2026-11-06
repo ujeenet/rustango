@@ -112,16 +112,26 @@ async fn app() -> axum::Router {
     let tera = tera();
     axum::Router::new()
         // The API view — JSON in, JSON out.
-        .merge(ViewSet::for_model(Post::SCHEMA, POST_FIELDS).router("/api/posts", pool.clone()))
+        .merge(
+            ViewSet::for_model(Post::SCHEMA, POST_FIELDS)
+                .allow_anonymous()
+                .router("/api/posts", pool.clone()),
+        )
         // The HTML views — server-rendered pages for a browser.
         .merge(
             ListView::for_model(Post::SCHEMA)
+                .allow_anonymous()
                 .order_by("published_at", true)
                 .router("/posts", tera.clone(), pool.clone()),
         )
-        .merge(DetailView::for_model(Post::SCHEMA).router("/posts", tera.clone(), pool.clone()))
+        .merge(
+            DetailView::for_model(Post::SCHEMA)
+                .allow_anonymous()
+                .router("/posts", tera.clone(), pool.clone()),
+        )
         .merge(
             CreateView::for_model(Post::SCHEMA, &["title", "body", "status", "author_id"])
+                .allow_anonymous()
                 .success_url("/posts")
                 .router("/posts", tera, pool),
         )
@@ -144,7 +154,9 @@ async fn get(app: &axum::Router, path: &str) -> (StatusCode, String, Option<Stri
 
 // doc-snippet:start
 fn post_list() -> ListView {
-    ListView::for_model(Post::SCHEMA).ordering_fields(&["title", "published_at"])
+    ListView::for_model(Post::SCHEMA)
+        .allow_anonymous()
+        .ordering_fields(&["title", "published_at"])
 }
 // doc-snippet:end
 

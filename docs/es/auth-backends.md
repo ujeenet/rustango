@@ -234,6 +234,10 @@ posea que conceda el codename pasa. Concede con
 `set_user_perm_pool` / los roles mediante `create_role_pool` + `assign_role_pool`
 (las tablas de permisos las crea `ensure_tables_pool`).
 
+`ViewSet` y las vistas de plantilla leen el mismo usuario para sus codenames,
+pero solo en `tenant_router`. En un `.router(..)` con pool fijo rechazan al
+usuario que resolvieron estos backends (`403`): ese pool no guarda usuarios de ningún tenant.
+
 ---
 
 ## Véase también

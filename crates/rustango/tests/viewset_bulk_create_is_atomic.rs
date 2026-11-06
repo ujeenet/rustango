@@ -76,6 +76,7 @@ async fn prepare(pool: &Pool, ddl: &str) {
 
 async fn post_json(pool: &Pool, body: &str) -> StatusCode {
     let app = ViewSet::for_model(Widget::SCHEMA, &["id", "label", "priority"])
+        .allow_anonymous()
         .router("/widgets", pool.clone());
     app.oneshot(
         Request::builder()

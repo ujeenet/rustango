@@ -50,26 +50,31 @@ fn app(pool: &Pool) -> axum::Router {
     .unwrap();
     let t = Arc::new(t);
     UpdateView::for_model(Account::SCHEMA, &["name"])
+        .allow_anonymous()
         .template("one.html")
         .router("/acc", t.clone(), pool.clone())
         .merge(
             UpdateView::for_model(Account::SCHEMA, &["name", "password_hash", "recovery"])
+                .allow_anonymous()
                 .template("one.html")
                 .router("/listed", t.clone(), pool.clone()),
         )
         .merge(
             UpdateView::for_model(Account::SCHEMA, &["name"])
+                .allow_anonymous()
                 .context_fields(&["note"])
                 .template("one.html")
                 .router("/ctx", t.clone(), pool.clone()),
         )
         .merge(
             DetailView::for_model(Account::SCHEMA)
+                .allow_anonymous()
                 .template("one.html")
                 .router("/acc", t.clone(), pool.clone()),
         )
         .merge(
             ListView::for_model(Account::SCHEMA)
+                .allow_anonymous()
                 .template("list.html")
                 .fields(&["name"])
                 .bulk_actions(true)
@@ -79,6 +84,7 @@ fn app(pool: &Pool) -> axum::Router {
         )
         .merge(
             ListView::for_model(Account::SCHEMA)
+                .allow_anonymous()
                 .template("list.html")
                 .bulk_actions(true)
                 .with_delete_confirmation(true)
@@ -191,5 +197,7 @@ fn the_secret_attribute_reaches_the_schema() {
 #[test]
 #[should_panic(expected = "UpdateView context_fields: `tvsecret_account` has no field [\"nope\"]")]
 fn context_fields_refuses_an_unknown_name() {
-    let _ = UpdateView::for_model(Account::SCHEMA, &["name"]).context_fields(&["note", "nope"]);
+    let _ = UpdateView::for_model(Account::SCHEMA, &["name"])
+        .allow_anonymous()
+        .context_fields(&["note", "nope"]);
 }

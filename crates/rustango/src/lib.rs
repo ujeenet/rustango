@@ -1023,6 +1023,10 @@ pub mod extractors;
 #[cfg(any(feature = "admin", feature = "tenancy"))]
 pub mod viewset;
 
+/// The access rule every generated model surface mounts with.
+#[cfg(any(feature = "admin", feature = "template_views"))]
+pub(crate) mod access;
+
 /// Shared list-endpoint query-parameter helpers — one place that owns the
 /// reserved-key skip list, `?ordering=` parsing and `?page_size=` clamping,
 /// so `viewset::handle_list` and `template_views::ListView` cannot drift

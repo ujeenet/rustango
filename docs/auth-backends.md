@@ -231,6 +231,10 @@ otherwise any role the user holds that grants the codename passes. Grant with
 `set_user_perm_pool` / roles via `create_role_pool` + `assign_role_pool` (the
 permission tables are created by `ensure_tables_pool`).
 
+`ViewSet` and the template views read the same user for their codename gates,
+but only on `tenant_router`. On a fixed-pool `.router(..)` they refuse a user
+these backends resolved (`403`): that pool holds no tenant's users.
+
 ---
 
 ## See also

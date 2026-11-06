@@ -95,7 +95,7 @@ async fn body_to_string(resp: axum::http::Response<Body>) -> String {
 fn router(pool: sqlx::PgPool, tera: Arc<Tera>) -> axum::Router {
     axum::Router::new()
         .merge(
-            ListView::for_model(Author::SCHEMA)
+            ListView::for_model(Author::SCHEMA).allow_anonymous()
                 .template("cookbook_author_list.html")
                 .page_size(2)
                 .filter_fields(&["name"])
@@ -104,24 +104,24 @@ fn router(pool: sqlx::PgPool, tera: Arc<Tera>) -> axum::Router {
                 .router("/authors", tera.clone(), pool.clone().into()),
         )
         .merge(
-            DetailView::for_model(Author::SCHEMA)
+            DetailView::for_model(Author::SCHEMA).allow_anonymous()
                 .template("cookbook_author_detail.html")
                 .router("/authors", tera.clone(), pool.clone().into()),
         )
         .merge(
-            CreateView::for_model(Author::SCHEMA, &["name", "email", "bio"])
+            CreateView::for_model(Author::SCHEMA, &["name", "email", "bio"]).allow_anonymous()
                 .template("cookbook_author_form.html")
                 .success_url("/authors/{pk}")
                 .router("/authors", tera.clone(), pool.clone().into()),
         )
         .merge(
-            UpdateView::for_model(Author::SCHEMA, &["name", "email", "bio"])
+            UpdateView::for_model(Author::SCHEMA, &["name", "email", "bio"]).allow_anonymous()
                 .template("cookbook_author_form.html")
                 .success_url("/authors/{pk}")
                 .router("/authors", tera.clone(), pool.clone().into()),
         )
         .merge(
-            DeleteView::for_model(Author::SCHEMA)
+            DeleteView::for_model(Author::SCHEMA).allow_anonymous()
                 .template("cookbook_author_confirm_delete.html")
                 .success_url("/authors")
                 .router("/authors", tera, pool.into()),

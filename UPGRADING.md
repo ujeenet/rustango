@@ -152,6 +152,9 @@ untouched.
 
 - M2M `add()` returns the driver error when a unique key other than the `(src, dst)` link refuses the row (it used to return `Ok` with nothing written).
 - `QuerySet::reverse()` now swaps an explicit `NULLS FIRST`/`LAST`, keeps each `distinct_on` group's row (it matches `last()`), and also flips an `order_by` added after it; `reorder`, `unordered` and `replace_order_by` reset it.
+- Every template model view now panics at mount until it says who may use it. Add `.allow_anonymous()` to public pages and to pages behind your own auth layer; with `tenancy`, gate writes with `.permissions_for_model()` (`add` / `change` / `delete`) or `.login_required()`. `permissions_for_model()` gates GET too: List/Detail need `view`, and the Create/Update/Delete form and confirm pages need their own codename; a `ListView` with `bulk_actions(true)` needs `view`, `change` and `delete` for its POST.
+- A `ViewSet` (or `#[derive(ViewSet)]`) with open writes panics at mount instead of warning: add codenames for create, update and destroy, or `read_only` / `allow_anonymous`.
+- Codename and login gates on a fixed-pool `router(..)` now refuse (403) a credential bound to a tenant; on a `tenant_router` they refuse one bound to another tenant or to none. Use `tenant_router` for tenant users.
 
 ## 0.64.0
 

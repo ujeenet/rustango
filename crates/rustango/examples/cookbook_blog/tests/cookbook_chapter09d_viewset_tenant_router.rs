@@ -153,7 +153,7 @@ async fn fixture() -> Option<(String, sqlx::PgPool, axum::Router)> {
     // `router(prefix, pool)` path, minus the pool. v0.30 unification:
     // filter_fields / search_fields / ordering / page_size all carry
     // over to the per-tenant path.
-    let vs_router = ViewSet::for_model(Author::SCHEMA, &["id", "name", "email", "bio", "joined_at"])
+    let vs_router = ViewSet::for_model(Author::SCHEMA, &["id", "name", "email", "bio", "joined_at"]).allow_anonymous()
         .filter_fields(&["name"])
         .search_fields(&["name", "email", "bio"])
         .ordering(&[("id", false)])

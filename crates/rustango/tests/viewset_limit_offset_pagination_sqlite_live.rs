@@ -37,6 +37,7 @@ async fn make_router_and_pool(page_size: usize) -> axum::Router {
     .expect("create");
     let pool = Pool::Sqlite(sq);
     rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "title"])
+        .allow_anonymous()
         .page_size(page_size)
         .limit_offset_pagination()
         .router("/posts", pool)

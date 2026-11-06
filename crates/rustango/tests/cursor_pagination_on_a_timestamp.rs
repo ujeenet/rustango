@@ -76,6 +76,7 @@ async fn seeded_pool() -> Pool {
 
 async fn get(pool: &Pool, uri: &str) -> (StatusCode, serde_json::Value) {
     let app = ViewSet::for_model(Event::SCHEMA, FIELDS)
+        .allow_anonymous()
         .cursor_pagination("occurred_at")
         .page_size(3)
         .router("/events", pool.clone());
@@ -168,14 +169,17 @@ async fn the_timestamp_cursor_actually_walks_the_table() {
 #[should_panic(expected = "projected away")]
 fn projecting_the_cursor_column_away_is_refused_at_build_time() {
     // occurred_at deliberately absent
-    let _ = ViewSet::for_model(Event::SCHEMA, &["id", "label"]).cursor_pagination("occurred_at");
+    let _ = ViewSet::for_model(Event::SCHEMA, &["id", "label"])
+        .allow_anonymous()
+        .cursor_pagination("occurred_at");
 }
 
 /// The primary key is required too — it breaks ties.
 #[test]
 #[should_panic(expected = "primary key")]
 fn projecting_the_primary_key_away_is_refused() {
-    let _ = ViewSet::for_model(Event::SCHEMA, &["label", "occurred_at"]) // no `id`
+    let _ = ViewSet::for_model(Event::SCHEMA, &["label", "occurred_at"])
+        .allow_anonymous() // no `id`
         .cursor_pagination("occurred_at");
 }
 
@@ -184,6 +188,7 @@ fn projecting_the_primary_key_away_is_refused() {
 async fn a_projection_containing_the_cursor_and_pk_still_serves() {
     let pool = seeded_pool().await;
     let app = ViewSet::for_model(Event::SCHEMA, &["id", "label", "occurred_at"])
+        .allow_anonymous()
         .cursor_pagination("occurred_at")
         .page_size(3)
         .router("/events", pool.clone());
@@ -292,6 +297,7 @@ async fn paging_through_tied_timestamps_visits_every_row() {
         let pool = pool.clone();
         async move {
             let app = ViewSet::for_model(Event::SCHEMA, FIELDS)
+                .allow_anonymous()
                 .cursor_pagination("occurred_at")
                 .page_size(2)
                 .router("/events", pool);
@@ -360,6 +366,7 @@ async fn paging_descending_through_ties_visits_every_row() {
 
     for _ in 0..20 {
         let app = ViewSet::for_model(Event::SCHEMA, FIELDS)
+            .allow_anonymous()
             .cursor_pagination_desc("occurred_at")
             .page_size(2)
             .router("/events", pool.clone());
@@ -468,6 +475,7 @@ async fn walk_all_labels(pool: &Pool) -> Vec<String> {
     let mut exhausted = false;
     for _ in 0..MAX_PAGES {
         let app = ViewSet::for_model(Event::SCHEMA, FIELDS)
+            .allow_anonymous()
             .cursor_pagination("occurred_at")
             .page_size(2)
             .router("/events", pool.clone());

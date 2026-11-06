@@ -79,6 +79,7 @@ async fn count_returned(app: axum::Router, uri: &str) -> usize {
 #[tokio::test]
 async fn client_cannot_exceed_the_default_ceiling() {
     let app = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
+        .allow_anonymous()
         .page_size(20)
         .router("/notes", pool_with_rows().await);
     let n = count_returned(app, "/notes?page_size=1000").await;
@@ -92,6 +93,7 @@ async fn client_cannot_exceed_the_default_ceiling() {
 #[tokio::test]
 async fn app_can_lower_the_ceiling() {
     let app = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
+        .allow_anonymous()
         .page_size(20)
         .max_page_size(25)
         .router("/notes", pool_with_rows().await);
@@ -103,6 +105,7 @@ async fn app_can_lower_the_ceiling() {
 #[tokio::test]
 async fn app_can_raise_the_ceiling() {
     let app = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
+        .allow_anonymous()
         .max_page_size(200)
         .router("/notes", pool_with_rows().await);
     let n = count_returned(app, "/notes?page_size=200").await;
@@ -114,6 +117,7 @@ async fn app_can_raise_the_ceiling() {
 #[tokio::test]
 async fn limit_offset_respects_the_same_ceiling() {
     let app = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
+        .allow_anonymous()
         .max_page_size(30)
         .pagination(rustango::viewset::PaginationStyle::LimitOffset)
         .router("/notes", pool_with_rows().await);
@@ -126,6 +130,7 @@ async fn limit_offset_respects_the_same_ceiling() {
 #[tokio::test]
 async fn default_page_size_is_clamped_to_the_ceiling() {
     let app = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
+        .allow_anonymous()
         .page_size(500)
         .max_page_size(50)
         .router("/notes", pool_with_rows().await);
@@ -144,6 +149,7 @@ async fn status_of(app: axum::Router, uri: &str) -> StatusCode {
 #[tokio::test]
 async fn huge_page_number_is_an_empty_page() {
     let app = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
+        .allow_anonymous()
         .page_size(20)
         .max_offset(0)
         .router("/notes", pool_with_rows().await);
@@ -156,6 +162,7 @@ async fn huge_page_number_is_an_empty_page() {
 async fn offset_past_the_cap_is_a_400() {
     let max = rustango::viewset::DEFAULT_MAX_OFFSET;
     let lo = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
+        .allow_anonymous()
         .pagination(rustango::viewset::PaginationStyle::LimitOffset)
         .router("/notes", pool_with_rows().await);
     let at = status_of(lo.clone(), &format!("/notes?offset={max}")).await;
@@ -164,6 +171,7 @@ async fn offset_past_the_cap_is_a_400() {
     assert_eq!(over, StatusCode::BAD_REQUEST);
 
     let pages = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
+        .allow_anonymous()
         .page_size(10)
         .router("/notes", pool_with_rows().await);
     let last = max / 10 + 1;
@@ -175,6 +183,7 @@ async fn offset_past_the_cap_is_a_400() {
     assert_eq!(over, StatusCode::BAD_REQUEST);
 
     let open = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
+        .allow_anonymous()
         .pagination(rustango::viewset::PaginationStyle::LimitOffset)
         .max_offset(0)
         .router("/notes", pool_with_rows().await);
@@ -187,6 +196,7 @@ async fn offset_past_the_cap_is_a_400() {
 async fn count_can_be_skipped() {
     for (count, expect) in [(true, Value::from(250)), (false, Value::Null)] {
         let app = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
+            .allow_anonymous()
             .page_size(10)
             .count(count)
             .router("/notes", pool_with_rows().await);
@@ -209,6 +219,7 @@ async fn in_list_over_the_cap_is_a_400() {
     let cap = rustango::list_params::MAX_IN_VALUES;
     let ids = |n: usize| (1..=n).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
     let app = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
+        .allow_anonymous()
         .filter_fields(&["id"])
         .router("/notes", pool_with_rows().await);
     let at_cap = status_of(app.clone(), &format!("/notes?id__in={}", ids(cap))).await;
@@ -256,6 +267,7 @@ async fn in_lists_over_the_bind_total_are_a_400() {
     let names: Vec<String> = (0..17).map(|i| format!("f{i}")).collect();
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
     let app = ViewSet::for_model(Wide::SCHEMA, &["id"])
+        .allow_anonymous()
         .filter_fields(&refs)
         .router("/wide", pool);
     let ids = (1..=rustango::list_params::MAX_IN_VALUES)

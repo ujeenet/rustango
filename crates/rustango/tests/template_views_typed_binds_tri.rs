@@ -180,17 +180,20 @@ fn app(pool: &Pool) -> axum::Router {
     .unwrap();
     let t = Arc::new(t);
     CreateView::for_model(Event::SCHEMA, EVENT_FIELDS)
+        .allow_anonymous()
         .template("form.html")
         .success_url("/events")
         .router("/events", t.clone(), pool.clone())
         .merge(
             UpdateView::for_model(Event::SCHEMA, EVENT_FIELDS)
+                .allow_anonymous()
                 .template("form.html")
                 .success_url("/events")
                 .router("/events", t.clone(), pool.clone()),
         )
         .merge(
             ListView::for_model(Event::SCHEMA)
+                .allow_anonymous()
                 .template("list.html")
                 .filter_fields(&["author_id", "done", "token", "day", "note", "at"])
                 .search_fields(&["note"])
@@ -198,101 +201,118 @@ fn app(pool: &Pool) -> axum::Router {
         )
         .merge(
             DeleteView::for_model(Event::SCHEMA)
+                .allow_anonymous()
                 .template("detail.html")
                 .success_url("/events")
                 .router("/events", t.clone(), pool.clone()),
         )
         .merge(
             DetailView::for_model(Event::SCHEMA)
+                .allow_anonymous()
                 .template("detail.html")
                 .router("/ev", t.clone(), pool.clone()),
         )
         .merge(
             CreateView::for_model(Label::SCHEMA, &["code"])
+                .allow_anonymous()
                 .template("form.html")
                 .success_url("/labels")
                 .router("/labels", t.clone(), pool.clone()),
         )
         .merge(
             CreateView::for_model(Slot::SCHEMA, &["day", "hour"])
+                .allow_anonymous()
                 .template("form.html")
                 .success_url("/slots")
                 .router("/slots", t.clone(), pool.clone()),
         )
         .merge(
             UpdateView::for_model(Slot::SCHEMA, &["day", "hour"])
+                .allow_anonymous()
                 .template("form.html")
                 .success_url("/slots")
                 .router("/slots", t.clone(), pool.clone()),
         )
         .merge(
             UpdateView::for_model(Label::SCHEMA, &["code"])
+                .allow_anonymous()
                 .template("form.html")
                 .success_url("/labels")
                 .router("/labels", t.clone(), pool.clone()),
         )
         .merge(
             CreateView::for_model(Label::SCHEMA, &["code"])
+                .allow_anonymous()
                 .template("form.html")
                 .success_url("/labels/{id}")
                 .router("/rlabels", t.clone(), pool.clone()),
         )
         .merge(
             CreateView::for_model(Tag::SCHEMA, &["code", "name"])
+                .allow_anonymous()
                 .template("form.html")
                 .success_url("/tags")
                 .router("/tags", t.clone(), pool.clone()),
         )
         .merge(
             CreateView::for_model(Doc::SCHEMA, &["name"])
+                .allow_anonymous()
                 .template("form.html")
                 .success_url("/docs")
                 .router("/docs", t.clone(), pool.clone()),
         )
         .merge(
             UpdateView::for_model(Memo::SCHEMA, &["title"])
+                .allow_anonymous()
                 .template("form.html")
                 .success_url("/memos")
                 .router("/memos", t.clone(), pool.clone()),
         )
         .merge(
             CreateView::for_model(Story::SCHEMA, STORY_FIELDS)
+                .allow_anonymous()
                 .template("form.html")
                 .success_url("/stories")
                 .router("/stories", t.clone(), pool.clone()),
         )
         .merge(
             UpdateView::for_model(Story::SCHEMA, STORY_FIELDS)
+                .allow_anonymous()
                 .template("form.html")
                 .success_url("/stories")
                 .router("/stories", t.clone(), pool.clone()),
         )
         .merge(
             CreateView::for_model(Badge::SCHEMA, &["name", "tier", "rank"])
+                .allow_anonymous()
                 .template("form.html")
                 .success_url("/badges")
                 .router("/badges", t.clone(), pool.clone()),
         )
         .merge(
             CreateView::for_model(Event::SCHEMA, EVENT_FIELDS)
+                .allow_anonymous()
                 .template("form.html")
                 .success_url("/ev/{pk}/{day}/{done}/{token}/{author_id}")
                 .router("/tevents", t.clone(), pool.clone()),
         )
         .merge(
             CreateView::for_model(Event::SCHEMA, EVENT_FIELDS)
+                .allow_anonymous()
                 .template("form.html")
                 .success_url("/ev/{note}")
                 .router("/nevents", t.clone(), pool.clone()),
         )
         .merge(
             CreateView::for_model(Tag::SCHEMA, &["code", "name"])
+                .allow_anonymous()
                 .template("form.html")
                 .success_url("/tags/{pk}")
                 .router("/ptags", t.clone(), pool.clone()),
         )
         .merge(
             ListView::for_model(Pin::SCHEMA)
+                .allow_anonymous()
                 .template("pins.html")
                 .with_fk_display(true)
                 .router("/pins", t, pool.clone()),
@@ -671,22 +691,26 @@ async fn sqlite_text_uuid_key_is_found_by_every_view() {
         })
     });
     let app = DetailView::for_model(TextKey::SCHEMA)
+        .allow_anonymous()
         .template("t.html")
         .router("/tk", t.clone(), pool.clone())
         .merge(
             CreateView::for_model(TextKey::SCHEMA, &["name"])
+                .allow_anonymous()
                 .template("form.html")
                 .success_url("/tk")
                 .router("/tk", t.clone(), pool.clone()),
         )
         .merge(
             UpdateView::for_model(TextKey::SCHEMA, &["name"])
+                .allow_anonymous()
                 .template("form.html")
                 .success_url("/tk")
                 .router("/tk", t.clone(), pool.clone()),
         )
         .merge(
             ListView::for_model(TextKey::SCHEMA)
+                .allow_anonymous()
                 .template("t.html")
                 .bulk_actions(true)
                 .action("rename", "Rename", rename)
@@ -694,6 +718,7 @@ async fn sqlite_text_uuid_key_is_found_by_every_view() {
         )
         .merge(
             DeleteView::for_model(TextKey::SCHEMA)
+                .allow_anonymous()
                 .template("t.html")
                 .success_url("/tk")
                 .router("/tk", t, pool.clone()),
@@ -756,10 +781,12 @@ async fn sqlite_text_uuid_key_matches_any_spelling() {
         .unwrap();
     let t = Arc::new(t);
     let app = DetailView::for_model(TextKey::SCHEMA)
+        .allow_anonymous()
         .template("t.html")
         .router("/tk", t.clone(), pool.clone())
         .merge(
             CreateView::for_model(TextKey::SCHEMA, &["name"])
+                .allow_anonymous()
                 .template("form.html")
                 .success_url("/tk")
                 .router("/tk", t, pool.clone()),
@@ -847,11 +874,13 @@ async fn sqlite_bulk_action_skips_a_hidden_row_sharing_the_uuid() {
         })
     });
     let app = CreateView::for_model(SharedKey::SCHEMA, &["name", "mine"])
+        .allow_anonymous()
         .template("form.html")
         .success_url("/sk")
         .router("/sk", t.clone(), pool.clone())
         .merge(
             ListView::for_model(SharedKey::SCHEMA)
+                .allow_anonymous()
                 .template("t.html")
                 .bulk_actions(true)
                 .action("rename", "Rename", rename)
