@@ -427,7 +427,7 @@ impl Run<'_> {
         let declared: BTreeSet<String> = wanted.iter().flat_map(created).collect();
         let (mut live, mut absent) = (BTreeSet::new(), BTreeSet::new());
         for t in self.owned.intersection(&declared) {
-            if runner::table_exists_here(self.pool, t).await {
+            if runner::try_table_exists_here(self.pool, t).await? {
                 live.insert(t.clone());
             } else {
                 absent.insert(t.clone());
@@ -441,7 +441,7 @@ impl Run<'_> {
         if self.chain.origin() == runner::ChainOrigin::OnDisk {
             let pending = wanted.iter().filter(|m| !ledger.contains(&m.name));
             for t in pending.flat_map(created) {
-                if !self.owned.contains(&t) && runner::table_exists_here(self.pool, &t).await {
+                if !self.owned.contains(&t) && runner::try_table_exists_here(self.pool, &t).await? {
                     early.insert(t);
                 }
             }
@@ -484,7 +484,7 @@ impl Run<'_> {
                     let mut groups =
                         early_creations(&step, |c| waits(c, &m.snapshot, &held).is_some());
                     for g in &mut groups {
-                        if runner::table_exists_here(self.pool, g[0].table()).await {
+                        if runner::try_table_exists_here(self.pool, g[0].table()).await? {
                             g.clear();
                         }
                     }
@@ -577,7 +577,7 @@ async fn finish_groups(
     let mut groups = Vec::new();
     let (mut remade, mut junctions) = (BTreeSet::new(), Vec::new());
     for t in &declared {
-        let exists = runner::table_exists_here(pool, t).await;
+        let exists = runner::try_table_exists_here(pool, t).await?;
         if owned.contains(t) {
             if exists {
                 live.push(t.clone());
@@ -809,7 +809,10 @@ async fn lost_fks(
             .iter()
             .any(|f| f.fk.as_ref().is_some_and(|r| into(&r.to)))
             || t.composite_fks.iter().any(|c| into(&c.to));
-        if !wants || remade.contains(&t.name) || !runner::table_exists_here(pool, &t.name).await {
+        if !wants
+            || remade.contains(&t.name)
+            || !runner::try_table_exists_here(pool, &t.name).await?
+        {
             continue;
         }
         let have = super::inspectdb::list_fks(pool, &schema, &t.name).await?;
@@ -1155,7 +1158,9 @@ mod tests {
             &mig("0002_drop", Some("0001_initial"), after, vec![drop_links]),
         );
         run(pool.clone(), dir, chain).await.unwrap();
-        assert!(runner::table_exists_here(&pool, "sc_links").await);
+        assert!(runner::try_table_exists_here(&pool, "sc_links")
+            .await
+            .unwrap());
     }
 
     /// A target the ledger has under the lock runs nothing: the caller's
@@ -1190,7 +1195,9 @@ mod tests {
         .await
         .unwrap();
         assert!(ran.is_none());
-        assert!(!runner::table_exists_here(&pool, "sc_sys").await);
+        assert!(!runner::try_table_exists_here(&pool, "sc_sys")
+            .await
+            .unwrap());
         let applied = runner::applied_set_pool(&pool).await.unwrap();
         assert!(applied.contains("0002_b"), "{applied:?}");
     }
