@@ -81,9 +81,10 @@ impl M2MManager {
     }
 
     /// Add `dst_id` to the junction table. No-op if already present; a
-    /// duplicate fires no signal. One insert-or-ignore when the junction has
-    /// a unique `(src, dst)` key; a keyless through model checks then inserts,
-    /// so two concurrent adds of one link on PG/MySQL can both insert.
+    /// duplicate fires no signal. A junction with a unique key over the link
+    /// runs one insert-or-ignore, plus a check for the link when it skips;
+    /// a keyless through model checks then inserts, so two concurrent adds
+    /// of one link on PG/MySQL can both insert.
     ///
     /// # Errors
     /// Driver failures (another unique key refusing the row among them), or a
@@ -444,6 +445,16 @@ async fn insert_link(
     // One statement when the row goes in; a skip may be another key's.
     if let LinkKey::Unique = key {
         if super::executor::insert_or_ignore(pool, query).await? {
+            return Ok(true);
+        }
+        // Outside a block the key orders the writers: a plain check, then
+        // the insert raises the other key's error. A block's rows only its
+        // own connection sees, so it checks through the block below.
+        if !crate::sql::in_block(pool) {
+            if exists(query.model, link, pool).await? {
+                return Ok(false);
+            }
+            super::executor::insert_pool(pool, query).await?;
             return Ok(true);
         }
     }

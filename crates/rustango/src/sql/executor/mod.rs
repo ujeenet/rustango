@@ -903,7 +903,6 @@ pub use on::{PoolConn, PooledConn, SqlExecutor};
 mod atomic;
 #[cfg(feature = "jobs")]
 pub(crate) use atomic::in_any_block;
-#[cfg(feature = "jobs-postgres")]
 pub(crate) use atomic::in_block;
 pub(crate) use atomic::rolled_back;
 pub use atomic::{atomic, atomic_immediate, on_commit, on_commit_pending, AtomicTx, TxGuard};

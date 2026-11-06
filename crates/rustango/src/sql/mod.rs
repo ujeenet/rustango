@@ -73,7 +73,6 @@ pub use vector::Vector;
 // Always-on: tri-dialect entry points + traits that don't pin on PG.
 #[cfg(feature = "jobs")]
 pub(crate) use executor::in_any_block;
-#[cfg(feature = "jobs-postgres")]
 pub(crate) use executor::in_block;
 pub(crate) use executor::rolled_back;
 #[cfg(feature = "mysql")]

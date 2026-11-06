@@ -354,7 +354,6 @@ fn block_on(pool: &Pool) -> Option<Arc<Block>> {
 }
 
 /// Whether the running task is inside an [`atomic`] block on `pool`.
-#[cfg(feature = "jobs-postgres")]
 pub(crate) fn in_block(pool: &Pool) -> bool {
     block_on(pool).is_some()
 }
