@@ -6,7 +6,7 @@
 //! closure.
 
 use super::{
-    ExecError, FetcherPool, FetcherTx, LoadRelated, MaybeMyFromRow, MaybeMyLoadRelated,
+    atomic, ExecError, FetcherPool, FetcherTx, LoadRelated, MaybeMyFromRow, MaybeMyLoadRelated,
     MaybePgFromRow, MaybeSqliteFromRow, MaybeSqliteLoadRelated, PoolTx,
 };
 use crate::core::Model;
@@ -23,6 +23,8 @@ use crate::sql::Pool;
 /// INSERT. When `create_fn` fails on a UNIQUE or primary-key violation,
 /// the query runs again and the row it now finds is returned, so a
 /// UNIQUE constraint over the filtered columns makes concurrent callers safe.
+/// Inside an [`atomic`](super::atomic) block on `pool`, `create_fn` runs in a
+/// savepoint: its writes roll back when it fails and the block stays usable.
 ///
 /// The closure receives an **owned** `Pool` (cheap to clone — it's
 /// an `Arc` internally). That sidesteps Rust's async-closure
@@ -71,7 +73,7 @@ where
 {
     match fetch_at_most_one(qs.clone(), "get_or_create", pool).await? {
         Some(row) => Ok((row, false)),
-        None => match create_fn(pool.clone()).await {
+        None => match create(create_fn, pool).await {
             Ok(row) => Ok((row, true)),
             Err(e) => Ok((lost_race(qs, e, "get_or_create", pool).await?, false)),
         },
@@ -120,6 +122,23 @@ where
         Some(row) => Ok((row, false)),
         None => Ok((create_fn(tx).await?, true)),
     }
+}
+
+/// Run `create_fn`, in a savepoint of the `atomic` block on `pool` if
+/// any, so a unique violation leaves the block usable for the retry.
+async fn create<T, F, Fut>(create_fn: F, pool: &Pool) -> Result<T, ExecError>
+where
+    F: FnOnce(Pool) -> Fut,
+    Fut: std::future::Future<Output = Result<T, ExecError>>,
+{
+    let Some(point) = atomic::retry_point(pool).await else {
+        return create_fn(pool.clone()).await;
+    };
+    let point = point?;
+    let res = create_fn(pool.clone()).await;
+    let ended = point.end(res.is_ok()).await;
+    // `create_fn`'s own error wins over a failure to end the savepoint.
+    res.and_then(|row| ended.map(|()| row))
 }
 
 /// The one row `qs` matches, if any.
@@ -236,7 +255,7 @@ where
 {
     let existing = match fetch_at_most_one(qs.clone(), "update_or_create", pool).await? {
         Some(row) => row,
-        None => match create_fn(pool.clone()).await {
+        None => match create(create_fn, pool).await {
             Ok(row) => return Ok((row, true)),
             Err(e) => lost_race(qs, e, "update_or_create", pool).await?,
         },

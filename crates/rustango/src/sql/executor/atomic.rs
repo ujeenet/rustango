@@ -55,6 +55,8 @@ struct TxState {
     depth: usize,
     /// A savepoint statement failed; the transaction can only roll back.
     poisoned: bool,
+    /// [`RetryPoint`]s opened so far, so each gets its own name.
+    retry_points: usize,
 }
 
 impl TxState {
@@ -63,8 +65,13 @@ impl TxState {
     }
 
     async fn savepoint(&mut self, verb: &str, depth: usize) -> Result<(), ExecError> {
+        self.named_savepoint(verb, &format!("rustango_sp_{depth}"))
+            .await
+    }
+
+    async fn named_savepoint(&mut self, verb: &str, name: &str) -> Result<(), ExecError> {
         let tx = self.tx();
-        let name = tx.dialect().quote_ident(&format!("rustango_sp_{depth}"));
+        let name = tx.dialect().quote_ident(name);
         let r = tx.execute_unprepared(&format!("{verb} {name}")).await;
         if r.is_err() {
             self.poisoned = true;
@@ -428,6 +435,58 @@ impl std::ops::DerefMut for JoinedWrite {
     }
 }
 
+/// A savepoint that undoes one step of the block on `pool` if it fails, so
+/// a PostgreSQL error inside it does not abort the block. Unlike
+/// [`JoinedWrite`] it holds no lock and opens no depth: the step may lock
+/// the block's guard or join writes to it. `None` outside a block.
+pub(crate) async fn retry_point(pool: &Pool) -> Option<Result<RetryPoint, ExecError>> {
+    let block = block_on(pool)?;
+    Some(RetryPoint::open(&block).await)
+}
+
+/// An open [`retry_point`]; finish it with [`RetryPoint::end`].
+pub(crate) struct RetryPoint {
+    slot: Arc<Slot>,
+    depth: usize,
+    name: String,
+}
+
+impl RetryPoint {
+    async fn open(block: &Block) -> Result<Self, ExecError> {
+        let slot = Arc::clone(&block.slot);
+        let mut guard = acquire(&slot).await?;
+        if guard.depth != block.depth {
+            return Err(ExecError::NestedAtomic);
+        }
+        guard.retry_points += 1;
+        // Its own name: a nested retry point must not replace it (MySQL).
+        let name = format!("rustango_rp_{}", guard.retry_points);
+        guard.named_savepoint("SAVEPOINT", &name).await?;
+        drop(guard);
+        Ok(Self {
+            slot,
+            depth: block.depth,
+            name,
+        })
+    }
+
+    /// Keep the step's writes, or roll them back.
+    pub(crate) async fn end(self, keep: bool) -> Result<(), ExecError> {
+        // Settles the step's cancelled savepoints first.
+        let mut guard = acquire(&self.slot).await?;
+        if guard.depth != self.depth {
+            guard.poisoned = true;
+            return Err(ExecError::AtomicAborted);
+        }
+        if !keep {
+            guard
+                .named_savepoint("ROLLBACK TO SAVEPOINT", &self.name)
+                .await?;
+        }
+        guard.named_savepoint("RELEASE SAVEPOINT", &self.name).await
+    }
+}
+
 /// Whether the running task is inside an [`atomic`] block whose commit
 /// is still ahead, on any pool.
 #[cfg(feature = "jobs")]
@@ -635,6 +694,7 @@ where
         tx: Some(tx),
         depth: 0,
         poisoned: false,
+        retry_points: 0,
     }));
     // The `PoolTx` never moves inside `state`, so its address identifies it.
     let tx_key = state

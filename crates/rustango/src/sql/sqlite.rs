@@ -9,6 +9,8 @@
 //! extension uses functions rather than operators, so a query using
 //! one gets [`SqlError::OperatorNotSupportedInDialect`].
 
+use std::borrow::Cow;
+
 use crate::core::{
     AggregateQuery, BulkInsertQuery, BulkUpdateQuery, ConflictClause, CountQuery, DeleteQuery,
     FieldType, InsertQuery, ModelSchema, Op, SelectQuery, UpdateQuery,
@@ -610,13 +612,19 @@ impl Dialect for Sqlite {
         b.finish()
     }
 
-    fn compile_insert(&self, query: &InsertQuery) -> Result<CompiledStatement, SqlError> {
+    fn compile_insert_cow(
+        &self,
+        query: Cow<'_, InsertQuery>,
+    ) -> Result<CompiledStatement, SqlError> {
         let mut b = Sql::new(self);
         write_insert(&mut b, query)?;
         b.finish()
     }
 
-    fn compile_bulk_insert(&self, query: &BulkInsertQuery) -> Result<CompiledStatement, SqlError> {
+    fn compile_bulk_insert_cow(
+        &self,
+        query: Cow<'_, BulkInsertQuery>,
+    ) -> Result<CompiledStatement, SqlError> {
         let mut b = Sql::new(self);
         write_bulk_insert(&mut b, query)?;
         b.finish()
@@ -628,7 +636,10 @@ impl Dialect for Sqlite {
         b.finish()
     }
 
-    fn compile_bulk_update(&self, query: &BulkUpdateQuery) -> Result<CompiledStatement, SqlError> {
+    fn compile_bulk_update_cow(
+        &self,
+        query: Cow<'_, BulkUpdateQuery>,
+    ) -> Result<CompiledStatement, SqlError> {
         // SQLite's UPDATE … FROM rejects Postgres' column-list
         // alias on inline VALUES, so use the CTE form instead.
         let mut b = Sql::new(self);
