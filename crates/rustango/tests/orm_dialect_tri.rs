@@ -379,14 +379,26 @@ async fn reverse_flips_nulls_and_keeps_distinct_on_rows(pool: &Pool) {
         .await
         .expect("reversed");
     assert_eq!(parents(nulls_last), [None, Some(5), Some(3), Some(2)]);
-    let per_title = Post::objects()
-        .distinct_on(&["title"])
-        .order_by(&[("title", false), ("parent_id", true)])
-        .reverse()
-        .fetch(pool)
-        .await
-        .expect("reversed distinct_on");
-    assert_eq!(parents(per_title), [None, Some(3), Some(5)]);
+    // Where `reverse()` sits in the chain does not matter.
+    let order = [("title", false), ("parent_id", true)];
+    let chains = [
+        Post::objects()
+            .distinct_on(&["title"])
+            .order_by(&order)
+            .reverse(),
+        Post::objects()
+            .order_by(&order)
+            .reverse()
+            .distinct_on(&["title"]),
+        Post::objects()
+            .reverse()
+            .distinct_on(&["title"])
+            .order_by(&order),
+    ];
+    for (i, qs) in chains.into_iter().enumerate() {
+        let rows = qs.fetch(pool).await.expect("reversed distinct_on");
+        assert_eq!(parents(rows), [None, Some(3), Some(5)], "chain {i}");
+    }
 }
 
 /// A PG bulk insert reads back a default-written UUID key.
