@@ -16,6 +16,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Changed
 
+- `cargo rustango new` ends by linking both the framework and Rustango-CMS repositories and asks for a star on each.
 - **Breaking:** M2M `add()` treats only the exact `(src, dst)` link as already present; another unique key refusing the row is now an error, as in `set()`.
 - **Breaking:** `QuerySet::reverse()` is the flip `last()` uses, applied at compile time: it also swaps `NULLS FIRST`/`LAST`, flips only the `distinct_on` keys, and flips an `order_by` chained after it.
 - Model `insert` and `bulk_insert` move their values into the statement (they copied each two to four times) and `bulk_update` copies them once, not twice; a bulk upsert finds repeated keys without a `String` per cell.
