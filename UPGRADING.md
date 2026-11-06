@@ -151,7 +151,7 @@ untouched.
 ## Unreleased
 
 - M2M `add()` returns the driver error when a unique key other than the `(src, dst)` link refuses the row (it used to return `Ok` with nothing written).
-- `QuerySet::reverse()` now swaps an explicit `NULLS FIRST`/`LAST` and, under `distinct_on`, keeps each group's row; it matches `last()`.
+- `QuerySet::reverse()` now swaps an explicit `NULLS FIRST`/`LAST`, keeps each `distinct_on` group's row (it matches `last()`), and also flips an `order_by` added after it; `reorder`, `unordered` and `replace_order_by` reset it.
 
 ## 0.64.0
 
