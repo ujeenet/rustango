@@ -111,3 +111,23 @@ async fn a_failed_squash_keeps_the_pending_files() {
         "the pending files are back as they were"
     );
 }
+
+/// A file an interrupted squash set aside refuses the next squash, which
+/// would otherwise report "no pending migrations" and never mention it.
+#[tokio::test]
+async fn a_leftover_backup_refuses_the_next_squash() {
+    let pool = Pool::connect("sqlite::memory:").await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("0002_note.json.squash-bak"), "{}").unwrap();
+    let args = vec!["migrate".to_owned(), "--squash".to_owned()];
+    let err = manage::run_with_writer(&pool, &dir, args, &mut Vec::new())
+        .await
+        .expect_err("a leftover backup");
+    assert!(
+        err.to_string().contains("0002_note.json.squash-bak"),
+        "{err}"
+    );
+    assert!(dir.join("0002_note.json.squash-bak").exists());
+}
