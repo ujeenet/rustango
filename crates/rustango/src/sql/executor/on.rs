@@ -448,7 +448,9 @@ impl<'c> SqlExecutor<'c> for &'c Pool {
         'c: 'e,
         Self: 'e,
     {
-        Box::pin(async move { super::insert_returning_pool(self, &query).await })
+        Box::pin(
+            async move { super::insert_returning_cow(self, std::borrow::Cow::Owned(query)).await },
+        )
     }
 
     fn bulk_insert<'e>(
@@ -461,7 +463,7 @@ impl<'c> SqlExecutor<'c> for &'c Pool {
     {
         Box::pin(async move {
             let mut tx = super::write_tx(self).await?;
-            let rows = super::bulk_insert_rows_tx(&mut tx, &query).await?;
+            let rows = super::bulk_insert_rows_tx(&mut tx, std::borrow::Cow::Owned(query)).await?;
             tx.commit().await?;
             Ok(rows)
         })
@@ -541,7 +543,8 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolConn {
     {
         Box::pin(async move {
             let mut tx = self.begin().await?;
-            let row = super::insert_returning_tx(&mut tx, &query).await?;
+            let row =
+                super::insert_returning_cow_tx(&mut tx, std::borrow::Cow::Owned(query)).await?;
             tx.commit().await?;
             Ok(row)
         })
@@ -557,7 +560,7 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolConn {
     {
         Box::pin(async move {
             let mut tx = self.begin().await?;
-            let rows = super::bulk_insert_rows_tx(&mut tx, &query).await?;
+            let rows = super::bulk_insert_rows_tx(&mut tx, std::borrow::Cow::Owned(query)).await?;
             tx.commit().await?;
             Ok(rows)
         })
@@ -634,7 +637,9 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolTx<'_> {
         'c: 'e,
         Self: 'e,
     {
-        Box::pin(async move { super::insert_returning_tx(self, &query).await })
+        Box::pin(async move {
+            super::insert_returning_cow_tx(self, std::borrow::Cow::Owned(query)).await
+        })
     }
 
     fn bulk_insert<'e>(
@@ -645,7 +650,9 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolTx<'_> {
         'c: 'e,
         Self: 'e,
     {
-        Box::pin(async move { super::bulk_insert_rows_tx(self, &query).await })
+        Box::pin(
+            async move { super::bulk_insert_rows_tx(self, std::borrow::Cow::Owned(query)).await },
+        )
     }
 }
 
@@ -692,7 +699,7 @@ impl<'c, E: sqlx::Executor<'c, Database = sqlx::Postgres>> SqlExecutor<'c> for E
         Self: 'e,
     {
         Box::pin(async move {
-            let row = super::pg_insert_returning(self, &query).await?;
+            let row = super::pg_insert_returning(self, std::borrow::Cow::Owned(query)).await?;
             Ok(InsertReturningPool::PgRow(row))
         })
     }
@@ -707,8 +714,11 @@ impl<'c, E: sqlx::Executor<'c, Database = sqlx::Postgres>> SqlExecutor<'c> for E
     {
         Box::pin(async move {
             // One executor, one statement: no transaction to span chunks.
-            let mut stmts =
-                super::compile_bulk_insert_batches(crate::sql::postgres::DIALECT, &query)?;
+            let returns = !query.returning.is_empty();
+            let mut stmts = super::compile_bulk_insert_batches(
+                crate::sql::postgres::DIALECT,
+                std::borrow::Cow::Owned(query),
+            )?;
             if stmts.len() != 1 {
                 return Err(ExecError::Sql(
                     crate::sql::SqlError::OperatorNotSupportedInDialect {
@@ -723,7 +733,7 @@ impl<'c, E: sqlx::Executor<'c, Database = sqlx::Postgres>> SqlExecutor<'c> for E
                 .params
                 .into_iter()
                 .fold(sqlx::query(&stmt.sql), super::bind_query);
-            if query.returning.is_empty() {
+            if !returns {
                 q.execute(self).await?;
                 return Ok(Vec::new());
             }
@@ -802,7 +812,7 @@ macro_rules! database_conn_executor {
                 Box::pin(async move {
                     let pool = self.pool_id().clone();
                     let mut tx = PoolTx::begin_on(&mut ***self, &pool).await?;
-                    let row = super::insert_returning_tx(&mut tx, &query).await?;
+                    let row = super::insert_returning_cow_tx(&mut tx, std::borrow::Cow::Owned(query)).await?;
                     tx.commit().await?;
                     Ok(row)
                 })
@@ -819,7 +829,7 @@ macro_rules! database_conn_executor {
                 Box::pin(async move {
                     let pool = self.pool_id().clone();
                     let mut tx = PoolTx::begin_on(&mut ***self, &pool).await?;
-                    let rows = super::bulk_insert_rows_tx(&mut tx, &query).await?;
+                    let rows = super::bulk_insert_rows_tx(&mut tx, std::borrow::Cow::Owned(query)).await?;
                     tx.commit().await?;
                     Ok(rows)
                 })

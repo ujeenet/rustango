@@ -10,6 +10,7 @@
 //! that says `false` gets a clear
 //! [`SqlError::OperatorNotSupportedInDialect`] instead of wrong SQL.
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 
 use crate::core::{
@@ -423,6 +424,120 @@ pub(super) fn null_cast_for(
     d.null_cast(field.ty).map(BindCast::Untyped)
 }
 
+/// Each column's [`null_cast_for`], looked up once per statement, not per row.
+fn null_casts(d: &dyn Dialect, model: &ModelSchema, columns: &[&str]) -> Vec<Option<BindCast>> {
+    columns.iter().map(|c| null_cast_for(d, model, c)).collect()
+}
+
+/// A write query whose bind values [`split_values`] can take out.
+pub(crate) trait BindValues: Clone {
+    type Values: ?Sized + ToOwned<Owned: Default>;
+    fn values(&self) -> &Self::Values;
+    fn values_mut(&mut self) -> &mut <Self::Values as ToOwned>::Owned;
+}
+
+impl BindValues for InsertQuery {
+    type Values = [SqlValue];
+    fn values(&self) -> &[SqlValue] {
+        &self.values
+    }
+    fn values_mut(&mut self) -> &mut Vec<SqlValue> {
+        &mut self.values
+    }
+}
+
+impl BindValues for BulkInsertQuery {
+    type Values = [Vec<SqlValue>];
+    fn values(&self) -> &[Vec<SqlValue>] {
+        &self.rows
+    }
+    fn values_mut(&mut self) -> &mut Vec<Vec<SqlValue>> {
+        &mut self.rows
+    }
+}
+
+impl BindValues for BulkUpdateQuery {
+    type Values = [Vec<SqlValue>];
+    fn values(&self) -> &[Vec<SqlValue>] {
+        &self.rows
+    }
+    fn values_mut(&mut self) -> &mut Vec<Vec<SqlValue>> {
+        &mut self.rows
+    }
+}
+
+/// `query` and its bind values apart: moved out of an owned query (which
+/// is left without them), borrowed from a borrowed one.
+pub(crate) fn split_values<Q: BindValues>(query: Cow<'_, Q>) -> (Cow<'_, Q>, Cow<'_, Q::Values>) {
+    match query {
+        Cow::Borrowed(q) => (Cow::Borrowed(q), Cow::Borrowed(q.values())),
+        Cow::Owned(mut q) => {
+            let values = std::mem::take(q.values_mut());
+            (Cow::Owned(q), Cow::Owned(values))
+        }
+    }
+}
+
+/// One row's bind values: cloned when borrowed, moved when owned, so
+/// compiling an owned query copies no value.
+pub(super) enum Values<'a> {
+    Borrowed(std::slice::Iter<'a, SqlValue>),
+    Owned(std::vec::IntoIter<SqlValue>),
+}
+
+impl<'a> From<Cow<'a, [SqlValue]>> for Values<'a> {
+    fn from(values: Cow<'a, [SqlValue]>) -> Self {
+        match values {
+            Cow::Borrowed(v) => Self::Borrowed(v.iter()),
+            Cow::Owned(v) => Self::Owned(v.into_iter()),
+        }
+    }
+}
+
+impl Iterator for Values<'_> {
+    type Item = SqlValue;
+    fn next(&mut self) -> Option<SqlValue> {
+        match self {
+            Self::Borrowed(it) => it.next().cloned(),
+            Self::Owned(it) => it.next(),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Self::Borrowed(it) => it.size_hint(),
+            Self::Owned(it) => it.size_hint(),
+        }
+    }
+}
+
+impl ExactSizeIterator for Values<'_> {}
+
+/// [`Values`] for every row of a multi-row query.
+pub(super) enum ValueRows<'a> {
+    Borrowed(std::slice::Iter<'a, Vec<SqlValue>>),
+    Owned(std::vec::IntoIter<Vec<SqlValue>>),
+}
+
+impl<'a> From<Cow<'a, [Vec<SqlValue>]>> for ValueRows<'a> {
+    fn from(rows: Cow<'a, [Vec<SqlValue>]>) -> Self {
+        match rows {
+            Cow::Borrowed(r) => Self::Borrowed(r.iter()),
+            Cow::Owned(r) => Self::Owned(r.into_iter()),
+        }
+    }
+}
+
+impl<'a> Iterator for ValueRows<'a> {
+    type Item = Values<'a>;
+    fn next(&mut self) -> Option<Values<'a>> {
+        match self {
+            Self::Borrowed(it) => it.next().map(|r| Values::Borrowed(r.iter())),
+            Self::Owned(it) => it.next().map(|r| Values::Owned(r.into_iter())),
+        }
+    }
+}
+
 /// SQL has no `IN ()`: an empty `IN` matches no row, an empty `NOT IN` every row.
 fn write_empty_in(b: &mut Sql<'_>, op: Op) {
     b.sql.push_str(if matches!(op, Op::NotIn) {
@@ -797,13 +912,13 @@ fn write_compound_ordered_outside(
         .iter()
         .flatten()
         .map(|col| match col.split_once('.') {
-            Some((alias, c)) => crate::core::joins::joined_label(alias, c),
+            Some((alias, c)) => crate::core::joins::joined_label(alias, c).to_string(),
             None => (*col).to_owned(),
         })
         .chain(query.joins.iter().flat_map(|j| {
             j.project
                 .iter()
-                .map(|c| crate::core::joins::joined_label(j.alias, c))
+                .map(|c| crate::core::joins::joined_label(j.alias, c).to_string())
         }));
     for (i, label) in labels.enumerate() {
         if i > 0 {
@@ -2095,20 +2210,36 @@ fn stddev_variance_name(expr: &AggregateExpr) -> &'static str {
 
 // ---- INSERT ----
 
-pub(super) fn write_insert(b: &mut Sql<'_>, query: &InsertQuery) -> Result<(), SqlError> {
+pub(super) fn write_insert(b: &mut Sql<'_>, query: Cow<'_, InsertQuery>) -> Result<(), SqlError> {
     if query.columns.is_empty() && query.returning.is_empty() {
         return Err(SqlError::EmptyInsert);
     }
-    write_insert_rows(b, query)?;
+    let (query, values) = split_values(query);
+    write_insert_values(b, &query, values.into())?;
     write_returning(b, &query.returning)
 }
 
 /// [`write_insert`] without `RETURNING`: MySQL reads the id from the reply.
-pub(super) fn write_insert_rows(b: &mut Sql<'_>, query: &InsertQuery) -> Result<(), SqlError> {
-    if query.columns.len() != query.values.len() {
+#[cfg(feature = "mysql")]
+pub(super) fn write_insert_rows(
+    b: &mut Sql<'_>,
+    query: Cow<'_, InsertQuery>,
+) -> Result<(), SqlError> {
+    let (query, values) = split_values(query);
+    write_insert_values(b, &query, values.into())
+}
+
+/// The INSERT of `query`, binding `values` in place of `query.values`.
+fn write_insert_values(
+    b: &mut Sql<'_>,
+    query: &InsertQuery,
+    values: Values<'_>,
+) -> Result<(), SqlError> {
+    let n_values = values.len();
+    if query.columns.len() != n_values {
         return Err(SqlError::InsertShapeMismatch {
             columns: query.columns.len(),
-            values: query.values.len(),
+            values: n_values,
         });
     }
 
@@ -2129,13 +2260,13 @@ pub(super) fn write_insert_rows(b: &mut Sql<'_>, query: &InsertQuery) -> Result<
         }
         b.sql.push_str(") VALUES (");
         let mut first = true;
-        for (col, value) in query.columns.iter().zip(&query.values) {
+        for (col, value) in query.columns.iter().zip(values) {
             if !first {
                 b.sql.push_str(", ");
             }
             first = false;
             let cast = null_cast_for(b.d, query.model, col);
-            b.push_param_typed(value.clone(), cast);
+            b.push_param_typed(value, cast);
         }
         b.sql.push(')');
     }
@@ -2174,7 +2305,10 @@ fn caller_set(columns: &[&'static str], generated: &[&str]) -> Vec<&'static str>
 
 // ---- BULK INSERT ----
 
-pub(super) fn write_bulk_insert(b: &mut Sql<'_>, query: &BulkInsertQuery) -> Result<(), SqlError> {
+pub(super) fn write_bulk_insert(
+    b: &mut Sql<'_>,
+    query: Cow<'_, BulkInsertQuery>,
+) -> Result<(), SqlError> {
     if query.rows.is_empty() {
         return Err(SqlError::EmptyBulkInsert);
     }
@@ -2189,6 +2323,9 @@ pub(super) fn write_bulk_insert(b: &mut Sql<'_>, query: &BulkInsertQuery) -> Res
             });
         }
     }
+    let n_rows = query.rows.len();
+    let (query, rows) = split_values(query);
+    let rows = ValueRows::from(rows);
 
     b.sql.push_str("INSERT INTO ");
     b.write_ident(query.model.table);
@@ -2207,7 +2344,7 @@ pub(super) fn write_bulk_insert(b: &mut Sql<'_>, query: &BulkInsertQuery) -> Res
         b.write_ident(pk);
         b.sql.push_str(") VALUES ");
         let mut first_row = true;
-        for _ in &query.rows {
+        for _ in 0..n_rows {
             if !first_row {
                 b.sql.push_str(", ");
             }
@@ -2228,21 +2365,21 @@ pub(super) fn write_bulk_insert(b: &mut Sql<'_>, query: &BulkInsertQuery) -> Res
         }
         b.sql.push_str(") VALUES ");
 
+        let casts = null_casts(b.d, query.model, &query.columns);
         let mut first_row = true;
-        for row in &query.rows {
+        for row in rows {
             if !first_row {
                 b.sql.push_str(", ");
             }
             first_row = false;
             b.sql.push('(');
             let mut first_v = true;
-            for (col, value) in query.columns.iter().zip(row) {
+            for (cast, value) in casts.iter().zip(row) {
                 if !first_v {
                     b.sql.push_str(", ");
                 }
                 first_v = false;
-                let cast = null_cast_for(b.d, query.model, col);
-                b.push_param_typed(value.clone(), cast);
+                b.push_param_typed(value, *cast);
             }
             b.sql.push(')');
         }
@@ -4444,18 +4581,9 @@ pub(crate) fn compile_delete_plan(
 /// correlated subqueries works on every SQLite with CTE support.
 pub(super) fn write_bulk_update_sqlite(
     b: &mut Sql<'_>,
-    query: &BulkUpdateQuery,
+    query: Cow<'_, BulkUpdateQuery>,
 ) -> Result<(), SqlError> {
-    if query.rows.is_empty() {
-        return Err(SqlError::EmptyBulkInsert);
-    }
-    if query.update_columns.is_empty() {
-        return Err(SqlError::EmptyUpdateSet);
-    }
-    let pk_field = query
-        .model
-        .primary_key()
-        .ok_or(SqlError::MissingPrimaryKey)?;
+    let (query, pk_field, rows) = split_bulk_update(query)?;
 
     // WITH __data(<pk>, <c1>, …) AS (VALUES (?, …), (?, …))
     b.sql.push_str("WITH __data(");
@@ -4466,17 +4594,17 @@ pub(super) fn write_bulk_update_sqlite(
     }
     b.sql.push_str(") AS (VALUES ");
     let mut first_row = true;
-    for row in &query.rows {
+    for row in rows {
         if !first_row {
             b.sql.push_str(", ");
         }
         first_row = false;
         b.sql.push('(');
-        for (i, val) in row.iter().enumerate() {
+        for (i, val) in row.enumerate() {
             if i > 0 {
                 b.sql.push_str(", ");
             }
-            b.push_param(val.clone());
+            b.push_param(val);
         }
         b.sql.push(')');
     }
@@ -4508,10 +4636,17 @@ pub(super) fn write_bulk_update_sqlite(
     Ok(())
 }
 
-pub(super) fn write_bulk_update_pg(
-    b: &mut Sql<'_>,
-    query: &BulkUpdateQuery,
-) -> Result<(), SqlError> {
+/// Check a bulk update's shape, then split its rows off as [`split_values`].
+pub(super) fn split_bulk_update(
+    query: Cow<'_, BulkUpdateQuery>,
+) -> Result<
+    (
+        Cow<'_, BulkUpdateQuery>,
+        &'static crate::core::FieldSchema,
+        ValueRows<'_>,
+    ),
+    SqlError,
+> {
     if query.rows.is_empty() {
         return Err(SqlError::EmptyBulkInsert);
     }
@@ -4522,6 +4657,15 @@ pub(super) fn write_bulk_update_pg(
         .model
         .primary_key()
         .ok_or(SqlError::MissingPrimaryKey)?;
+    let (query, rows) = split_values(query);
+    Ok((query, pk_field, rows.into()))
+}
+
+pub(super) fn write_bulk_update_pg(
+    b: &mut Sql<'_>,
+    query: Cow<'_, BulkUpdateQuery>,
+) -> Result<(), SqlError> {
+    let (query, pk_field, rows) = split_bulk_update(query)?;
 
     b.sql.push_str("UPDATE ");
     b.write_ident(query.model.table);
@@ -4550,17 +4694,17 @@ pub(super) fn write_bulk_update_pg(
         })
         .collect();
     let mut first_row = true;
-    for row in &query.rows {
+    for row in rows {
         if !first_row {
             b.sql.push_str(", ");
         }
         first_row = false;
         b.sql.push('(');
-        for (i, val) in row.iter().enumerate() {
+        for (i, val) in row.enumerate() {
             if i > 0 {
                 b.sql.push_str(", ");
             }
-            b.push_param_typed(val.clone(), casts.get(i).copied().flatten());
+            b.push_param_typed(val, casts.get(i).copied().flatten());
         }
         b.sql.push(')');
     }

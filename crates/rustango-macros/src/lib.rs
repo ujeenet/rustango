@@ -6629,7 +6629,7 @@ fn inherent_impl_tokens(
                 &quote! {
                     let _query = self.__rustango_upsert_query();
                     let _row = #root::sql::__macro_internals::insert_returning_on(
-                        _executor, &_query,
+                        _executor, _query,
                     )
                     .await?;
                     #root::sql::apply_auto_pk(_row, self)
@@ -7169,10 +7169,10 @@ fn inherent_impl_tokens(
                 let _query = self.__rustango_insert_query();
                 // Every `Auto` filled Rust-side: nothing to read back.
                 if _query.returning.is_empty() {
-                    return #root::sql::__macro_internals::insert_on(_executor, &_query).await;
+                    return #root::sql::__macro_internals::insert_owned_on(_executor, _query).await;
                 }
                 let _row = #root::sql::__macro_internals::insert_returning_on(
-                    _executor, &_query,
+                    _executor, _query,
                 )
                 .await?;
                 #root::sql::apply_auto_pk(_row, self)
@@ -7233,8 +7233,11 @@ fn inherent_impl_tokens(
                 &self,
                 _executor: _E,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                #root::sql::__macro_internals::insert_on(_executor, &self.__rustango_insert_query())
-                    .await
+                #root::sql::__macro_internals::insert_owned_on(
+                    _executor,
+                    self.__rustango_insert_query(),
+                )
+                .await
             }
 
             /// The INSERT for this row.
@@ -7350,7 +7353,7 @@ fn inherent_impl_tokens(
                 )
                 .returning(::std::vec![ #( #returning_cols ),* ]);
                 let _returned =
-                    #root::sql::__macro_internals::bulk_insert_on(_executor, &_query).await?;
+                    #root::sql::__macro_internals::bulk_insert_owned_on(_executor, _query).await?;
                 if _returned.is_empty() {
                     return ::core::result::Result::Ok(());
                 }
@@ -7455,7 +7458,7 @@ fn inherent_impl_tokens(
                     _columns,
                     _all_rows,
                 );
-                #root::sql::__macro_internals::bulk_insert_on(_executor, &_query)
+                #root::sql::__macro_internals::bulk_insert_owned_on(_executor, _query)
                     .await
                     .map(drop)
             }

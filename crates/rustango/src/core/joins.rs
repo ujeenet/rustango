@@ -69,17 +69,84 @@ pub fn aliased(alias: &'static str, column: &'static str) -> Expr {
     Expr::AliasedColumn { alias, column }
 }
 
-/// The SQL result-column name of joined column `alias.column`.
+/// Longest result label PostgreSQL keeps; [`sql_label`] cuts longer ones.
+const MAX_LABEL: usize = 63;
+
+/// A joined column's result label, held inline: row decoding looks one up
+/// per joined column per row, so it must not allocate.
+#[doc(hidden)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct JoinedLabel {
+    buf: [u8; MAX_LABEL],
+    len: usize,
+}
+
+impl JoinedLabel {
+    const EMPTY: Self = Self {
+        buf: [0; MAX_LABEL],
+        len: 0,
+    };
+
+    /// Append `part`; the caller keeps the total within [`MAX_LABEL`].
+    fn push(&mut self, part: &str) {
+        let end = self.len + part.len();
+        self.buf[self.len..end].copy_from_slice(part.as_bytes());
+        self.len = end;
+    }
+
+    /// The label text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        // Only whole `&str`s are pushed, so the bytes are UTF-8.
+        std::str::from_utf8(&self.buf[..self.len]).unwrap_or_default()
+    }
+}
+
+impl std::ops::Deref for JoinedLabel {
+    type Target = str;
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for JoinedLabel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::fmt::Debug for JoinedLabel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self.as_str(), f)
+    }
+}
+
+impl PartialEq<&str> for JoinedLabel {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+/// The SQL result-column name of joined column `alias.column`. Only a
+/// label past [`MAX_LABEL`] bytes, which is cut and hashed, allocates.
 #[doc(hidden)]
 #[must_use]
-pub fn joined_label(alias: &str, column: &str) -> String {
-    sql_label(&joined_key(alias, column)).into_owned()
+pub fn joined_label(alias: &str, column: &str) -> JoinedLabel {
+    let mut label = JoinedLabel::EMPTY;
+    if alias.len() + 2 + column.len() <= MAX_LABEL {
+        label.push(alias);
+        label.push("__");
+        label.push(column);
+    } else {
+        label.push(&sql_label(&joined_key(alias, column)));
+    }
+    label
 }
 
 /// `name` as a result label: past 63 bytes it is cut and hashed, as PG
 /// would truncate it and a read by the full name would miss.
 pub(crate) fn sql_label(name: &str) -> std::borrow::Cow<'_, str> {
-    const MAX: usize = 63;
+    const MAX: usize = MAX_LABEL;
     if name.len() <= MAX {
         return name.into();
     }
@@ -188,6 +255,27 @@ mod tests {
         assert!(x.len() <= 63 && y.len() <= 63, "{x} {y}");
         assert_ne!(x, y);
         assert_eq!(x, joined_label(&alias, "first"));
+    }
+
+    /// The inline label is the one the SELECT writer emits, at every length.
+    #[test]
+    fn joined_label_matches_the_written_label() {
+        for (alias, column) in [
+            ("author", "name"),
+            (&*"a".repeat(55), "abcdef"),  // 63 bytes: kept whole
+            (&*"a".repeat(55), "abcdefg"), // 64 bytes: cut and hashed
+            (&*"é".repeat(30), "colonne"),
+        ] {
+            let label = joined_label(alias, column);
+            assert_eq!(label.as_str(), sql_label(&joined_key(alias, column)));
+        }
+    }
+
+    /// `Copy` rules out a heap buffer: decoding a joined column allocates nothing.
+    #[test]
+    fn joined_label_is_inline() {
+        fn copy<T: Copy>(_: T) {}
+        copy(joined_label("author", "name"));
     }
 
     #[test]

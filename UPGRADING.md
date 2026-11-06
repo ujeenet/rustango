@@ -160,6 +160,7 @@ untouched.
 - A ViewSet or template view whose field lists name a credential column (`password_hash`, `database_url`, `client_secret`, TOTP secrets, sealed fields) panics at mount: drop the column, or serve it from a handler of your own (a ViewSet over `rustango_users` can no longer create users, whose hash is required). A column that only looks like one by name takes `#[rustango(secret = false)]`.
 - `ListView` answers 400 past offset 10 000 (`.max_offset(0)` lifts it); the admin list and audit log past 100 000.
 - A machine clock before 2024-01-01 now rejects tokens, sessions and signed values instead of accepting them; `signing::TimestampSigner::sign` no longer panics on such a clock.
+- Inside an `atomic` block, `get_or_create` / `update_or_create` roll back `create_fn`'s writes when it returns an error (before, MySQL and SQLite kept them).
 
 ## 0.64.0
 

@@ -375,7 +375,7 @@ fn audit_insert_stmt(
         .collect();
     let query = crate::core::BulkInsertQuery::new(AuditLog::SCHEMA, AUDIT_COLUMNS.to_vec(), rows);
     dialect
-        .compile_bulk_insert(&query)
+        .compile_bulk_insert_cow(std::borrow::Cow::Owned(query))
         .map_err(|e| sqlx::Error::Protocol(e.to_string()))
 }
 
@@ -2234,7 +2234,11 @@ where
     }
     let mut tx = crate::sql::write_tx(pool).await?;
     // Small pages also keep SQLite's per-row CTE lookup cheap.
-    let stmts = crate::sql::compile_bulk_update_batches(tx.dialect(), query, BULK_AUDIT_CHUNK)?;
+    let stmts = crate::sql::compile_bulk_update_batches(
+        tx.dialect(),
+        std::borrow::Cow::Borrowed(query),
+        BULK_AUDIT_CHUNK,
+    )?;
     let affected = crate::sql::execute_batches_tx(&mut tx, stmts).await?;
     // Each row is `[pk, …update cols]`.
     let pks: Vec<crate::core::SqlValue> = query

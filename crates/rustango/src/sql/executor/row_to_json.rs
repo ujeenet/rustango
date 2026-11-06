@@ -439,6 +439,7 @@ pub(crate) async fn select_rows_as_json_with(
 ) -> Result<Vec<serde_json::Value>, ExecError> {
     crate::test_assertions::query_counter::bump();
     let stmt = pool.dialect().compile_select(query)?;
+    let joined = joined_columns(&query.joins);
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {
@@ -451,7 +452,7 @@ pub(crate) async fn select_rows_as_json_with(
                 .iter()
                 .map(|r| {
                     let mut json = row_to_json_pg_with(r, fields, decode)?;
-                    augment_joined_columns_pg(&mut json, r, &query.joins);
+                    augment_joined_columns(&mut json, r, &joined);
                     Ok(json)
                 })
                 .collect::<Result<_, sqlx::Error>>()?)
@@ -468,7 +469,7 @@ pub(crate) async fn select_rows_as_json_with(
                 .iter()
                 .map(|r| {
                     let mut json = row_to_json_my_with(r, fields, decode)?;
-                    augment_joined_columns_my(&mut json, r, &query.joins);
+                    augment_joined_columns(&mut json, r, &joined);
                     Ok(json)
                 })
                 .collect::<Result<_, sqlx::Error>>()?)
@@ -485,7 +486,7 @@ pub(crate) async fn select_rows_as_json_with(
                 .iter()
                 .map(|r| {
                     let mut json = row_to_json_sqlite_with(r, fields, decode)?;
-                    augment_joined_columns_sqlite(&mut json, r, &query.joins);
+                    augment_joined_columns(&mut json, r, &joined);
                     Ok(json)
                 })
                 .collect::<Result<_, sqlx::Error>>()?)
@@ -493,89 +494,49 @@ pub(crate) async fn select_rows_as_json_with(
     }
 }
 
+/// Each joined column's `<alias>__<col>` JSON key and result label, built
+/// once per query rather than per row.
+fn joined_columns(joins: &[crate::core::Join]) -> Vec<(String, crate::core::joins::JoinedLabel)> {
+    joins
+        .iter()
+        .flat_map(|join| {
+            join.project.iter().map(|col| {
+                (
+                    crate::core::joins::joined_key(join.alias, col),
+                    crate::core::joins::joined_label(join.alias, col),
+                )
+            })
+        })
+        .collect()
+}
+
 /// v0.37 — copy joined-table columns (`<alias>__<col>`) into the
 /// JSON row. The compile_select writer aliases joined columns this
 /// way and the admin's `read_joined_value_as_html_json` reads them
 /// out by the same key. Decoded as nullable strings — the admin only
 /// uses these for FK display HTML rendering.
-#[cfg(feature = "postgres")]
-fn augment_joined_columns_pg(
+fn augment_joined_columns<R>(
     out: &mut serde_json::Value,
-    row: &sqlx::postgres::PgRow,
-    joins: &[crate::core::Join],
-) {
-    use sqlx::Row as _;
+    row: &R,
+    joined: &[(String, crate::core::joins::JoinedLabel)],
+) where
+    R: sqlx::Row,
+    for<'a> &'a str: sqlx::ColumnIndex<R>,
+    Option<String>: for<'r> sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+{
     let Some(map) = out.as_object_mut() else {
         return;
     };
-    for join in joins {
-        for col in &join.project {
-            let key = crate::core::joins::joined_key(join.alias, col);
-            let label = crate::core::joins::joined_label(join.alias, col);
-            let v = row
-                .try_get::<Option<String>, _>(label.as_str())
-                .ok()
-                .flatten();
-            map.insert(
-                key,
-                v.map(serde_json::Value::String)
-                    .unwrap_or(serde_json::Value::Null),
-            );
-        }
-    }
-}
-
-#[cfg(feature = "mysql")]
-fn augment_joined_columns_my(
-    out: &mut serde_json::Value,
-    row: &sqlx::mysql::MySqlRow,
-    joins: &[crate::core::Join],
-) {
-    use sqlx::Row as _;
-    let Some(map) = out.as_object_mut() else {
-        return;
-    };
-    for join in joins {
-        for col in &join.project {
-            let key = crate::core::joins::joined_key(join.alias, col);
-            let label = crate::core::joins::joined_label(join.alias, col);
-            let v = row
-                .try_get::<Option<String>, _>(label.as_str())
-                .ok()
-                .flatten();
-            map.insert(
-                key,
-                v.map(serde_json::Value::String)
-                    .unwrap_or(serde_json::Value::Null),
-            );
-        }
-    }
-}
-
-#[cfg(feature = "sqlite")]
-fn augment_joined_columns_sqlite(
-    out: &mut serde_json::Value,
-    row: &sqlx::sqlite::SqliteRow,
-    joins: &[crate::core::Join],
-) {
-    use sqlx::Row as _;
-    let Some(map) = out.as_object_mut() else {
-        return;
-    };
-    for join in joins {
-        for col in &join.project {
-            let key = crate::core::joins::joined_key(join.alias, col);
-            let label = crate::core::joins::joined_label(join.alias, col);
-            let v = row
-                .try_get::<Option<String>, _>(label.as_str())
-                .ok()
-                .flatten();
-            map.insert(
-                key,
-                v.map(serde_json::Value::String)
-                    .unwrap_or(serde_json::Value::Null),
-            );
-        }
+    for (key, label) in joined {
+        let v = row
+            .try_get::<Option<String>, _>(label.as_str())
+            .ok()
+            .flatten();
+        map.insert(
+            key.clone(),
+            v.map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null),
+        );
     }
 }
 
@@ -591,6 +552,7 @@ pub async fn select_one_row_as_json(
 ) -> Result<Option<serde_json::Value>, ExecError> {
     crate::test_assertions::query_counter::bump();
     let stmt = pool.dialect().compile_select(query)?;
+    let joined = joined_columns(&query.joins);
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {
@@ -600,7 +562,7 @@ pub async fn select_one_row_as_json(
             }
             Ok(q.fetch_optional(pg).await?.as_ref().map(|r| {
                 let mut json = row_to_json(r, fields);
-                augment_joined_columns_pg(&mut json, r, &query.joins);
+                augment_joined_columns(&mut json, r, &joined);
                 json
             }))
         }
@@ -613,7 +575,7 @@ pub async fn select_one_row_as_json(
             }
             Ok(q.fetch_optional(my).await?.as_ref().map(|r| {
                 let mut json = row_to_json_my(r, fields);
-                augment_joined_columns_my(&mut json, r, &query.joins);
+                augment_joined_columns(&mut json, r, &joined);
                 json
             }))
         }
@@ -626,7 +588,7 @@ pub async fn select_one_row_as_json(
             }
             Ok(q.fetch_optional(sq).await?.as_ref().map(|r| {
                 let mut json = row_to_json_sqlite(r, fields);
-                augment_joined_columns_sqlite(&mut json, r, &query.joins);
+                augment_joined_columns(&mut json, r, &joined);
                 json
             }))
         }
@@ -642,6 +604,7 @@ pub(crate) async fn select_rows_as_json_tx(
 ) -> Result<Vec<serde_json::Value>, ExecError> {
     crate::test_assertions::query_counter::bump();
     let stmt = tx.dialect().compile_select(query)?;
+    let joined = joined_columns(&query.joins);
     match &mut tx.conn {
         #[cfg(feature = "postgres")]
         crate::sql::TxConn::Postgres(t) => {
@@ -654,7 +617,7 @@ pub(crate) async fn select_rows_as_json_tx(
                 .iter()
                 .map(|r| {
                     let mut json = row_to_json(r, fields);
-                    augment_joined_columns_pg(&mut json, r, &query.joins);
+                    augment_joined_columns(&mut json, r, &joined);
                     json
                 })
                 .collect())
@@ -671,7 +634,7 @@ pub(crate) async fn select_rows_as_json_tx(
                 .iter()
                 .map(|r| {
                     let mut json = row_to_json_my(r, fields);
-                    augment_joined_columns_my(&mut json, r, &query.joins);
+                    augment_joined_columns(&mut json, r, &joined);
                     json
                 })
                 .collect())
@@ -688,7 +651,7 @@ pub(crate) async fn select_rows_as_json_tx(
                 .iter()
                 .map(|r| {
                     let mut json = row_to_json_sqlite(r, fields);
-                    augment_joined_columns_sqlite(&mut json, r, &query.joins);
+                    augment_joined_columns(&mut json, r, &joined);
                     json
                 })
                 .collect())
