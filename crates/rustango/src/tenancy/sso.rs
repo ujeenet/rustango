@@ -73,6 +73,7 @@ use super::tenant_console::{self, SessionSecret, TenantSessionPayload};
 #[derive(crate::Model, Debug, Clone)]
 #[rustango(
     table = "rustango_shared_sso_providers",
+    access = "admin_only",
     scope = "registry",
     admin(
         list_display = "slug, label, kind, enabled, sort_order",

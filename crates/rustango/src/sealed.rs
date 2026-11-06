@@ -18,7 +18,7 @@ pub trait Expiring {
     fn is_expired_at(&self, now: i64) -> bool;
 
     fn is_expired(&self) -> bool {
-        self.is_expired_at(chrono::Utc::now().timestamp())
+        self.is_expired_at(crate::clock::unix_now_for_expiry())
     }
 }
 
@@ -51,7 +51,7 @@ impl<T: Serialize + DeserializeOwned + Expiring> SealedToken<T> {
     /// # Errors
     /// [`SealError`]: a bad shape, a signature mismatch, or an expired payload.
     pub fn open(key: &[u8], tag: &[u8], value: &str) -> Result<T, SealError> {
-        Self::open_at(key, tag, value, chrono::Utc::now().timestamp())
+        Self::open_at(key, tag, value, crate::clock::unix_now_for_expiry())
     }
 
     /// [`Self::open`] with expiry judged at `now`, Unix seconds.
@@ -103,6 +103,15 @@ mod tests {
             v: 7,
             exp: chrono::Utc::now().timestamp() + 60,
         }
+    }
+
+    /// Sessions and handoff tokens open through here: a broken clock refuses them.
+    #[test]
+    fn a_broken_clock_refuses_a_live_token() {
+        let t = SealedToken::<P>::seal(b"k", b"a", &live());
+        let refused = crate::clock::with_broken_clock(|| SealedToken::<P>::open(b"k", b"a", &t));
+        assert_eq!(refused, Err(SealError::Expired));
+        assert!(crate::clock::with_broken_clock(|| live().is_expired()));
     }
 
     #[test]

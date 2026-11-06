@@ -2292,6 +2292,7 @@ mod tests {
             get_latest_by: None,
             extra_permissions: &[],
             global_scopes: &[],
+            access: None,
         }))
     }
 }

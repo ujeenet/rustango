@@ -89,7 +89,7 @@ const AUTH_NAMESPACE: &str = "auth";
 /// migration engine owns it like every other framework table.
 #[derive(Model, Debug, Clone)]
 #[rustango(
-    table = "rustango_permissions",
+    table = "rustango_permissions", access = "open",
     display = "codename",
     // `unique_together` values are emitted verbatim as index columns
     // (no field→column resolution in the macro), so use the DB column
@@ -135,6 +135,7 @@ pub struct Permission {
 #[derive(Model, Debug, Clone)]
 #[rustango(
     table = "rustango_roles",
+    access = "open",
     display = "name",
     admin(
         list_display = "name, description",
@@ -169,6 +170,7 @@ pub struct Role {
 #[derive(Model, Debug, Clone)]
 #[rustango(
     table = "rustango_role_permissions",
+    access = "open",
     display = "codename",
     unique_together = "role_id, codename",
     admin(
@@ -199,6 +201,7 @@ pub struct RolePermission {
 #[derive(Model, Debug, Clone)]
 #[rustango(
     table = "rustango_user_roles",
+    access = "open",
     unique_together = "user_id, role_id",
     admin(list_display = "user_id, role_id", ordering = "user_id, role_id",)
 )]
@@ -222,6 +225,7 @@ pub struct UserRole {
 #[derive(Model, Debug, Clone)]
 #[rustango(
     table = "rustango_user_permissions",
+    access = "open",
     display = "codename",
     unique_together = "user_id, codename",
     admin(

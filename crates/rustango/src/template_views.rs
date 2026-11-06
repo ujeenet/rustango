@@ -235,6 +235,8 @@ pub struct ListView {
     page_size: i64,
     /// Hard cap on `?page_size=N` URL overrides. Default 100.
     max_page_size: i64,
+    /// Deepest row `?page=N` may skip to; see [`Self::max_offset`].
+    max_offset: usize,
     fields: Option<Vec<String>>,
     order_by: Vec<(String, bool)>,
     filter_fields: Vec<String>,
@@ -559,6 +561,20 @@ async fn view_outcome(
 }
 
 impl ListView {
+    /// Refuse to mount when a field list names a credential column.
+    fn refuse_credentials(&self, who: &str) {
+        let names = self
+            .fields
+            .iter()
+            .flatten()
+            .chain(&self.filter_fields)
+            .chain(&self.search_fields)
+            .chain(&self.ordering_fields)
+            .chain(self.order_by.iter().map(|(n, _)| n))
+            .map(String::as_str);
+        crate::core::table_policy::assert_no_credentials(self.schema, who, names);
+    }
+
     /// Start a `ListView` for the given schema. Defaults: template
     /// name `<table>_list.html`, page size 20, max page size 100,
     /// no `ORDER BY`, all fields included, no filters, no search,
@@ -574,6 +590,7 @@ impl ListView {
             template: format!("{}_list.html", schema.table),
             page_size: 20,
             max_page_size: 100,
+            max_offset: crate::list_params::DEFAULT_MAX_OFFSET,
             fields: None,
             order_by: Vec::new(),
             filter_fields: Vec::new(),
@@ -611,6 +628,26 @@ impl ListView {
     pub fn max_page_size(mut self, n: usize) -> Self {
         self.max_page_size = i64::try_from(n).unwrap_or(100).max(1);
         self
+    }
+
+    /// Deepest row `?page=N` may skip to (default
+    /// [`DEFAULT_MAX_OFFSET`](crate::list_params::DEFAULT_MAX_OFFSET)); past
+    /// it the view answers `400`. `0` lifts the cap.
+    #[must_use]
+    pub fn max_offset(mut self, n: usize) -> Self {
+        self.max_offset = n;
+        self
+    }
+
+    /// `(page, page_size, offset)` for `params`, or the `400` for a page
+    /// past [`Self::max_offset`].
+    fn page_window(&self, params: &HashMap<String, String>) -> Result<(i64, i64, i64), Response> {
+        let page = crate::list_params::parse_page(params);
+        let page_size = resolve_page_size(self.page_size, self.max_page_size, params);
+        let offset = crate::list_params::page_offset(page, page_size);
+        crate::list_params::check_offset(offset, self.max_offset)
+            .map(|offset| (page, page_size, offset))
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()).into_response())
     }
 
     /// Add an `ORDER BY` clause. Call multiple times for tie-breakers.
@@ -888,6 +925,7 @@ impl ListView {
     /// When [`Self::bulk_actions`] is on, also mounts `POST <prefix>`.
     #[must_use]
     pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: Pool) -> Router<()> {
+        self.refuse_credentials("ListView");
         let bulk = self.bulk_actions_enabled;
         let (schema, access) = (self.schema, self.access.clone());
         let state = Arc::new(ListViewState {
@@ -913,6 +951,7 @@ impl ListView {
     #[cfg(feature = "tenancy")]
     #[must_use]
     pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
+        self.refuse_credentials("ListView");
         let bulk = self.bulk_actions_enabled;
         let (schema, access) = (self.schema, self.access.clone());
         let state = Arc::new(TenantListViewState { vs: self, tera });
@@ -1006,9 +1045,10 @@ async fn handle_list(
     csrf: CsrfCookie,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let page = crate::list_params::parse_page(&params);
-    let page_size = resolve_page_size(state.vs.page_size, state.vs.max_page_size, &params);
-    let offset = crate::list_params::page_offset(page, page_size);
+    let (page, page_size, offset) = match state.vs.page_window(&params) {
+        Ok(w) => w,
+        Err(refused) => return refused,
+    };
 
     let (order_by, active_ordering) = match resolve_active_order(
         state.vs.schema,
@@ -1269,6 +1309,12 @@ pub struct DetailView {
 }
 
 impl DetailView {
+    /// Refuse to mount when a field list names a credential column.
+    fn refuse_credentials(&self, who: &str) {
+        let names = self.fields.iter().flatten().map(String::as_str);
+        crate::core::table_policy::assert_no_credentials(self.schema, who, names);
+    }
+
     /// # Panics
     /// On a table only the admin or its own flow serves (API keys, SSO, TOTP).
     #[must_use]
@@ -1310,6 +1356,7 @@ impl DetailView {
 
     #[must_use]
     pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: Pool) -> Router<()> {
+        self.refuse_credentials("DetailView");
         let (schema, access) = (self.schema, self.access.clone());
         let state = Arc::new(DetailViewState {
             vs: self,
@@ -1327,6 +1374,7 @@ impl DetailView {
     #[cfg(feature = "tenancy")]
     #[must_use]
     pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
+        self.refuse_credentials("DetailView");
         let (schema, access) = (self.schema, self.access.clone());
         let state = Arc::new(TenantDetailViewState { vs: self, tera });
         let path = mount_path(prefix, "/{pk}");
@@ -1430,6 +1478,12 @@ pub struct DeleteView {
 }
 
 impl DeleteView {
+    /// Refuse to mount when a field list names a credential column.
+    fn refuse_credentials(&self, who: &str) {
+        let names = self.fields.iter().flatten().map(String::as_str);
+        crate::core::table_policy::assert_no_credentials(self.schema, who, names);
+    }
+
     /// Start a `DeleteView` for the given schema. Defaults: template
     /// `<table>_confirm_delete.html`, redirect on success to `/`.
     ///
@@ -1454,6 +1508,7 @@ impl DeleteView {
     /// Mount as `GET`/`POST <prefix>/{pk}/delete`.
     #[must_use]
     pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: Pool) -> Router<()> {
+        self.refuse_credentials("DeleteView");
         let (schema, access) = (self.schema, self.access.clone());
         let state = Arc::new(DeleteViewState {
             vs: self,
@@ -1476,6 +1531,7 @@ impl DeleteView {
     #[cfg(feature = "tenancy")]
     #[must_use]
     pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
+        self.refuse_credentials("DeleteView");
         let (schema, access) = (self.schema, self.access.clone());
         let state = Arc::new(TenantDeleteViewState { vs: self, tera });
         let path = mount_path(prefix, "/{pk}/delete");
@@ -1594,6 +1650,12 @@ pub struct CreateView {
 }
 
 impl CreateView {
+    /// Refuse to mount when a field list names a credential column.
+    fn refuse_credentials(&self, who: &str) {
+        let names = self.fields.iter().map(String::as_str);
+        crate::core::table_policy::assert_no_credentials(self.schema, who, names);
+    }
+
     /// Start a `CreateView` that renders and writes only `fields` (names or
     /// columns); any other posted key is ignored. Defaults: template
     /// `<table>_form.html`, redirect to `/` on success.
@@ -1689,6 +1751,7 @@ impl CreateView {
     /// Mount as `GET`/`POST <prefix>/new`.
     #[must_use]
     pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: Pool) -> Router<()> {
+        self.refuse_credentials("CreateView");
         let state = Arc::new(FormViewState {
             schema: self.schema,
             template: self.template.clone(),
@@ -1722,6 +1785,7 @@ impl CreateView {
     #[cfg(feature = "tenancy")]
     #[must_use]
     pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
+        self.refuse_credentials("CreateView");
         let state = Arc::new(TenantFormViewState {
             schema: self.schema,
             template: self.template,
@@ -1769,6 +1833,16 @@ pub struct UpdateView {
 }
 
 impl UpdateView {
+    /// Refuse to mount when a field list names a credential column.
+    fn refuse_credentials(&self, who: &str) {
+        let names = self
+            .fields
+            .iter()
+            .chain(&self.context_fields)
+            .map(String::as_str);
+        crate::core::table_policy::assert_no_credentials(self.schema, who, names);
+    }
+
     /// Start an `UpdateView` that renders and writes only `fields`; see
     /// [`CreateView::for_model`]. `object` holds `fields` and the primary key.
     ///
@@ -1839,6 +1913,7 @@ impl UpdateView {
     /// Mount as `GET`/`POST <prefix>/{pk}/edit`.
     #[must_use]
     pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: Pool) -> Router<()> {
+        self.refuse_credentials("UpdateView");
         let state = Arc::new(FormViewState {
             schema: self.schema,
             template: self.template.clone(),
@@ -1872,6 +1947,7 @@ impl UpdateView {
     #[cfg(feature = "tenancy")]
     #[must_use]
     pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
+        self.refuse_credentials("UpdateView");
         let state = Arc::new(TenantFormViewState {
             schema: self.schema,
             template: self.template,
@@ -4012,10 +4088,10 @@ mod tenant {
         Query(params): Query<HashMap<String, String>>,
         t: TenantScope,
     ) -> Response {
-        let page = crate::list_params::parse_page(&params);
-        let page_size =
-            super::resolve_page_size(state.vs.page_size, state.vs.max_page_size, &params);
-        let offset = crate::list_params::page_offset(page, page_size);
+        let (page, page_size, offset) = match state.vs.page_window(&params) {
+            Ok(w) => w,
+            Err(refused) => return refused,
+        };
 
         let (order_by, active_ordering) = match super::resolve_active_order(
             state.vs.schema,
@@ -4475,11 +4551,11 @@ mod tests {
     #[cfg(feature = "admin")]
     #[test]
     fn every_view_refuses_admin_only_and_never_served_tables() {
-        use crate::core::table_policy::{table_access, TableAccess};
+        use crate::core::{table_policy::table_access, TableAccess};
         let refused: Vec<&'static ModelSchema> = inventory::iter::<crate::core::ModelEntry>
             .into_iter()
             .map(|e| e.schema)
-            .filter(|s| table_access(s.table) != TableAccess::Open)
+            .filter(|s| table_access(s.table) != Some(TableAccess::Open))
             .collect();
         #[cfg(feature = "tenancy")]
         assert!(
@@ -4611,6 +4687,7 @@ mod tests {
             get_latest_by: None,
             extra_permissions: &[],
             global_scopes: &[],
+            access: None,
         }))
     }
 
@@ -4733,6 +4810,7 @@ mod tests {
             get_latest_by: None,
             extra_permissions: &[],
             global_scopes: &[],
+            access: None,
         }))
     }
 
@@ -5146,6 +5224,7 @@ mod tests {
             get_latest_by: None,
             extra_permissions: &[],
             global_scopes: &[],
+            access: None,
         }));
         assert!(resolve_order_by(no_pk, &[]).unwrap().is_empty());
     }
@@ -5607,6 +5686,7 @@ mod tests {
             get_latest_by: None,
             extra_permissions: &[],
             global_scopes: &[],
+            access: None,
         }));
         let pk = uuid_schema.primary_key().unwrap();
         let raw = "550e8400-e29b-41d4-a716-446655440000";
@@ -5679,6 +5759,7 @@ mod tests {
             get_latest_by: None,
             extra_permissions: &[],
             global_scopes: &[],
+            access: None,
         }))
     }
 

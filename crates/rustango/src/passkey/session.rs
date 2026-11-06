@@ -68,13 +68,9 @@ pub fn seal_challenge(
     context: &[u8],
     secret: &[u8],
 ) -> String {
-    seal_at(
-        challenge,
-        purpose,
-        context,
-        secret,
-        chrono::Utc::now().timestamp(),
-    )
+    // A broken clock seals a challenge that is already expired.
+    let now = crate::clock::unix_now_i64().unwrap_or(0);
+    seal_at(challenge, purpose, context, secret, now)
 }
 
 fn seal_at(
@@ -103,7 +99,7 @@ struct Ceremony {
 impl Expiring for Ceremony {
     fn is_expired_at(&self, now: i64) -> bool {
         let ttl = i64::try_from(CHALLENGE_TTL.as_secs()).unwrap_or(i64::MAX);
-        self.iat > now + CLOCK_SKEW_SECS || now - self.iat > ttl
+        self.iat > now.saturating_add(CLOCK_SKEW_SECS) || now.saturating_sub(self.iat) > ttl
     }
 }
 
@@ -118,6 +114,11 @@ fn verify_at(
     let challenge = URL_SAFE_NO_PAD.decode(c.challenge).ok()?;
     let context = URL_SAFE_NO_PAD.decode(c.context).ok()?;
     Some((challenge, context))
+}
+
+/// [`verify_at`] on the shared clock; a broken clock opens nothing.
+fn verify_now(sealed: &str, purpose: CeremonyPurpose, secret: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+    verify_at(sealed, purpose, secret, crate::clock::unix_now_for_expiry())
 }
 
 /// Verify, open and consume a token sealed by [`seal_challenge`].
@@ -139,7 +140,7 @@ pub async fn open_challenge(
     secret: &[u8],
     cache: &dyn crate::cache::Cache,
 ) -> Option<(Vec<u8>, Vec<u8>)> {
-    let opened = verify_at(sealed, purpose, secret, chrono::Utc::now().timestamp())?;
+    let opened = verify_now(sealed, purpose, secret)?;
     if cache.stores_nothing() {
         tracing::error!(
             target: "rustango::passkey",
@@ -226,6 +227,15 @@ mod tests {
         assert!(verify_at(&token, Authentication, b"s", NOW + ttl + 1).is_none());
         // Far-future issue time is not a way around expiry.
         assert!(verify_at(&token, Authentication, b"s", NOW - 3600).is_none());
+    }
+
+    /// A clock that cannot be read refuses a fresh challenge.
+    #[test]
+    fn a_broken_clock_refuses_a_fresh_challenge() {
+        let token = seal_challenge(b"chal", Authentication, b"", b"s");
+        assert!(verify_now(&token, Authentication, b"s").is_some());
+        let refused = crate::clock::with_broken_clock(|| verify_now(&token, Authentication, b"s"));
+        assert!(refused.is_none());
     }
 
     #[test]

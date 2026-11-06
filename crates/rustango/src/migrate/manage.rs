@@ -44,6 +44,7 @@ use std::path::Path;
 use crate::core::inventory;
 use crate::sql::Pool;
 
+use super::ensure::{bootstrap_tables, BootstrapHolder};
 use super::error::MigrateError;
 use super::file::{self, DataOp, Migration, Operation};
 use super::runner;
@@ -1071,9 +1072,12 @@ pub(crate) async fn migrate_dry_run_cmd<W: Write>(
         after.push(("converge framework tables".to_owned(), converge));
     }
     let tenant = system.scope == super::MigrationScope::Tenant;
-    let bootstrap = shared_bootstrap()
-        .into_iter()
-        .chain(tenant.then(tenant_bootstrap).into_iter().flatten());
+    let bootstrap = bootstrap_tables(BootstrapHolder::Shared).into_iter().chain(
+        tenant
+            .then(|| bootstrap_tables(BootstrapHolder::Tenant))
+            .into_iter()
+            .flatten(),
+    );
     let created = super::chains::pending_creates(pool, &all, system.scope, dirs).await?;
     for b in bootstrap {
         if created.contains(b.table) || runner::try_table_exists_here(pool, b.table).await? {
@@ -1207,7 +1211,7 @@ async fn after_chains<W: Write>(
 /// # Errors
 /// Driver or SQL failures from the DDL.
 pub(crate) async fn ensure_bootstrap_tables(pool: &Pool) -> Result<(), sqlx::Error> {
-    for b in shared_bootstrap() {
+    for b in bootstrap_tables(BootstrapHolder::Shared) {
         (b.ensure)(pool).await?;
     }
     Ok(())
@@ -1219,103 +1223,10 @@ pub(crate) async fn ensure_bootstrap_tables(pool: &Pool) -> Result<(), sqlx::Err
 /// # Errors
 /// Driver or SQL failures from the DDL.
 pub(crate) async fn ensure_tenant_bootstrap_tables(pool: &Pool) -> Result<(), sqlx::Error> {
-    for b in tenant_bootstrap() {
+    for b in bootstrap_tables(BootstrapHolder::Tenant) {
         (b.ensure)(pool).await?;
     }
     Ok(())
-}
-
-type EnsureFuture<'a> =
-    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), sqlx::Error>> + Send + 'a>>;
-
-/// A bootstrap table: how `migrate` ensures it, and the DDL that creates it,
-/// which `--dry-run` shows while the table is missing.
-struct Bootstrap {
-    table: &'static str,
-    ensure: for<'a> fn(&'a Pool) -> EnsureFuture<'a>,
-    ddl: fn(&dyn crate::sql::Dialect) -> Result<Vec<String>, String>,
-}
-
-/// The `managed = false` framework tables of the database that holds them.
-fn shared_bootstrap() -> Vec<Bootstrap> {
-    use crate::core::Model as _;
-    fn audit(pool: &Pool) -> EnsureFuture<'_> {
-        Box::pin(crate::audit::ensure_table_pool(pool))
-    }
-    fn i18n(pool: &Pool) -> EnsureFuture<'_> {
-        Box::pin(crate::i18n::db::ensure_table_pool(pool))
-    }
-    #[cfg(all(feature = "admin", feature = "totp"))]
-    fn totp(pool: &Pool) -> EnsureFuture<'_> {
-        Box::pin(crate::admin::totp_store::ensure_table(pool))
-    }
-    #[cfg(all(feature = "tenancy", feature = "totp"))]
-    fn operator_totp(pool: &Pool) -> EnsureFuture<'_> {
-        Box::pin(crate::tenancy::operator_totp::ensure_table(pool))
-    }
-    vec![
-        // Writes to `audit(track = ...)` models record from the first migrate.
-        Bootstrap {
-            table: crate::audit::AuditLog::SCHEMA.table,
-            ensure: audit,
-            ddl: |d| super::ensure::idempotent_ddl(&crate::audit::bootstrap_snapshot(), d),
-        },
-        // The admin login fails closed on a missing TOTP table, so a
-        // fresh install needs it before the first login, not at enrollment.
-        #[cfg(all(feature = "admin", feature = "totp"))]
-        Bootstrap {
-            table: crate::admin::totp_store::AdminTotp::SCHEMA.table,
-            ensure: totp,
-            ddl: |d| {
-                super::ensure::idempotent_ddl(&crate::admin::totp_store::bootstrap_snapshot(), d)
-            },
-        },
-        // The console's sign-in reads it, and fails closed on a read error.
-        #[cfg(all(feature = "tenancy", feature = "totp"))]
-        Bootstrap {
-            table: crate::tenancy::OperatorTotp::SCHEMA.table,
-            ensure: operator_totp,
-            ddl: |d| {
-                super::ensure::idempotent_ddl(
-                    &crate::tenancy::operator_totp::bootstrap_snapshot(),
-                    d,
-                )
-            },
-        },
-        // The admin lists translations wherever they live.
-        Bootstrap {
-            table: crate::i18n::db::Translation::SCHEMA.table,
-            ensure: i18n,
-            ddl: |d| {
-                Ok(crate::i18n::db::ddl(d)
-                    .split(';')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned)
-                    .collect())
-            },
-        },
-    ]
-}
-
-/// The `managed = false` tables each tenant holds.
-fn tenant_bootstrap() -> Vec<Bootstrap> {
-    #[cfg(feature = "passkey")]
-    fn passkey(pool: &Pool) -> EnsureFuture<'_> {
-        Box::pin(crate::passkey::ensure_table(pool))
-    }
-    vec![
-        // Passkey sign-in reads it from the first login.
-        #[cfg(feature = "passkey")]
-        Bootstrap {
-            table: {
-                use crate::core::Model as _;
-                crate::passkey::WebauthnCredential::SCHEMA.table
-            },
-            ensure: passkey,
-            ddl: |d| super::ensure::idempotent_ddl(&crate::passkey::bootstrap_snapshot(), d),
-        },
-    ]
 }
 
 /// `migrate --squash` (#84a) — dev-iteration escape hatch.

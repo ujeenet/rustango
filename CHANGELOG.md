@@ -4,6 +4,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added
+
+- `#[rustango(access = "open" | "admin_only" | "never")]` declares which generic surfaces may serve a model's table (`ModelSchema::access`); every framework model declares it; the policy matches table names case-insensitively.
+- `tenancy::DbJtiStore` (table `rustango_used_jti`, registry): spent handoff tokens and ended impersonations survive restarts and are shared by replicas.
+- `rustango::clock`: `unix_now()` fails on a clock before 2024; token, session, signing, passkey challenge, TOTP, HMAC and webhook checks treat that as expired.
+- `ListView::max_offset(n)` and `list_params::check_offset` / `DEFAULT_MAX_OFFSET`, shared with `ViewSet::max_offset`.
+
 ### Changed
 
 - **Breaking:** M2M `add()` treats only the exact `(src, dst)` link as already present; another unique key refusing the row is now an error, as in `set()`.
@@ -16,6 +23,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - The translations editor saves a form in one transaction: a failure part-way writes nothing.
 - **Breaking:** `ListView`, `DetailView`, `CreateView`, `UpdateView` and `DeleteView` refuse to mount without an access call: `allow_anonymous()`, or with `tenancy` `login_required()`, `permissions(..)` or `permissions_for_model()`. Each is checked per request: 401 anonymous, 403 missing codename or a credential bound to another tenant (or, on a fixed pool, to any tenant), 503 when the permission or session read fails.
 - **Breaking:** a `ViewSet` whose create, update or destroy has no codenames refuses to mount (it logged a warning) unless it is `read_only()` or `allow_anonymous()`.
+- **Breaking:** the tenant admin keeps used handoff tokens and ended impersonations in the registry (`DbJtiStore`) by default, not in process memory.
+- **Breaking:** `ViewSet::for_model` and the five template views refuse to mount when a field list (rendered, written, filter, search, ordering, or a serializer's fields) names a credential column such as `password_hash` or `database_url`.
+- **Breaking:** `ListView` past offset 10 000 and the admin list and audit log past offset 100 000 answer 400.
+- **Breaking:** a clock that reads before 2024 rejects every expiring JWT, session, sealed token, signed value and URL, TOTP code, HMAC date and webhook (a clock before 1970 used to accept them all).
 
 ## [0.64.0] — 2026-11-05
 

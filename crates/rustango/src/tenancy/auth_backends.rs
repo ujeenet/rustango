@@ -348,6 +348,7 @@ impl AuthBackend for ModelBackend {
 #[derive(crate::Model, Clone)]
 #[rustango(
     table = "rustango_api_keys",
+    access = "admin_only",
     admin(
         list_display = "user_id, key_prefix, label, expires_at, created_at",
         ordering = "-created_at",
@@ -919,7 +920,7 @@ impl JwtBackend {
         let payload =
             serde_json::Value::Object(crate::jwt::verify(token, &self.secret).ok()?.into_map());
         let exp = payload.get("exp")?.as_i64()?;
-        if chrono::Utc::now().timestamp() >= exp {
+        if crate::clock::unix_now_for_expiry() >= exp {
             return None; // expired
         }
         // Absent `typ` is a `JwtBackend::issue` token, which is an access

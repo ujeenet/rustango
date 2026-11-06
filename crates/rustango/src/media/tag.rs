@@ -21,7 +21,7 @@ use crate::sql::Auto;
 // `permissions` so `auto_create_permissions` seeds
 // `rustango_media_tags.{add,change,delete,view}`, the codenames
 // `router::MediaPerms` checks. Not a column, so no migration.
-#[rustango(table = "rustango_media_tags", permissions)]
+#[rustango(table = "rustango_media_tags", access = "open", permissions)]
 pub struct MediaTag {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
@@ -51,6 +51,7 @@ pub struct MediaTag {
 #[derive(crate::Model, Debug, Clone)]
 #[rustango(
     table = "rustango_media_tag_links",
+    access = "open",
     unique_together = "media_id, tag_id"
 )]
 pub struct MediaTagLink {

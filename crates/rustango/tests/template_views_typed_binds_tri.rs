@@ -25,6 +25,8 @@ pub struct Event {
     pub id: Auto<i64>,
     pub day: chrono::NaiveDate,
     pub at: chrono::DateTime<chrono::Utc>,
+    /// A public id, not a credential, despite its name.
+    #[rustango(secret = false)]
     pub token: uuid::Uuid,
     pub meta: serde_json::Value,
     pub done: bool,
@@ -487,7 +489,8 @@ async fn garbage_url_pk_is_a_404(pool: &Pool) {
     }
 }
 
-/// `?page=i64::MAX` is an empty page on every paging path, not an overflow (#1865).
+/// `?page=i64::MAX` never overflows: the ListView refuses it past its offset
+/// cap, the ORM pages it as empty.
 async fn huge_page_is_an_empty_page(pool: &Pool) {
     let (status, body) = send(
         pool,
@@ -498,7 +501,7 @@ async fn huge_page_is_an_empty_page(pool: &Pool) {
     .await;
     assert!(status.is_redirection(), "seed: {status} {body}");
     let (status, body) = send(pool, Method::GET, &format!("/events?page={}", i64::MAX), "").await;
-    assert_eq!((status, body.as_str()), (StatusCode::OK, "rows=0"));
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     let (rows, total) = Event::objects()
         .paginate(i64::MAX, 20, pool)
         .await

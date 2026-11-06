@@ -720,8 +720,7 @@ where
 /// rows per request, a fifth of the admin's default.
 const DEFAULT_VIEW_HOOK_SCAN_CAP: usize = 2_000;
 
-/// Default [`ViewSet::max_offset`]: deeper pages scan too many rows per request.
-pub const DEFAULT_MAX_OFFSET: usize = 10_000;
+pub use crate::list_params::DEFAULT_MAX_OFFSET;
 
 /// The largest `view_hook_scan_cap`: each list request reads that many rows.
 const MAX_VIEW_HOOK_SCAN_CAP: usize = 100_000;
@@ -1099,14 +1098,9 @@ impl ViewSet {
 
     /// The `400` for an `offset` past [`Self::max_offset`], if it is.
     fn offset_refused(&self, offset: i64) -> Option<Response> {
-        let max = i64::try_from(self.max_offset).unwrap_or(i64::MAX);
-        let over = self.max_offset > 0 && offset > max;
-        over.then(|| {
-            json_error(
-                StatusCode::BAD_REQUEST,
-                "this page is too deep; narrow the list with filters or use cursor pagination",
-            )
-        })
+        crate::list_params::check_offset(offset, self.max_offset)
+            .err()
+            .map(|e| json_error(StatusCode::BAD_REQUEST, &e.to_string()))
     }
 
     /// Most rows a bulk create (JSON array body) may carry; more is a
@@ -1337,6 +1331,7 @@ impl ViewSet {
     fn router_with_source(self, prefix: &str, pool_source: PoolSource) -> Router {
         self.assert_cursor_is_rendered();
         self.assert_related_rows_are_unhooked();
+        self.assert_no_credential_fields();
         let gates = self.action_gates();
         let routes: Vec<(&str, &crate::access::Gate)> =
             gates.iter().map(|(a, g)| (*a, g)).collect();
@@ -1648,6 +1643,25 @@ impl ViewSet {
                 self.schema.table
             );
         }
+    }
+
+    /// No field list, nor the serializer, may name a credential column.
+    fn assert_no_credential_fields(&self) {
+        let mut names: Vec<&str> = self
+            .fields
+            .iter()
+            .chain(&self.filter_fields)
+            .chain(&self.search_fields)
+            .chain(self.ordering_fields.iter().flatten())
+            .chain(self.default_ordering.iter().map(|(n, _)| n))
+            .chain(self.related_filters.iter().map(|(n, _)| n))
+            .map(String::as_str)
+            .collect();
+        if let Some(bridge) = &self.serializer {
+            names.extend(bridge.writable_model_fields());
+            names.extend(bridge.readable_model_fields());
+        }
+        crate::core::table_policy::assert_no_credentials(self.schema, "ViewSet", names);
     }
 
     /// A serializer must render the cursor column and the primary key.
@@ -6349,6 +6363,38 @@ mod bulk_create_source_tests {
                 .await
                 .unwrap();
             assert_eq!(rows.first().map(|e| e.source.as_str()), Some("user:7"));
+        }
+    }
+}
+
+#[cfg(all(test, feature = "tenancy", feature = "sqlite"))]
+mod credential_field_tests {
+    use super::ViewSet;
+    use crate::core::Model as _;
+    use crate::tenancy::User;
+
+    async fn mount(vs: ViewSet) -> String {
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(vs.read_only().router("/u", pool));
+        }))
+        .err()
+        .and_then(|e| e.downcast_ref::<String>().cloned())
+        .unwrap_or_default()
+    }
+
+    /// Listing users works; naming the hash in any list refuses to mount.
+    #[tokio::test]
+    async fn a_viewset_naming_a_credential_refuses_to_mount() {
+        let fields = &["id", "username", "email"];
+        assert_eq!(mount(ViewSet::for_model(User::SCHEMA, fields)).await, "");
+        for vs in [
+            ViewSet::for_model(User::SCHEMA, &["id", "password_hash"]),
+            ViewSet::for_model(User::SCHEMA, fields).filter_fields(&["password_hash"]),
+            ViewSet::for_model(User::SCHEMA, fields).search_fields(&["password_hash"]),
+            ViewSet::for_model(User::SCHEMA, fields).ordering_fields(&["password_hash"]),
+        ] {
+            assert!(mount(vs).await.contains("hold credentials"));
         }
     }
 }

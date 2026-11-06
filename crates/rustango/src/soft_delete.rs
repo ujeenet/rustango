@@ -353,6 +353,7 @@ mod tests {
         get_latest_by: None,
         extra_permissions: &[],
         global_scopes: &[],
+        access: None,
     };
 
     static MODEL_WITHOUT_SD: ModelSchema = ModelSchema {
@@ -388,6 +389,7 @@ mod tests {
         get_latest_by: None,
         extra_permissions: &[],
         global_scopes: &[],
+        access: None,
     };
 
     #[test]

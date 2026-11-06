@@ -151,7 +151,7 @@ einer JSON-Hülle ist. Verwende `.context_object_name("posts")`, falls du lieber
 über `object_list` im Template iterierst.
 
 Die Seitengröße ist standardmäßig 20. Ein Client kann `?page_size=N` anfragen,
-begrenzt durch `.max_page_size(n)` (Standard 100). `.bulk_actions(true)` lässt die
+begrenzt durch `.max_page_size(n)` (Standard 100); eine Seite hinter Zeile `.max_offset(n)` (Standard 10 000, `0` hebt die Grenze auf) antwortet mit 400. `.bulk_actions(true)` lässt die
 Liste einen POST mit einem `action`-Feld und den gewählten PKs annehmen:
 `delete_selected` ist eingebaut, `.action(...)` fügt eigene hinzu, und
 `.with_delete_confirmation(true)` zeigt vorher eine Bestätigungsseite.

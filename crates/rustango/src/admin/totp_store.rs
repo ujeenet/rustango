@@ -18,7 +18,7 @@ use crate::Model;
 /// half done: the secret exists but no code has been verified yet.
 /// Only a confirmed device gates login.
 #[derive(Model, Clone)]
-#[rustango(table = "rustango_admin_totp", managed = false)]
+#[rustango(table = "rustango_admin_totp", access = "never", managed = false)]
 #[allow(dead_code)]
 pub struct AdminTotp {
     /// Admin user id this device belongs to (one per user).
@@ -107,6 +107,17 @@ pub async fn ensure_table(pool: &Pool) -> Result<(), sqlx::Error> {
 pub(crate) fn bootstrap_snapshot() -> crate::migrate::SchemaSnapshot {
     use crate::core::Model as _;
     crate::migrate::SchemaSnapshot::from_models_forced(&[AdminTotp::SCHEMA])
+}
+
+// The admin login fails closed on a missing TOTP table, so a fresh
+// install needs it before the first login, not at enrollment.
+inventory::submit! {
+    crate::migrate::ensure::BootstrapTable {
+        table: <AdminTotp as crate::core::Model>::SCHEMA.table,
+        holder: crate::migrate::ensure::BootstrapHolder::Shared,
+        ensure: |pool| Box::pin(ensure_table(pool)),
+        ddl: |d| crate::migrate::ensure::idempotent_ddl(&bootstrap_snapshot(), d),
+    }
 }
 
 /// Columns newer than the table, added to one created by an older

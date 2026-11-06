@@ -20,7 +20,12 @@ use super::{BackendKind, Org, SecretsResolver as _, StorageMode, TenantSecrets};
 /// Write it through [`add`] and [`update`], which validate it and seal
 /// the password; the admin and the console never write it directly.
 #[derive(crate::Model, Clone)]
-#[rustango(table = "rustango_db_servers", scope = "registry", display = "name")]
+#[rustango(
+    table = "rustango_db_servers",
+    access = "never",
+    scope = "registry",
+    display = "name"
+)]
 pub struct DbServer {
     #[rustango(primary_key)]
     pub id: crate::sql::Auto<i64>,
@@ -101,6 +106,7 @@ pub struct DbServer {
 #[derive(crate::Model, Debug, Clone)]
 #[rustango(
     table = "rustango_tenant_databases",
+    access = "never",
     scope = "registry",
     display = "database_name",
     unique_together = "server_name, database_name"

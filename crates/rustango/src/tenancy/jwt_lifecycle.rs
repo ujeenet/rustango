@@ -583,7 +583,7 @@ impl JwtLifecycle {
     /// expired token never costs a round trip to a durable backend.
     fn decode_unexpired(&self, token: &str) -> Option<JwtClaims> {
         let claims = self.decode_signed(token)?;
-        (chrono::Utc::now().timestamp() < claims.exp).then_some(claims)
+        (crate::clock::unix_now_for_expiry() < claims.exp).then_some(claims)
     }
 
     /// Decode + verify signature only — does NOT check expiry or blacklist.

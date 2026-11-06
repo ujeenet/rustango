@@ -51,7 +51,7 @@ use crate::Model;
 /// from a racy bootstrap fail loudly instead of silently creating
 /// two rows.
 #[derive(Debug, Clone, Model)]
-#[rustango(table = "rustango_content_types")]
+#[rustango(table = "rustango_content_types", access = "open")]
 pub struct ContentType {
     /// Auto-assigned primary key. Used as the foreign key everywhere
     /// the framework needs to point at "any model" (permissions,

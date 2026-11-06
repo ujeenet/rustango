@@ -43,7 +43,11 @@ use crate::Model;
 /// is the authenticator's signature counter, bumped on each assertion to
 /// detect cloned authenticators.
 #[derive(Model, Debug, Clone)]
-#[rustango(table = "rustango_webauthn_credentials", managed = false)]
+#[rustango(
+    table = "rustango_webauthn_credentials",
+    access = "never",
+    managed = false
+)]
 #[allow(dead_code)]
 pub struct WebauthnCredential {
     /// Surrogate primary key (a user may have many credentials).
@@ -104,6 +108,16 @@ pub async fn ensure_table(pool: &Pool) -> Result<(), sqlx::Error> {
 pub(crate) fn bootstrap_snapshot() -> crate::migrate::SchemaSnapshot {
     use crate::core::Model as _;
     crate::migrate::SchemaSnapshot::from_models_forced(&[WebauthnCredential::SCHEMA])
+}
+
+// Passkey sign-in reads it from the first login; each tenant holds its own.
+inventory::submit! {
+    crate::migrate::ensure::BootstrapTable {
+        table: <WebauthnCredential as crate::core::Model>::SCHEMA.table,
+        holder: crate::migrate::ensure::BootstrapHolder::Tenant,
+        ensure: |pool| Box::pin(ensure_table(pool)),
+        ddl: |d| crate::migrate::ensure::idempotent_ddl(&bootstrap_snapshot(), d),
+    }
 }
 
 /// Every credential registered to `user_id` — the allow-list the

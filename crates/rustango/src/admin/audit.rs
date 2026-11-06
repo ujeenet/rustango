@@ -186,7 +186,11 @@ pub(crate) async fn audit_log_view(
         .audit_reader()
         .ok_or_else(|| audit_forbidden("view"))?;
     let page = crate::list_params::parse_page(&params);
-    let offset = crate::list_params::page_offset(page, AUDIT_PAGE_SIZE);
+    let offset = crate::list_params::check_offset(
+        crate::list_params::page_offset(page, AUDIT_PAGE_SIZE),
+        super::views::ADMIN_MAX_OFFSET,
+    )
+    .map_err(|e| AdminError::BadRequest(e.to_string()))?;
 
     // Collect the active filters into an `AuditFilter` for the listing
     // helpers in `crate::audit`. `entity_pk` is filterable (it drives
