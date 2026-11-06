@@ -42,6 +42,7 @@ async fn pool() -> Pool {
 /// A ViewSet gated on a codename nobody holds.
 fn gated(pool: Pool) -> axum::Router {
     ViewSet::for_model(Note::SCHEMA, &["id", "title"])
+        .read_only()
         .permissions(ViewSetPerms {
             list: vec!["vs_401_app.view_note".to_owned()],
             ..ViewSetPerms::default()
@@ -134,7 +135,9 @@ async fn superuser_is_allowed() {
 /// An ungated ViewSet is unaffected — no codenames means no auth check.
 #[tokio::test]
 async fn ungated_viewset_still_serves_anonymous() {
-    let app = ViewSet::for_model(Note::SCHEMA, &["id", "title"]).router("/notes", pool().await);
+    let app = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
+        .allow_anonymous()
+        .router("/notes", pool().await);
 
     let res = app
         .oneshot(
@@ -180,6 +183,7 @@ async fn every_codename_is_required() {
     rustango::sql::insert_pool(&pool, &user).await.unwrap();
     let app = |pool: Pool| {
         ViewSet::for_model(Note::SCHEMA, &["id", "title"])
+            .read_only()
             .permissions(ViewSetPerms {
                 list: vec![
                     "vs_401_app.view_note".to_owned(),

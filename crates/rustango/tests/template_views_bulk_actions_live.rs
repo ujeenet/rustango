@@ -132,6 +132,7 @@ fn build_app(pool: sqlx::PgPool) -> axum::Router {
     });
 
     let lv = ListView::for_model(Widget::SCHEMA)
+        .allow_anonymous()
         .page_size(20)
         .bulk_actions(true)
         .action("publish_selected", "Publish selected", publish_handler);
@@ -292,6 +293,7 @@ async fn confirmation_renders_first_then_deletes_on_confirmed() {
     let tera = Arc::new(t);
 
     let lv = ListView::for_model(Widget::SCHEMA)
+        .allow_anonymous()
         .bulk_actions(true)
         .with_delete_confirmation(true);
     let app = lv.router(
@@ -388,6 +390,7 @@ async fn confirmation_does_not_gate_custom_actions() {
     });
 
     let lv = ListView::for_model(Widget::SCHEMA)
+        .allow_anonymous()
         .bulk_actions(true)
         .with_delete_confirmation(true) // ON, but only gates delete_selected
         .action("publish_selected", "Publish", publish);
@@ -465,7 +468,9 @@ async fn list_get_stamps_csrf_token_into_context() {
         "csrf:{{ csrf_token }}\nrows={{ object_list | length }}",
     )
     .unwrap();
-    let lv = ListView::for_model(Widget::SCHEMA).bulk_actions(true);
+    let lv = ListView::for_model(Widget::SCHEMA)
+        .allow_anonymous()
+        .bulk_actions(true);
     let app = lv.router("/widgets", Arc::new(t), rustango::sql::Pool::Postgres(pool));
 
     // First GET: no cookie sent → handler mints + sets a fresh

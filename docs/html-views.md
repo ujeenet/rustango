@@ -87,6 +87,24 @@ them at the same `prefix` (say `/posts`) gives the classic CRUD URL set:
 `posts_list.html`, `posts_detail.html`, and so on. Override any of them with
 `.template("my_name.html")`.
 
+### Who may use a view
+
+A model view refuses to mount until you say who may use it, so a page cannot
+ship open by accident. Call one of these on every view:
+
+| Call | Who gets in |
+|---|---|
+| `.allow_anonymous()` | anyone who reaches the router; put your own auth layer in front if it needs one |
+| `.login_required()` | any signed-in user; others get `401` |
+| `.permissions(&["posts.change"])` | a signed-in user with every codename; superusers pass |
+| `.permissions_for_model()` | the model's codename: `view` for List and Detail, `add`, `change`, `delete` for the write views |
+
+The last three need the `tenancy` feature. The user comes from `require_auth` /
+`optional_auth` or the session cookie. With `permissions_for_model()`, a
+`ListView` with `.bulk_actions(true)` needs `view`, `change` and `delete` for its
+POST. To send anonymous visitors to a login page instead of a `401`, wrap the
+router in `auth_decorators::login_required("/login")`.
+
 ---
 
 ## ListView
@@ -105,6 +123,7 @@ let app = ListView::for_model(Post::SCHEMA)
     .order_by("published_at", true)      // default sort, true = DESC
     .filter_fields(&["status", "author_id"])  // ?status=published
     .search_fields(&["title", "body"])        // ?search=rust
+    .allow_anonymous()                        // a public page
     .router("/posts", Arc::new(tera), pool);
 ```
 
@@ -142,7 +161,9 @@ the parameter is ignored until you name the sortable columns yourself:
 
 ```rust
 fn post_list() -> ListView {
-    ListView::for_model(Post::SCHEMA).ordering_fields(&["title", "published_at"])
+    ListView::for_model(Post::SCHEMA)
+        .allow_anonymous()
+        .ordering_fields(&["title", "published_at"])
 }
 ```
 
@@ -164,6 +185,7 @@ use rustango::template_views::DetailView;
 
 let app = DetailView::for_model(Post::SCHEMA)
     .lookup_field("slug")          // GET /posts/{slug} instead of /posts/{id}
+    .allow_anonymous()
     .router("/posts", Arc::new(tera), pool);
 ```
 
@@ -191,6 +213,7 @@ use rustango::template_views::CreateView;
 
 let app = CreateView::for_model(Post::SCHEMA, &["title", "body", "author_id"])  // the only fields a POST can set
     .success_url("/posts")         // where to send the browser after a save
+    .permissions_for_model()       // `posts.add`
     .router("/posts", Arc::new(tera), pool);
 ```
 
@@ -250,6 +273,7 @@ CreateView::for_model(Post::SCHEMA, &["title", "body", "author_id"])
         if errs.is_empty() { Ok(()) } else { Err(errs) }
     })
     .success_url("/posts")
+    .permissions_for_model()
     .router("/posts", Arc::new(tera), pool);
 ```
 
@@ -264,6 +288,7 @@ use rustango::template_views::UpdateView;
 
 UpdateView::for_model(Post::SCHEMA, &["title", "body"])
     .success_url("/posts")
+    .permissions_for_model()       // `posts.change`
     .router("/posts", Arc::new(tera), pool);
 ```
 
@@ -278,6 +303,7 @@ use rustango::template_views::DeleteView;
 
 DeleteView::for_model(Post::SCHEMA)
     .success_url("/posts")
+    .permissions_for_model()       // `posts.delete`
     .router("/posts", Arc::new(tera), pool);
 ```
 
@@ -285,11 +311,11 @@ Mount all five at the same prefix and you have full HTML CRUD:
 
 ```rust
 let app = axum::Router::new()
-    .merge(ListView::for_model(Post::SCHEMA).router("/posts", tera.clone(), pool.clone()))
-    .merge(DetailView::for_model(Post::SCHEMA).router("/posts", tera.clone(), pool.clone()))
-    .merge(CreateView::for_model(Post::SCHEMA, &["title", "body", "author_id"]).success_url("/posts").router("/posts", tera.clone(), pool.clone()))
-    .merge(UpdateView::for_model(Post::SCHEMA, &["title", "body"]).success_url("/posts").router("/posts", tera.clone(), pool.clone()))
-    .merge(DeleteView::for_model(Post::SCHEMA).success_url("/posts").router("/posts", tera, pool));
+    .merge(ListView::for_model(Post::SCHEMA).allow_anonymous().router("/posts", tera.clone(), pool.clone()))
+    .merge(DetailView::for_model(Post::SCHEMA).allow_anonymous().router("/posts", tera.clone(), pool.clone()))
+    .merge(CreateView::for_model(Post::SCHEMA, &["title", "body", "author_id"]).permissions_for_model().success_url("/posts").router("/posts", tera.clone(), pool.clone()))
+    .merge(UpdateView::for_model(Post::SCHEMA, &["title", "body"]).permissions_for_model().success_url("/posts").router("/posts", tera.clone(), pool.clone()))
+    .merge(DeleteView::for_model(Post::SCHEMA).permissions_for_model().success_url("/posts").router("/posts", tera, pool));
 ```
 
 ---
@@ -386,10 +412,10 @@ use rustango::template_views::{ListView, DetailView};
 
 let app = axum::Router::new()
     // JSON for API clients:
-    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).router("/api/posts", pool.clone()))
+    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).read_only().router("/api/posts", pool.clone()))
     // HTML pages for browsers:
-    .merge(ListView::for_model(Post::SCHEMA).router("/posts", tera.clone(), pool.clone()))
-    .merge(DetailView::for_model(Post::SCHEMA).router("/posts", tera, pool));
+    .merge(ListView::for_model(Post::SCHEMA).allow_anonymous().router("/posts", tera.clone(), pool.clone()))
+    .merge(DetailView::for_model(Post::SCHEMA).allow_anonymous().router("/posts", tera, pool));
 ```
 
 Now `GET /api/posts` returns the paginated JSON envelope and `GET /posts`

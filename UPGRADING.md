@@ -150,6 +150,9 @@ untouched.
 
 ## Unreleased
 
+- Every template model view now panics at mount until it says who may use it. Add `.allow_anonymous()` to public pages and to pages behind your own auth layer; with `tenancy`, gate writes with `.permissions_for_model()` (`add` / `change` / `delete`) or `.login_required()`. A `ListView` with `bulk_actions(true)` needs `view`, `change` and `delete` for its POST under `permissions_for_model()`.
+- A `ViewSet` (or `#[derive(ViewSet)]`) with open writes panics at mount instead of warning: add codenames for create, update and destroy, or `read_only` / `allow_anonymous`.
+
 ## 0.64.0
 
 - Resource caps, all configurable: `FileCache` keeps 100 000 entries / 1 GiB and drops the oldest; `DatabaseCache` purges expired rows every 256 writes; `/refresh` allows 30 per user per minute (429 past it); a full `InMemoryJtiStore` (1 000 000) refuses refreshes and revocations; ViewSet lists answer 400 past offset 10 000; tenant pool builds past 16 at once or 600 a minute answer 503; `/ready` answers are reused for 1 s; the server holds 10 000 connections (`RUSTANGO_MAX_CONNECTIONS`); a recursive media listing over 100 000 collections is a 400. `0` lifts most caps.

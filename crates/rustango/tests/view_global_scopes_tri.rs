@@ -179,16 +179,19 @@ fn tera() -> Arc<Tera> {
 fn app(pool: &Pool) -> axum::Router {
     let t = tera();
     ViewSet::for_model(Note::SCHEMA, &["id", "tag", "visible"])
+        .allow_anonymous()
         .filter_fields(&["tag"])
         .search_fields(&["tag"])
         .router("/api/notes", pool.clone())
         .merge(
             ViewSet::for_model(Note::SCHEMA, &["id", "tag", "visible"])
+                .allow_anonymous()
                 .cursor_pagination("id")
                 .router("/api/cursor", pool.clone()),
         )
         .merge(
             ListView::for_model(Note::SCHEMA)
+                .allow_anonymous()
                 .template("list.html")
                 .filter_fields(&["tag"])
                 .bulk_actions(true)
@@ -199,25 +202,30 @@ fn app(pool: &Pool) -> axum::Router {
         )
         .merge(
             ListView::for_model(Pet::SCHEMA)
+                .allow_anonymous()
                 .template("pets.html")
                 .with_fk_display(true)
                 .router("/pets", t.clone(), pool.clone()),
         )
         .merge(
             ViewSet::for_model(Owner::SCHEMA, &["id", "name", "visible"])
+                .allow_anonymous()
                 .search_fields(&["name"])
                 .router("/api/owners", pool.clone()),
         )
         .merge(
             ViewSet::for_model(Memo::SCHEMA, &["id", "tag", "deleted_at"])
+                .allow_anonymous()
                 .router("/api/memos", pool.clone()),
         )
         .merge(
             ViewSet::for_model(Pet::SCHEMA, &["id", "tag", "owner_id"])
+                .allow_anonymous()
                 .router("/api/pets", pool.clone()),
         )
         .merge(
             ViewSet::for_model(Pet::SCHEMA, &["id", "tag", "owner_id"])
+                .allow_anonymous()
                 .related_filter(
                     "owner_id",
                     |_: &std::collections::HashMap<String, String>, _| {
@@ -232,43 +240,52 @@ fn app(pool: &Pool) -> axum::Router {
         )
         .merge(
             ListView::for_model(Memo::SCHEMA)
+                .allow_anonymous()
                 .template("list.html")
                 .bulk_actions(true)
                 .router("/memos", t.clone(), pool.clone()),
         )
         .merge(
             DetailView::for_model(Memo::SCHEMA)
+                .allow_anonymous()
                 .template("detail.html")
                 .router("/memos", t.clone(), pool.clone()),
         )
         .merge(
             UpdateView::for_model(Memo::SCHEMA, &["tag", "deleted_at"])
+                .allow_anonymous()
                 .template("form.html")
                 .success_url("/memos")
                 .router("/memos", t.clone(), pool.clone()),
         )
         .merge(
             DeleteView::for_model(Memo::SCHEMA)
+                .allow_anonymous()
                 .template("confirm.html")
                 .success_url("/memos")
                 .router("/memos", t.clone(), pool.clone()),
         )
         .merge(
-            ViewSet::for_model(Ranked::SCHEMA, &["id", "rank"]).router("/api/ranked", pool.clone()),
+            ViewSet::for_model(Ranked::SCHEMA, &["id", "rank"])
+                .allow_anonymous()
+                .router("/api/ranked", pool.clone()),
         )
         .merge(
             DetailView::for_model(Note::SCHEMA)
+                .allow_anonymous()
                 .template("detail.html")
                 .router("/notes", t.clone(), pool.clone()),
         )
         .merge(
             UpdateView::for_model(Note::SCHEMA, &["tag", "visible"])
+                .allow_anonymous()
                 .template("form.html")
                 .success_url("/notes")
                 .router("/notes", t.clone(), pool.clone()),
         )
         .merge(
             DeleteView::for_model(Note::SCHEMA)
+                .allow_anonymous()
                 .template("confirm.html")
                 .success_url("/notes")
                 .router("/notes", t, pool.clone()),

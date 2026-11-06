@@ -1,16 +1,10 @@
-//! A ViewSet whose write actions need no permission warns at mount time,
-//! unless it is read-only or says `.allow_anonymous()` (#1857).
+//! A ViewSet whose write actions need no permission refuses to mount,
+//! unless it is read-only or says `.allow_anonymous()`.
 
-#![cfg(all(
-    feature = "sqlite",
-    feature = "admin",
-    feature = "runtime",
-    feature = "testkit"
-))]
+#![cfg(all(feature = "sqlite", feature = "admin", feature = "runtime"))]
 
 use rustango::core::Model as _;
 use rustango::sql::{sqlx, Auto, Pool};
-use rustango::testkit::CaptureWriter;
 use rustango::viewset::ViewSet;
 #[cfg(feature = "tenancy")]
 use rustango::viewset::ViewSetPerms;
@@ -25,28 +19,26 @@ pub struct Note {
     pub title: String,
 }
 
-/// What mounting `vs` logs.
-fn mount_logs(vs: ViewSet, pool: Pool) -> String {
-    let out = CaptureWriter::default();
-    let sub = tracing_subscriber::fmt()
-        .with_writer(out.clone())
-        .with_ansi(false)
-        .finish();
-    tracing::subscriber::with_default(sub, || {
+/// The panic message of mounting `vs`, or `None` when it mounted.
+fn refusal(vs: ViewSet, pool: Pool) -> Option<String> {
+    let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = vs.router("/api/notes", pool);
-    });
-    out.contents()
+    }))
+    .err()?;
+    Some(err.downcast_ref::<String>().cloned().unwrap_or_default())
 }
 
 #[tokio::test]
-async fn open_writes_warn_unless_acknowledged() {
+async fn open_writes_refuse_unless_acknowledged() {
     let pool = Pool::Sqlite(sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap());
     let vs = || ViewSet::for_model(Note::SCHEMA, &["id", "title"]);
 
-    let open = mount_logs(vs(), pool.clone());
-    assert!(open.contains("WARN"), "{open}");
-    assert!(open.contains("rustango::viewset"), "{open}");
-    assert!(open.contains("vs_open_note"), "{open}");
+    let open = refusal(vs(), pool.clone()).expect("open writes must not mount");
+    assert!(open.contains("ViewSet `vs_open_note`"), "{open}");
+    assert!(
+        open.contains("create") && open.contains("update") && open.contains("destroy"),
+        "{open}"
+    );
     // The fix it names exists in this build; the no-tenancy text is a
     // unit test in `viewset`, which the `sqlite,admin` lib run covers.
     assert!(
@@ -56,12 +48,11 @@ async fn open_writes_warn_unless_acknowledged() {
     #[cfg(feature = "tenancy")]
     assert!(open.contains("permissions_for_model"), "{open}");
 
-    for (what, quiet) in [
+    for (what, decided) in [
         ("read_only", vs().read_only()),
         ("allow_anonymous", vs().allow_anonymous()),
     ] {
-        let logs = mount_logs(quiet, pool.clone());
-        assert!(!logs.contains("WARN"), "{what}: {logs}");
+        assert_eq!(refusal(decided, pool.clone()), None, "{what}");
     }
 }
 
@@ -85,11 +76,11 @@ fn write_perms(destroy: bool) -> ViewSetPerms {
 async fn codenames_close_open_writes() {
     let pool = Pool::Sqlite(sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap());
     let vs = || ViewSet::for_model(Note::SCHEMA, &["id", "title"]);
-    let one_open = mount_logs(vs().permissions(write_perms(false)), pool.clone());
+    let one_open = refusal(vs().permissions(write_perms(false)), pool.clone())
+        .expect("an open destroy must not mount");
     assert!(
         one_open.contains("destroy") && !one_open.contains("create"),
         "{one_open}"
     );
-    let logs = mount_logs(vs().permissions(write_perms(true)), pool);
-    assert!(!logs.contains("WARN"), "{logs}");
+    assert_eq!(refusal(vs().permissions(write_perms(true)), pool), None);
 }

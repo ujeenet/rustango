@@ -43,6 +43,7 @@ async fn make_router_and_pool(page_size: usize) -> (axum::Router, Pool) {
     .expect("create");
     let pool = Pool::Sqlite(sq);
     let router = rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "title"])
+        .allow_anonymous()
         .page_size(page_size)
         .cursor_pagination("id")
         .router("/posts", pool.clone());
@@ -157,6 +158,7 @@ async fn cursor_pagination_descending_walks_back_from_highest_id() {
     .expect("create");
     let pool = Pool::Sqlite(sq);
     let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "title"])
+        .allow_anonymous()
         .page_size(3)
         .cursor_pagination_desc("id")
         .router("/posts", pool);
@@ -213,6 +215,7 @@ async fn cursor_pagination_follows_a_renamed_cursor_field() {
     let (seeder, pool) = make_router_and_pool(5).await;
     seed(&seeder, 7).await;
     let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "title"])
+        .allow_anonymous()
         .page_size(5)
         .cursor_pagination("id")
         .serializer::<KeyedPost>()
@@ -249,6 +252,7 @@ struct TitleOnly {
 async fn a_serializer_without_the_cursor_field_panics_at_mount() {
     let (_, pool) = make_router_and_pool(5).await;
     let _ = rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "title"])
+        .allow_anonymous()
         .cursor_pagination("id")
         .serializer::<TitleOnly>()
         .router("/posts", pool);

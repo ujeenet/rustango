@@ -76,6 +76,7 @@ rustango::register_admin_computed!("post", "word_count", "Words", |row| {
     search_fields = "title, body",
     ordering      = "-published_at",
     page_size     = 20,
+    allow_anonymous,
 )]
 // Declaration samples only: nothing mounts these. The `/api/*` routes in
 // `urls.rs` are hand-written handlers, hence the allow.

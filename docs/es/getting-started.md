@@ -600,13 +600,14 @@ use crate::blog::models::Post;
     search_fields = "title, body",
     ordering      = "-published_at",
     page_size     = 20,
+    allow_anonymous,
 )]
 pub struct PostViewSet;
 ```
 
 Registra el nuevo módulo añadiendo `pub mod post_view_set;` a `src/lib.rs` (`make:viewset` te imprime esta línea).
 
-El archivo generado empieza con `read_only`. Si lo omites, como arriba, el ViewSet también sirve create, update y delete. Las acciones de escritura abiertas registran un aviso al montar el router. Pon tu propia capa de auth delante y añade `allow_anonymous` para indicar que es intencionado; los codenames de `permissions(...)` requieren la feature `tenancy` y sin ella impiden montar.
+El archivo generado empieza con `read_only`. Si lo omites, como arriba, el ViewSet también sirve create, update y delete. Las acciones de escritura abiertas impiden montar el router. Pon tu propia capa de auth delante y añade `allow_anonymous`, como arriba, para indicar que es intencionado; los codenames de `permissions(...)` requieren la feature `tenancy` y sin ella impiden montar.
 
 ### 12b. Montar las rutas
 
@@ -692,6 +693,7 @@ Conecta el serializer al ViewSet con el atributo `serializer` — las respuestas
     fields = "id, title, body, author_id, published_at",
     serializer = crate::post_serializer::PostSerializer,
     ordering = "-published_at",
+    allow_anonymous,
 )]
 pub struct PostViewSet;
 ```

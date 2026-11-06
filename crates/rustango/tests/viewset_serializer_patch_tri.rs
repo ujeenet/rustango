@@ -74,12 +74,14 @@ async fn setup(pool: &Pool) {
 
 fn plain(pool: &Pool) -> axum::Router {
     ViewSet::for_model(Span::SCHEMA, &["id", "owner_id", "lo", "hi", "note"])
+        .allow_anonymous()
         .serializer::<SpanSerializer>()
         .router("/spans", pool.clone())
 }
 
 fn owned(pool: &Pool) -> axum::Router {
     ViewSet::for_model(Span::SCHEMA, &["id", "owner_id", "lo", "hi", "note"])
+        .allow_anonymous()
         .serializer::<SpanSerializer>()
         .filter_backend(OwnedBy::column("owner_id"))
         .router("/spans", pool.clone())
@@ -131,6 +133,7 @@ async fn stored(pool: &Pool, id: i64) -> (i64, i64, i64) {
 async fn patch_checks_the_stored_value_of_an_unwritten_field(pool: &Pool) {
     let id = seed(pool, 1, 1, 10).await;
     let app = ViewSet::for_model(Span::SCHEMA, &["id", "hi"])
+        .allow_anonymous()
         .serializer::<SpanSerializer>()
         .router("/spans", pool.clone());
     let uri = format!("/spans/{id}");

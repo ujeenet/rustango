@@ -67,6 +67,7 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
 ///     search_fields = "title, body",
 ///     ordering     = "-published_at",
 ///     page_size    = 20,
+///     allow_anonymous, // or `read_only` / `permissions(...)`
 /// )]
 /// pub struct PostViewSet;
 ///
@@ -87,7 +88,7 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
 ///   at `ViewSet::max_page_size`, default 100).
 /// * `read_only` — flag; wires only `list` + `retrieve` (no mutations).
 /// * `allow_anonymous` — flag; write actions without codenames are
-///   intended, so the mount warning is skipped.
+///   intended. Without it (or `read_only`) they refuse to mount.
 /// * `serializer = SomeSerializer` — render list / retrieve / create
 ///   responses through a `#[derive(Serializer)]` type instead of the
 ///   default field-level projection (`read_only` / `source` / `method`

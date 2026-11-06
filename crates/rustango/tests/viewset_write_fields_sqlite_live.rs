@@ -116,8 +116,9 @@ async fn send(app: &axum::Router, r: Request<Body>) -> (StatusCode, Value) {
 #[tokio::test]
 async fn fields_limits_what_update_writes() {
     let sq = pool().await;
-    let app =
-        ViewSet::for_model(Doc::SCHEMA, &["id", "title"]).router("/docs", Pool::Sqlite(sq.clone()));
+    let app = ViewSet::for_model(Doc::SCHEMA, &["id", "title"])
+        .allow_anonymous()
+        .router("/docs", Pool::Sqlite(sq.clone()));
 
     let (status, _) = send(
         &app,
@@ -141,8 +142,9 @@ async fn fields_limits_what_update_writes() {
 #[tokio::test]
 async fn fields_limits_what_create_writes() {
     let sq = pool().await;
-    let app =
-        ViewSet::for_model(Doc::SCHEMA, &["id", "title"]).router("/docs", Pool::Sqlite(sq.clone()));
+    let app = ViewSet::for_model(Doc::SCHEMA, &["id", "title"])
+        .allow_anonymous()
+        .router("/docs", Pool::Sqlite(sq.clone()));
     let body = r#"{"title":"n","owner_id":7,"salary":99}"#;
     let (status, created) = send(&app, req(Method::POST, "/docs", body, None)).await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
@@ -152,6 +154,7 @@ async fn fields_limits_what_create_writes() {
 
 fn owned(sq: &sqlx::SqlitePool) -> axum::Router {
     ViewSet::for_model(Doc::SCHEMA, DOC_FIELDS)
+        .allow_anonymous()
         .filter_backend(OwnedBy::column("owner_id"))
         .router("/docs", Pool::Sqlite(sq.clone()))
 }
@@ -218,6 +221,7 @@ async fn owned_by_refuses_an_unauthenticated_create() {
 async fn owned_by_superuser_sees_all_may_set_the_owner() {
     let sq = pool().await;
     let app = ViewSet::for_model(Doc::SCHEMA, DOC_FIELDS)
+        .allow_anonymous()
         .filter_backend(OwnedBy::column("owner_id").superuser_sees_all())
         .router("/docs", Pool::Sqlite(sq.clone()));
     let mut r = req(Method::PATCH, "/docs/1", r#"{"owner_id":2}"#, None);
@@ -231,6 +235,7 @@ async fn owned_by_superuser_sees_all_may_set_the_owner() {
 async fn ordering_falls_back_to_the_serializer_fields() {
     let sq = pool().await;
     let app = ViewSet::for_model(Doc::SCHEMA, DOC_FIELDS)
+        .allow_anonymous()
         .serializer::<DocSerializer>()
         .ordering(&[("id", false)])
         .router("/docs", Pool::Sqlite(sq));
@@ -294,6 +299,7 @@ impl rustango::viewset::ViewSetFilter for PinOwner {
 async fn two_pins_on_one_field_write_it_once_or_deny() {
     let sq = pool().await;
     let agree = ViewSet::for_model(Doc::SCHEMA, DOC_FIELDS)
+        .allow_anonymous()
         .filter_backend(OwnedBy::column("owner_id"))
         .filter_backend(PinOwner(1))
         .router("/docs", Pool::Sqlite(sq.clone()));
@@ -303,6 +309,7 @@ async fn two_pins_on_one_field_write_it_once_or_deny() {
     assert_eq!(created["owner_id"], 1);
 
     let disagree = ViewSet::for_model(Doc::SCHEMA, DOC_FIELDS)
+        .allow_anonymous()
         .filter_backend(OwnedBy::column("owner_id"))
         .filter_backend(PinOwner(2))
         .router("/docs", Pool::Sqlite(sq.clone()));
@@ -362,7 +369,9 @@ async fn item_pool() -> sqlx::SqlitePool {
 }
 
 fn items(sq: &sqlx::SqlitePool) -> axum::Router {
-    ViewSet::for_model(Item::SCHEMA, ITEM_FIELDS).router("/items", Pool::Sqlite(sq.clone()))
+    ViewSet::for_model(Item::SCHEMA, ITEM_FIELDS)
+        .allow_anonymous()
+        .router("/items", Pool::Sqlite(sq.clone()))
 }
 
 /// Create one item through the API; returns its id.
@@ -591,6 +600,7 @@ struct ItemSettingsSerializer {
 async fn a_json_field_stores_the_value_as_sent() {
     let sq = item_pool().await;
     let with_serializer = ViewSet::for_model(Item::SCHEMA, ITEM_FIELDS)
+        .allow_anonymous()
         .serializer::<ItemSettingsSerializer>()
         .router("/items", Pool::Sqlite(sq.clone()));
     for app in [items(&sq), with_serializer] {

@@ -234,6 +234,7 @@ use crate::blog::models::Post;
     search_fields = "title, body",
     ordering      = "-published_at",
     page_size     = 20,
+    allow_anonymous,
 )]
 pub struct PostViewSet;
 ```
@@ -494,6 +495,7 @@ Both produce an `axum::Router` of the same CRUD routes.
     search_fields = "title, body",
     ordering      = "-published_at",
     page_size     = 20,
+    allow_anonymous,
 )]
 pub struct PostViewSet;
 
@@ -584,7 +586,7 @@ mount the ViewSet and override the one route with your own handler (see
 | `ordering` | `"-published_at, id"` | none | Default sort (`-` = DESC). |
 | `page_size` | `20` | 20 | Rows per page (client `?page_size=` capped at 100). |
 | `read_only` | *(flag)* | off | Expose GET (list + retrieve) only. |
-| `allow_anonymous` | *(flag)* | off | Say that write actions with no codenames are meant to be open; silences the mount warning. |
+| `allow_anonymous` | *(flag)* | off | Say that write actions with no codenames are meant to be open; without it (or `read_only`) they refuse to mount. |
 | `permissions(...)` | `permissions(create = "posts.add")` | none | Per-action permission codenames; needs `tenancy`. |
 
 ---
@@ -610,7 +612,7 @@ fields responses render and bodies may write. Every other method returns `Self`:
 | `openapi_query(bool)` | Describe the `QUERY` route in the generated OpenAPI document (needs OpenAPI 3.2 tooling). Off by default; the route is mounted either way. |
 | `related_filter(fk_field, backend)` | Limit which target rows a body's FK may name; any other is a `422`. |
 | `read_only()` | GET-only. |
-| `allow_anonymous()` | Writes without codenames are intended; skips the mount warning. |
+| `allow_anonymous()` | Writes without codenames are intended; without it they refuse to mount. |
 | `permissions(ViewSetPerms{…})` / `permissions_for_model::<T>()` | Per-action codename gates; both need `tenancy`. |
 | `cursor_pagination("id")` / `cursor_pagination_desc("id")` | Keyset pagination (skips `COUNT(*)`). Any totally-ordered NOT NULL column: integer, timestamp, date, uuid or string. |
 | `limit_offset_pagination()` | `?limit=&offset=` windowing. |

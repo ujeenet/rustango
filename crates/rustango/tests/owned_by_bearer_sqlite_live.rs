@@ -162,6 +162,7 @@ async fn app(slug: &str, name: &str) -> (Router, i64, i64, i64) {
     // One instance for both, so a logout revokes for the middleware too.
     let auth = auth();
     let router = ViewSet::for_model(Note::SCHEMA, &["id", "member_id", "body"])
+        .allow_anonymous()
         .page_size(100)
         .filter_backend(OwnedBy::column("member_id"))
         .tenant_router("/notes")

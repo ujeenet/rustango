@@ -48,6 +48,7 @@ impl PostSerializer {
     serializer = PostSerializer,
     ordering = "-id",
     page_size = 25,
+    allow_anonymous,
 )]
 pub struct PostViewSet;
 

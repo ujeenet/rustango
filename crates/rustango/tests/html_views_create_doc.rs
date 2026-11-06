@@ -109,6 +109,7 @@ async fn the_documented_create_view_inserts_and_shows_a_refusal() {
         tera.add_raw_template("posts_form.html", &form_template(&md))
             .unwrap();
         let app = CreateView::for_model(Post::SCHEMA, &fields)
+            .allow_anonymous()
             .success_url("/posts")
             .router("/posts", Arc::new(tera), pool().await);
 

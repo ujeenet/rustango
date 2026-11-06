@@ -108,6 +108,7 @@ fn ids(body: &Value) -> Vec<i64> {
 async fn default_ordering_applies_when_no_query_param() {
     let pool = fresh_pool().await;
     let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, POST_FIELDS)
+        .allow_anonymous()
         .page_size(50)
         .ordering(&[("rating", true)])
         .router("/posts", pool);
@@ -127,6 +128,7 @@ async fn default_ordering_applies_when_no_query_param() {
 async fn explicit_ordering_overrides_default_and_handles_desc_prefix() {
     let pool = fresh_pool().await;
     let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, POST_FIELDS)
+        .allow_anonymous()
         .page_size(50)
         .ordering(&[("rating", true)]) // default DESC on rating
         .router("/posts", pool);
@@ -160,6 +162,7 @@ async fn explicit_ordering_overrides_default_and_handles_desc_prefix() {
 async fn comma_separated_multi_field_ordering() {
     let pool = fresh_pool().await;
     let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, POST_FIELDS)
+        .allow_anonymous()
         .page_size(50)
         .router("/posts", pool);
 
@@ -184,6 +187,7 @@ async fn comma_separated_multi_field_ordering() {
 async fn ordering_fields_whitelist_drops_off_list_names() {
     let pool = fresh_pool().await;
     let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, POST_FIELDS)
+        .allow_anonymous()
         .page_size(50)
         .ordering(&[("id", false)])
         .ordering_fields(&["title", "rating"]) // `secret_score` NOT whitelisted
@@ -242,6 +246,7 @@ async fn ordering_fields_whitelist_drops_off_list_names() {
 /// `secret_score` (#1845).
 async fn seed_divergent(pool: &Pool) {
     let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, POST_FIELDS)
+        .allow_anonymous()
         .router("/posts", pool.clone());
     for (title, rating, secret) in [("a", 1, "zzz"), ("b", 2, "mmm"), ("c", 3, "aaa")] {
         let payload = serde_json::json!({
@@ -269,6 +274,7 @@ async fn ordering_on_an_unexposed_field_is_dropped_by_default() {
     let pool = fresh_pool().await;
     // secret_score NOT exposed
     let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "title", "rating"])
+        .allow_anonymous()
         .page_size(50)
         .ordering(&[("id", false)])
         .router("/posts", pool.clone());
@@ -297,6 +303,7 @@ async fn ordering_on_an_unexposed_field_is_dropped_by_default() {
 async fn ordering_on_an_exposed_field_still_works() {
     let pool = fresh_pool().await;
     let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "title", "rating"])
+        .allow_anonymous()
         .page_size(50)
         .router("/posts", pool.clone());
 
@@ -317,6 +324,7 @@ async fn ordering_on_an_exposed_field_still_works() {
 async fn ordering_stays_open_when_every_field_is_listed() {
     let pool = fresh_pool().await;
     let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, POST_FIELDS)
+        .allow_anonymous()
         .page_size(50)
         .router("/posts", pool.clone());
 
@@ -361,6 +369,7 @@ impl rustango::serializer::ModelSerializer for HandPost {
 async fn ordering_is_closed_when_the_serializer_renders_no_model_field() {
     let pool = fresh_pool().await;
     let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, POST_FIELDS)
+        .allow_anonymous()
         .page_size(50)
         .serializer::<HandPost>()
         .router("/posts", pool.clone());
@@ -382,6 +391,7 @@ async fn ordering_is_closed_when_the_serializer_renders_no_model_field() {
 async fn an_empty_ordering_fields_list_sorts_on_nothing() {
     let pool = fresh_pool().await;
     let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, POST_FIELDS)
+        .allow_anonymous()
         .page_size(50)
         .ordering(&[("id", false)])
         .ordering_fields(&[])

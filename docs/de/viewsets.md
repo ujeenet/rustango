@@ -238,6 +238,7 @@ use crate::blog::models::Post;
     search_fields = "title, body",
     ordering      = "-published_at",
     page_size     = 20,
+    allow_anonymous,
 )]
 pub struct PostViewSet;
 ```
@@ -499,6 +500,7 @@ Beide erzeugen einen `axum::Router` mit denselben CRUD-Routen.
     search_fields = "title, body",
     ordering      = "-published_at",
     page_size     = 20,
+    allow_anonymous,
 )]
 pub struct PostViewSet;
 
@@ -589,7 +591,7 @@ binde das ViewSet ein und überschreibe die eine Route mit deinem eigenen Handle
 | `ordering` | `"-published_at, id"` | keiner | Standardsortierung (`-` = DESC). |
 | `page_size` | `20` | 20 | Zeilen pro Seite (Client-`?page_size=` gedeckelt bei 100). |
 | `read_only` | *(Flag)* | aus | Nur GET (list + retrieve) exponieren. |
-| `allow_anonymous` | *(Flag)* | aus | Erklärt, dass Schreibaktionen ohne Codenamen offen sein sollen; unterdrückt die Mount-Warnung. |
+| `allow_anonymous` | *(Flag)* | aus | Erklärt, dass Schreibaktionen ohne Codenamen offen sein sollen; ohne es (oder `read_only`) verweigern sie das Einhängen. |
 | `permissions(...)` | `permissions(create = "posts.add")` | keiner | Berechtigungs-Codenamen pro Aktion; braucht `tenancy`. |
 
 ---
@@ -615,7 +617,7 @@ Felder, die Antworten zeigen und Bodies schreiben dürfen. Jede weitere Methode 
 | `openapi_query(bool)` | Beschreibt die `QUERY`-Route im erzeugten OpenAPI-Dokument (braucht OpenAPI-3.2-Tooling). Standardmäßig aus; die Route wird in jedem Fall eingehängt. |
 | `related_filter(fk_field, backend)` | Begrenzt, welche Zielzeilen ein FK im Body nennen darf; jede andere ist ein `422`. |
 | `read_only()` | Nur GET. |
-| `allow_anonymous()` | Schreibzugriffe ohne Codenamen sind gewollt; überspringt die Mount-Warnung. |
+| `allow_anonymous()` | Schreibzugriffe ohne Codenamen sind gewollt; ohne es verweigern sie das Einhängen. |
 | `permissions(ViewSetPerms{…})` / `permissions_for_model::<T>()` | Codename-Gates pro Aktion; beide brauchen `tenancy`. |
 | `cursor_pagination("id")` / `cursor_pagination_desc("id")` | Keyset-Paginierung (überspringt `COUNT(*)`). Jede total geordnete NOT-NULL-Spalte: Integer, Timestamp, Datum, UUID oder String. |
 | `limit_offset_pagination()` | `?limit=&offset=`-Fensterung. |

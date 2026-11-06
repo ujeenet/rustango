@@ -484,6 +484,7 @@ async fn viewset_writes_clear_the_host_cache(pool: &Pool) {
     assert_eq!(resolve(pool, &host).await.as_deref(), Some(slug.as_str()));
     use rustango::core::Model as _;
     let app = rustango::viewset::ViewSet::for_model(OrgHost::SCHEMA, &["id", "hostname"])
+        .allow_anonymous()
         .router("/hosts", pool.clone());
     let uri = format!("/hosts/{}", row.id.get().unwrap());
     let req = Request::builder()
@@ -524,9 +525,11 @@ async fn api(
     use rustango::core::Model as _;
     use rustango::viewset::ViewSet;
     let app = ViewSet::for_model(Org::SCHEMA, ORG_FIELDS)
+        .allow_anonymous()
         .router("/orgs", pool.clone())
         .merge(
             ViewSet::for_model(OrgHost::SCHEMA, &["id", "org_id", "hostname", "enabled"])
+                .allow_anonymous()
                 .router("/hosts", pool.clone()),
         );
     let resp = app

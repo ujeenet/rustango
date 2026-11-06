@@ -2213,7 +2213,7 @@ let tera = Arc::new(tera);
 use rustango::template_views::{CreateView, UpdateView, DeleteView};
 
 let app = axum::Router::new()
-    .merge(ListView::for_model(Post::SCHEMA)
+    .merge(ListView::for_model(Post::SCHEMA).allow_anonymous()
         .page_size(20)
         .max_page_size(100)                         // cap for ?page_size= overrides
         .order_by("created_at", true)
@@ -2221,15 +2221,15 @@ let app = axum::Router::new()
         .search_fields(&["title", "body"])          // ?search=rustango → ILIKE %rustango%
         .ordering_fields(&["title", "created_at"])  // ?ordering=title / ?ordering=-created_at
         .router("/posts", tera.clone(), pool.clone()))
-    .merge(DetailView::for_model(Post::SCHEMA)
+    .merge(DetailView::for_model(Post::SCHEMA).allow_anonymous()
         .router("/posts", tera.clone(), pool.clone()))
-    .merge(CreateView::for_model(Post::SCHEMA, &["title", "slug", "body", "published"])
+    .merge(CreateView::for_model(Post::SCHEMA, &["title", "slug", "body", "published"]).permissions_for_model()
         .success_url("/posts/{pk}/{slug}")  // any column from the new row
         .router("/posts", tera.clone(), pool.clone()))
-    .merge(UpdateView::for_model(Post::SCHEMA, &["title", "slug", "body", "published"])
+    .merge(UpdateView::for_model(Post::SCHEMA, &["title", "slug", "body", "published"]).permissions_for_model()
         .success_url("/posts")
         .router("/posts", tera.clone(), pool.clone()))
-    .merge(DeleteView::for_model(Post::SCHEMA)
+    .merge(DeleteView::for_model(Post::SCHEMA).permissions_for_model()
         .success_url("/posts")
         .router("/posts", tera.clone(), pool.clone()));
 ```
@@ -2313,7 +2313,7 @@ let publish: BulkActionFn = Arc::new(|pool, pks| {
     })
 });
 
-ListView::for_model(Post::SCHEMA)
+ListView::for_model(Post::SCHEMA).allow_anonymous()
     .bulk_actions(true)                              // built-in delete_selected
     .action("publish_selected", "Publish selected", publish)
     .router("/posts", tera, pool)
@@ -2350,7 +2350,7 @@ Admin-shape lists usually want to show the FK target's name, not
 its raw integer ID. Opt in with `.with_fk_display(true)`:
 
 ```rust,ignore
-ListView::for_model(Post::SCHEMA)
+ListView::for_model(Post::SCHEMA).allow_anonymous()
     .with_fk_display(true)               // adds `<col>_display` siblings
     .router("/posts", tera, pool)
 ```
@@ -2374,7 +2374,7 @@ deleted row.
 interstitial confirmation page with `.with_delete_confirmation(true)`:
 
 ```rust,ignore
-ListView::for_model(Post::SCHEMA)
+ListView::for_model(Post::SCHEMA).allow_anonymous()
     .bulk_actions(true)
     .with_delete_confirmation(true)        // two-step flow
     .router("/posts", tera, pool)
@@ -2399,7 +2399,7 @@ cross-field checks) hooks in via two builder methods on
 
 ```rust,ignore
 // Closure shape — no new types, just `data: &HashMap<String,String>`.
-CreateView::for_model(Post::SCHEMA, &["title", "slug", "body", "published"])
+CreateView::for_model(Post::SCHEMA, &["title", "slug", "body", "published"]).permissions_for_model()
     .validator(|data| {
         let mut errs = rustango::forms::FormErrors::default();
         if data.get("title").map_or(true, |s| s.len() < 5) {
@@ -2415,7 +2415,7 @@ pub struct PostForm {
     #[form(min_length = 5)] title: String,
     #[form(min_length = 1)] body: String,
 }
-CreateView::for_model(Post::SCHEMA, &["title", "slug", "body", "published"])
+CreateView::for_model(Post::SCHEMA, &["title", "slug", "body", "published"]).permissions_for_model()
     .form::<PostForm>()
     .router("/posts", tera, pool)
 ```
@@ -2436,18 +2436,18 @@ single pool at mount time. Mirrors `viewset::ViewSet::tenant_router`.
 use rustango::template_views::{ListView, DetailView, CreateView, UpdateView, DeleteView};
 
 let app = axum::Router::new()
-    .merge(ListView::for_model(Post::SCHEMA)
+    .merge(ListView::for_model(Post::SCHEMA).allow_anonymous()
         .page_size(20)
         .tenant_router("/posts", tera.clone()))    // no pool!
-    .merge(DetailView::for_model(Post::SCHEMA)
+    .merge(DetailView::for_model(Post::SCHEMA).allow_anonymous()
         .tenant_router("/posts", tera.clone()))
-    .merge(CreateView::for_model(Post::SCHEMA, &["title", "slug", "body", "published"])
+    .merge(CreateView::for_model(Post::SCHEMA, &["title", "slug", "body", "published"]).permissions_for_model()
         .success_url("/posts")
         .tenant_router("/posts", tera.clone()))
-    .merge(UpdateView::for_model(Post::SCHEMA, &["title", "slug", "body", "published"])
+    .merge(UpdateView::for_model(Post::SCHEMA, &["title", "slug", "body", "published"]).permissions_for_model()
         .success_url("/posts")
         .tenant_router("/posts", tera.clone()))
-    .merge(DeleteView::for_model(Post::SCHEMA)
+    .merge(DeleteView::for_model(Post::SCHEMA).permissions_for_model()
         .success_url("/posts")
         .tenant_router("/posts", tera));
 ```
@@ -3049,7 +3049,7 @@ dispatcher wiring.
 ```rust,ignore
 use rustango::template_views::{DeleteView, ListView};
 
-ListView::for_model(Item::SCHEMA)
+ListView::for_model(Item::SCHEMA).allow_anonymous()
     .bulk_actions(true)                    // built-in delete_selected
     .with_delete_confirmation(true)        // two-step confirm before bulk DELETE
     .with_fk_display(true)                 // FK columns auto-resolve to display

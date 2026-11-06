@@ -238,6 +238,7 @@ use crate::blog::models::Post;
     search_fields = "title, body",
     ordering      = "-published_at",
     page_size     = 20,
+    allow_anonymous,
 )]
 pub struct PostViewSet;
 ```
@@ -499,6 +500,7 @@ Les deux produisent un `axum::Router` des mêmes routes CRUD.
     search_fields = "title, body",
     ordering      = "-published_at",
     page_size     = 20,
+    allow_anonymous,
 )]
 pub struct PostViewSet;
 
@@ -591,7 +593,7 @@ montez le ViewSet et surchargez la route unique avec votre propre handler (voir
 | `ordering` | `"-published_at, id"` | aucun | Tri par défaut (`-` = DESC). |
 | `page_size` | `20` | 20 | Lignes par page (le `?page_size=` du client est plafonné à 100). |
 | `read_only` | *(drapeau)* | désactivé | N'exposer que GET (list + retrieve). |
-| `allow_anonymous` | *(drapeau)* | désactivé | Indique que les actions d'écriture sans codename sont voulues ouvertes ; fait taire l'avertissement au montage. |
+| `allow_anonymous` | *(drapeau)* | désactivé | Indique que les actions d'écriture sans codename sont voulues ouvertes ; sans lui (ni `read_only`), le montage est refusé. |
 | `permissions(...)` | `permissions(create = "posts.add")` | aucun | Codenames de permission par action ; exige `tenancy`. |
 
 ---
@@ -617,7 +619,7 @@ que les réponses affichent et que les bodies peuvent écrire. Chaque autre mét
 | `openapi_query(bool)` | Décrit la route `QUERY` dans le document OpenAPI généré (demande un outillage OpenAPI 3.2). Désactivé par défaut ; la route est montée dans tous les cas. |
 | `related_filter(fk_field, backend)` | Limite les lignes cibles qu'une FK du corps peut nommer ; toute autre donne un `422`. |
 | `read_only()` | GET uniquement. |
-| `allow_anonymous()` | Les écritures sans codename sont voulues ; évite l'avertissement au montage. |
+| `allow_anonymous()` | Les écritures sans codename sont voulues ; sans lui, le montage est refusé. |
 | `permissions(ViewSetPerms{…})` / `permissions_for_model::<T>()` | Barrières de codename par action ; les deux exigent `tenancy`. |
 | `cursor_pagination("id")` / `cursor_pagination_desc("id")` | Pagination par keyset (saute `COUNT(*)`). Toute colonne NOT NULL totalement ordonnée : entier, horodatage, date, uuid ou chaîne. |
 | `limit_offset_pagination()` | Fenêtrage `?limit=&offset=`. |
