@@ -313,13 +313,35 @@ pub async fn apply_edits(
     edits: &[(String, String, String)],
     updated_by: &str,
 ) -> Result<usize, crate::sql::ExecError> {
-    let current = editor_rows(pool).await?;
-    let mut changed = changed_edits(&current, edits);
-    changed.retain(|(locale, key, _)| crate::i18n::db::storable(locale, key));
-    for (locale, key, value) in &changed {
+    let writes = storable_changes(&editor_rows(pool).await?, edits);
+    write_edits(pool, &writes, updated_by).await?;
+    Ok(writes.len())
+}
+
+/// The edits [`changed_edits`] keeps whose key the table can hold.
+#[cfg(feature = "admin")]
+fn storable_changes(
+    current: &[(String, String, String)],
+    edits: &[(String, String, String)],
+) -> Vec<(String, String, String)> {
+    changed_edits(current, edits)
+        .into_iter()
+        .filter(|(locale, key, _)| crate::i18n::db::storable(locale, key))
+        .cloned()
+        .collect()
+}
+
+/// Upsert each of `writes` as `updated_by`.
+#[cfg(feature = "admin")]
+async fn write_edits(
+    pool: &Pool,
+    writes: &[(String, String, String)],
+    updated_by: &str,
+) -> Result<(), crate::sql::ExecError> {
+    for (locale, key, value) in writes {
         upsert_pool(pool, locale, key, value, updated_by).await?;
     }
-    Ok(changed.len())
+    Ok(())
 }
 
 /// Delete each `(locale, key)` override, so those locales fall back to
@@ -339,12 +361,12 @@ pub async fn apply_clears(
     Ok(removed)
 }
 
-/// Apply one editor POST body: edits and the new key, emptied cells,
-/// then the delete-checked keys, so a key both edited and checked ends
-/// up deleted.
+/// Apply one editor POST body in one transaction: emptied cells, edits
+/// and the new key, then the delete-checked keys, so a key both edited
+/// and checked ends up deleted.
 ///
 /// # Errors
-/// As the ORM write paths ([`crate::sql::ExecError`]).
+/// As the ORM write paths ([`crate::sql::ExecError`]); nothing is written.
 #[cfg(feature = "admin")]
 pub async fn apply_form(
     pool: &Pool,
@@ -352,12 +374,29 @@ pub async fn apply_form(
     updated_by: &str,
 ) -> Result<(), crate::sql::ExecError> {
     let mut edits = parse_edits(form);
-    let shown = parse_shown(form);
-    apply_clears(pool, &cleared_cells(&shown, &edits)).await?;
+    let clears: Vec<(String, String)> = cleared_cells(&parse_shown(form), &edits)
+        .into_iter()
+        .map(|(l, k)| (l.to_owned(), k.to_owned()))
+        .collect();
     edits.extend(parse_new_key(form));
-    apply_edits(pool, &edits, updated_by).await?;
-    apply_deletes(pool, &parse_deletes(form)).await?;
-    Ok(())
+    // Read before the block, whose reads would not see its own writes.
+    // Cleared cells post "", which `changed_edits` never writes.
+    let writes = storable_changes(&editor_rows(pool).await?, &edits);
+    let deletes = parse_deletes(form);
+    let (p, updated_by) = (pool.clone(), updated_by.to_owned());
+    crate::sql::atomic(pool, move |_tx| {
+        Box::pin(async move {
+            let cells: Vec<(&str, &str)> = clears
+                .iter()
+                .map(|(l, k)| (l.as_str(), k.as_str()))
+                .collect();
+            apply_clears(&p, &cells).await?;
+            write_edits(&p, &writes, &updated_by).await?;
+            apply_deletes(&p, &deletes).await?;
+            Ok(())
+        })
+    })
+    .await
 }
 
 /// Delete each listed key (all locales) from the override layer. Returns

@@ -193,6 +193,24 @@ async fn a_long_key_does_not_fail_the_rest(pool: &Pool) {
     );
 }
 
+/// A save that fails part-way writes nothing: the cleared cell comes back.
+async fn a_failed_save_writes_nothing(pool: &Pool) {
+    let seed = [edit("en", "greet", "Hello"), edit("fr", "greet", "Salut")];
+    apply_edits(pool, &seed, "alice").await.expect("seed");
+    // fr is cleared first; the en edit then fails on an over-long `updated_by`.
+    let form: Vec<_> = [
+        cell("en", "greet", "Hi", "Hello"),
+        cell("fr", "greet", "", "Salut"),
+    ]
+    .concat();
+    apply_form(pool, &form, &"b".repeat(201))
+        .await
+        .expect_err("updated_by is over 200 chars");
+    let mut rows = editor_rows(pool).await.expect("rows");
+    rows.sort();
+    assert_eq!(rows, seed);
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -202,5 +220,6 @@ tri_dialect_test! {
         an_older_case_insensitive_table_is_upgraded,
         a_refused_upgrade_only_warns,
         a_long_key_does_not_fail_the_rest,
+        a_failed_save_writes_nothing,
     ],
 }
