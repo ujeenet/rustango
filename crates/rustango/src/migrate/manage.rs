@@ -1320,9 +1320,10 @@ fn tenant_bootstrap() -> Vec<Bootstrap> {
 
 /// `migrate --squash` (#84a) — dev-iteration escape hatch.
 ///
-/// Deletes every pending (un-applied) migration JSON in `dir`, then
+/// Sets aside every pending (un-applied) migration JSON in `dir`, then
 /// re-runs `makemigrations` so the diff regenerates as a single
-/// fresh file against the current model registry. Recovers the
+/// fresh file against the current model registry. The pending files are
+/// deleted once that succeeds and put back on any failure. Recovers the
 /// "scaffolder shape → real shape" iteration cycle that hits the
 /// `AddColumn NOT NULL no default` validator rejection without
 /// touching the database.
@@ -1406,26 +1407,98 @@ async fn migrate_squash<W: Write>(pool: &Pool, dir: &Path, w: &mut W) -> Result<
     // declare it `replaces` them (see below).
     let removed: Vec<(String, super::MigrationScope)> =
         pending.iter().map(|m| (m.name.clone(), m.scope)).collect();
-    for m in &pending {
-        let path = file_path(dir, &m.name);
-        std::fs::remove_file(&path).map_err(|e| {
-            MigrateError::Validation(format!("migrate --squash: rm {}: {e}", path.display()))
-        })?;
-        writeln!(w, "  removed {}", path.display())?;
+    // Set aside, not deleted: a failed regeneration puts them back.
+    let aside = SetAside::take(dir, pending.iter().map(|m| m.name.as_str()))?;
+    // Which files existed before regeneration, so we can tell which are new.
+    let before = json_names(dir)?;
+    let regenerated = (|| {
+        for (path, _) in &aside.0 {
+            writeln!(w, "  removed {}", path.display())?;
+        }
+        writeln!(w, "regenerating diff against current model registry...")?;
+        // Empty args means "default makemigrations behavior" — splits
+        // registry vs tenant in tenancy projects, single file otherwise.
+        // Pass through to the existing entry point so any future flags
+        // gain consistent behavior automatically.
+        // The pending files already hold any drop + add; refusing here would lose them.
+        makemigrations(dir, &["--drop-and-add".to_owned()], w)?;
+        stamp_replaces(dir, &before, &removed, w)
+    })();
+    match regenerated {
+        Ok(()) => {
+            for (_, backup) in &aside.0 {
+                if let Err(e) = std::fs::remove_file(backup) {
+                    writeln!(w, "  could not delete {}: {e}", backup.display())?;
+                }
+            }
+            Ok(())
+        }
+        Err(e) => match aside.restore(dir, &before) {
+            Ok(()) => Err(e),
+            Err(r) => Err(MigrateError::Validation(format!(
+                "{e}; restoring the pending files failed too: {r}"
+            ))),
+        },
+    }
+}
+
+/// The pending files `migrate --squash` renamed to `*.json.squash-bak`.
+struct SetAside(Vec<(std::path::PathBuf, std::path::PathBuf)>);
+
+impl SetAside {
+    /// Rename each of `names` aside; on a failure, put back the ones moved.
+    fn take<'a>(dir: &Path, names: impl Iterator<Item = &'a str>) -> Result<Self, MigrateError> {
+        let mut aside = Self(Vec::new());
+        for name in names {
+            let path = file_path(dir, name);
+            let backup = path.with_extension("json.squash-bak");
+            if let Err(e) = std::fs::rename(&path, &backup) {
+                let restored = aside.put_back();
+                return Err(MigrateError::Validation(format!(
+                    "migrate --squash: move {}: {e}{}",
+                    path.display(),
+                    restored.err().map_or(String::new(), |r| format!("; {r}")),
+                )));
+            }
+            aside.0.push((path, backup));
+        }
+        Ok(aside)
     }
 
-    writeln!(w, "regenerating diff against current model registry...")?;
-    // Which files existed before regeneration, so we can tell which are new.
-    let before: std::collections::HashSet<String> =
-        file::list_dir(dir)?.into_iter().map(|m| m.name).collect();
-    // Empty args means "default makemigrations behavior" — splits
-    // registry vs tenant in tenancy projects, single file otherwise.
-    // Pass through to the existing entry point so any future flags
-    // gain consistent behavior automatically.
-    // The pending files already hold any drop + add; refusing here would lose them.
-    makemigrations(dir, &["--drop-and-add".to_owned()], w)?;
+    /// Delete the files written since `before`, then put the originals back.
+    fn restore(
+        self,
+        dir: &Path,
+        before: &std::collections::HashSet<String>,
+    ) -> Result<(), MigrateError> {
+        for name in json_names(dir)?.difference(before) {
+            std::fs::remove_file(file_path(dir, name))?;
+        }
+        self.put_back()
+    }
 
-    stamp_replaces(dir, &before, &removed, w)
+    fn put_back(self) -> Result<(), MigrateError> {
+        for (path, backup) in &self.0 {
+            std::fs::rename(backup, path).map_err(|e| {
+                MigrateError::Validation(format!(
+                    "migrate --squash: restore {} from {}: {e}",
+                    path.display(),
+                    backup.display(),
+                ))
+            })?;
+        }
+        Ok(())
+    }
+}
+
+/// The names of the `*.json` migration files in `dir`.
+fn json_names(dir: &Path) -> Result<std::collections::HashSet<String>, MigrateError> {
+    Ok(std::fs::read_dir(dir)?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
+        .filter_map(|p| Some(p.file_stem()?.to_str()?.to_owned()))
+        .collect())
 }
 
 /// The system chain a single-database project applies.
