@@ -379,9 +379,11 @@ pub async fn apply_form(
         .map(|(l, k)| (l.to_owned(), k.to_owned()))
         .collect();
     edits.extend(parse_new_key(form));
-    // Read before the block, whose reads would not see its own writes.
-    // Cleared cells post "", which `changed_edits` never writes.
-    let writes = storable_changes(&editor_rows(pool).await?, &edits);
+    // Read before the block, whose reads would not see its own writes; a
+    // cell this save clears is gone by the time the edits run.
+    let mut current = editor_rows(pool).await?;
+    current.retain(|(l, k, _)| !clears.iter().any(|(cl, ck)| cl == l && ck == k));
+    let writes = storable_changes(&current, &edits);
     let deletes = parse_deletes(form);
     let (p, updated_by) = (pool.clone(), updated_by.to_owned());
     crate::sql::atomic(pool, move |_tx| {

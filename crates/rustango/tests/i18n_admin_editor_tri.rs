@@ -12,7 +12,11 @@ use rustango::i18n::db::ensure_table_pool;
 use rustango::sql::Pool;
 use rustango::tri_dialect_test;
 
+/// A table whose FK pins a translation row, so deleting that row fails.
+const PIN: &str = "i18n_editor_pin";
+
 async fn setup(pool: &Pool) {
+    rustango::testkit::matrix::drop_table(pool, PIN).await;
     rustango::testkit::matrix::drop_table(pool, "rustango_translations").await;
     ensure_table_pool(pool).await.expect("ensure_table");
 }
@@ -211,6 +215,48 @@ async fn a_failed_save_writes_nothing(pool: &Pool) {
     assert_eq!(rows, seed);
 }
 
+/// A cell the save clears and re-enters under the new key keeps its value.
+async fn a_cleared_cell_entered_again_is_kept(pool: &Pool) {
+    let seed = [edit("fr", "greet", "Salut")];
+    apply_edits(pool, &seed, "alice").await.expect("seed");
+    let mut form: Vec<_> = cell("fr", "greet", "", "Salut").to_vec();
+    form.push(("newkey".to_owned(), "greet".to_owned()));
+    form.push(("newval:fr".to_owned(), "Salut".to_owned()));
+    apply_form(pool, &form, "bob").await.expect("save");
+    assert_eq!(editor_rows(pool).await.expect("rows"), seed);
+}
+
+/// A database error part-way rolls back the writes before it.
+async fn a_database_error_rolls_the_save_back(pool: &Pool) {
+    use rustango::i18n::db::all_pool;
+    use rustango::sql::raw_execute_pool as exec;
+    let seed = [edit("en", "greet", "Hello"), edit("fr", "greet", "Salut")];
+    apply_edits(pool, &seed, "alice").await.expect("seed");
+    let fr = all_pool(pool)
+        .await
+        .expect("rows")
+        .into_iter()
+        .find(|t| t.locale == "fr")
+        .and_then(|t| t.id.get().copied())
+        .expect("fr id");
+    let ddl = format!(
+        "CREATE TABLE {PIN} (id BIGINT PRIMARY KEY, tr_id BIGINT NOT NULL, \
+         FOREIGN KEY (tr_id) REFERENCES rustango_translations (id))"
+    );
+    exec(pool, &ddl, Vec::new()).await.expect("pin table");
+    let pin = format!("INSERT INTO {PIN} (id, tr_id) VALUES (1, {fr})");
+    exec(pool, &pin, Vec::new()).await.expect("pin fr");
+    // en is cleared first; deleting the key then fails on the pinned fr row.
+    let mut form: Vec<_> = cell("en", "greet", "", "Hello").to_vec();
+    form.push(("delkey:greet".to_owned(), "on".to_owned()));
+    apply_form(pool, &form, "bob")
+        .await
+        .expect_err("the FK refuses the delete");
+    let mut rows = editor_rows(pool).await.expect("rows");
+    rows.sort();
+    assert_eq!(rows, seed);
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -221,5 +267,7 @@ tri_dialect_test! {
         a_refused_upgrade_only_warns,
         a_long_key_does_not_fail_the_rest,
         a_failed_save_writes_nothing,
+        a_cleared_cell_entered_again_is_kept,
+        a_database_error_rolls_the_save_back,
     ],
 }
