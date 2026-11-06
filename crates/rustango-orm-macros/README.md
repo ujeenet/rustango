@@ -16,9 +16,9 @@ The framework-only derives (`Serializer`, `ViewSet`, `Q!`, `#[rustango::main]`) 
 
 ```toml
 [dependencies]
-rustango-orm-macros = "0.64"
+rustango-orm-macros = "0.65"
 # There is no standalone `rustango-orm` runtime crate — pull in `rustango`:
-rustango = { version = "0.64", default-features = false, features = ["sqlite"] }
+rustango = { version = "0.65", default-features = false, features = ["sqlite"] }
 ```
 
 ```rust

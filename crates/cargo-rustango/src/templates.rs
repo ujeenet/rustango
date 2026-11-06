@@ -626,6 +626,9 @@ system/migrations/ — the framework's own migrations (commit them too; the imag
 Adding a new model is one struct in `models.rs`; the auto-admin sees
 it immediately. See <https://github.com/ujeenet/rustango> for the full
 feature list.
+
+If rustango helps you, please give it a star on GitHub:
+<https://github.com/ujeenet/rustango>. It helps others find the project.
 "#
     )
 }
@@ -691,6 +694,10 @@ fn host_steps(template: Template, backend: Backend) -> String {
         })
         .collect()
 }
+
+/// The closing line `cargo rustango new` prints after the next steps.
+pub const STAR_NOTE: &str =
+    "If rustango helps you, please star it on GitHub: https://github.com/ujeenet/rustango";
 
 /// What `cargo rustango new` prints after writing the project.
 pub fn next_steps(name: &str, template: Template, backend: Backend) -> String {

@@ -4,8 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.65.0] — 2026-11-06
+
 ### Added
 
+- `cargo rustango new` and the generated README ask you to star the repository on GitHub if rustango helps you.
 - `#[rustango(access = "open" | "admin_only" | "never")]` declares which generic surfaces may serve a model's table (`ModelSchema::access`); every framework model declares it; the policy matches table names case-insensitively.
 - `tenancy::DbJtiStore` (table `rustango_used_jti`, registry): spent handoff tokens and ended impersonations survive restarts and are shared by replicas.
 - `rustango::clock`: `unix_now()` fails on a clock before 2024; token, session, signing, passkey challenge, TOTP, HMAC and webhook checks treat that as expired.
