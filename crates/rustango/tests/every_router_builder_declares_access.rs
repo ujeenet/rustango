@@ -17,6 +17,18 @@ const DECIDED: &str = "require_decided(";
 /// `(file under src/, impl type or "", fn, why it needs no decision)`.
 const EXEMPT: &[(&str, &str, &str, &str)] = &[
     (
+        "api_version.rs",
+        "VersionStrategy",
+        "as_layer",
+        "a layer that tags the API version; the router it wraps decides access",
+    ),
+    (
+        "server/builder.rs",
+        "Builder",
+        "into_router",
+        "assembles the app's own routers; each surface in it decides its access",
+    ),
+    (
         "admin/auth.rs",
         "",
         "protect_with_basic_auth",
@@ -74,7 +86,7 @@ const EXEMPT: &[(&str, &str, &str, &str)] = &[
         "mcp/router.rs",
         "",
         "router",
-        "documented open JSON-RPC; the `secure_*` routers check agent tokens",
+        "without an agent token only `initialize` and `ping` answer; every other method fails closed",
     ),
     (
         "mcp/router.rs",
@@ -104,7 +116,7 @@ const EXEMPT: &[(&str, &str, &str, &str)] = &[
         "mcp/router.rs",
         "",
         "tenant_router",
-        "documented open JSON-RPC; the `secure_*` routers check agent tokens",
+        "without an agent token only `initialize` and `ping` answer; every other method fails closed",
     ),
     (
         "mcp/router.rs",
@@ -361,8 +373,49 @@ fn is_ident(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
-/// Every `fn` item: `(name, is pub, signature, body range)`.
-fn functions(code: &str) -> Vec<(String, bool, String, std::ops::Range<usize>)> {
+/// One `fn` item.
+struct Item {
+    name: String,
+    /// `pub`, not `pub(crate)` or private.
+    public: bool,
+    /// The return type, from the arrow after the parameter list.
+    ret: Option<String>,
+    body: std::ops::Range<usize>,
+}
+
+/// The index just past the bracket closing the one at `open`. A `>` of
+/// `->` is not a bracket.
+fn close(code: &str, open: usize, (l, r): (char, char)) -> usize {
+    let mut depth = 0usize;
+    let mut prev = ' ';
+    for (i, c) in code[open..].char_indices() {
+        if c == l {
+            depth += 1;
+        } else if c == r && !(r == '>' && prev == '-') {
+            depth -= 1;
+            if depth == 0 {
+                return open + i + 1;
+            }
+        }
+        prev = c;
+    }
+    code.len()
+}
+
+/// `head` with its `#[...]` attributes removed.
+fn without_attrs(head: &str) -> String {
+    let mut out = String::new();
+    let mut rest = head;
+    while let Some(i) = rest.find("#[") {
+        out.push_str(&rest[..i]);
+        rest = &rest[close(rest, i + 1, ('[', ']')).min(rest.len())..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Every `fn` item with a body.
+fn functions(code: &str) -> Vec<Item> {
     let mut fns = Vec::new();
     let mut at = 0;
     while let Some(p) = code[at..].find("fn ").map(|p| p + at) {
@@ -374,24 +427,127 @@ fn functions(code: &str) -> Vec<(String, bool, String, std::ops::Range<usize>)> 
         if name.is_empty() {
             continue;
         }
-        let line_start = code[..p].rfind('\n').map_or(0, |n| n + 1);
-        let head = code[line_start..p].trim();
-        let is_pub = head.split_whitespace().next() == Some("pub");
-        let (Some(brace), semi) = (code[at..].find('{'), code[at..].find(';')) else {
+        // The item's head: back to the previous line, block or statement end.
+        let start = code[..p].rfind(['\n', '{', '}', ';']).map_or(0, |n| n + 1);
+        let head = without_attrs(&code[start..p]);
+        let public = head.split_whitespace().next() == Some("pub");
+        // Generics, then the parameter list: an `Fn(..) -> X` in either is
+        // not the return type.
+        let mut i = at + name.len();
+        if code[i..].trim_start().starts_with('<') {
+            let lt = i + code[i..].find('<').unwrap();
+            i = close(code, lt, ('<', '>'));
+        }
+        let Some(lp) = code[i..].find('(').map(|o| o + i) else {
+            continue;
+        };
+        let after_params = close(code, lp, ('(', ')'));
+        let (Some(brace), semi) = (
+            code[after_params..].find('{'),
+            code[after_params..].find(';'),
+        ) else {
             continue;
         };
         if semi.is_some_and(|s| s < brace) {
             continue; // a trait method declaration
         }
-        let open = at + brace;
-        fns.push((
+        let open = after_params + brace;
+        let tail = code[after_params..open].trim();
+        let ret = tail.strip_prefix("->").map(|r| {
+            let r = r.split("where").next().unwrap_or(r);
+            r.trim().to_owned()
+        });
+        fns.push(Item {
             name,
-            is_pub,
-            code[at..open].to_owned(),
-            open..block_end(code, open),
-        ));
+            public,
+            ret,
+            body: open..block_end(code, open),
+        });
     }
     fns
+}
+
+/// A type naming `Router` itself: `Router<S>`, `axum::routing::Router`,
+/// `Result<Router, E>`, `(Router, T)`; not `MethodRouter`.
+fn names_router(ty: &str) -> bool {
+    ty.split(|c: char| !is_ident(c)).any(|t| t == "Router")
+}
+
+/// Whether `body` calls `callee` as a free fn, `Self::callee` or `self.callee`.
+fn calls(body: &str, callee: &str) -> bool {
+    body.match_indices(callee).any(|(i, _)| {
+        let before = &body[..i];
+        let after = &body[i + callee.len()..];
+        if !(after.starts_with('(') || after.starts_with("::<")) {
+            return false;
+        }
+        let own = |p: &str| {
+            before
+                .strip_suffix(p)
+                .is_some_and(|b| !b.chars().last().is_some_and(is_ident))
+        };
+        own("self.")
+            || own("Self::")
+            || !(before.chars().last().is_some_and(is_ident)
+                || before.ends_with('.')
+                || before.ends_with("::"))
+    })
+}
+
+/// `code` with every `#[cfg(test)] mod ... { }` block blanked; what follows stays.
+fn without_test_mods(mut code: String) -> String {
+    let mut from = 0;
+    while let Some(p) = code[from..].find("#[cfg(test)]").map(|p| p + from) {
+        from = p + 1;
+        let rest = code[p + "#[cfg(test)]".len()..].trim_start();
+        let is_mod = rest.starts_with("mod ") || rest.starts_with("pub mod ");
+        let Some(open) = code[p..].find('{').map(|o| o + p) else {
+            continue;
+        };
+        if !is_mod || code[p..open].contains(';') {
+            continue;
+        }
+        let end = block_end(&code, open);
+        let blank: String = code[p..end]
+            .chars()
+            .map(|c| if c == '\n' { '\n' } else { ' ' })
+            .collect();
+        code.replace_range(p..end, &blank);
+    }
+    code
+}
+
+/// Builders of one file per `(impl, fn)`, decided or not. Twins under
+/// different `cfg`s share a key and count as decided only if all are.
+fn analyze(src: &str) -> BTreeMap<(String, String), bool> {
+    let code = without_test_mods(code_only(src));
+    let fns = functions(&code);
+    let body = |f: &Item| &code[f.body.clone()];
+    // Names of same-file functions that reach the decision, to a fixed point.
+    let reaches =
+        |b: &str, names: &BTreeSet<&str>| b.contains(DECIDED) || names.iter().any(|n| calls(b, n));
+    let mut names: BTreeSet<&str> = BTreeSet::new();
+    loop {
+        let next: BTreeSet<&str> = fns
+            .iter()
+            .filter(|f| reaches(body(f), &names))
+            .map(|f| f.name.as_str())
+            .collect();
+        if next == names {
+            break;
+        }
+        names = next;
+    }
+    let mut found = BTreeMap::new();
+    for f in &fns {
+        if f.public && f.ret.as_deref().is_some_and(names_router) {
+            let decided = reaches(body(f), &names);
+            *found
+                .entry((impl_type(&code, f.body.start), f.name.clone()))
+                .or_insert(true) &= decided;
+        }
+    }
+    found
 }
 
 /// The type of the innermost `impl` block holding `pos`, or "".
@@ -459,49 +615,9 @@ fn builders() -> BTreeMap<(String, String, String), bool> {
                 .unwrap()
                 .to_string_lossy()
                 .replace('\\', "/");
-            let mut code = code_only(&std::fs::read_to_string(&path).expect("read"));
-            // Unit tests mount whatever they like.
-            if let Some(t) = code.find("#[cfg(test)]\nmod ") {
-                code.truncate(t);
-            }
-            let fns = functions(&code);
-            let bodies: Vec<(&str, &str)> = fns
-                .iter()
-                .map(|(n, _, _, r)| (n.as_str(), &code[r.clone()]))
-                .collect();
-            // Names of same-file functions that reach the decision, to a fixed
-            // point. A call resolves by name; the verdict is per function.
-            let reaches = |body: &str, names: &BTreeSet<&str>| {
-                body.contains(DECIDED)
-                    || names.iter().any(|callee| {
-                        body.match_indices(callee).any(|(i, _)| {
-                            let prev = body[..i].chars().last();
-                            !prev.is_some_and(is_ident)
-                                && body[i + callee.len()..].starts_with(['(', ':'])
-                        })
-                    })
-            };
-            let mut names: BTreeSet<&str> = BTreeSet::new();
-            loop {
-                let next: BTreeSet<&str> = bodies
-                    .iter()
-                    .filter(|(_, body)| reaches(body, &names))
-                    .map(|(name, _)| *name)
-                    .collect();
-                if next == names {
-                    break;
-                }
-                names = next;
-            }
-            for ((name, is_pub, sig, range), (_, body)) in fns.iter().zip(&bodies) {
-                let returns_router = sig
-                    .split("->")
-                    .nth(1)
-                    .is_some_and(|r| r.trim().trim_start_matches("axum::").starts_with("Router"));
-                if *is_pub && returns_router {
-                    let key = (rel.clone(), impl_type(&code, range.start), name.clone());
-                    found.insert(key, reaches(body, &names));
-                }
+            let src = std::fs::read_to_string(&path).expect("read");
+            for ((ty, name), decided) in analyze(&src) {
+                found.insert((rel.clone(), ty, name), decided);
             }
         }
     }
@@ -563,4 +679,78 @@ fn the_scanner_skips_strings_and_comments() {
     let code = code_only("let s = r#\"pub fn router() -> Router {\"#; // fn x()\nfn real() {}");
     assert!(!code.contains("router"));
     assert_eq!(functions(&code).len(), 1);
+}
+
+/// The verdict of `(impl, fn)` in `src`; `None` when it is not a builder.
+fn verdict(src: &str, ty: &str, name: &str) -> Option<bool> {
+    analyze(src).get(&(ty.to_owned(), name.to_owned())).copied()
+}
+
+const DECIDED_ROUTER: &str =
+    "impl Good {\npub fn router(self) -> Router { require_decided(x); r }\n}\n";
+
+#[test]
+fn another_types_same_name_call_does_not_decide() {
+    let src = format!(
+        "{DECIDED_ROUTER}impl Bad {{\npub fn router(self) -> Router {{ Other::new().router(x) }}\n}}"
+    );
+    assert_eq!(verdict(&src, "Bad", "router"), Some(false));
+    assert_eq!(verdict(&src, "Good", "router"), Some(true));
+}
+
+#[test]
+fn a_binding_named_like_a_decided_fn_does_not_decide() {
+    let src = format!(
+        "{DECIDED_ROUTER}impl Bad {{\npub fn router(self) -> Router {{ let router: Router = x; router }}\n}}"
+    );
+    assert_eq!(verdict(&src, "Bad", "router"), Some(false));
+}
+
+#[test]
+fn own_calls_still_decide() {
+    let src = format!(
+        "{DECIDED_ROUTER}impl Good {{\npub fn old(self) -> Router {{ self.router() }}\n\
+         pub fn again(self) -> Router {{ Self::router(self) }}\n}}"
+    );
+    assert_eq!(verdict(&src, "Good", "old"), Some(true));
+    assert_eq!(verdict(&src, "Good", "again"), Some(true));
+}
+
+#[test]
+fn code_after_a_test_module_is_scanned() {
+    let src = "#[cfg(test)]\nmod tests { fn t() {} }\npub fn after() -> Router { Router::new() }";
+    assert_eq!(verdict(src, "", "after"), Some(false));
+}
+
+#[test]
+fn an_arrow_inside_the_parameters_is_not_the_return_type() {
+    let src = "pub fn takes<F: Fn() -> Router>(f: F) -> u8 { 0 }\n\
+               pub fn cb(f: impl Fn(Pool) -> Router) -> Self { x }";
+    assert_eq!(verdict(src, "", "takes"), None);
+    assert_eq!(verdict(src, "", "cb"), None);
+}
+
+#[test]
+fn wrapped_and_qualified_routers_are_builders() {
+    let src = "pub fn a() -> Result<Router, E> { x }\n\
+               pub fn b() -> (Router, u8) { x }\n\
+               pub fn c() -> axum::routing::Router { x }\n\
+               pub fn d() -> MethodRouter { x }";
+    assert_eq!(verdict(src, "", "a"), Some(false));
+    assert_eq!(verdict(src, "", "b"), Some(false));
+    assert_eq!(verdict(src, "", "c"), Some(false));
+    assert_eq!(verdict(src, "", "d"), None);
+}
+
+#[test]
+fn an_attribute_on_the_same_line_keeps_it_public() {
+    let src = "#[must_use] pub fn d() -> Router { Router::new() }";
+    assert_eq!(verdict(src, "", "d"), Some(false));
+}
+
+#[test]
+fn cfg_twins_are_decided_only_together() {
+    let src = "impl T {\n#[cfg(a)]\npub fn router(self) -> Router { r }\n\
+               #[cfg(not(a))]\npub fn router(self) -> Router { require_decided(x); r }\n}";
+    assert_eq!(verdict(src, "T", "router"), Some(false));
 }
