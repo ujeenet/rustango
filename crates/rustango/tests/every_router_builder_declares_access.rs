@@ -470,11 +470,24 @@ fn functions(code: &str) -> Vec<Item> {
 /// A type naming `Router` itself: `Router<S>`, `axum::routing::Router`,
 /// `Result<Router, E>`, `(Router, T)`; not `MethodRouter`.
 fn names_router(ty: &str) -> bool {
-    ty.split(|c: char| !is_ident(c)).any(|t| t == "Router")
+    ty.split(|c: char| !is_ident(c))
+        .any(|t| t == "Router" || ROUTER_ALIASES.contains(&t))
 }
 
-/// Whether `body` calls `callee` as a free fn, `Self::callee` or `self.callee`.
-fn calls(body: &str, callee: &str) -> bool {
+/// Type aliases of `Router` in `src/`.
+const ROUTER_ALIASES: &[&str] = &["ApiRouter"];
+
+/// How a call names its callee.
+#[derive(Clone, Copy, PartialEq)]
+enum Via {
+    /// `callee(..)`: a free fn.
+    Free,
+    /// `self.callee(..)` / `Self::callee(..)`: the caller's own impl.
+    Own,
+}
+
+/// Whether `body` calls `callee` the way `via` says.
+fn calls(body: &str, callee: &str, via: Via) -> bool {
     body.match_indices(callee).any(|(i, _)| {
         let before = &body[..i];
         let after = &body[i + callee.len()..];
@@ -486,11 +499,14 @@ fn calls(body: &str, callee: &str) -> bool {
                 .strip_suffix(p)
                 .is_some_and(|b| !b.chars().last().is_some_and(is_ident))
         };
-        own("self.")
-            || own("Self::")
-            || !(before.chars().last().is_some_and(is_ident)
-                || before.ends_with('.')
-                || before.ends_with("::"))
+        match via {
+            Via::Own => own("self.") || own("Self::"),
+            Via::Free => {
+                !(before.chars().last().is_some_and(is_ident)
+                    || before.ends_with('.')
+                    || before.ends_with("::"))
+            }
+        }
     })
 }
 
@@ -521,38 +537,50 @@ fn without_test_mods(mut code: String) -> String {
 /// different `cfg`s share a key and count as decided only if all are.
 fn analyze(src: &str) -> BTreeMap<(String, String), bool> {
     let code = without_test_mods(code_only(src));
-    let fns = functions(&code);
+    let fns: Vec<(Item, (String, bool))> = functions(&code)
+        .into_iter()
+        .map(|f| {
+            let owner = impl_type(&code, f.body.start);
+            (f, owner)
+        })
+        .collect();
     let body = |f: &Item| &code[f.body.clone()];
-    // Names of same-file functions that reach the decision, to a fixed point.
-    let reaches =
-        |b: &str, names: &BTreeSet<&str>| b.contains(DECIDED) || names.iter().any(|n| calls(b, n));
-    let mut names: BTreeSet<&str> = BTreeSet::new();
+    // Same-file `(impl, fn)`s that reach the decision, to a fixed point. A
+    // bare call resolves to a free fn, `self.` / `Self::` to the caller's impl.
+    let reaches = |b: &str, ty: &str, decided: &BTreeSet<(&str, &str)>| {
+        b.contains(DECIDED)
+            || decided.iter().any(|&(dty, dname)| {
+                (dty.is_empty() && calls(b, dname, Via::Free))
+                    || (!dty.is_empty() && dty == ty && calls(b, dname, Via::Own))
+            })
+    };
+    let mut decided: BTreeSet<(&str, &str)> = BTreeSet::new();
     loop {
-        let next: BTreeSet<&str> = fns
+        let next: BTreeSet<(&str, &str)> = fns
             .iter()
-            .filter(|f| reaches(body(f), &names))
-            .map(|f| f.name.as_str())
+            .filter(|(f, (ty, _))| reaches(body(f), ty, &decided))
+            .map(|(f, (ty, _))| (ty.as_str(), f.name.as_str()))
             .collect();
-        if next == names {
+        if next == decided {
             break;
         }
-        names = next;
+        decided = next;
     }
     let mut found = BTreeMap::new();
-    for f in &fns {
-        if f.public && f.ret.as_deref().is_some_and(names_router) {
-            let decided = reaches(body(f), &names);
-            *found
-                .entry((impl_type(&code, f.body.start), f.name.clone()))
-                .or_insert(true) &= decided;
+    for (f, (ty, trait_impl)) in &fns {
+        // A trait impl's methods are as public as the trait.
+        if (f.public || *trait_impl) && f.ret.as_deref().is_some_and(names_router) {
+            let ok = reaches(body(f), ty, &decided);
+            *found.entry((ty.clone(), f.name.clone())).or_insert(true) &= ok;
         }
     }
     found
 }
 
-/// The type of the innermost `impl` block holding `pos`, or "".
-fn impl_type(code: &str, pos: usize) -> String {
-    let mut best = (0, String::new());
+/// The type of the innermost `impl` block holding `pos` ("" outside one),
+/// and whether it implements a trait.
+fn impl_type(code: &str, pos: usize) -> (String, bool) {
+    let mut best = (0, String::new(), false);
     let mut at = 0;
     while let Some(p) = code[at..].find("impl").map(|p| p + at) {
         at = p + 4;
@@ -583,6 +611,7 @@ fn impl_type(code: &str, pos: usize) -> String {
             }
             false
         });
+        let trait_impl = head.contains(" for ");
         let ty = head
             .split(" for ")
             .last()
@@ -591,9 +620,13 @@ fn impl_type(code: &str, pos: usize) -> String {
             .next()
             .unwrap_or("");
         let ty = ty.trim().rsplit("::").next().unwrap_or("").trim();
-        best = (p, ty.chars().take_while(|&c| is_ident(c)).collect());
+        best = (
+            p,
+            ty.chars().take_while(|&c| is_ident(c)).collect(),
+            trait_impl,
+        );
     }
-    best.1
+    (best.1, best.2)
 }
 
 /// Builders per `(file, impl, fn)`, with whether each is decided.
@@ -753,4 +786,21 @@ fn cfg_twins_are_decided_only_together() {
     let src = "impl T {\n#[cfg(a)]\npub fn router(self) -> Router { r }\n\
                #[cfg(not(a))]\npub fn router(self) -> Router { require_decided(x); r }\n}";
     assert_eq!(verdict(src, "T", "router"), Some(false));
+}
+
+#[test]
+fn own_calls_resolve_in_the_callers_impl() {
+    let src = "impl ListView {\npub fn router(self) -> Router { require_decided(x); r }\n}\n\
+               impl TemplateView {\npub fn router(self) -> Router { r }\n\
+               pub fn router_at(self) -> Router { self.router() }\n}";
+    assert_eq!(verdict(src, "TemplateView", "router_at"), Some(false));
+    assert_eq!(verdict(src, "ListView", "router"), Some(true));
+}
+
+#[test]
+fn trait_methods_and_aliases_are_builders() {
+    let src = "impl Mount for App {\nfn mount(self) -> Router { r }\n}\n\
+               pub fn api() -> ApiRouter { r }";
+    assert_eq!(verdict(src, "App", "mount"), Some(false));
+    assert_eq!(verdict(src, "", "api"), Some(false));
 }
