@@ -2220,6 +2220,7 @@ pub(super) fn write_insert(b: &mut Sql<'_>, query: Cow<'_, InsertQuery>) -> Resu
 }
 
 /// [`write_insert`] without `RETURNING`: MySQL reads the id from the reply.
+#[cfg(feature = "mysql")]
 pub(super) fn write_insert_rows(
     b: &mut Sql<'_>,
     query: Cow<'_, InsertQuery>,
