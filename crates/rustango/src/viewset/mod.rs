@@ -1776,8 +1776,19 @@ impl ViewSetState {
         if codenames.is_empty() {
             return PermOutcome::Allow;
         }
-        let caller = crate::access::Caller::authenticated(parts);
-        crate::access::check_codenames(codenames, caller.as_ref(), &conn.pool).await
+        let caller = match &conn.scope {
+            Scope::Static => crate::access::Caller::on_fixed(parts),
+            #[cfg(feature = "tenancy")]
+            Scope::Tenant(org) => crate::access::Caller::on_tenant(parts, org),
+            #[cfg(feature = "tenancy")]
+            Scope::Unknown => Err(PermOutcome::Forbidden),
+        };
+        match caller {
+            Ok(caller) => {
+                crate::access::check_codenames(codenames, caller.as_ref(), &conn.pool).await
+            }
+            Err(refused) => refused,
+        }
     }
 
     fn pk_field(&self) -> Option<&'static crate::core::FieldSchema> {

@@ -231,3 +231,24 @@ async fn every_codename_is_required() {
     let res = app(pool).oneshot(list()).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 }
+
+/// A superuser bound to a tenant is no superuser of a fixed pool: 403.
+#[tokio::test]
+async fn tenant_superuser_is_refused_on_a_fixed_pool() {
+    let app = gated(pool().await);
+    let mut req = Request::builder()
+        .method(Method::GET)
+        .uri("/notes")
+        .body(Body::empty())
+        .unwrap();
+    req.extensions_mut()
+        .insert(rustango::tenancy::middleware::AuthenticatedUser {
+            id: 1,
+            username: "root".to_owned(),
+            is_superuser: true,
+        });
+    req.extensions_mut()
+        .insert(rustango::tenancy::TenantSlug::new(1, "acme"));
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+}

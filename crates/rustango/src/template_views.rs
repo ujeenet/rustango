@@ -502,44 +502,50 @@ async fn gate_request(
     }
 }
 
-/// The gate's answer for this request: the caller from an auth layer or
-/// the session cookie, codenames from the pool the view reads.
+/// The gate's answer for this request: the caller from an auth layer, or
+/// on a tenant route the session cookie; codenames from the pool the view reads.
 #[cfg(feature = "tenancy")]
 async fn view_outcome(
     gate: &Gate,
     parts: &mut Parts,
     pool: Option<&Pool>,
 ) -> Result<crate::access::Outcome, Response> {
+    use crate::access::Caller;
     use axum::extract::FromRequestParts as _;
-    let pool = match pool {
-        Some(p) => p.clone(),
+    let (caller, pool) = match pool {
+        // No cookie fallback: a session belongs to a tenant, this pool to none.
+        Some(p) => (Caller::on_fixed(parts), p.clone()),
         None => {
             let t = crate::extractors::TenantScope::from_request_parts(parts, &())
                 .await
                 .map_err(IntoResponse::into_response)?;
-            if matches!(
-                crate::access::Binding::of(parts, &t.org),
-                crate::access::Binding::Foreign
-            ) {
-                return Err((StatusCode::FORBIDDEN, "tenant mismatch").into_response());
-            }
-            t.pool().clone()
+            let caller = match Caller::on_tenant(parts, &t.org) {
+                Ok(None) => session_caller(parts).await,
+                decided => decided,
+            };
+            (caller, t.pool().clone())
         }
     };
-    let caller = match crate::access::Caller::authenticated(parts) {
-        Some(c) => Some(c),
-        None => crate::extractors::SessionUser::from_request_parts(parts, &())
-            .await
-            .ok()
-            .and_then(|s| s.0)
-            .and_then(|u| {
-                Some(crate::access::Caller {
-                    id: *u.id.get()?,
-                    is_superuser: u.is_superuser,
-                })
-            }),
-    };
-    Ok(gate.check(caller.as_ref(), &pool).await)
+    Ok(match caller {
+        Ok(caller) => gate.check(caller.as_ref(), &pool).await,
+        Err(refused) => refused,
+    })
+}
+
+/// The session cookie's user; a failed read is an outage (503), not anonymous.
+#[cfg(feature = "tenancy")]
+async fn session_caller(
+    parts: &Parts,
+) -> Result<Option<crate::access::Caller>, crate::access::Outcome> {
+    let user = crate::extractors::SessionUser::read(parts)
+        .await
+        .map_err(crate::access::Outcome::Unavailable)?;
+    Ok(user.and_then(|u| {
+        Some(crate::access::Caller {
+            id: *u.id.get()?,
+            is_superuser: u.is_superuser,
+        })
+    }))
 }
 
 /// Only `allow_anonymous` exists without `tenancy`, and it skips the gate.

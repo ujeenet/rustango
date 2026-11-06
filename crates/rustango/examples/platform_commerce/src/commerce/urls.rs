@@ -108,7 +108,7 @@ fn gift_cards(pool: &Pool) -> Router<AppState> {
 const PROMO_FIELDS: &[&str] = &["code", "label", "amount_cents", "visible"];
 
 /// Server-rendered promotion pages. They apply the global scope like
-/// the API (#1746), and every POST needs the CSRF token (#1669). Open
+/// the API, and every POST needs the CSRF token. Open
 /// like the API: soak only, no single-database sign-in yet.
 fn promotion_pages(pool: &Pool) -> Router<AppState> {
     let tera = views::promotion_templates();

@@ -54,9 +54,7 @@ pub(crate) struct Caller {
 
 impl Caller {
     /// The user an auth layer (`require_auth`, a Bearer or custom backend) proved.
-    #[must_use]
-    #[cfg_attr(not(feature = "admin"), allow(dead_code))]
-    pub(crate) fn authenticated(parts: &Parts) -> Option<Self> {
+    fn authenticated(parts: &Parts) -> Option<Self> {
         #[cfg(feature = "tenancy")]
         if let Some(u) = parts
             .extensions
@@ -69,6 +67,48 @@ impl Caller {
         }
         let _ = parts;
         None
+    }
+
+    /// The caller on a route whose pool was fixed at mount. That pool holds
+    /// no tenant's users, so a tenant's credential (user id, superuser bit)
+    /// names someone else there: refused.
+    ///
+    /// # Errors
+    /// `Forbidden` for a principal bound to a tenant, or on a request
+    /// routed to one.
+    #[cfg_attr(not(feature = "admin"), allow(dead_code))]
+    pub(crate) fn on_fixed(parts: &Parts) -> Result<Option<Self>, Outcome> {
+        let caller = Self::authenticated(parts);
+        #[cfg(feature = "tenancy")]
+        {
+            let principal = crate::tenancy::Principal::from_parts(parts);
+            let tenant_bound = principal.as_ref().is_some_and(|p| p.tenant.is_some())
+                || crate::object_permissions::credential_tenant(parts).is_some()
+                || matches!(
+                    crate::tenancy::RequestTenant::get(&parts.extensions),
+                    Some(crate::tenancy::RequestTenant::Tenant(_))
+                );
+            if (caller.is_some() || principal.is_some()) && tenant_bound {
+                return Err(Outcome::Forbidden);
+            }
+        }
+        Ok(caller)
+    }
+
+    /// The caller on a route serving `org`. A credential bound to another
+    /// tenant, or to none, is refused: its user id is not this tenant's.
+    ///
+    /// # Errors
+    /// `Forbidden` for a foreign or untenanted principal.
+    #[cfg(feature = "tenancy")]
+    pub(crate) fn on_tenant(
+        parts: &Parts,
+        org: &crate::tenancy::Org,
+    ) -> Result<Option<Self>, Outcome> {
+        match Binding::of(parts, org) {
+            Binding::Foreign | Binding::Untenanted => Err(Outcome::Forbidden),
+            Binding::Fits => Ok(Self::authenticated(parts)),
+        }
     }
 }
 
@@ -139,6 +179,13 @@ pub(crate) fn require_decided(surface: &str, table: &str, routes: &[(&str, &Gate
         "{surface} `{table}`: {open:?} would serve any caller, and nothing says that is \
          intended; {fix}"
     );
+    assert!(
+        !routes
+            .iter()
+            .any(|(_, g)| matches!(g, Gate::Codenames(c) if c.is_empty())),
+        "{surface} `{table}`: an empty codename list would let any signed-in user in; \
+         name the codenames, or call `.login_required()` if that is intended"
+    );
     let needs_users = routes
         .iter()
         .any(|(_, g)| matches!(g, Gate::SignedIn | Gate::Codenames(_)));
@@ -195,6 +242,17 @@ mod tests {
     #[test]
     fn a_decided_surface_mounts() {
         require_decided("ListView", "post", &[("list", &Gate::Anonymous)], "x");
+    }
+
+    #[test]
+    #[should_panic(expected = "call `.login_required()`")]
+    fn empty_codenames_refuse_to_mount() {
+        require_decided(
+            "ListView",
+            "post",
+            &[("GET", &Gate::Codenames(Vec::new()))],
+            "x",
+        );
     }
 
     #[cfg(not(feature = "tenancy"))]

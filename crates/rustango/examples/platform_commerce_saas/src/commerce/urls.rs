@@ -153,8 +153,8 @@ fn gift_cards() -> Router {
 const PROMO_FIELDS: &[&str] = &["code", "label", "amount_cents", "visible"];
 
 /// Server-rendered promotion pages. They apply the global scope like
-/// the API (#1746), need the model's codenames like it, and every POST
-/// needs the CSRF token (#1669).
+/// the API, need the model's codenames like it, and every POST
+/// needs the CSRF token.
 fn promotion_pages() -> Router<AppState> {
     let tera = views::promotion_templates();
     let s = Promotion::SCHEMA;

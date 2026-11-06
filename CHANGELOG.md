@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Changed
 
-- **Breaking:** `ListView`, `DetailView`, `CreateView`, `UpdateView` and `DeleteView` refuse to mount without an access call: `allow_anonymous()`, or with `tenancy` `login_required()`, `permissions(..)` or `permissions_for_model()`. Each is checked per request (401 / 403).
+- **Breaking:** `ListView`, `DetailView`, `CreateView`, `UpdateView` and `DeleteView` refuse to mount without an access call: `allow_anonymous()`, or with `tenancy` `login_required()`, `permissions(..)` or `permissions_for_model()`. Each is checked per request: 401 anonymous, 403 missing codename or a credential bound to another tenant (or, on a fixed pool, to any tenant), 503 when the permission or session read fails.
 - **Breaking:** a `ViewSet` whose create, update or destroy has no codenames refuses to mount (it logged a warning) unless it is `read_only()` or `allow_anonymous()`.
 
 ## [0.64.0] — 2026-11-05
