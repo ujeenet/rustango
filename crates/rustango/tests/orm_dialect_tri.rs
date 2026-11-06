@@ -357,6 +357,38 @@ async fn distinct_on_honours_nulls_order(pool: &Pool) {
     assert_eq!(winners(true, NullsOrder::First).await, [None, None]);
 }
 
+/// `reverse()` is the flip `last()` uses: NULLs change ends, and each
+/// `distinct_on` group keeps the row it picked.
+async fn reverse_flips_nulls_and_keeps_distinct_on_rows(pool: &Pool) {
+    use rustango::core::NullsOrder;
+    for (slug, title, parent) in [
+        ("a", "x", Some(5)),
+        ("b", "x", Some(2)),
+        ("c", "y", Some(3)),
+        ("d", "z", None),
+    ] {
+        let mut p = post(slug, parent);
+        p.title = title.into();
+        p.insert(pool).await.expect("seed");
+    }
+    let parents = |rows: Vec<Post>| rows.into_iter().map(|p| p.parent_id).collect::<Vec<_>>();
+    let nulls_last = Post::objects()
+        .order_by_with_nulls(&[("parent_id", false, NullsOrder::Last)])
+        .reverse()
+        .fetch(pool)
+        .await
+        .expect("reversed");
+    assert_eq!(parents(nulls_last), [None, Some(5), Some(3), Some(2)]);
+    let per_title = Post::objects()
+        .distinct_on(&["title"])
+        .order_by(&[("title", false), ("parent_id", true)])
+        .reverse()
+        .fetch(pool)
+        .await
+        .expect("reversed distinct_on");
+    assert_eq!(parents(per_title), [None, Some(3), Some(5)]);
+}
+
 /// A PG bulk insert reads back a default-written UUID key.
 #[cfg(feature = "postgres")]
 #[tokio::test]
@@ -1502,6 +1534,7 @@ tri_dialect_test! {
         empty_having_is_true,
         distinct_on_pages_the_survivors,
         distinct_on_honours_nulls_order,
+        reverse_flips_nulls_and_keeps_distinct_on_rows,
     ],
 }
 

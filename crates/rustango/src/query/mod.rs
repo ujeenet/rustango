@@ -923,10 +923,8 @@ impl<T: Model> QuerySet<T> {
         self.order_by(items)
     }
 
-    /// Flips the direction of every pending `ORDER BY` entry.
-    /// `Random` has no direction, so it stays as it is.
-    ///
-    /// No-op when no ordering is set.
+    /// Flips the pending `ORDER BY`, as [`Self::flip_order_by`] (the flip
+    /// `last` uses). No-op when no ordering is set.
     ///
     /// ```ignore
     /// // newest first
@@ -936,16 +934,8 @@ impl<T: Model> QuerySet<T> {
     /// let r = q.reverse();
     /// ```
     #[must_use]
-    pub fn reverse(mut self) -> Self {
-        for item in &mut self.order_by {
-            match item {
-                PendingOrderItem::Field { desc, .. } | PendingOrderItem::Expr { desc, .. } => {
-                    *desc = !*desc
-                }
-                PendingOrderItem::Random => {}
-            }
-        }
-        self
+    pub fn reverse(self) -> Self {
+        self.flip_order_by()
     }
 
     /// Flip every ordering direction in place. `last` uses it to take
