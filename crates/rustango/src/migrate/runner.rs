@@ -1962,11 +1962,8 @@ async fn warn_on_index_clash(pool: &crate::sql::Pool, mig: &Migration) -> Result
     Ok(())
 }
 
-/// How many of `tables` already exist in `pool`. Probes with
-/// `SELECT 1 FROM <t> LIMIT 1` so each name resolves through exactly the
-/// same search_path / current-database rules the migration's own
-/// `CREATE TABLE` would use (unqualified — correct for schema-mode
-/// tenants and single-DB alike).
+/// How many of `tables` exist in the schema this connection writes to
+/// ([`try_table_exists_here`]); a failed probe is an error.
 async fn count_existing_tables(
     pool: &crate::sql::Pool,
     tables: &[String],
