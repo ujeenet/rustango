@@ -48,28 +48,34 @@ A job is a serializable struct that implements `Job`. The payload is what gets
 queued (serialized to JSON); `run()` is the work. `NAME` routes a queued payload
 back to its handler, so it must be unique.
 
-Scaffold a skeleton with the CLI — `cargo run -- make:job WelcomeEmail` — or
-write it by hand:
+Scaffold a skeleton with the CLI — `cargo run -- make:job WelcomeEmail` writes
+`src/welcome_email.rs`; add `pub mod welcome_email;` to `src/lib.rs` — or write it
+by hand:
 
 ```rust
+// src/welcome_email.rs
 use rustango::jobs::{Job, JobError};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
-struct WelcomeEmail {
-    user_id: i64,
+pub struct WelcomeEmail {
+    pub to: String,
 }
 
-#[async_trait::async_trait]   // add `async-trait` to your Cargo.toml
+#[async_trait::async_trait]   // the scaffolded Cargo.toml has `async-trait`
 impl Job for WelcomeEmail {
     const NAME: &'static str = "welcome_email";
 
     async fn run(&self) -> Result<(), JobError> {
-        // ... look up the user and send the email
+        tracing::info!(to = %self.to, "welcome email job ran");
         Ok(())
     }
 }
 ```
+
+`run()` gets only the payload: no database pool, no mailer. So put in the payload
+what the job needs, such as the address. [Step 4](#step-4--wire-it-into-your-app)
+gives the job a mailer, so it can really send.
 
 `run()` returns:
 
@@ -83,8 +89,9 @@ retries; `MAX_ATTEMPTS = 3` gives two retries. `0` counts as `1`: the job runs
 once.
 
 A handler that needs state the payload cannot carry, such as a mailer, can be
-registered with `queue.register_with::<T, _, _>(|job| async move { … })`. That
-closure runs in place of `Job::run`. Both built-in queues support it.
+registered with `queue.register_with(move |job: WelcomeEmail| async move { … })`.
+That closure runs in place of `Job::run`, and it can hold values you move into
+it. Both built-in queues support it. Step 4 shows a full one.
 
 ---
 
@@ -130,15 +137,15 @@ Once the queue is running, dispatch is one call — it enqueues and returns
 immediately, so the request doesn't wait for the work:
 
 ```rust
-queue.dispatch(&WelcomeEmail { user_id: 42 }).await?;
+queue.dispatch(&WelcomeEmail { to: "ada@example.com".into() }).await?;
 ```
 
 A worker picks it up and runs `run()` moments later. Verified end to end: three
 dispatched jobs all run on the workers.
 
 ```rust
-for user_id in 1..=3 {
-    queue.dispatch(&WelcomeEmail { user_id }).await.unwrap();
+for to in ["a@example.com", "b@example.com", "c@example.com"] {
+    queue.dispatch(&WelcomeEmail { to: to.into() }).await.unwrap();
 }
 // → all three WelcomeEmail::run() calls execute on the worker pool
 ```
@@ -147,21 +154,117 @@ for user_id in 1..=3 {
 
 ## Step 4 — Wire it into your app
 
-Putting Steps 1–3 together: build the queue and register every job **once at
-boot**, start the workers, hand the queue to your routes so handlers can reach
-it, then drain on shutdown. The queue lives in your `main.rs`:
+Putting Steps 1–3 together for the app from [Getting started](getting-started.md):
+give the job a mailer, register it **once at boot**, start the workers, hand the
+queue to a route, and drain on shutdown.
+
+First the job file. It keeps the `WelcomeEmail` job from Step 1 and adds two
+things: a `register` function and a `/signup` route.
+
+```rust
+// src/welcome_email.rs
+use std::sync::Arc;
+
+use axum::{http::StatusCode, routing::post, Extension, Json, Router};
+use rustango::email::{BoxedMailer, Email};
+use rustango::jobs::{InMemoryJobQueue, Job, JobError, JobQueue};
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+pub struct WelcomeEmail {
+    pub to: String,
+}
+
+#[async_trait::async_trait]
+impl Job for WelcomeEmail {
+    const NAME: &'static str = "welcome_email";
+
+    // Not called here: `register` below gives the queue a handler instead.
+    async fn run(&self) -> Result<(), JobError> {
+        tracing::info!(to = %self.to, "welcome email job ran");
+        Ok(())
+    }
+}
+
+/// Register the job with a handler that holds the mailer. Call it once at
+/// boot, before `start()`.
+pub async fn register<Q: JobQueue>(queue: &Q, mailer: BoxedMailer) {
+    queue
+        .register_with(move |job: WelcomeEmail| {
+            // The closure runs once per job, so each run takes its own copy.
+            let mailer = mailer.clone();
+            async move {
+                Email::new()
+                    .to(job.to)
+                    .subject("Welcome")
+                    .body("Thanks for signing up.")
+                    .send(&*mailer)
+                    .await
+                    .map_err(|e| {
+                        if e.is_retryable() {
+                            JobError::Retryable(e.to_string()) // mail server down
+                        } else {
+                            JobError::Fatal(e.to_string()) // bad address: no retry
+                        }
+                    })
+            }
+        })
+        .await;
+}
+
+#[derive(Deserialize)]
+pub struct Signup {
+    pub email: String,
+}
+
+async fn signup(
+    Extension(queue): Extension<Arc<InMemoryJobQueue>>,
+    Json(form): Json<Signup>,
+) -> StatusCode {
+    // ... create the user here ...
+    // `dispatch` returns at once; a worker sends the email.
+    match queue.dispatch(&WelcomeEmail { to: form.email }).await {
+        Ok(()) => StatusCode::CREATED,
+        Err(e) => {
+            tracing::error!(error = %e, "could not queue the welcome email");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
+pub fn router(queue: Arc<InMemoryJobQueue>) -> Router {
+    Router::new()
+        .route("/signup", post(signup))
+        .layer(Extension(queue))
+}
+```
+
+`mailer` is an `Arc`, so `&*mailer` passes the mailer inside it.
+
+Then `src/main.rs`. This is the scaffolded file from Getting started, with the
+queue added. The scaffolder puts the body in `run()`; the lines go there. The
+lines marked `NEW` are the additions — keep the admin and settings lines:
 
 ```rust
 // src/main.rs
 use std::sync::Arc;
-use rustango::jobs::{InMemoryJobQueue, JobQueue};
-use rustango::manage::Cli;
+
+use myblog::urls;
+use rustango::jobs::{InMemoryJobQueue, JobQueue}; // NEW
 
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Build the queue + register every job type BEFORE starting workers.
+    let _ = dotenvy::dotenv();
+    let loaded = rustango::config::Settings::load_from_env();
+    let settings = loaded.as_ref().cloned().unwrap_or_default();
+    let admin_settings = settings.clone();
+
+    // NEW 1. The mailer, from the [mail] settings (see the email guide).
+    let mailer = rustango::email::from_settings(&settings.mail)?;
+
+    // NEW 2. Build the queue and register every job type BEFORE start().
     let queue = Arc::new(InMemoryJobQueue::with_workers(4));
-    queue.register::<WelcomeEmail>().await;
+    myblog::welcome_email::register(&*queue, mailer).await;
     queue
         .on_dead_letter(|dl| async move {
             tracing::error!(job = dl.name, attempts = dl.attempts, error = %dl.error,
@@ -169,24 +272,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .await;
 
-    // 2. Start the workers — tokio tasks that run inside THIS process.
+    // NEW 3. Start the workers — tokio tasks that run inside THIS process.
     queue.start().await;
-
-    // 3. Share the queue with handlers (axum extension/state).
-    let app = urls::api().layer(axum::Extension(queue.clone()));
-
-    // 4. Boot the server, and say what to do when it stops. The hook
-    //    runs after the server drains, on SIGINT *and* SIGTERM.
     let draining = Arc::clone(&queue);
-    Cli::new()
-        .api(app)
+
+    rustango::manage::Cli::new()
+        // NEW 4. Mount the /signup route, which holds the queue.
+        .api(urls::api().merge(myblog::welcome_email::router(queue)))
+        .try_nest_with(urls::admin_prefix(&settings), move |pool| {
+            urls::admin_router(pool, &admin_settings)
+        })
         .with_health()
+        .with_loaded_settings(loaded)
+        // NEW 5. Drain the queue after the server stops (SIGINT and SIGTERM).
         .on_shutdown(move || async move { draining.shutdown().await })
         .run()
-        .await?;
-    Ok(())
+        .await
 }
 ```
+
+Try it with `cargo run`, and in another terminal:
+
+```bash
+curl -X POST http://localhost:8080/signup \
+     -H "content-type: application/json" \
+     -d '{"email":"ada@example.com"}'
+```
+
+The request returns `201` at once. With the default console mail backend, the
+email prints in the server's terminal a moment later.
+
+To send an `Email` you build in the handler, you do not need your own job type:
+`rustango::email_jobs::register_email_job` and `dispatch_email` do it in two
+calls. See [Send it off the request](email.md#send-it-off-the-request).
 
 > **Put the drain in `on_shutdown`, not after `run()`.** Earlier
 > versions of this example
@@ -196,23 +314,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 > run — but `on_shutdown` is still the right place, because it also runs on
 > the tenancy path and orders correctly against the server's own drain.
 
-A handler dispatches by reading the queue back out of the request:
-
-```rust
-use axum::Extension;
-use std::sync::Arc;
-use rustango::jobs::{InMemoryJobQueue, JobQueue};
-
-async fn signup(Extension(queue): Extension<Arc<InMemoryJobQueue>>) -> StatusCode {
-    // ... create the user ...
-    queue.dispatch(&WelcomeEmail { user_id: 42 }).await.ok();  // returns instantly
-    StatusCode::CREATED
-}
-```
-
 > **Store the concrete queue type.** The `JobQueue` trait is **not object-safe**
 > (its `register`/`dispatch` are generic), so you can't hold `Arc<dyn JobQueue>`
 > in state — keep the concrete `Arc<InMemoryJobQueue>` (or `Arc<DatabaseJobQueue>`).
+
+### A job that reads the database
+
+In `main.rs` a job cannot hold the server's database pool. `Cli` opens that pool
+when the server starts, and that is after your queue is built. You have two
+options:
+
+- Put the data in the payload, as `WelcomeEmail` does with the address. The
+  handler can read the database: a route mounted with `nest_with` gets the pool,
+  as in [Getting started, Step 12b](getting-started.md#12b-mount-the-routes).
+- Run the job in a [worker process](#a-dedicated-worker-process-production). It
+  opens its own pool, and `register_with` can hold the pool next to the mailer.
 
 ---
 
@@ -235,20 +351,51 @@ At scale you often want workers **separate** from the web tier — so a traffic
 spike can't starve jobs, and you scale each independently. With the
 [persistent queue](#the-persistent-queue-production) every process pulls from the
 same `rustango_jobs` table, so just run a second, server-less binary that builds
-the queue, starts it, and blocks until a signal:
+the queue, starts it, and blocks until a signal. `cargo run -- make:worker Worker`
+writes a skeleton. Here the worker opens its own pool, so its `register_with`
+closure can hold the pool and the mailer. The job reads the `Post` model from
+Getting started:
 
 ```rust
 // src/bin/worker.rs — run with `cargo run --bin worker`
 use std::sync::Arc;
-use rustango::jobs::{DatabaseJobQueue, JobQueue};
+
+use myblog::blog::models::Post;
+use myblog::welcome_email::WelcomeEmail;
+use rustango::email::Email;
+use rustango::jobs::{DatabaseJobQueue, JobError, JobQueue};
+use rustango::sql::{FetcherPool, Pool};
 
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let pool = /* connect your tri-dialect Pool */;
+    // A worker never runs main.rs, so it loads `.env` and the settings itself.
+    let _ = dotenvy::dotenv();
+    let settings = rustango::config::Settings::load_from_env()?;
+    let mailer = rustango::email::from_settings(&settings.mail)?;
+    let pool = Pool::connect_from_env().await?; // DATABASE_URL
     DatabaseJobQueue::ensure_table_pool(&pool).await?;
 
-    let queue = Arc::new(DatabaseJobQueue::with_workers_pool(pool, 8));
-    queue.register::<WelcomeEmail>().await;   // register the SAME job types
+    let queue = Arc::new(DatabaseJobQueue::with_workers_pool(pool.clone(), 8));
+    // Register the SAME job types the web process dispatches.
+    queue
+        .register_with(move |job: WelcomeEmail| {
+            let pool = pool.clone();
+            let mailer = mailer.clone();
+            async move {
+                let posts = Post::objects()
+                    .fetch(&pool)
+                    .await
+                    .map_err(|e| JobError::Retryable(e.to_string()))?;
+                Email::new()
+                    .to(job.to)
+                    .subject("Welcome")
+                    .body(format!("There are {} posts waiting for you.", posts.len()))
+                    .send(&*mailer)
+                    .await
+                    .map_err(|e| JobError::Retryable(e.to_string()))
+            }
+        })
+        .await;
     queue.start().await;
 
     // Blocks until Ctrl-C (SIGINT) *or* SIGTERM. `tokio::signal::ctrl_c()`
@@ -408,7 +555,7 @@ queue.register::<WelcomeEmail>().await;
 queue.start().await;
 
 // 3. Dispatch exactly as before — now it's durable.
-queue.dispatch(&WelcomeEmail { user_id: 42 }).await?;
+queue.dispatch(&WelcomeEmail { to: "ada@example.com".into() }).await?;
 ```
 
 **Dispatch inside a transaction.** Inside an `atomic` block on the queue's own

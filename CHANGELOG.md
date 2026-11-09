@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Documentation
+
+- Email and jobs guides: a full `[mail]` settings block, the `RUSTANGO__MAIL__SMTP_PASSWORD` override (linked from security), a mailer in a handler, an `EmailRenderer` example, and jobs added to the scaffolded `main.rs` with a mailer and a pool.
+
 ## [0.65.0] — 2026-11-06
 
 ### Added
