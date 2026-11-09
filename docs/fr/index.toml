@@ -4,7 +4,7 @@
 [[section]]
 title = "Premiers pas"
 slug = "premiers-pas"
-pages = ["getting-started.md", "scaffolding.md", "glossary.md"]
+pages = ["getting-started.md", "common-tasks.md", "scaffolding.md", "glossary.md"]
 
 [[section]]
 title = "Guides"

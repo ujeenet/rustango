@@ -13,6 +13,10 @@ consultarse sobre la marcha.
 - [Fundamentos de las API web](#fundamentos-de-las-api-web) — qué es una API, en términos cotidianos
 - [Bloques de construcción de Rustango](#bloques-de-construcción-de-rustango) — las piezas que ensamblas
 - [Los datos y la base de datos](#los-datos-y-la-base-de-datos)
+- [Inicio de sesión y seguridad](#inicio-de-sesión-y-seguridad) — sesiones, tokens, contraseñas, firmas
+- [Caché, archivos, correo y jobs](#caché-archivos-correo-y-jobs)
+- [Idiomas](#idiomas) — traducir tu app
+- [Tiempo real y agentes de IA](#tiempo-real-y-agentes-de-ia) — actualizaciones en vivo, MCP
 - [Multi-tenancy](#multi-tenancy) — solo si sirves a varios clientes desde un único despliegue
 - [Unas pocas palabras de Rust](#unas-pocas-palabras-de-rust) — para que los bloques de código no den miedo
 
@@ -65,6 +69,28 @@ las peticiones como las respuestas suelen ser JSON.
 | `404` | Not found (no encontrado) |
 | `429` | Too many requests — ve más despacio |
 | `500` | El servidor topó con un error |
+
+**401 / 403** — `401` significa "no sabemos quién eres": inicia sesión o envía un
+token. `403` significa "sabemos quién eres, pero no puedes hacer esto".
+
+**Ruta (route)** — un patrón de URL más el verbo al que responde, como
+`GET /api/posts/{id}`, unido al código que lo atiende. Consulta
+[URLs y enrutamiento](urls.md).
+
+**Handler** — la función que se ejecuta para una ruta. Recibe la petición y
+devuelve la respuesta.
+
+**Cookie** — un pequeño texto que el servidor pide al navegador que guarde. El
+navegador lo envía en cada petición posterior al mismo sitio. Así un navegador
+sigue con la sesión iniciada.
+
+**Multipart (subida de formulario)** — el formato de petición que usa un
+navegador para enviar un formulario con archivos. Cada campo y cada archivo
+viaja como una parte propia. Consulta [Archivos](files.md#paso-3--acepta-una-subida).
+
+**Renderizado en el servidor (server-rendered)** — una página HTML que el
+servidor construye y envía completa, así que el navegador solo la muestra.
+Consulta [Vistas HTML](html-views.md).
 
 **CRUD** — *Create, Read, Update, Delete* (crear, leer, actualizar, eliminar). Las cuatro cosas básicas que haces con los datos.
 Una "API CRUD" simplemente significa una API que te permite hacer las cuatro. Consulta
@@ -124,6 +150,10 @@ handler y después de él — para preocupaciones transversales como el registro
 cabeceras de seguridad o el CSRF. "Layer" es la palabra de Rustango para una pieza de
 middleware. Consulta la [guía de Middleware](middleware.md).
 
+**Extractor** — un argumento del handler que saca una cosa de la petición por ti,
+como el usuario con sesión iniciada, el cuerpo JSON o el tenant actual. Si falta,
+el extractor rechaza la petición antes de que se ejecute tu código.
+
 **Pool** — el handle de base de datos que tu código usa para leer y escribir.
 Rustango te pide pasarlo explícitamente a cada llamada a la base de datos (en vez
 de ocultarlo en un global), para que siempre quede claro qué toca la base de
@@ -147,6 +177,33 @@ nada llega a la base de datos hasta que la `fetch`eas.
 excluye una parte del framework en tiempo de compilación. Te permite mantener tu app pequeña
 compilando solo lo que usas. La mayoría de las features están activadas por defecto.
 
+**Reverse (construir una URL por su nombre)** — generar una URL a partir de su
+nombre en lugar de escribir la ruta, para que cambiar una ruta no rompa enlaces.
+Consulta [Nombres de URL y reverse](urls.md).
+
+**Namespace / namespacing** — un prefijo en el nombre de una URL, como
+`blog:post-detail`, que mantiene separados los nombres de distintas partes de la
+app. Consulta [Namespacing](urls.md#namespacing).
+
+**Fieldset (grupo de campos)** — un grupo de campos con título en un formulario
+de edición del admin, como "Content" y "Publishing". Consulta
+[Admin](admin.md#el-formulario-de-cambio).
+
+**Audit trail (registro de auditoría)** — un registro de quién cambió qué fila,
+cuándo, y cuáles eran los valores antiguos y nuevos. Consulta
+[Admin](admin.md#registro-de-auditoría).
+
+**OpenAPI** — un formato de archivo estándar que describe cada endpoint de una
+API. Las herramientas lo leen para mostrar documentación interactiva y generar
+código cliente. Consulta [OpenAPI](openapi.md).
+
+**Schema (esquema)** — una descripción de la forma de los datos. En OpenAPI
+describe un cuerpo JSON. En una base de datos es el conjunto de tablas, y en
+Postgres también es un grupo con nombre de tablas dentro de una base de datos.
+
+**Fixture** — datos de prueba que preparas antes de un test, para que cada test
+empiece desde un estado conocido. Consulta [Pruebas](testing.md).
+
 **Andamiaje (Scaffolding)** — comandos generadores (`startapp`, `make:serializer`,
 `make:viewset`…) que escriben archivos iniciales por ti para que no empieces desde una
 página en blanco. Consulta [Andamiaje](scaffolding.md).
@@ -169,9 +226,211 @@ a un `Author`. Es como las filas se referencian entre sí.
 **NULL / nullable** — `NULL` es la palabra de la base de datos para "sin valor / vacío". Un
 campo **nullable** puede estar vacío; uno no-nullable es obligatorio.
 
+**ORM** — *Object-Relational Mapper.* La parte del framework que convierte tus
+structs de Rust en filas de la base de datos y al revés, para que consultes en
+Rust en lugar de escribir SQL a mano. Consulta la [guía del ORM](orm.md).
+
+**Transacción** — un grupo de cambios en la base de datos que tienen éxito o
+fallan juntos. O se guardan todos, o ninguno.
+
+**Rollback (reversión)** — deshacer todos los cambios hechos dentro de una
+transacción, como si nunca hubieran ocurrido. Los tests lo usan para dejar la
+base de datos limpia. Consulta
+[Pruebas de base de datos con reversión](testing.md#pruebas-de-base-de-datos-con-reversión).
+
 **Tri-dialecto (tri-dialect)** — "funciona igual en las tres bases de datos soportadas" —
 PostgreSQL, MySQL y SQLite. Cuando una feature es tri-dialecto, puedes cambiar de
 base de datos sin cambiar tu código.
+
+---
+
+## Inicio de sesión y seguridad
+
+**Sesión (session)** — la memoria que guarda el servidor de un usuario con sesión
+iniciada entre peticiones. El navegador solo guarda un id en una cookie; los
+datos se quedan en el servidor. Consulta [Sesiones](auth-sessions.md).
+
+**Id opaco** — un id que no significa nada por sí solo, solo una cadena aleatoria
+larga. Solo el servidor puede ver a qué apunta.
+
+**Token** — una cadena que envía un cliente para demostrar quién es, normalmente
+en la cabecera `Authorization`. Trátalo como una contraseña.
+
+**Bearer token** — un token enviado como `Authorization: Bearer <token>`. Quien
+lo tiene ("lo porta") entra, así que mantenlo en secreto. Consulta
+[Claves de API](auth-api-keys.md).
+
+**JWT** — *JSON Web Token.* Un token que lleva datos firmados (quién es el
+usuario, cuándo caduca). El servidor puede comprobarlo sin consultar la base de
+datos. Consulta [JWT](auth-jwt.md).
+
+**Claims** — los datos dentro de un JWT, como el id del usuario y la hora de
+caducidad.
+
+**Sin estado (stateless)** — el servidor no guarda nada entre peticiones. Todo lo
+que necesita llega en la propia petición, como con un JWT.
+
+**Token de acceso / token de refresco** — un token de vida corta que se usa en
+cada petición, más uno de vida larga que solo sirve para obtener un nuevo token
+de acceso cuando el anterior caduca. Consulta [API JWT](auth-jwt-api.md).
+
+**Rotación de tokens** — cada vez que se usa un token de refresco, se sustituye
+por uno nuevo y el anterior deja de funcionar. Un token de refresco robado solo
+sirve una vez.
+
+**Revocación** — anular un token o una sesión antes de que caduque, por ejemplo
+al cerrar sesión. Consulta
+[Revocación](auth-jwt-api.md#revocación-y-el-almacén-de-jti).
+
+**Caducidad (expiry)** — el momento en que un token, un enlace o una sesión deja
+de funcionar.
+
+**Secreto / secreto compartido** — un valor privado que firma o comprueba datos.
+Un secreto compartido lo conocen ambos lados, como el cliente y el servidor.
+Nunca lo pongas en el código ni en los logs.
+
+**Hash** — una huella de un solo sentido de unos datos. Puedes comprobar una
+contraseña contra su hash, pero no puedes recuperar la contraseña a partir de
+él. Consulta [Contraseñas](auth-passwords.md).
+
+**Sal (salt)** — datos aleatorios que se mezclan con cada contraseña antes de
+calcular el hash, para que dos contraseñas iguales tengan hashes distintos.
+
+**Argon2id** — el método de hash de contraseñas que usa Rustango. Es lento a
+propósito, lo que hace caro adivinar contraseñas.
+
+**Cadena PHC** — la forma de texto estándar de un hash de contraseña guardado.
+Contiene el método, sus ajustes, la sal y el hash en una sola cadena que empieza
+por `$argon2id$`.
+
+**HMAC** — una firma hecha con unos datos más una clave secreta. Quien tenga la
+clave puede comprobar que los datos no se cambiaron. Consulta
+[Firma de peticiones HMAC](auth-hmac.md) y [Flujos de cuenta](auth-flows.md).
+
+**Comparación en tiempo constante** — comparar dos secretos de forma que siempre
+tarde lo mismo, para que un atacante no aprenda nada de cuánto tardó la
+comprobación.
+
+**Replay (repetición)** — un atacante vuelve a enviar una petición que capturó
+antes. Un límite de tiempo en las peticiones firmadas lo bloquea. Consulta
+[Desfase de reloj y replay](auth-hmac.md#desfase-de-reloj-y-replay).
+
+**URL prefirmada (presigned URL)** — un enlace a un archivo con una firma y una
+caducidad incluidas, así que cualquiera con el enlace puede descargar (o subir)
+ese archivo durante poco tiempo. Consulta [Archivos](files.md).
+
+**CSRF** — *Cross-Site Request Forgery.* Otro sitio engaña a un navegador con
+sesión iniciada para que envíe una petición a tu app. Un token CSRF en cada
+formulario lo bloquea. Consulta [Protección CSRF](middleware.md#protección-csrf).
+
+**Codename de permiso** — el nombre de un permiso, escrito como
+`{table}.{action}`, por ejemplo `post.add`. Las rutas lo comprueban para decidir
+quién puede hacer qué. Consulta
+[Backends de autenticación](auth-backends.md#permisos-require_perm).
+
+**OAuth** — una forma estándar de que una app obtenga acceso limitado en nombre
+de un usuario sin ver su contraseña. Es la base de los botones "Iniciar sesión
+con …". Consulta [SSO](sso.md).
+
+---
+
+## Caché, archivos, correo y jobs
+
+**Backend (backend de almacenamiento, backend de correo, backend de caché)** — el
+lugar o servicio real detrás de una interfaz común: disco local o S3 para
+archivos, SMTP o la consola para el correo, memoria o Redis para una caché.
+Puedes cambiarlo sin tocar el código que lo llama. Los backends de autenticación
+son la misma idea: cada uno es una forma de reconocer a un usuario. Consulta
+[Backends de autenticación](auth-backends.md).
+
+**Caché** — un almacén rápido que guarda copias de datos que lees a menudo, para
+no calcularlos ni buscarlos cada vez. Consulta [Caché](caching.md).
+
+**Clave de caché** — el nombre con el que se guarda un valor en la caché, como
+`post:42:summary`.
+
+**TTL** — *time to live.* Cuánto tiempo se guarda un valor en la caché antes de
+caducar. Consulta [TTL y expiración](caching.md#ttl-y-expiración).
+
+**Almacenamiento de objetos (object storage)** — un servicio que guarda archivos
+("objetos") por HTTP, como Amazon S3 o Azure Blob Storage. Consulta
+[Archivos](files.md).
+
+**Mailer** — la parte de tu app que envía correo. En desarrollo imprime el correo
+en la terminal; en producción lo envía de verdad. Consulta [Correo](email.md).
+
+**SMTP** — el protocolo estándar para enviar correo a un servidor de correo.
+
+**Correo transaccional** — un correo que tu app envía por algo que hizo un
+usuario, como un restablecimiento de contraseña o un recibo.
+
+**Cola de jobs** — una lista de tareas que esperan para ejecutarse en segundo
+plano, para que una petición pueda responder enseguida. Consulta
+[Jobs en segundo plano](jobs.md).
+
+**Worker** — una tarea en segundo plano que toma jobs de la cola y los ejecuta.
+
+**Reintento y backoff** — volver a ejecutar un job fallido, esperando un poco más
+después de cada fallo. Consulta [Reintentos y backoff](jobs.md#reintentos-y-backoff).
+
+**Dead-letter** — adonde va un job cuando ha fallado del todo, para que puedas
+revisarlo más tarde. Consulta [El handler dead-letter](jobs.md#el-handler-dead-letter).
+
+---
+
+## Idiomas
+
+**Locale** — un idioma, a veces con región, como `en`, `es` o `pt-BR`. Consulta
+[i18n](i18n.md).
+
+**Catálogo de mensajes** — el archivo con los textos traducidos de un locale.
+
+**Pluralización** — elegir la forma correcta de una palabra para un número, como
+"1 archivo" y "2 archivos". Algunos idiomas tienen más de dos formas. Consulta
+[Pluralización](i18n.md#pluralización).
+
+**Accept-Language** — una cabecera que envía el navegador con los idiomas que
+prefiere el usuario. Consulta [Negociar el idioma](i18n.md#negociar-el-idioma).
+
+**RTL** — *right-to-left.* Idiomas como el árabe y el hebreo, que se escriben de
+derecha a izquierda. Consulta
+[Idiomas de derecha a izquierda](i18n.md#idiomas-de-derecha-a-izquierda).
+
+---
+
+## Tiempo real y agentes de IA
+
+**WebSocket** — una conexión que se mantiene abierta para que el navegador y el
+servidor puedan enviar mensajes en cualquier momento. Consulta
+[WebSockets y SSE](websockets.md).
+
+**SSE** — *Server-Sent Events.* Una conexión que se mantiene abierta para que el
+servidor envíe actualizaciones al navegador. Los mensajes van en un solo
+sentido, del servidor al navegador.
+
+**Broadcast (difusión)** — enviar un mensaje a todos los oyentes conectados a la
+vez.
+
+**Keep-alive / ping** — un pequeño mensaje que se envía de vez en cuando para que
+un proxy no cierre una conexión inactiva y para notar una conexión muerta.
+
+**Back-pressure (contrapresión)** — lo que pasa cuando un oyente lee más despacio
+de lo que llegan los mensajes. El emisor tiene que esperar, guardar en búfer o
+descartar mensajes.
+
+**MCP** — *Model Context Protocol.* Una forma estándar de que un agente de IA
+descubra y llame a las herramientas que ofrece tu app. Consulta
+[Servidor MCP](mcp.md).
+
+**JSON-RPC** — un protocolo sencillo para llamar a una función con nombre en un
+servidor, con la petición y la respuesta en JSON. MCP lo usa.
+
+**Agente (agent)** — un programa de IA, normalmente guiado por un modelo de
+lenguaje grande, que llama a herramientas para hacer un trabajo.
+
+**Tool, resource, prompt (MCP)** — lo que un servidor MCP ofrece a un agente: un
+tool es una acción que puede llamar, un resource son datos que puede leer y un
+prompt es una instrucción ya preparada.
 
 ---
 
