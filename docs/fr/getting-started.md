@@ -829,6 +829,11 @@ fn jwt_secret() -> Result<Vec<u8>, ApiError> {
     }
 }
 
+/// Methods that only read. Everything else needs a token.
+pub fn is_read(method: &Method) -> bool {
+    matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+}
+
 /// Usernames are stored lower-case, so `Alice` and `alice` are one account.
 fn normalize(username: &str) -> String {
     username.trim().to_lowercase()
@@ -907,10 +912,12 @@ pub async fn login(
     ip: ClientIp,
     Json(body): Json<Credentials>,
 ) -> Result<Json<TokenResponse>, Response> {
+    // First: with no valid key every login is a 500, right password or not.
+    let secret = jwt_secret().map_err(IntoResponse::into_response)?;
     let username = normalize(&body.username);
 
     // Before any lookup: 429 once this IP (or everyone) failed too often.
-    // `Sso(name)` is the scope an app can name: own limits, no account lock.
+    // `Sso(name)`: its own total limit, a per-IP limit shared with SSO sign-ins, no account lock.
     let scope = LoginScope::Sso("blog-api".to_owned());
     let attempt = login_throttle::shared()
         .begin(&scope, &ip, &username)
@@ -945,7 +952,6 @@ pub async fn login(
 
     let id = user.id.get().copied().unwrap_or_default();
     let claims = Claims::new(id.to_string()).ttl(TOKEN_TTL); // subject = user id
-    let secret = jwt_secret().map_err(IntoResponse::into_response)?;
     let access_token =
         jwt::encode(&claims, &secret).map_err(|e| server_error(e).into_response())?;
     Ok(Json(TokenResponse {
@@ -958,7 +964,8 @@ pub async fn login(
 
 Ce que fait `login`, dans l'ordre :
 
-- `login_throttle::shared().begin(...)` est la même barrière que celle des connexions intégrées. Elle compte les échecs par IP client et au total, et répond `429 Too Many Requests` quand il y en a trop. Vous signalez chaque résultat avec `attempt.failed()` ou `attempt.succeeded()` ; un succès rend le compte. Le scope `LoginScope::Sso("blog-api")` donne à cette connexion ses propres limites.
+- `jwt_secret()` passe en premier. Sans `JWT_SECRET` valide, chaque connexion répond `500`, donc un bon et un mauvais mot de passe se ressemblent.
+- `login_throttle::shared().begin(...)` est la même barrière que celle des connexions intégrées. Elle compte les échecs par IP client et au total, et répond `429 Too Many Requests` quand il y en a trop. Vous signalez chaque résultat avec `attempt.failed()` ou `attempt.succeeded()` ; un succès rend le compte. Le scope `LoginScope::Sso("blog-api")` donne à cette connexion sa propre limite totale ; sa limite par IP est partagée avec les connexions SSO du framework, et il n'a pas de verrouillage de compte.
 - Un nom d'utilisateur inconnu et un mauvais mot de passe reçoivent le même `401` avec le même message. Sinon, un attaquant pourrait essayer des noms et savoir quels comptes existent.
 - `verify_dummy_async` fait une vérification complète contre un faux hachage quand l'utilisateur n'existe pas, donc les deux cas prennent à peu près le même temps.
 - `Claims::new(id)` place l'id de l'utilisateur dans le jeton comme *subject*. `.ttl(TOKEN_TTL)` le fait expirer au bout de 15 minutes.
@@ -998,13 +1005,13 @@ pub async fn authenticate(pool: &Pool, parts: &Parts) -> Result<CurrentUser, Api
     })
 }
 
-/// Middleware: reads pass, every other method needs a valid token.
+/// Middleware: GET, HEAD and OPTIONS pass, every other method needs a valid token.
 pub async fn require_user_for_writes(
     State(pool): State<Pool>,
     request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
-    if matches!(*request.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
+    if is_read(request.method()) {
         return Ok(next.run(request).await);
     }
     let (mut parts, body) = request.into_parts();
@@ -1028,7 +1035,7 @@ impl ViewSetFilter for AuthorFromToken {
         _: &HashMap<String, String>,
         schema: &'static ModelSchema,
     ) -> Vec<WhereExpr> {
-        if matches!(parts.method, Method::GET | Method::HEAD | Method::OPTIONS) {
+        if is_read(&parts.method) {
             return Vec::new();
         }
         match parts.extensions.get::<CurrentUser>() {
@@ -1048,18 +1055,17 @@ impl ViewSetFilter for AuthorFromToken {
 }
 ```
 
-- `require_user_for_writes` est le middleware. Les requêtes `GET` passent. Pour tout le reste, il appelle `authenticate`, qui répond `401` si l'en-tête manque, si le jeton a été modifié ou a expiré, ou si l'utilisateur n'existe plus. En cas de succès, il place un `CurrentUser` sur la requête, où le code suivant peut le lire.
-- `AuthorFromToken` est un *filter backend* du ViewSet : il peut restreindre les lignes qu'une requête voit et fixer des valeurs à l'écriture. `write_pins` enregistre l'id de l'utilisateur connecté dans `author_id` à la création, quoi que dise le corps, et une mise à jour ne peut jamais le changer. `filter_with` ne laisse un utilisateur modifier ou supprimer que ses propres articles ; l'article de quelqu'un d'autre répond `404`.
+- `require_user_for_writes` est le middleware. Les requêtes `GET`, `HEAD` et `OPTIONS` passent (`is_read`). Pour toute autre méthode, il appelle `authenticate`, qui répond `401` si l'en-tête manque, si le jeton a été modifié ou a expiré, ou si l'utilisateur n'existe plus. En cas de succès, il place un `CurrentUser` sur la requête, où le code suivant peut le lire.
+- `AuthorFromToken` est un *filter backend* du ViewSet : il peut restreindre les lignes qu'une requête voit et fixer des valeurs à l'écriture. `write_pins` enregistre l'id de l'utilisateur connecté dans `author_id` à la création, quoi que dise le corps, et une mise à jour ne peut jamais le changer. Sans le pin, un client pourrait désigner un autre utilisateur comme auteur ; c'est le pin qui l'en empêche. `filter_with` ne laisse un utilisateur modifier ou supprimer que ses propres articles ; l'article de quelqu'un d'autre répond `404`.
 
 ### 14d. Monter les routes
 
-Ajoutez les routes de connexion dans `src/blog/urls.rs`. Elles ont besoin du pool de la base, donc elles ont leur propre fonction à côté de `api()` :
+Ajoutez les routes de connexion dans `src/blog/urls.rs`. Elles ont besoin du pool de la base, donc elles ont leur propre fonction à côté de `api()`. Le fichier a déjà `use axum::Router;` ; ajoutez les autres imports en haut :
 
 ```rust
 use std::time::Duration;
 
 use axum::routing::post;
-use axum::Router;
 use rustango::rate_limit::{RateLimitLayer, RateLimitRouterExt};
 use rustango::sql::Pool;
 

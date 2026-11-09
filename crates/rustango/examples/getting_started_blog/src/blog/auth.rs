@@ -59,6 +59,11 @@ fn jwt_secret() -> Result<Vec<u8>, ApiError> {
     }
 }
 
+/// Methods that only read. Everything else needs a token.
+pub fn is_read(method: &Method) -> bool {
+    matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+}
+
 /// Usernames are stored lower-case, so `Alice` and `alice` are one account.
 fn normalize(username: &str) -> String {
     username.trim().to_lowercase()
@@ -131,10 +136,12 @@ pub async fn login(
     ip: ClientIp,
     Json(body): Json<Credentials>,
 ) -> Result<Json<TokenResponse>, Response> {
+    // First: with no valid key every login is a 500, right password or not.
+    let secret = jwt_secret().map_err(IntoResponse::into_response)?;
     let username = normalize(&body.username);
 
     // Before any lookup: 429 once this IP (or everyone) failed too often.
-    // `Sso(name)` is the scope an app can name: own limits, no account lock.
+    // `Sso(name)`: its own total limit, a per-IP limit shared with SSO sign-ins, no account lock.
     let scope = LoginScope::Sso("blog-api".to_owned());
     let attempt = login_throttle::shared()
         .begin(&scope, &ip, &username)
@@ -169,7 +176,6 @@ pub async fn login(
 
     let id = user.id.get().copied().unwrap_or_default();
     let claims = Claims::new(id.to_string()).ttl(TOKEN_TTL); // subject = user id
-    let secret = jwt_secret().map_err(IntoResponse::into_response)?;
     let access_token =
         jwt::encode(&claims, &secret).map_err(|e| server_error(e).into_response())?;
     Ok(Json(TokenResponse {
@@ -211,13 +217,13 @@ pub async fn authenticate(pool: &Pool, parts: &Parts) -> Result<CurrentUser, Api
     })
 }
 
-/// Middleware: reads pass, every other method needs a valid token.
+/// Middleware: GET, HEAD and OPTIONS pass, every other method needs a valid token.
 pub async fn require_user_for_writes(
     State(pool): State<Pool>,
     request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
-    if matches!(*request.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
+    if is_read(request.method()) {
         return Ok(next.run(request).await);
     }
     let (mut parts, body) = request.into_parts();
@@ -241,7 +247,7 @@ impl ViewSetFilter for AuthorFromToken {
         _: &HashMap<String, String>,
         schema: &'static ModelSchema,
     ) -> Vec<WhereExpr> {
-        if matches!(parts.method, Method::GET | Method::HEAD | Method::OPTIONS) {
+        if is_read(&parts.method) {
             return Vec::new();
         }
         match parts.extensions.get::<CurrentUser>() {

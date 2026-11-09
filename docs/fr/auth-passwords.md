@@ -145,10 +145,12 @@ pub async fn login(
     ip: ClientIp,
     Json(body): Json<Credentials>,
 ) -> Result<Json<TokenResponse>, Response> {
+    // First: with no valid key every login is a 500, right password or not.
+    let secret = jwt_secret().map_err(IntoResponse::into_response)?;
     let username = normalize(&body.username);
 
     // Before any lookup: 429 once this IP (or everyone) failed too often.
-    // `Sso(name)` is the scope an app can name: own limits, no account lock.
+    // `Sso(name)`: its own total limit, a per-IP limit shared with SSO sign-ins, no account lock.
     let scope = LoginScope::Sso("blog-api".to_owned());
     let attempt = login_throttle::shared()
         .begin(&scope, &ip, &username)
@@ -183,7 +185,6 @@ pub async fn login(
 
     let id = user.id.get().copied().unwrap_or_default();
     let claims = Claims::new(id.to_string()).ttl(TOKEN_TTL); // subject = user id
-    let secret = jwt_secret().map_err(IntoResponse::into_response)?;
     let access_token =
         jwt::encode(&claims, &secret).map_err(|e| server_error(e).into_response())?;
     Ok(Json(TokenResponse {

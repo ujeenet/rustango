@@ -820,6 +820,11 @@ fn jwt_secret() -> Result<Vec<u8>, ApiError> {
     }
 }
 
+/// Methods that only read. Everything else needs a token.
+pub fn is_read(method: &Method) -> bool {
+    matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+}
+
 /// Usernames are stored lower-case, so `Alice` and `alice` are one account.
 fn normalize(username: &str) -> String {
     username.trim().to_lowercase()
@@ -898,10 +903,12 @@ pub async fn login(
     ip: ClientIp,
     Json(body): Json<Credentials>,
 ) -> Result<Json<TokenResponse>, Response> {
+    // First: with no valid key every login is a 500, right password or not.
+    let secret = jwt_secret().map_err(IntoResponse::into_response)?;
     let username = normalize(&body.username);
 
     // Before any lookup: 429 once this IP (or everyone) failed too often.
-    // `Sso(name)` is the scope an app can name: own limits, no account lock.
+    // `Sso(name)`: its own total limit, a per-IP limit shared with SSO sign-ins, no account lock.
     let scope = LoginScope::Sso("blog-api".to_owned());
     let attempt = login_throttle::shared()
         .begin(&scope, &ip, &username)
@@ -936,7 +943,6 @@ pub async fn login(
 
     let id = user.id.get().copied().unwrap_or_default();
     let claims = Claims::new(id.to_string()).ttl(TOKEN_TTL); // subject = user id
-    let secret = jwt_secret().map_err(IntoResponse::into_response)?;
     let access_token =
         jwt::encode(&claims, &secret).map_err(|e| server_error(e).into_response())?;
     Ok(Json(TokenResponse {
@@ -949,7 +955,8 @@ pub async fn login(
 
 What `login` does, in order:
 
-- `login_throttle::shared().begin(...)` is the same gate the built-in logins use. It counts failed attempts per client IP and in total, and answers `429 Too Many Requests` when there are too many. You report each result with `attempt.failed()` or `attempt.succeeded()`; a success gives the count back. The `LoginScope::Sso("blog-api")` scope gives this login its own limits.
+- `jwt_secret()` comes first. Without a valid `JWT_SECRET` every login answers `500`, so a right and a wrong password look the same.
+- `login_throttle::shared().begin(...)` is the same gate the built-in logins use. It counts failed attempts per client IP and in total, and answers `429 Too Many Requests` when there are too many. You report each result with `attempt.failed()` or `attempt.succeeded()`; a success gives the count back. The `LoginScope::Sso("blog-api")` scope gives this login its own total limit; its per-IP limit is shared with the framework's SSO sign-ins, and it has no account lock.
 - An unknown username and a wrong password get the same `401` with the same message. Otherwise an attacker could try names and learn which accounts exist.
 - `verify_dummy_async` does a full password check on a fake hash when the user does not exist, so both cases take about the same time.
 - `Claims::new(id)` puts the user id in the token as its *subject*. `.ttl(TOKEN_TTL)` makes it expire after 15 minutes.
@@ -989,13 +996,13 @@ pub async fn authenticate(pool: &Pool, parts: &Parts) -> Result<CurrentUser, Api
     })
 }
 
-/// Middleware: reads pass, every other method needs a valid token.
+/// Middleware: GET, HEAD and OPTIONS pass, every other method needs a valid token.
 pub async fn require_user_for_writes(
     State(pool): State<Pool>,
     request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
-    if matches!(*request.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
+    if is_read(request.method()) {
         return Ok(next.run(request).await);
     }
     let (mut parts, body) = request.into_parts();
@@ -1019,7 +1026,7 @@ impl ViewSetFilter for AuthorFromToken {
         _: &HashMap<String, String>,
         schema: &'static ModelSchema,
     ) -> Vec<WhereExpr> {
-        if matches!(parts.method, Method::GET | Method::HEAD | Method::OPTIONS) {
+        if is_read(&parts.method) {
             return Vec::new();
         }
         match parts.extensions.get::<CurrentUser>() {
@@ -1039,18 +1046,17 @@ impl ViewSetFilter for AuthorFromToken {
 }
 ```
 
-- `require_user_for_writes` is the middleware. `GET` requests pass. For anything else it calls `authenticate`, which answers `401` when the header is missing, the token is changed or expired, or the user no longer exists. On success it puts a `CurrentUser` on the request, where the next code can read it.
-- `AuthorFromToken` is a ViewSet *filter backend*: it can narrow which rows a request sees and fix values on writes. `write_pins` stores the signed-in user's id in `author_id` on create, whatever the body says, and an update can never change it. `filter_with` lets a user change or delete only their own posts; someone else's post answers `404`.
+- `require_user_for_writes` is the middleware. `GET`, `HEAD` and `OPTIONS` requests pass (`is_read`). For any other method it calls `authenticate`, which answers `401` when the header is missing, the token is changed or expired, or the user no longer exists. On success it puts a `CurrentUser` on the request, where the next code can read it.
+- `AuthorFromToken` is a ViewSet *filter backend*: it can narrow which rows a request sees and fix values on writes. `write_pins` stores the signed-in user's id in `author_id` on create, whatever the body says, and an update can never change it. Without the pin, a client could name another user as the author; the pin is what stops that. `filter_with` lets a user change or delete only their own posts; someone else's post answers `404`.
 
 ### 14d. Mount the routes
 
-Add the sign-in routes to `src/blog/urls.rs`. They need the database pool, so they get their own function next to `api()`:
+Add the sign-in routes to `src/blog/urls.rs`. They need the database pool, so they get their own function next to `api()`. The file already has `use axum::Router;`; add the other imports at the top:
 
 ```rust
 use std::time::Duration;
 
 use axum::routing::post;
-use axum::Router;
 use rustango::rate_limit::{RateLimitLayer, RateLimitRouterExt};
 use rustango::sql::Pool;
 

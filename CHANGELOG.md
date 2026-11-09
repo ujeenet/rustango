@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Documentation
 
-- Getting started Step 14 is a complete sign-in walkthrough: a user model, register and login handlers (throttled, no user enumeration), a Bearer-token guard, author-only post writes, curl and good practices; the example project runs every case. Steps 12-13 stay `read_only` until then.
+- Getting started Step 14 is a complete sign-in walkthrough: a user model, register and login handlers (throttled; login does not reveal which usernames exist), a Bearer-token guard, author-only post writes, curl and good practices; the example project runs every case. Steps 12-13 stay `read_only` until then.
 
 ## [0.65.0] — 2026-11-06
 

@@ -2,7 +2,7 @@
 //! and write posts with a Bearer token.
 //!
 //! Uses `DATABASE_URL` (migrated) when set. Without it, a SQLite build
-//! makes a throwaway database file; a Postgres build skips.
+//! uses a throwaway in-memory database; a Postgres build skips.
 //!
 //! Run: `cargo test --no-default-features --features sqlite --test auth_flow`
 
@@ -31,10 +31,8 @@ async fn pool() -> Option<Pool> {
     }
     #[cfg(feature = "sqlite")]
     {
-        let path = std::env::temp_dir().join(format!("gsb_auth_{}.db", unique("db")));
-        let pool = Pool::connect(&format!("sqlite://{}?mode=rwc", path.display()))
-            .await
-            .expect("connect sqlite");
+        // One private in-memory database per call, shared by the pool's connections; no file left behind.
+        let pool = Pool::connect("sqlite::memory:").await.expect("connect sqlite");
         rustango::migrate::apply_all_pool(&pool).await.expect("create tables");
         Some(pool)
     }
