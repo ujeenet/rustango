@@ -15,7 +15,7 @@ version = "0.65"
 [[section]]
 title = "Getting started"
 slug = "getting-started"
-pages = ["getting-started.md", "scaffolding.md", "glossary.md"]
+pages = ["getting-started.md", "common-tasks.md", "scaffolding.md", "glossary.md"]
 
 [[section]]
 title = "Guides"

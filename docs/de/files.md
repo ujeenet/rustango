@@ -30,6 +30,7 @@ einmal gegen das Trait; wechsle von lokaler Festplatte zu S3 mit einer einzeilig
 - [Schritt 1 — Ein Storage-Backend wählen](#schritt-1--ein-storage-backend-wählen)
 - [Schritt 2 — Dateien speichern, laden und ausliefern](#schritt-2--dateien-speichern-laden-und-ausliefern)
 - [Schritt 3 — Einen Upload annehmen](#schritt-3--einen-upload-annehmen)
+- [Ein Avatar-Upload von Anfang bis Ende](#ein-avatar-upload-von-anfang-bis-ende)
 - [Sichere Dateinamen](#sichere-dateinamen)
 - [Produktion: S3-kompatibler Speicher](#produktion-s3-kompatibler-speicher)
 - [Produktion: Azure Blob Storage](#produktion-azure-blob-storage)
@@ -88,8 +89,10 @@ let store = LocalStorage::new("./uploads".into())
 store.url("docs/report.pdf");   // Some("https://cdn.example.com/uploads/docs/report.pdf")
 ```
 
-Ohne Basis-URL gibt `url()` `None` zurück — du würdest die Bytes stattdessen durch einen
-Handler streamen. `LocalStorage` schützt außerdem vor Path-Traversal in Keys.
+Ohne Basis-URL gibt `url()` `None` zurück. Dann liefere den Ordner mit
+`Cli::with_uploads` aus ([Avatar-Beispiel](#ein-avatar-upload-von-anfang-bis-ende)) oder
+streame die Bytes durch einen eigenen Handler ([Große Dateien](#große-dateien-streamen)).
+`LocalStorage` schützt außerdem vor Path-Traversal in Keys.
 
 ---
 
@@ -101,10 +104,16 @@ Handler streamen. `LocalStorage` schützt außerdem vor Path-Traversal in Keys.
 gepuffert zu werden.
 
 ```rust
+use axum::extract::{Multipart, State};
+use axum::http::StatusCode;
+use axum::Json;
+use rustango::storage::BoxedStorage;
 use rustango::uploads::{save_uploads, UploadConfig};
-use axum::extract::Multipart;
 
-async fn upload(mp: Multipart) -> Result<Json<Vec<String>>, (StatusCode, String)> {
+async fn upload(
+    State(storage): State<BoxedStorage>,             // router state, see below
+    mp: Multipart,                                   // must be the last argument
+) -> Result<Json<Vec<String>>, (StatusCode, String)> {
     let cfg = UploadConfig::new("avatars/")          // key prefix
         .max_bytes(2 * 1024 * 1024)                  // reject files over 2 MiB
         .allowed_extensions(&["png", "jpg", "jpeg", "webp"])
@@ -117,6 +126,10 @@ async fn upload(mp: Multipart) -> Result<Json<Vec<String>>, (StatusCode, String)
     Ok(Json(saved.into_iter().map(|s| s.key).collect()))
 }
 ```
+
+Das Storage erreicht den Handler als Router-State:
+`Router::new().route("/upload", post(upload)).with_state(storage)`. Das
+[Avatar-Beispiel](#ein-avatar-upload-von-anfang-bis-ende) unten zeigt die ganze Verdrahtung.
 
 Die Schutzvorkehrungen werden erzwungen (und verifiziert): `allowed_extensions` ist
 **case-insensitiv** (`"PNG"` und `"png"` sind dasselbe), und `max_bytes` bricht den Stream ab,
@@ -137,6 +150,232 @@ let cfg = UploadConfig::new("avatars/").allowed_extensions(&["PNG", "Jpg"]);
 assert!(cfg.allowed_extensions.contains("png"));   // normalized to lowercase
 assert!(cfg.allowed_extensions.contains("jpg"));
 ```
+
+---
+
+## Ein Avatar-Upload von Anfang bis Ende
+
+Hier kommen die Teile in der App aus [Erste Schritte](getting-started.md)
+zusammen: ein Profil mit Avatar, eine Route, die das Bild annimmt, und eine URL,
+die der Browser laden kann. Die Dateien landen in `./var/uploads` auf der lokalen
+Platte.
+
+### 1. Den Key im Model speichern
+
+Speichere den Storage-Key, nicht die Datei und nicht die URL. Lege in
+`src/blog/models.rs` unter `Post` ein Model an. Die Zeile
+`use rustango::{Auto, Model};` aus Schritt 8 deckt es schon ab:
+
+```rust
+#[derive(Model, Clone, Debug)]
+#[rustango(table = "profiles")]
+pub struct Profile {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+
+    pub user_id: i64,
+
+    // Storage key, e.g. "avatars/3f2c…-me.png". None until the first upload.
+    pub avatar_key: Option<String>,
+}
+```
+
+Dann lege die Tabelle an, wie in Schritt 9:
+
+```bash
+cargo run -- makemigrations
+cargo run -- migrate
+```
+
+Die URL wird bei Bedarf aus dem Key gebaut. Ziehen die Dateien später nach S3
+um, ändert sich keine Zeile in der Datenbank.
+
+`avatar_key` hat kein `max_length` und ist deshalb eine `TEXT`-Spalte. Der Key
+behält den Dateinamen des Clients, und `save_uploads` kürzt ihn nicht. Eine feste
+`VARCHAR`-Länge könnte also zu kurz sein.
+
+### 2. Den Upload annehmen und den Key speichern
+
+Der Handler braucht zwei Dinge: den Datenbank-Pool und das Storage. Pack beide in
+eine State-Struct. Füge das in `src/blog/views.rs` ein. Lass jede `use`-Zeile weg,
+die die Datei schon hat: dasselbe `use` zweimal kompiliert nicht.
+
+```rust
+use axum::extract::{Multipart, Path, State};
+use axum::http::StatusCode;
+use axum::Json;
+use rustango::sql::Pool;
+use rustango::storage::BoxedStorage;
+use rustango::uploads::{save_uploads, UploadConfig};
+
+use crate::blog::models::Profile;
+
+/// What the avatar routes need: the database and the file storage.
+#[derive(Clone)]
+pub struct AvatarState {
+    pub pool: Pool,
+    pub storage: BoxedStorage,
+}
+
+type HttpError = (StatusCode, String);
+
+fn server_error(e: impl std::fmt::Display) -> HttpError {
+    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+}
+
+/// POST /profiles/{id}/avatar with a multipart form that holds one image.
+pub async fn upload_avatar(
+    State(state): State<AvatarState>,
+    Path(id): Path<i64>,
+    mp: Multipart,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    let mut profile = Profile::objects()
+        .find(id, &state.pool)
+        .await
+        .map_err(server_error)?
+        .ok_or((StatusCode::NOT_FOUND, "no such profile".to_owned()))?;
+
+    let cfg = UploadConfig::new("avatars/")
+        .max_bytes(2 * 1024 * 1024) // 2 MiB
+        .max_files(1)
+        .allowed_extensions(&["png", "jpg", "jpeg", "webp"]);
+    let saved = save_uploads(mp, &cfg, &state.storage)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let Some(file) = saved.into_iter().next() else {
+        return Err((StatusCode::BAD_REQUEST, "send one file".to_owned()));
+    };
+
+    // Save the key on the row. If that fails, remove the new file.
+    let old_key = profile.avatar_key.replace(file.key.clone());
+    if let Err(e) = profile.save(&state.pool).await {
+        let _ = state.storage.delete(&file.key).await;
+        return Err(server_error(e));
+    }
+    // Nothing points at the old file any more.
+    if let Some(old) = old_key {
+        let _ = state.storage.delete(&old).await;
+    }
+
+    Ok(Json(serde_json::json!({
+        "key": file.key,
+        "url": state.storage.url(&file.key), // "/uploads/avatars/…-me.png"
+    })))
+}
+```
+
+`find` gibt `Ok(None)` zurück, wenn keine Zeile diese ID hat; der Handler
+antwortet dann mit `404`. `save` schreibt die Zeile auf PostgreSQL, MySQL und
+SQLite gleich zurück.
+
+`Multipart` kommt aus dem axum-Feature `multipart`. Das Rustango-Feature
+`uploads` schaltet es ein, also baut der Code so. Trag `"multipart"` trotzdem in
+die `axum`-Features deiner `Cargo.toml` ein, damit dein Code nennt, was er nutzt.
+
+### 3. Storage anlegen und Route mounten
+
+Baue das Storage einmal, neben dem Router, der es nutzt. Füge das in
+`src/blog/urls.rs` ein, das schon `use axum::Router;` hat:
+
+```rust
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use axum::routing::post;
+use rustango::sql::Pool;
+use rustango::storage::{BoxedStorage, LocalStorage};
+
+use crate::blog::views::{upload_avatar, AvatarState};
+
+/// The folder that holds uploads, and the URL prefix that serves it.
+pub const UPLOAD_DIR: &str = "./var/uploads";
+pub const UPLOAD_URL: &str = "/uploads";
+
+pub fn avatar_routes(pool: Pool) -> Router {
+    let storage: BoxedStorage = Arc::new(
+        LocalStorage::new(PathBuf::from(UPLOAD_DIR)).with_base_url(UPLOAD_URL),
+    );
+    Router::new()
+        .route("/{id}/avatar", post(upload_avatar))
+        .with_state(AvatarState { pool, storage })
+}
+```
+
+Dann füge zwei Zeilen zur `Cli`-Kette in `src/main.rs` hinzu:
+
+```rust
+rustango::manage::Cli::new()
+    .api(urls::api())
+    // … the lines you already have …
+    .nest_with("/profiles", myblog::blog::urls::avatar_routes)
+    .with_uploads(myblog::blog::urls::UPLOAD_URL, myblog::blog::urls::UPLOAD_DIR)
+    .with_loaded_settings(loaded)
+    .run()
+    .await
+```
+
+`nest_with` baut den Router aus dem Pool, den der Server öffnet, wie in
+Schritt 12b. Er braucht ein eigenes Präfix: ein zweites `nest_with("/api", …)`
+würde mit dem ViewSet kollidieren. `with_uploads` liefert die Dateien aus
+`./var/uploads` unter `/uploads/…` aus. HTML, SVG und XML gehen als Download
+raus, damit eine hochgeladene Seite kein Skript auf deiner Site ausführt.
+`LocalStorage` legt die Ordner beim ersten Speichern an. Die
+generierte `.gitignore` hält `var/` schon aus git heraus.
+
+### 4. Ausprobieren
+
+Lege zuerst eine Profilzeile an, im Admin (Schritt 11) oder mit `save` wie in
+Schritt 10. Dann:
+
+```bash
+curl -F "avatar=@me.png" http://localhost:8080/profiles/1/avatar
+# {"key":"avatars/3f2c…-me.png","url":"/uploads/avatars/3f2c…-me.png"}
+
+curl -O http://localhost:8080/uploads/avatars/3f2c…-me.png
+```
+
+Setze die `url` in ein `<img src>`. Ein `.gif` bekommt `400` mit der Meldung
+``file extension `gif` not allowed``.
+
+> **Diese Route prüft keinen Login.** Jeder kann jeden Avatar ersetzen. Bevor du
+> sie auslieferst, stell sie hinter deine Authentifizierung und prüfe, dass der
+> angemeldete Benutzer das Profil besitzt. Siehe [Zugriffs-Dekoratoren](auth-decorators.md).
+
+**Private Dateien.** `with_uploads` liefert jede Datei an jeden aus, der die URL
+kennt. Für Dateien, die nur manche Benutzer sehen dürfen, lass `with_uploads` und
+die Basis-URL weg und streame die Datei durch einen Handler, der vorher den
+Zugriff prüft: der `download`-Handler in [Große Dateien](#große-dateien-streamen)
+ist dieser Handler.
+
+**Mehr als ein Server.** Die lokale Platte reicht für einen Server. Bei mehreren
+nimm `S3Storage` oder `AzureBlobStorage` mit einer öffentlichen URL; `url()` zeigt
+dann auf den Bucket, und `with_uploads` fällt weg. Der Handler bleibt gleich.
+
+### Das Limit für den Request-Body
+
+axum begrenzt einen Request-Body standardmäßig auf 2 MiB, und `Multipart` liest
+unter dieser Grenze. Sie zählt das ganze Formular, nicht eine Datei. Ohne
+Änderung ist der `max_bytes`-Standard von 10 MiB also nie erreichbar, und eine
+Datei knapp unter 2 MiB scheitert als Multipart-Parse-Fehler.
+
+Hebe die Grenze mit `max_body_bytes` in `config/default.toml` an:
+
+```toml
+[server]
+max_body_bytes = 5242880   # 5 MiB: room for a 2 MiB file and the form
+```
+
+oder mit der Umgebungsvariable `RUSTANGO__SERVER__MAX_BODY_BYTES=5242880`. Der
+`Cli` macht daraus einen `BodyLimitLayer` (`rustango::body_limit`) auf der API
+und auf jedem mit `nest_with` hinzugefügten Router, und er ersetzt die 2-MiB-Grenze
+von axum. Ein Request mit größerem `Content-Length` bekommt
+`413 Payload Too Large`, bevor dein Handler läuft. Setze den Wert etwas über dein
+größtes `max_bytes`.
+
+Der `Cli` liest diese Einstellung nur, wenn er deine Settings hat. Die
+gescaffoldete `main.rs` übergibt sie mit `.with_loaded_settings(loaded)`. Ohne
+diesen Aufruf (oder `.with_settings_from_env()`) wird der Wert ignoriert, und der
+Server loggt eine Warnung, die ihn nennt.
 
 ---
 
@@ -509,3 +748,4 @@ Schritt „beim ersten Gebrauch anlegen"; ist das Feature aus, werden die Tabell
 - [Hintergrundjobs](jobs.md) — skaliere/transcodiere einen Upload außerhalb des Requests.
 - [Caching](caching.md) — dasselbe Muster „Backend-austauschen" per Trait.
 - [Sicherheitsleitfaden](security.md) — Validieren nicht vertrauenswürdiger Upload-Eingaben.
+- [Häufige Aufgaben](common-tasks.md) — kurze Antworten mit Links zu vollständigen Beispielen.

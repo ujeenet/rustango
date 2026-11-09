@@ -174,7 +174,7 @@ This adds the `cargo rustango ...` subcommand globally. Confirm it's there:
 cargo rustango --help
 ```
 
-The scaffolder's own version is the one your project pins, so installing the newest gives you the newest rustango. To generate a project on an older release, install that generator instead (`cargo install cargo-rustango --version 0.65.1`) — see [Scaffolding](scaffolding.md#the-generators-own-version-is-the-one-your-project-gets).
+The scaffolder's own version is the one your project pins, so installing the newest gives you the newest rustango. To generate a project on an older release, install that generator instead (`cargo install cargo-rustango --version 0.65.2`) — see [Scaffolding](scaffolding.md#the-generators-own-version-is-the-one-your-project-gets).
 
 ---
 
@@ -1359,13 +1359,14 @@ Make sure your reverse proxy:
 | Topic | Doc |
 |---|---|
 | Runnable version of this guide | [`examples/getting_started_blog`](https://github.com/ujeenet/rustango/tree/develop/crates/rustango/examples/getting_started_blog) |
+| Everyday tasks (sign up, upload, email, jobs, deploy) | [`docs/common-tasks.md`](common-tasks.md) |
 | Every `manage` subcommand | [`docs/manage.md`](manage.md) |
 | ORM cookbook (advanced filters, aggregations, M2M, soft delete) | [`docs/orm.md`](orm.md) |
 | Middleware (the full layer catalog + ordering) | [`docs/middleware.md`](middleware.md) |
 | Performance benchmarks (vs Go) | [`docs/benchmarks.md`](benchmarks.md) |
 | API conventions (naming, builder patterns, feature gates) | [`docs/api-conventions.md`](api-conventions.md) |
 | Security features in depth | [`docs/security.md`](security.md) |
-| Multi-tenancy | [README — Multi-tenancy section](https://github.com/ujeenet/rustango/blob/develop/README.md#multi-tenancy) |
+| Multi-tenancy | [`docs/tenancy.md`](tenancy.md) |
 | API docs | <https://docs.rs/rustango> |
 
 If you hit something that doesn't work or is unclear, open an issue.

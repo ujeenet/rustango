@@ -753,7 +753,11 @@ router.request_id(RequestIdLayer::always_generate());
 
 ## Managing secrets
 
-Never hard-code secrets (database passwords, API keys) in your source. Read them at runtime through the `Secrets` trait, which abstracts over where they actually live. (A "trait" is Rust's version of an interface.) The built-in `EnvSecrets` reads from environment variables.
+Never hard-code secrets (database passwords, API keys) in your source.
+
+Your `config/*.toml` files are committed to git, so keep passwords out of them too. Any setting can come from an environment variable named `RUSTANGO__SECTION__KEY` instead. For example, `RUSTANGO__MAIL__SMTP_PASSWORD` sets `[mail] smtp_password`. Put it in `.env` on your machine (the scaffolded `.gitignore` leaves `.env` out of git) and in your host's secret settings in production. See [Keep the SMTP password out of git](email.md#keep-the-smtp-password-out-of-git).
+
+Read the secrets your own code needs at runtime through the `Secrets` trait, which abstracts over where they actually live. (A "trait" is Rust's version of an interface.) The built-in `EnvSecrets` reads from environment variables.
 
 ```rust
 use rustango::secrets::{Secrets, EnvSecrets, BoxedSecrets};

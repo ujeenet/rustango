@@ -81,6 +81,8 @@ const UNBACKED: &[(&str, usize)] = &[
     // `scaffolding.md` came off this list in #1421, which holds its
     // `--features` table to what `cargo rustango new --help` prints.
     ("benchmarks.md", 0),
+    // A table of links to the pages that hold the code; no examples of its own.
+    ("common-tasks.md", 0),
     ("database-tuning.md", 0),
     ("glossary.md", 0),
     ("migrations.md", 0),
