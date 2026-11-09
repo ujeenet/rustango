@@ -191,6 +191,9 @@ There is no ready-made gate for an app without tenancy today. Use one of these:
   return `redirect_to_login(login_url, "next", original_path)`. In the login
   handler, read `?next=` with `extract_next` and pass it through `safe_next`,
   as shown above. These helpers do not need the `tenancy` feature.
+  For an API with tokens instead of cookies, [Getting started, Step 14](getting-started.md#step-14-add-sign-up-login-and-jwt-authentication)
+  builds the whole thing: a user model, register and login handlers, and a
+  Bearer-token middleware.
 
 ---
 

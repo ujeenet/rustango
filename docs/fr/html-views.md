@@ -95,7 +95,7 @@ méthodes sur chaque vue :
 
 | Appel | Qui entre |
 |---|---|
-| `.allow_anonymous()` | quiconque atteint le routeur ; placez votre propre couche d'auth devant si besoin |
+| `.allow_anonymous()` | quiconque atteint le routeur ; placez votre propre couche d'auth devant si besoin ([exemple](getting-started.md#étape-14--inscription-connexion-et-authentification-jwt)) |
 | `.login_required()` | tout utilisateur connecté ; les autres reçoivent `401` |
 | `.permissions(&["posts.change"])` | un utilisateur connecté qui a chaque codename ; les superutilisateurs passent |
 | `.permissions_for_model()` | le codename du modèle : `view` pour List et Detail, `add`, `change`, `delete` pour les vues d'écriture |

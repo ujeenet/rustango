@@ -1,6 +1,6 @@
 # Bien démarrer : construire un blog avec Rustango
 
-Ce guide vous accompagne depuis un répertoire vide jusqu'à un blog déployé : des articles, une interface d'administration, une API JSON, une authentification JWT et des tests. De bout en bout.
+Ce guide vous accompagne depuis un répertoire vide jusqu'à un blog déployé : des articles, une interface d'administration, une API JSON avec inscription et connexion (JWT), et des tests. De bout en bout.
 
 > **Durée :** ~45 minutes pour la visite complète, ~10 minutes si vous voulez juste la voir fonctionner.
 >
@@ -604,14 +604,14 @@ use crate::blog::models::Post;
     search_fields = "title, body",
     ordering      = "-published_at",
     page_size     = 20,
-    allow_anonymous,
+    read_only,
 )]
 pub struct PostViewSet;
 ```
 
 Enregistrez le nouveau module en ajoutant `pub mod post_view_set;` à `src/lib.rs` (`make:viewset` affiche cette ligne pour vous).
 
-Le fichier généré commence par `read_only`. Si vous l'omettez, comme ci-dessus, le ViewSet sert aussi la création, la mise à jour et la suppression. Les actions d'écriture ouvertes empêchent le montage du routeur. Placez votre propre couche d'auth devant et ajoutez `allow_anonymous`, comme ci-dessus, pour indiquer que c'est voulu ; les codenames `permissions(...)` exigent la feature `tenancy` et refusent le montage sans elle.
+Gardez `read_only` pour l'instant : l'API ne sert que la liste et la lecture. Sans lui, le ViewSet servirait aussi la création, la mise à jour et la suppression à tout le monde, donc il refuse de se monter tant que vous n'avez pas dit qui peut écrire. L'[étape 14](#étape-14--inscription-connexion-et-authentification-jwt) ajoute des comptes et ouvre les écritures aux utilisateurs connectés.
 
 ### 12b. Monter les routes
 
@@ -644,13 +644,12 @@ Dans un autre terminal, interrogez l'API avec `curl` :
 
 ```bash
 curl http://localhost:8080/api/posts                                    # list
-curl -X POST http://localhost:8080/api/posts \
-     -H "content-type: application/json" \
-     -d '{"title":"From API","body":"Yo","status":"published","author_id":1}'
 curl http://localhost:8080/api/posts/1                                   # retrieve
 curl "http://localhost:8080/api/posts?search=API&ordering=-id"            # search + sort
 curl "http://localhost:8080/api/posts?status__ne=draft"                   # lookup operator
 ```
+
+Pour l'instant, un `POST` répond `405 Method Not Allowed`. Vous écrirez des articles via l'API à l'étape 14.
 
 ---
 
@@ -697,7 +696,7 @@ Branchez le serializer dans le ViewSet avec l'attribut `serializer` — les rép
     fields = "id, title, body, author_id, published_at",
     serializer = crate::post_serializer::PostSerializer,
     ordering = "-published_at",
-    allow_anonymous,
+    read_only,
 )]
 pub struct PostViewSet;
 ```
@@ -706,56 +705,493 @@ Ceci fonctionne à l'identique sur PostgreSQL, MySQL et SQLite. Les redéfinitio
 
 ---
 
-## Étape 14 : ajouter l'authentification JWT
+## Étape 14 : inscription, connexion et authentification JWT
 
-Les JWT sont des jetons signés que vous remettez à un client après la connexion et que vous vérifiez à chaque requête, un schéma courant pour l'authentification d'API. Le module `rustango::jwt` de **Rustango** les émet et les vérifie (HS256), et il est actif par défaut — aucune feature supplémentaire à activer.
+Jusqu'ici, tout le monde peut lire les articles et personne ne peut en écrire. Dans cette étape, les gens créent un compte, se connectent et reçoivent un jeton. Avec ce jeton, ils peuvent écrire des articles. La lecture reste publique.
 
-### 14a. Émettre un jeton à la connexion
+D'abord, quelques mots :
 
-Il s'agit de fragments, et non de fichiers autonomes : celui-ci se place à l'intérieur de votre gestionnaire de connexion dans `src/views.rs`, aux côtés des gestionnaires de l'étape 6.
+- Un **hachage de mot de passe** est une transformation à sens unique d'un mot de passe. Vous stockez le hachage, jamais le mot de passe. À la connexion, on hache à nouveau la tentative et on compare.
+- Un **JWT** (JSON Web Token) est un petit texte signé. Le serveur le signe avec une clé secrète, donc personne ne peut le modifier sans la clé. Il contient l'id de l'utilisateur et une heure d'expiration.
+- Le client renvoie le jeton à chaque requête, dans l'en-tête `Authorization: Bearer <token>`.
+- Un **middleware** est du code qui s'exécute avant votre handler. Ici, il vérifie le jeton.
 
-Intégrez l'identifiant de l'utilisateur (le « sujet » du jeton) et toute revendication (claim) personnalisée, comme les rôles, dans un jeton signé, puis remettez-le au client :
+`rustango::passwords` hache les mots de passe (argon2id). `rustango::jwt` signe et vérifie les jetons (HS256). Les deux sont actifs par défaut. Le code final se trouve dans le projet d'exemple [`getting_started_blog`](https://github.com/ujeenet/rustango/tree/develop/crates/rustango/examples/getting_started_blog), et son `tests/auth_flow.rs` vérifie chaque cas ci-dessous.
+
+### 14a. Un modèle d'utilisateur
+
+Ajoutez un second modèle dans `src/blog/models.rs`, sous `Post`. Les imports en haut du fichier restent tels quels :
 
 ```rust
-use rustango::jwt::{encode, Claims};
+/// Someone who can sign in to the API (Step 14).
+#[derive(Model, Clone, Debug)]
+#[rustango(table = "api_users", display = "username")]
+pub struct ApiUser {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+
+    #[rustango(max_length = 150, unique)]
+    pub username: String,
+
+    // An argon2 hash, never the password itself.
+    #[rustango(max_length = 255)]
+    pub password_hash: String,
+
+    #[rustango(auto_now_add)]
+    pub created_at: Auto<DateTime<Utc>>,
+}
+```
+
+`unique` fait refuser par la base une seconde ligne avec le même nom d'utilisateur. Créez et appliquez la migration, comme à l'étape 9 :
+
+```bash
+cargo run -- makemigrations     # wrote ./migrations/0002_create_api_users.json
+cargo run -- migrate
+```
+
+Ne mettez jamais `password_hash` dans un ViewSet ni dans un serializer : le framework refuse de monter un ViewSet qui nomme une colonne d'identifiants, donc un hachage ne peut pas fuir par l'API. L'admin affiche la nouvelle table et masque cette colonne.
+
+### 14b. La clé de signature
+
+Le serveur a besoin d'une clé secrète pour signer les jetons. Créez-en une d'au moins 32 octets aléatoires et mettez-la dans `.env` :
+
+```bash
+echo "JWT_SECRET=$(openssl rand -base64 32)" >> .env
+```
+
+Dans PowerShell, lancez les trois mêmes lignes que l'étape 18 utilise pour `RUSTANGO_SESSION_SECRET`, puis ajoutez la valeur à `.env` sous la forme `JWT_SECRET=...`. Utilisez une autre clé en production et gardez-la hors de git. `.env` est déjà dans `.gitignore`.
+
+### 14c. S'inscrire, se connecter, vérifier le jeton
+
+Créez `src/blog/auth.rs`. Ce fichier contient tout le code de connexion. Il est présenté ici en trois parties ; collez-les l'une après l'autre. Ajoutez ensuite `pub mod auth;` dans `src/blog/mod.rs`.
+
+**Partie 1 : imports, types et petites fonctions d'aide.**
+
+```rust
+//! Sign-up, sign-in and the Bearer-token guard for the blog API (Step 14).
+
+use std::collections::HashMap;
 use std::time::Duration;
 
-// A key of its own, 32+ bytes: add `JWT_SECRET=<output of openssl rand -base64 32>`
-// to `.env`. (Step 3 leaves `RUSTANGO_SESSION_SECRET` unset in development.)
-let secret = std::env::var("JWT_SECRET")?.into_bytes();
+use axum::extract::{Request, State};
+use axum::http::request::Parts;
+use axum::http::{header, Method, StatusCode};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+use rustango::api_errors::ApiError;
+use rustango::core::{ModelSchema, WhereExpr};
+use rustango::jwt::{self, Claims};
+use rustango::login_throttle::{self, ClientIp, LoginRefused, LoginScope};
+use rustango::passwords::{self, PasswordError};
+use rustango::prelude::*;
+use rustango::sql::{sqlx, ExecError, Pool};
+use rustango::viewset::{match_nothing, ViewSetFilter, WritePin};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 
-let mut claims = Claims::new(user_id.to_string());   // subject = user id
-claims.set("roles", vec!["editor"]);
-let token = encode(&claims.ttl(Duration::from_secs(900)), &secret)?;
+use crate::blog::models::{ApiUser, Post};
 
-// Send `token` to the client (e.g. in the login response body).
+/// How long a token from `/api/login` stays valid.
+pub const TOKEN_TTL: Duration = Duration::from_secs(15 * 60);
+
+/// What `/api/register` and `/api/login` read from the request body.
+#[derive(Deserialize)]
+pub struct Credentials {
+    pub username: String,
+    pub password: String,
+}
+
+/// What `/api/login` sends back.
+#[derive(Serialize)]
+pub struct TokenResponse {
+    pub access_token: String,
+    pub token_type: &'static str,
+    pub expires_in: u64,
+}
+
+/// The signed-in user. The guard puts it on the request for the handlers.
+#[derive(Clone, Debug)]
+pub struct CurrentUser {
+    pub id: i64,
+    pub username: String,
+}
+
+/// The signing key, from the `JWT_SECRET` environment variable.
+fn jwt_secret() -> Result<Vec<u8>, ApiError> {
+    match std::env::var("JWT_SECRET") {
+        Ok(secret) if secret.len() >= 32 => Ok(secret.into_bytes()),
+        _ => Err(ApiError::logged(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "auth",
+            "JWT_SECRET is unset or shorter than 32 bytes",
+        )),
+    }
+}
+
+/// Usernames are stored lower-case, so `Alice` and `alice` are one account.
+fn normalize(username: &str) -> String {
+    username.trim().to_lowercase()
+}
+
+/// A 500 that logs the cause and tells the client nothing about it.
+fn server_error(e: impl std::fmt::Display) -> ApiError {
+    ApiError::logged(StatusCode::INTERNAL_SERVER_ERROR, "auth", e)
+}
+
+/// The same answer for an unknown user and a wrong password.
+fn bad_credentials() -> ApiError {
+    ApiError::unauthorized("invalid username or password")
+}
 ```
 
-### 14b. Vérifier le jeton à chaque requête
+`ApiError` envoie la forme d'erreur JSON habituelle du framework (`{"error": ..., "message": ..., "status": ...}`), donc vos erreurs ressemblent à celles du ViewSet.
 
-Ce code se place là où vous protégez une route — dans un gestionnaire protégé de `src/views.rs`, ou dans un extracteur axum / une couche `middleware::from_fn` si vous souhaitez l'appliquer à toute une sous-arborescence.
-
-Décodez le jeton — ceci vérifie la signature et l'expiration — puis relisez les revendications (claims). S'il est absent ou invalide, rejetez la requête comme non autorisée :
+**Partie 2 : les deux handlers.** Un handler est une `async fn` qui répond à une route. `State(pool)` lui donne le pool de la base ; `Json(body)` lit le corps JSON dans `Credentials`.
 
 ```rust
-use rustango::jwt::decode;
+/// `POST /api/register` — create an account. 201 on success, 409 if the name is taken.
+pub async fn register(
+    State(pool): State<Pool>,
+    Json(body): Json<Credentials>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let username = normalize(&body.username);
+    let name_ok = (3..=150).contains(&username.len())
+        && username
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+    if !name_ok {
+        return Err(ApiError::validation(
+            "username: 3-150 characters, letters, digits, '_', '-' or '.'",
+        )
+        .with_field("username"));
+    }
+    // An upper limit too: hashing a huge password costs the server.
+    if body.password.len() > 128 || !passwords::strength_score(&body.password).is_empty() {
+        return Err(ApiError::validation(
+            "password: 12-128 characters, with a digit or a symbol, not a common one",
+        )
+        .with_field("password"));
+    }
 
-let claims = decode(&access_token, &secret)
-    .map_err(|_| StatusCode::UNAUTHORIZED)?;
+    // argon2 is slow on purpose; the `_async` call keeps the server responsive.
+    let password_hash = passwords::hash_async(&body.password)
+        .await
+        .map_err(server_error)?;
 
-let user_id = claims.subject().ok_or(StatusCode::UNAUTHORIZED)?;
-let roles: Vec<String> = claims.get("roles").unwrap_or_default();
+    let mut user = ApiUser {
+        id: Auto::default(),
+        username,
+        password_hash,
+        created_at: Auto::default(),
+    };
+    match user.save(&pool).await {
+        Ok(_) => {}
+        // The unique index on `username` decides, so two parallel sign-ups cannot both win.
+        Err(ExecError::Driver(sqlx::Error::Database(db))) if db.is_unique_violation() => {
+            return Err(ApiError::conflict("username already taken").with_field("username"));
+        }
+        Err(e) => return Err(server_error(e)),
+    }
+
+    let id = user.id.get().copied().unwrap_or_default();
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "id": id, "username": user.username })),
+    ))
+}
+
+/// `POST /api/login` — check the password and hand out a short-lived token.
+pub async fn login(
+    State(pool): State<Pool>,
+    ip: ClientIp,
+    Json(body): Json<Credentials>,
+) -> Result<Json<TokenResponse>, Response> {
+    let username = normalize(&body.username);
+
+    // Before any lookup: 429 once this IP (or everyone) failed too often.
+    // `Sso(name)` is the scope an app can name: own limits, no account lock.
+    let scope = LoginScope::Sso("blog-api".to_owned());
+    let attempt = login_throttle::shared()
+        .begin(&scope, &ip, &username)
+        .await
+        .map_err(IntoResponse::into_response)?;
+
+    let found = ApiUser::objects()
+        .where_(ApiUser::username.eq(username))
+        .first(&pool)
+        .await
+        .map_err(|e| server_error(e).into_response())?;
+
+    let Some(user) = found else {
+        // Do the same slow work as a real check, so timing does not reveal the name is unknown.
+        if passwords::verify_dummy_async(&body.password).await.is_err() {
+            return Err(LoginRefused::Busy.into_response()); // 503: no hashing slot free
+        }
+        attempt.failed().await;
+        return Err(bad_credentials().into_response());
+    };
+    let password_ok = match passwords::verify_async(&body.password, &user.password_hash).await {
+        Ok(ok) => ok,
+        Err(PasswordError::Busy) => return Err(LoginRefused::Busy.into_response()),
+        // A corrupt stored hash counts as a wrong password, not a server error.
+        Err(_) => false,
+    };
+    if !password_ok {
+        attempt.failed().await;
+        return Err(bad_credentials().into_response());
+    }
+    attempt.succeeded().await;
+
+    let id = user.id.get().copied().unwrap_or_default();
+    let claims = Claims::new(id.to_string()).ttl(TOKEN_TTL); // subject = user id
+    let secret = jwt_secret().map_err(IntoResponse::into_response)?;
+    let access_token =
+        jwt::encode(&claims, &secret).map_err(|e| server_error(e).into_response())?;
+    Ok(Json(TokenResponse {
+        access_token,
+        token_type: "Bearer",
+        expires_in: TOKEN_TTL.as_secs(),
+    }))
+}
 ```
 
-### 14c. Cycle de vie accès + rafraîchissement
+Ce que fait `login`, dans l'ordre :
 
-`rustango::jwt` émet des jetons uniques sans état. Pour le schéma complet — des jetons d'**accès** de courte durée, un jeton de **rafraîchissement** de longue durée dans un cookie HttpOnly, la rotation, et une liste noire de JTI pour la révocation — activez la feature `tenancy` et utilisez `rustango::tenancy::jwt_lifecycle::JwtLifecycle`, dont les méthodes `issue_pair_with` / `verify_access` / `refresh` gèrent la paire pour vous.
+- `login_throttle::shared().begin(...)` est la même barrière que celle des connexions intégrées. Elle compte les échecs par IP client et au total, et répond `429 Too Many Requests` quand il y en a trop. Vous signalez chaque résultat avec `attempt.failed()` ou `attempt.succeeded()` ; un succès rend le compte. Le scope `LoginScope::Sso("blog-api")` donne à cette connexion ses propres limites.
+- Un nom d'utilisateur inconnu et un mauvais mot de passe reçoivent le même `401` avec le même message. Sinon, un attaquant pourrait essayer des noms et savoir quels comptes existent.
+- `verify_dummy_async` fait une vérification complète contre un faux hachage quand l'utilisateur n'existe pas, donc les deux cas prennent à peu près le même temps.
+- `Claims::new(id)` place l'id de l'utilisateur dans le jeton comme *subject*. `.ttl(TOKEN_TTL)` le fait expirer au bout de 15 minutes.
+
+**Partie 3 : le garde et la règle des articles.**
+
+```rust
+/// The user behind an `Authorization: Bearer <token>` header, or a 401.
+pub async fn authenticate(pool: &Pool, parts: &Parts) -> Result<CurrentUser, ApiError> {
+    let unauthorized = || ApiError::unauthorized("missing, invalid or expired token");
+
+    let token = parts
+        .headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split_once(' '))
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+        .map(|(_, token)| token.trim())
+        .ok_or_else(unauthorized)?;
+    // `decode` checks the signature and the expiry time.
+    let claims = jwt::decode(token, &jwt_secret()?).map_err(|_| unauthorized())?;
+    let id: i64 = claims
+        .subject()
+        .and_then(|sub| sub.parse().ok())
+        .ok_or_else(unauthorized)?;
+
+    // A deleted account's tokens stop working at once.
+    let user = ApiUser::objects()
+        .where_(ApiUser::id.eq(id))
+        .first(pool)
+        .await
+        .map_err(server_error)?
+        .ok_or_else(unauthorized)?;
+    Ok(CurrentUser {
+        id,
+        username: user.username,
+    })
+}
+
+/// Middleware: reads pass, every other method needs a valid token.
+pub async fn require_user_for_writes(
+    State(pool): State<Pool>,
+    request: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    if matches!(*request.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
+        return Ok(next.run(request).await);
+    }
+    let (mut parts, body) = request.into_parts();
+    let user = authenticate(&pool, &parts).await?;
+    parts.extensions.insert(user);
+    Ok(next.run(Request::from_parts(parts, body)).await)
+}
+
+/// ViewSet rule: a new post's author is the signed-in user, and only the
+/// author may change or delete it. Reads see every post.
+pub struct AuthorFromToken;
+
+impl ViewSetFilter for AuthorFromToken {
+    fn filter(&self, _: &HashMap<String, String>, _: &'static ModelSchema) -> Vec<WhereExpr> {
+        Vec::new()
+    }
+
+    fn filter_with(
+        &self,
+        parts: &Parts,
+        _: &HashMap<String, String>,
+        schema: &'static ModelSchema,
+    ) -> Vec<WhereExpr> {
+        if matches!(parts.method, Method::GET | Method::HEAD | Method::OPTIONS) {
+            return Vec::new();
+        }
+        match parts.extensions.get::<CurrentUser>() {
+            Some(user) => vec![Post::author_id.eq(user.id).into()],
+            // No user: match no row. An empty Vec would mean "every row".
+            None => vec![match_nothing(schema)],
+        }
+    }
+
+    fn write_pins(&self, parts: &Parts, _: &'static ModelSchema) -> Vec<WritePin> {
+        match parts.extensions.get::<CurrentUser>() {
+            // Whatever `author_id` the body sends, this value is stored.
+            Some(user) => vec![WritePin::field("author_id", user.id)],
+            None => vec![WritePin::Deny],
+        }
+    }
+}
+```
+
+- `require_user_for_writes` est le middleware. Les requêtes `GET` passent. Pour tout le reste, il appelle `authenticate`, qui répond `401` si l'en-tête manque, si le jeton a été modifié ou a expiré, ou si l'utilisateur n'existe plus. En cas de succès, il place un `CurrentUser` sur la requête, où le code suivant peut le lire.
+- `AuthorFromToken` est un *filter backend* du ViewSet : il peut restreindre les lignes qu'une requête voit et fixer des valeurs à l'écriture. `write_pins` enregistre l'id de l'utilisateur connecté dans `author_id` à la création, quoi que dise le corps, et une mise à jour ne peut jamais le changer. `filter_with` ne laisse un utilisateur modifier ou supprimer que ses propres articles ; l'article de quelqu'un d'autre répond `404`.
+
+### 14d. Monter les routes
+
+Ajoutez les routes de connexion dans `src/blog/urls.rs`. Elles ont besoin du pool de la base, donc elles ont leur propre fonction à côté de `api()` :
+
+```rust
+use std::time::Duration;
+
+use axum::routing::post;
+use axum::Router;
+use rustango::rate_limit::{RateLimitLayer, RateLimitRouterExt};
+use rustango::sql::Pool;
+
+use super::auth;
+
+/// `/register` and `/login` (Step 14). They need the pool, so `main.rs` mounts them.
+pub fn auth_routes(pool: Pool) -> Router {
+    // Each sign-up costs a password hash: 10 a minute per client IP.
+    let register = Router::new()
+        .route("/register", post(auth::register))
+        .rate_limit(RateLimitLayer::per_ip(10, Duration::from_secs(60)));
+    Router::new()
+        .route("/login", post(auth::login)) // throttled inside the handler
+        .merge(register)
+        .with_state(pool)
+}
+```
+
+Ajoutez ensuite dans `src/urls.rs` une fonction qui rassemble tout ce qui va sous `/api` :
+
+```rust
+/// Everything `main.rs` mounts under `/api`: the posts and the sign-in routes (Step 14).
+pub fn rest_api(pool: Pool) -> Router {
+    crate::post_view_set::PostViewSet::router("/posts", pool.clone())
+        .merge(crate::blog::urls::auth_routes(pool))
+}
+```
+
+Dans `src/main.rs`, remplacez la ligne `/api` de l'étape 12b par :
+
+```rust
+.nest_with("/api", urls::rest_api)
+```
+
+### 14e. Protéger les écritures des articles
+
+Remplacez `src/post_view_set.rs` par la version ci-dessous. Les attributs de `#[derive(ViewSet)]` n'ont pas d'option pour un filter backend, donc ce fichier utilise les mêmes options via le builder `ViewSet`. `PostViewSet::router(prefix, pool)` garde son nom, donc le reste de votre code ne change pas.
+
+```rust
+use axum::middleware::from_fn_with_state;
+use axum::Router;
+use rustango::core::Model as _;
+use rustango::sql::Pool;
+use rustango::viewset::ViewSet;
+
+use crate::blog::auth::{require_user_for_writes, AuthorFromToken};
+use crate::blog::models::Post;
+use crate::post_serializer::PostSerializer;
+
+/// The Post API: anyone can read, writes need a Bearer token (Step 14).
+pub struct PostViewSet;
+
+impl PostViewSet {
+    pub fn router(prefix: &str, pool: impl Into<Pool>) -> Router {
+        let pool = pool.into();
+        ViewSet::for_model(
+            Post::SCHEMA,
+            &["id", "title", "body", "author_id", "published_at"],
+        )
+        .serializer::<PostSerializer>()
+        .filter_fields(&["author_id", "status"])
+        .search_fields(&["title", "body"])
+        .ordering(&[("published_at", true)])
+        .page_size(20)
+        .filter_backend(AuthorFromToken)
+        // Writes pass the framework's gate because the layer below guards them.
+        .allow_anonymous()
+        .router(prefix, pool.clone())
+        .layer(from_fn_with_state(pool, require_user_for_writes))
+    }
+}
+```
+
+`allow_anonymous()` indique au framework que les écritures ne sont pas ouvertes par erreur : votre propre middleware, ajouté avec `.layer(...)`, vérifie chaque écriture avant que le ViewSet ne la voie. Les deux lignes comptent : sans `allow_anonymous()` le routeur refuse de se monter, et sans `.layer(...)` n'importe qui pourrait écrire.
+
+Le serializer de l'étape 13 liste toujours `author_id`, donc les réponses l'affichent. Un client peut encore l'envoyer, mais le pin remplace la valeur.
+
+### 14f. Essayer avec curl
+
+Lancez le serveur avec `cargo run`, puis dans un autre terminal :
+
+```bash
+# 1. Create an account: 201
+curl -i -X POST http://localhost:8080/api/register \
+     -H "content-type: application/json" \
+     -d '{"username":"alice","password":"correct-Horse-battery-9"}'
+
+# 2. Log in: 200 with {"access_token":"eyJ...","token_type":"Bearer","expires_in":900}
+curl -X POST http://localhost:8080/api/login \
+     -H "content-type: application/json" \
+     -d '{"username":"alice","password":"correct-Horse-battery-9"}'
+
+# 3. Keep the token in a shell variable (paste your own value)
+TOKEN=eyJ...
+
+# 4. Write a post with the token: 201, and "author_id" is alice's id
+curl -X POST http://localhost:8080/api/posts \
+     -H "authorization: Bearer $TOKEN" \
+     -H "content-type: application/json" \
+     -d '{"title":"Hello","content":"My first signed-in post"}'
+
+# 5. The same request without the token: 401
+curl -i -X POST http://localhost:8080/api/posts \
+     -H "content-type: application/json" \
+     -d '{"title":"Nope","content":"x"}'
+
+# 6. Reading stays public: 200
+curl http://localhost:8080/api/posts
+```
+
+Un mauvais mot de passe, ou un nom d'utilisateur qui n'existe pas, donne le même `401 {"error":"unauthorized","message":"invalid username or password",...}`. Au bout de 15 minutes, le jeton expire et les écritures répondent de nouveau `401` : reconnectez-vous.
+
+> **Bonnes pratiques dès le départ**
+>
+> - **Secret depuis l'environnement.** `JWT_SECRET` vient de `.env` ou de l'environnement du serveur, jamais du code ni de git. Utilisez 32 octets aléatoires ou plus (`openssl rand -base64 32`) et une clé différente par environnement.
+> - **Jetons de courte durée.** 15 minutes limitent les dégâts d'un jeton volé. Ne montez pas à plusieurs jours pour éviter une connexion.
+> - **Ne journalisez jamais de secrets.** Ne journalisez ni n'affichez de mots de passe, de jetons ou l'en-tête `Authorization`, et ne mettez jamais un jeton dans une URL. L'`AccessLogLayer` de l'étape 15 ne journalise ni en-têtes ni corps et masque les valeurs de la query.
+> - **Erreurs de connexion génériques.** Le même `401` pour un utilisateur inconnu et un mauvais mot de passe, comme ci-dessus.
+> - **Limitez les tentatives de connexion.** Gardez la barrière `login_throttle` dans `login` et la limite de débit sur `/register`. Derrière un proxy, déclarez les proxies de confiance (étape 18), sinon tous les clients partagent l'IP du proxy.
+> - **HTTPS en production.** Un jeton envoyé en HTTP simple peut être lu en chemin. Terminez HTTPS sur votre proxy (étape 18).
+> - **Hachage côté serveur seulement, avec argon2 seulement.** Utilisez `passwords::hash_async` / `verify_async` ; ne stockez jamais un mot de passe ni un hachage rapide comme SHA-256.
+> - **Pas d'écritures ouvertes.** Chaque route d'écriture a besoin d'une vérification, comme la couche de 14e. Un ViewSet avec `allow_anonymous` et sans couche laisse n'importe qui modifier vos données.
+
+### 14g. Étape suivante : jetons de rafraîchissement
+
+`rustango::jwt` émet des jetons uniques et sans état : quand l'un expire, l'utilisateur se reconnecte, et vous ne pouvez pas annuler un jeton avant son expiration. Quand il vous faut des sessions plus longues ou une déconnexion immédiate, passez au modèle complet : des jetons d'**accès** de courte durée, un jeton de **rafraîchissement** de longue durée dans un cookie HttpOnly, la rotation et une liste noire de JTI pour la révocation. Activez la feature `tenancy` et utilisez `rustango::tenancy::jwt_lifecycle::JwtLifecycle`, dont les méthodes `issue_pair_with` / `verify_access` / `refresh` gèrent la paire pour vous.
 
 ---
 
 ## Étape 15 : ajouter le middleware de sécurité
 
-Le middleware englobe chaque requête pour y ajouter un comportement transversal. Ce code se place dans `src/main.rs` : il remplace la ligne `nest_with` de `/api` de l'étape 12b, afin que les couches englobent chaque route sous `/api`. Ici, vous empilez les identifiants de requête, la journalisation des accès, la limitation de débit, le CORS et les en-têtes de sécurité en une seule chaîne. Chaque `.method(...)` ajoute une couche ; l'ordre des appels détermine l'ordre de la pile. Voir le [guide du middleware](middleware.md) pour le catalogue complet des couches et les règles d'ordonnancement.
+Le middleware englobe chaque requête pour y ajouter un comportement transversal. Ce code se place dans `src/main.rs` : il remplace la ligne `nest_with` de `/api` de l'étape 14d, afin que les couches englobent chaque route sous `/api`. Ici, vous empilez les identifiants de requête, la journalisation des accès, la limitation de débit, le CORS et les en-têtes de sécurité en une seule chaîne. Chaque `.method(...)` ajoute une couche ; l'ordre des appels détermine l'ordre de la pile. Voir le [guide du middleware](middleware.md) pour le catalogue complet des couches et les règles d'ordonnancement.
 
 ```rust
 use rustango::security_headers::{SecurityHeadersLayer, SecurityHeadersRouterExt, CspBuilder};
@@ -765,7 +1201,7 @@ use rustango::access_log::{AccessLogLayer, AccessLogRouterExt};
 use rustango::request_id::{RequestIdLayer, RequestIdRouterExt};
 use std::time::Duration;
 
-.nest_with("/api", |pool| myblog::post_view_set::PostViewSet::router("/posts", pool)
+.nest_with("/api", |pool| urls::rest_api(pool)
     .request_id(RequestIdLayer::default())
     .access_log(AccessLogLayer::default())                      // PII-redacted
     .rate_limit(RateLimitLayer::per_ip(60, Duration::from_secs(60)))
@@ -792,23 +1228,22 @@ cargo run -- make:test PostSmoke      # generates tests/post_smoke.rs
 
 Les générateurs `make:*` prennent un nom en PascalCase ; `PostSmoke` devient le fichier en snake_case `tests/post_smoke.rs`.
 
-Modifiez `tests/post_smoke.rs`. Les tests d'intégration vivent dans une crate séparée, donc ils construisent le routeur testé directement à partir du ViewSet (le même appel `router(...)` que celui monté à l'étape 12b) :
+Modifiez `tests/post_smoke.rs`. Les tests d'intégration vivent dans une crate séparée, donc ils construisent eux-mêmes le routeur testé, avec le même `urls::rest_api` que `main.rs` monte à l'étape 14d :
 
 ```rust
-use rustango::test_client::TestClient;
-use myblog::post_view_set::PostViewSet;
+use myblog::urls;
 use rustango::sql::Pool;
+use rustango::test_client::TestClient;
 use serde_json::json;
 
 async fn app() -> axum::Router {
-    // Un test dans `tests/` est une crate séparée et n'exécute jamais
-    // `main`, donc rien n'a chargé `.env` pour lui. Sans cette ligne,
-    // `DATABASE_URL` n'est pas définie et les deux tests paniquent avant
-    // d'atteindre la base de données.
+    // A test in `tests/` is a separate crate and never runs `main`, so
+    // nothing has loaded `.env` for it. Without this line `DATABASE_URL`
+    // is unset and both tests panic before reaching the database.
     let _ = dotenvy::dotenv();
 
     let pool = Pool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
-    PostViewSet::router("/api/posts", pool)
+    axum::Router::new().nest("/api", urls::rest_api(pool))
 }
 
 #[tokio::test]
@@ -821,33 +1256,26 @@ async fn list_posts_returns_200() {
 }
 
 #[tokio::test]
-async fn create_post_returns_the_new_object() {
+async fn create_post_without_a_token_returns_401() {
     let client = TestClient::new(app().await);
     let response = client.post("/api/posts")
-        // Envoyez les champs du serializer. `status` est omis parce que le
-        // serializer ne le liste pas : il serait de toute façon écarté —
-        // c'est le `default = "'draft'"` du modèle qui le remplit.
-        .json(&json!({
-            "title": "Test",
-            "content": "x",
-            "author_id": 1,
-        }))
+        // The serializer's field names: `content` is `Post.body` renamed.
+        .json(&json!({ "title": "Test", "content": "x" }))
         .send().await;
-    assert_eq!(response.status, 201);
-    let v: serde_json::Value = response.json();
-    assert_eq!(v["title"], "Test");
+    assert_eq!(response.status, 401);
 }
 ```
 
-Trois détails de cet extrait sont faciles à rater, et chacun produit un échec différent :
+Deux points de cet extrait sont faciles à rater :
 
-- **`dotenvy::dotenv()`** — si vous l'omettez, les *deux* tests échouent, avant même qu'une requête ne soit émise.
-- **`content`, et non `body`** — le serializer accepte ici l'un ou l'autre, puisque `source = "body"` laisse le nom du modèle continuer de fonctionner en entrée, mais `content` est le nom que votre API publie réellement.
-- **`author_id`** — si vous l'omettez, seul le test de création échoue, avec une violation de contrainte NOT NULL remontée par la base de données. Le test de liste passe toujours, car une table vide est une page vide valide.
+- **`dotenvy::dotenv()`** — si vous l'omettez, *les deux* tests échouent, avant même la première requête.
+- **`content`, pas `body`** — le serializer accepte les deux ici, puisque `source = "body"` garde le nom du modèle valable en entrée, mais `content` est le nom que votre API publie réellement.
+
+Le second test prouve que le garde de l'étape 14 est en place. Pour tester une écriture connectée, inscrivez-vous et connectez-vous d'abord avec le même client, puis envoyez le jeton dans un en-tête `authorization`. Le [`tests/auth_flow.rs`](https://github.com/ujeenet/rustango/blob/develop/crates/rustango/examples/getting_started_blog/tests/auth_flow.rs) du projet d'exemple le fait pour chaque cas de l'étape 14 : inscription, nom en double, connexion, mauvais mot de passe, utilisateur inconnu, jetons absents, modifiés et expirés, et l'auteur tiré du jeton.
 
 `Pool` est le pool multi-backend, et `router` accepte le pool de n'importe quel backend : ce fichier compile donc tel quel sur PostgreSQL, MySQL et SQLite.
 
-> **Attention :** les tests d'intégration dans `tests/` ne peuvent faire `use myblog::…` que pour les modules déclarés `pub mod` dans `src/lib.rs`. Un squelette neuf a cette cible de bibliothèque ; vérifiez que `pub mod post_view_set;` y figure (étape 12a). Un projet issu d'un ancien `cargo-rustango` peut n'être qu'un binaire : ajoutez un `src/lib.rs` avec les lignes `pub mod …;` nécessaires, ou construisez le routeur en ligne dans le test, de la façon dont `make:test` génère sa fonction `app()`.
+> **Attention :** les tests d'intégration dans `tests/` ne peuvent faire `use myblog::…` que pour les modules déclarés `pub mod` dans `src/lib.rs`. Un squelette neuf a cette cible de bibliothèque ; vérifiez que `pub mod post_view_set;` et `pub mod urls;` y figurent. Un projet issu d'un ancien `cargo-rustango` peut n'être qu'un binaire : ajoutez un `src/lib.rs` avec les lignes `pub mod …;` nécessaires, ou construisez le routeur en ligne dans le test, de la façon dont `make:test` génère sa fonction `app()`.
 
 Exécutez les tests :
 
@@ -915,6 +1343,8 @@ $bytes = New-Object byte[] 32
 $env:RUSTANGO_SESSION_SECRET = [Convert]::ToBase64String($bytes)
 cargo run --release -- migrate
 ```
+
+> **Vérifiez d'abord vos routes d'écriture.** Un ViewSet ou une vue est-il encore en `allow_anonymous` sans couche d'auth devant ? Alors n'importe qui sur internet peut modifier ces données. Passez-le en `read_only` ou protégez-le comme à l'[étape 14e](#14e-protéger-les-écritures-des-articles).
 
 Assurez-vous que votre proxy inverse :
 - Termine le HTTPS

@@ -125,6 +125,75 @@ let ok = verify(attempt, &stored)?;
   (eine beschädigte oder abgeschnittene Spalte), behandeln Sie es also als
   fehlgeschlagene Anmeldung, nicht als 500.
 
+### Ein vollständiger Login-Handler
+
+Das ist der `login`-Handler aus [Erste Schritte, Schritt 14](getting-started.md#schritt-14-registrierung-login-und-jwt-authentifizierung), kompiliert und getestet im Beispiel `getting_started_blog`. Er bremst Fehlversuche mit `login_throttle`, ruft für einen unbekannten Benutzer `verify_dummy_async` auf, antwortet für einen unbekannten Benutzer und ein falsches Passwort mit demselben `401` und gibt ein JWT für 15 Minuten zurück. Die kleinen Helfer, die er aufruft (`normalize`, `server_error`, `bad_credentials`, `jwt_secret`), und die Typen `ApiUser`, `Credentials` und `TokenResponse` stehen dort in derselben Datei.
+
+```rust
+use axum::extract::State;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+use rustango::jwt::{self, Claims};
+use rustango::login_throttle::{self, ClientIp, LoginRefused, LoginScope};
+use rustango::passwords::{self, PasswordError};
+use rustango::prelude::*;
+use rustango::sql::Pool;
+
+/// `POST /api/login` — check the password and hand out a short-lived token.
+pub async fn login(
+    State(pool): State<Pool>,
+    ip: ClientIp,
+    Json(body): Json<Credentials>,
+) -> Result<Json<TokenResponse>, Response> {
+    let username = normalize(&body.username);
+
+    // Before any lookup: 429 once this IP (or everyone) failed too often.
+    // `Sso(name)` is the scope an app can name: own limits, no account lock.
+    let scope = LoginScope::Sso("blog-api".to_owned());
+    let attempt = login_throttle::shared()
+        .begin(&scope, &ip, &username)
+        .await
+        .map_err(IntoResponse::into_response)?;
+
+    let found = ApiUser::objects()
+        .where_(ApiUser::username.eq(username))
+        .first(&pool)
+        .await
+        .map_err(|e| server_error(e).into_response())?;
+
+    let Some(user) = found else {
+        // Do the same slow work as a real check, so timing does not reveal the name is unknown.
+        if passwords::verify_dummy_async(&body.password).await.is_err() {
+            return Err(LoginRefused::Busy.into_response()); // 503: no hashing slot free
+        }
+        attempt.failed().await;
+        return Err(bad_credentials().into_response());
+    };
+    let password_ok = match passwords::verify_async(&body.password, &user.password_hash).await {
+        Ok(ok) => ok,
+        Err(PasswordError::Busy) => return Err(LoginRefused::Busy.into_response()),
+        // A corrupt stored hash counts as a wrong password, not a server error.
+        Err(_) => false,
+    };
+    if !password_ok {
+        attempt.failed().await;
+        return Err(bad_credentials().into_response());
+    }
+    attempt.succeeded().await;
+
+    let id = user.id.get().copied().unwrap_or_default();
+    let claims = Claims::new(id.to_string()).ttl(TOKEN_TTL); // subject = user id
+    let secret = jwt_secret().map_err(IntoResponse::into_response)?;
+    let access_token =
+        jwt::encode(&claims, &secret).map_err(|e| server_error(e).into_response())?;
+    Ok(Json(TokenResponse {
+        access_token,
+        token_type: "Bearer",
+        expires_in: TOKEN_TTL.as_secs(),
+    }))
+}
+```
+
 ---
 
 ## Timing-sichere Anmeldungen (Kontoaufzählung)

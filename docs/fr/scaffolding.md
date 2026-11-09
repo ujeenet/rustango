@@ -104,6 +104,8 @@ Chacun correspond à une des trois formes d'application de **Rustango** :
 | `fullstack` *(par défaut)* | ORM + l'**admin automatique** | Une application web classique avec un back-office |
 | `tenant` | Multi-tenancy + console opérateur + apps par tenant | Hébergement SaaS avec de nombreux tenants isolés |
 
+**Comptes utilisateurs.** Seul `--template tenant` intègre la connexion des utilisateurs de votre app. Avec `api` ou `fullstack`, la connexion de l'admin est réservée à l'équipe ; construisez l'inscription et la connexion de vos utilisateurs comme à l'[étape 14 de la prise en main](getting-started.md#étape-14--inscription-connexion-et-authentification-jwt).
+
 ```sh
 cargo rustango new myblog                      # fullstack (the default)
 cargo rustango new api_demo  --template api

@@ -779,7 +779,8 @@ Codenamen `<table>.view` / `.add` / `.change` / `.delete` (`posts.view`, … fü
 Tabelle `posts`). Codenamen brauchen die `tenancy`-Feature: Ohne sie verweigert
 ein ViewSet, das welche setzt, das Mounten mit einem Panic, der die Lösung nennt.
 In einer Single-Database-App setze deine eigene Auth-Schicht davor und nutze
-`allow_anonymous` oder `read_only`.
+`allow_anonymous` oder `read_only`. [Erste Schritte, Schritt 14](getting-started.md#schritt-14-registrierung-login-und-jwt-authentifizierung) zeigt
+eine solche Schicht vollständig: Lesen öffentlich, Schreiben mit Bearer-Token.
 
 **Objekt-Berechtigungen.** Ein ViewSet führt dieselben Hooks wie der Admin aus
 (`register_object_permission!`, `register_queryset_scope!`): `add` beim Create
