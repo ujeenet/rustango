@@ -57,11 +57,19 @@ There are two shapes, and you'll use both:
    let app = router.security_headers(SecurityHeadersLayer::strict());
    ```
 
-   The ones that genuinely are `tower::Layer` — and so accept `.layer(…)` — are
-   `CachePageLayer`, `CsrfLayer`, `LocaleMiddleware`, `MethodOverrideLayer`,
-   `HmacAuthLayer`, `TracingLayer`, `RequestSignalsLayer` and the `api_version`
-   builder. Check before reaching for `.layer(…)`:
-   `rg 'impl.*tower::Layer' crates/rustango/src/`.
+   Only these are a real `tower::Layer`, so only these accept `.layer(…)`:
+
+   | Layer | What it does | Read more |
+   | --- | --- | --- |
+   | `forms::csrf::CsrfLayer` | Blocks forged form posts | [CSRF protection](#csrf-protection) |
+   | `i18n::middleware::LocaleMiddleware` | Picks the language for each request | [Locale-aware middleware](#locale-aware-middleware) |
+   | `hmac_auth::HmacAuthLayer` | Checks signed requests | [HMAC request signing](auth-hmac.md) |
+   | `cache_page::CachePageLayer` | Caches whole GET responses | [Caching whole pages](caching.md#caching-whole-pages) |
+   | `tracing_layer::TracingLayer` | Wraps each request in a `tracing` span | [Request spans](logging.md#request-spans-and-opentelemetry) |
+   | `signals::request::RequestSignalsLayer` | Fires `request_started` / `request_finished` | [Request lifecycle](orm.md#request-lifecycle) |
+   | `method_override::MethodOverrideLayer` | Lets an HTML form send PUT / PATCH / DELETE | [The built-in catalog](#the-built-in-catalog) |
+   | `api_version::VersionStrategy::as_layer()` | Puts the requested API version on the request | — |
+   | `auth_decorators::login_required(…)` and the other gates | Lets a request through only for the right user | [Access decorators](auth-decorators.md) |
 
    Each built-in module exports a `…RouterExt` trait (`SecurityHeadersRouterExt`,
    `RateLimitRouterExt`, …). Bring it into scope and you get a `.security_headers()`

@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Documentation
+
+- The glossary (all four languages) defines every term the "New to a term here?" boxes point to, and a test keeps it that way; the middleware page lists its real `tower::Layer` types, and the HTML views page links `Tenant` to the tenancy guide.
+
 ## [0.65.0] — 2026-11-06
 
 ### Added

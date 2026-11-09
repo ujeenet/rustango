@@ -59,11 +59,19 @@ Es gibt zwei Formen, und du wirst beide verwenden:
    let app = router.security_headers(SecurityHeadersLayer::strict());
    ```
 
-   Wirklich `tower::Layer` — und damit für `.layer(…)` geeignet — sind
-   `CachePageLayer`, `CsrfLayer`, `LocaleMiddleware`, `MethodOverrideLayer`,
-   `HmacAuthLayer`, `TracingLayer`, `RequestSignalsLayer` und der
-   `api_version`-Builder. Vor einem `.layer(…)` prüfen:
-   `rg 'impl.*tower::Layer' crates/rustango/src/`.
+   Nur diese sind ein echter `tower::Layer` und nehmen deshalb `.layer(…)` an:
+
+   | Layer | Was er tut | Mehr dazu |
+   | --- | --- | --- |
+   | `forms::csrf::CsrfLayer` | Blockiert gefälschte Formular-Posts | [CSRF-Schutz](#csrf-schutz) |
+   | `i18n::middleware::LocaleMiddleware` | Wählt die Sprache für jeden Request | [Locale-bewusste Middleware](#locale-bewusste-middleware) |
+   | `hmac_auth::HmacAuthLayer` | Prüft signierte Requests | [HMAC-Request-Signierung](auth-hmac.md) |
+   | `cache_page::CachePageLayer` | Cacht ganze GET-Antworten | [Ganze Seiten cachen](caching.md#ganze-seiten-cachen) |
+   | `tracing_layer::TracingLayer` | Legt jeden Request in einen `tracing`-Span | [Request-Spans](logging.md#request-spans-und-opentelemetry) |
+   | `signals::request::RequestSignalsLayer` | Feuert `request_started` / `request_finished` | [Request-Lebenszyklus](orm.md#request-lebenszyklus) |
+   | `method_override::MethodOverrideLayer` | Lässt ein HTML-Formular PUT / PATCH / DELETE senden | [Der eingebaute Katalog](#der-eingebaute-katalog) |
+   | `api_version::VersionStrategy::as_layer()` | Legt die angefragte API-Version auf den Request | — |
+   | `auth_decorators::login_required(…)` und die anderen Gates | Lässt einen Request nur für den richtigen Benutzer durch | [Zugriffs-Decorators](auth-decorators.md) |
 
    Jedes eingebaute Modul exportiert einen `…RouterExt`-Trait
    (`SecurityHeadersRouterExt`, `RateLimitRouterExt`, …). Bring ihn in den
