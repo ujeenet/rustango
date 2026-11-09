@@ -8,6 +8,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 - The glossary (all four languages) defines every term the "New to a term here?" boxes point to, and a test keeps it that way; the middleware page lists its real `tower::Layer` types, and the HTML views page links `Tenant` to the tenancy guide.
 - Email and jobs guides: a full `[mail]` settings block, the `RUSTANGO__MAIL__SMTP_PASSWORD` override (linked from security), a mailer in a handler, an `EmailRenderer` example, and jobs added to the scaffolded `main.rs` with a mailer and a pool.
+- `files.md` shows an avatar upload end to end (model field, state, route, `Cli::with_uploads`, the `[server] max_body_bytes` limit), and a new Common tasks page links each everyday task and the cookbook.
 
 ## [0.65.0] — 2026-11-06
 
