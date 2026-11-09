@@ -94,7 +94,7 @@ ship open by accident. Call one of these on every view:
 
 | Call | Who gets in |
 |---|---|
-| `.allow_anonymous()` | anyone who reaches the router; put your own auth layer in front if it needs one |
+| `.allow_anonymous()` | anyone who reaches the router; put your own auth layer in front if it needs one ([example](getting-started.md#step-14-add-sign-up-login-and-jwt-authentication)) |
 | `.login_required()` | any signed-in user; others get `401` |
 | `.permissions(&["posts.change"])` | a signed-in user with every codename; superusers pass |
 | `.permissions_for_model()` | the model's codename: `view` for List and Detail, `add`, `change`, `delete` for the write views |

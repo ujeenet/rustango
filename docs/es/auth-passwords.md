@@ -125,6 +125,76 @@ let ok = verify(attempt, &stored)?;
   columna corrupta o truncada), así que trátalo como un inicio de sesión fallido,
   no como un 500.
 
+### Un handler de login completo
+
+Este es el handler `login` de [Primeros pasos, Paso 14](getting-started.md#paso-14-registro-inicio-de-sesión-y-autenticación-jwt), compilado y probado en el ejemplo `getting_started_blog`. Frena los intentos fallidos con `login_throttle`, ejecuta `verify_dummy_async` para un usuario desconocido, da el mismo `401` para un usuario desconocido y una contraseña incorrecta, y devuelve un JWT de 15 minutos. Los pequeños ayudantes que llama (`normalize`, `server_error`, `bad_credentials`, `jwt_secret`) y los tipos `ApiUser`, `Credentials` y `TokenResponse` están allí en el mismo archivo.
+
+```rust
+use axum::extract::State;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+use rustango::jwt::{self, Claims};
+use rustango::login_throttle::{self, ClientIp, LoginRefused, LoginScope};
+use rustango::passwords::{self, PasswordError};
+use rustango::prelude::*;
+use rustango::sql::Pool;
+
+/// `POST /api/login` — check the password and hand out a short-lived token.
+pub async fn login(
+    State(pool): State<Pool>,
+    ip: ClientIp,
+    Json(body): Json<Credentials>,
+) -> Result<Json<TokenResponse>, Response> {
+    // First: with no valid key every login is a 500, right password or not.
+    let secret = jwt_secret().map_err(IntoResponse::into_response)?;
+    let username = normalize(&body.username);
+
+    // Before any lookup: 429 once this IP (or everyone) failed too often.
+    // `Sso(name)`: its own total limit, a per-IP limit shared with SSO sign-ins, no account lock.
+    let scope = LoginScope::Sso("blog-api".to_owned());
+    let attempt = login_throttle::shared()
+        .begin(&scope, &ip, &username)
+        .await
+        .map_err(IntoResponse::into_response)?;
+
+    let found = ApiUser::objects()
+        .where_(ApiUser::username.eq(username))
+        .first(&pool)
+        .await
+        .map_err(|e| server_error(e).into_response())?;
+
+    let Some(user) = found else {
+        // Do the same slow work as a real check, so timing does not reveal the name is unknown.
+        if passwords::verify_dummy_async(&body.password).await.is_err() {
+            return Err(LoginRefused::Busy.into_response()); // 503: no hashing slot free
+        }
+        attempt.failed().await;
+        return Err(bad_credentials().into_response());
+    };
+    let password_ok = match passwords::verify_async(&body.password, &user.password_hash).await {
+        Ok(ok) => ok,
+        Err(PasswordError::Busy) => return Err(LoginRefused::Busy.into_response()),
+        // A corrupt stored hash counts as a wrong password, not a server error.
+        Err(_) => false,
+    };
+    if !password_ok {
+        attempt.failed().await;
+        return Err(bad_credentials().into_response());
+    }
+    attempt.succeeded().await;
+
+    let id = user.id.get().copied().unwrap_or_default();
+    let claims = Claims::new(id.to_string()).ttl(TOKEN_TTL); // subject = user id
+    let access_token =
+        jwt::encode(&claims, &secret).map_err(|e| server_error(e).into_response())?;
+    Ok(Json(TokenResponse {
+        access_token,
+        token_type: "Bearer",
+        expires_in: TOKEN_TTL.as_secs(),
+    }))
+}
+```
+
 ---
 
 ## Inicios de sesión con tiempos seguros (enumeración de cuentas)

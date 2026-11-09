@@ -487,6 +487,8 @@ Verrouillez-le de l'une des deux façons suivantes :
   L'admin ne monte le CSRF qu'avec l'auth par session, et le navigateur renvoie
   l'auth Basic de lui-même, donc les mutations d'un admin en Basic sont falsifiables
   cross-site ; voir [Sécurité → CSRF](security.md#se-protéger-contre-le-csrf).
+  [Prise en main, étape 14](getting-started.md#étape-14--inscription-connexion-et-authentification-jwt) montre comment
+  construire un tel middleware, avec des jetons Bearer pour une API.
 
 Lorsque l'authentification par session est active, le pied de la barre latérale
 affiche une ligne **« Connecté en tant que _username_ »** et un bouton

@@ -633,7 +633,8 @@ pub struct PostViewSet;
 It starts `read_only`. To serve writes, guard them first: with `tenancy`, add
 `permissions(create = "...", ...)` behind an auth layer and drop `read_only`; on
 a single-database app, put your own auth layer in front and swap `read_only` for
-`allow_anonymous` (codenames there refuse to mount). `--model Post` finds
+`allow_anonymous` (codenames there refuse to mount); [Getting started, Step 14](getting-started.md#step-14-add-sign-up-login-and-jwt-authentication)
+shows such a layer. `--model Post` finds
 `Post` in `src/models.rs` or an app's `models.rs` and imports it from there;
 `--model blog::models::Post` names the path outright.
 
@@ -807,7 +808,7 @@ Prints the **Rustango** framework version.
 
 ```bash
 $ cargo run -- version
-rustango 0.65.0
+rustango 0.65.1
 ```
 
 ### `about`
@@ -819,7 +820,7 @@ variables. Drop this into support tickets when something's wrong.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.65.0
+  version:        0.65.1
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local

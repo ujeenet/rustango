@@ -26,7 +26,7 @@ fn jwt_issue_and_verify_roundtrip() {
 }
 
 // ---- Step 15: the full security-middleware stack ----
-use getting_started_blog::{post_view_set::PostViewSet, urls};
+use getting_started_blog::urls;
 use rustango::access_log::{AccessLogLayer, AccessLogRouterExt};
 use rustango::cors::{CorsLayer, CorsRouterExt};
 use rustango::health::health_router;
@@ -44,7 +44,7 @@ async fn secure_app() -> axum::Router {
 
     urls::api()
         .nest("/admin", urls::admin_router(pool.clone(), &rustango::config::Settings::default()).expect("admin"))
-        .merge(PostViewSet::router("/api/posts", pool.clone()))
+        .nest("/api", urls::rest_api(pool.clone()))
         .merge(health_router(pool.clone())) // /health, /ready
         .request_id(RequestIdLayer::default())
         .access_log(AccessLogLayer::default()) // PII-redacted

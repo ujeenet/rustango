@@ -39,10 +39,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .try_nest_with(urls::admin_prefix(&settings), move |pool| {
             urls::admin_router(pool, &admin_settings)
         })
-        // Step 12b: the ViewSet, on the server's pool like the admin.
-        .nest_with("/api", |pool| {
-            getting_started_blog::post_view_set::PostViewSet::router("/posts", pool)
-        })
+        // Steps 12b and 14: posts + sign-in, on the server's pool like the admin.
+        .nest_with("/api", urls::rest_api)
         .with_health() // /health + /ready endpoints for load balancers
         // Behind a load balancer, name its addresses so per-IP limits see clients:
         // .with_trusted_proxies(["10.0.0.0/8"])?

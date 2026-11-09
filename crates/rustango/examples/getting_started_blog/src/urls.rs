@@ -20,6 +20,12 @@ pub fn api() -> Router<()> {
         .route("/healthz", get(views::healthz))
 }
 
+/// Everything `main.rs` mounts under `/api`: the posts and the sign-in routes (Step 14).
+pub fn rest_api(pool: Pool) -> Router {
+    crate::post_view_set::PostViewSet::router("/posts", pool.clone())
+        .merge(crate::blog::urls::auth_routes(pool))
+}
+
 /// Where the admin mounts: `[admin] url_prefix` (or `[routes] admin_url`), else `/admin`.
 pub fn admin_prefix(settings: &Settings) -> String {
     admin::Builder::settings_prefix(settings)

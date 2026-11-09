@@ -641,7 +641,8 @@ pub struct PostViewSet;
 Empieza como `read_only`. Para servir escrituras, protégelas antes: con
 `tenancy`, añade `permissions(create = "...", ...)` detrás de una capa de auth y
 quita `read_only`; en una app de una sola base, pon tu propia capa de auth delante
-y cambia `read_only` por `allow_anonymous` (ahí los codenames impiden montar). `--model Post`
+y cambia `read_only` por `allow_anonymous` (ahí los codenames impiden montar); [Primeros pasos, Paso 14](getting-started.md#paso-14-registro-inicio-de-sesión-y-autenticación-jwt)
+muestra esa capa. `--model Post`
 busca `Post` en `src/models.rs` o en el `models.rs` de una app y lo importa desde
 ahí; `--model blog::models::Post` da la ruta directamente.
 
@@ -818,7 +819,7 @@ Imprime la versión del framework **Rustango**.
 
 ```bash
 $ cargo run -- version
-rustango 0.65.0
+rustango 0.65.1
 ```
 
 ### `about`
@@ -830,7 +831,7 @@ Incluye esto en los tickets de soporte cuando algo va mal.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.65.0
+  version:        0.65.1
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local

@@ -108,6 +108,8 @@ Jede entspricht einer der drei App-Formen von **Rustango**:
 | `fullstack` *(Default)* | ORM + der **Auto-Admin** | Eine typische Webapp mit Backoffice |
 | `tenant` | Multi-Tenancy + Operator-Konsole + Apps pro Tenant | SaaS, das viele isolierte Tenants hostet |
 
+**Benutzerkonten.** Nur `--template tenant` hat eine Anmeldung für die eigenen Benutzer deiner App eingebaut. Mit `api` oder `fullstack` ist der Admin-Login nur für das Team; baue Registrierung und Login für deine Benutzer wie in [Erste Schritte, Schritt 14](getting-started.md#schritt-14-registrierung-login-und-jwt-authentifizierung).
+
 ```sh
 cargo rustango new myblog                      # fullstack (the default)
 cargo rustango new api_demo  --template api

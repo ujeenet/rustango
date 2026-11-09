@@ -456,6 +456,8 @@ Sperre es auf eine von zwei Arten:
   Der Admin hängt CSRF nur mit Session-Auth ein, und Basic-Auth schickt der Browser
   von sich aus mit, also sind die Mutationen eines Basic-Auth-Admins cross-site
   fälschbar; siehe [Sicherheit → CSRF](security.md#schutz-vor-csrf).
+  [Erste Schritte, Schritt 14](getting-started.md#schritt-14-registrierung-login-und-jwt-authentifizierung) zeigt, wie
+  so eine Middleware gebaut wird, mit Bearer-Tokens für eine API.
 
 Wenn die Session-Auth aktiv ist, zeigt die Fußzeile der Seitenleiste eine Zeile
 **"Signed in as _username_"** und eine **Logout**-Schaltfläche (ein `POST`-Formular).

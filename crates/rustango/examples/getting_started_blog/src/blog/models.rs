@@ -39,3 +39,21 @@ pub struct Post {
     #[rustango(soft_delete)]
     pub deleted_at: Option<DateTime<Utc>>,
 }
+
+/// Someone who can sign in to the API (Step 14).
+#[derive(Model, Clone, Debug)]
+#[rustango(table = "api_users", display = "username")]
+pub struct ApiUser {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+
+    #[rustango(max_length = 150, unique)]
+    pub username: String,
+
+    // An argon2 hash, never the password itself.
+    #[rustango(max_length = 255)]
+    pub password_hash: String,
+
+    #[rustango(auto_now_add)]
+    pub created_at: Auto<DateTime<Utc>>,
+}

@@ -797,7 +797,8 @@ est refusé. `.permissions_for_model::<Post>()` remplit automatiquement les code
 `posts`). Les codenames exigent la feature `tenancy` : sans elle, un ViewSet qui
 en fixe refuse le montage, avec un panic qui indique la solution. Dans une app
 mono-base, placez votre propre couche d'auth devant et utilisez `allow_anonymous`,
-ou `read_only`.
+ou `read_only`. [Prise en main, étape 14](getting-started.md#étape-14--inscription-connexion-et-authentification-jwt) montre
+une telle couche en entier : lecture publique, écritures avec un jeton Bearer.
 
 **Permissions objet.** Un ViewSet exécute les mêmes hooks que l'admin
 (`register_object_permission!`, `register_queryset_scope!`) : `add` à la
