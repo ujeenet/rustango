@@ -62,11 +62,19 @@ Il existe deux formes, et vous utiliserez les deux :
    let app = router.security_headers(SecurityHeadersLayer::strict());
    ```
 
-   Ceux qui sont réellement des `tower::Layer` — et acceptent donc `.layer(…)` —
-   sont `CachePageLayer`, `CsrfLayer`, `LocaleMiddleware`, `MethodOverrideLayer`,
-   `HmacAuthLayer`, `TracingLayer`, `RequestSignalsLayer` et le builder
-   `api_version`. Vérifiez avant de recourir à `.layer(…)` :
-   `rg 'impl.*tower::Layer' crates/rustango/src/`.
+   Seuls ceux-ci sont un vrai `tower::Layer`, donc seuls ceux-ci acceptent `.layer(…)` :
+
+   | Layer | Ce qu'il fait | En savoir plus |
+   | --- | --- | --- |
+   | `forms::csrf::CsrfLayer` | Bloque les envois de formulaire falsifiés | [Protection CSRF](#protection-csrf) |
+   | `i18n::middleware::LocaleMiddleware` | Choisit la langue de chaque requête | [Middleware sensible à la locale](#middleware-sensible-à-la-locale) |
+   | `hmac_auth::HmacAuthLayer` | Vérifie les requêtes signées | [Signature de requêtes HMAC](auth-hmac.md) |
+   | `cache_page::CachePageLayer` | Met en cache des réponses GET entières | [Mettre en cache des pages entières](caching.md#mettre-en-cache-des-pages-entières) |
+   | `tracing_layer::TracingLayer` | Enveloppe chaque requête dans un span `tracing` | [Spans de requête](logging.md#spans-de-requête-et-opentelemetry) |
+   | `signals::request::RequestSignalsLayer` | Déclenche `request_started` / `request_finished` | [Cycle de vie de la requête](orm.md#cycle-de-vie-de-la-requête) |
+   | `method_override::MethodOverrideLayer` | Permet à un formulaire HTML d'envoyer PUT / PATCH / DELETE | [Le catalogue intégré](#le-catalogue-intégré) |
+   | `api_version::VersionStrategy::as_layer()` | Place sur la requête la version d'API demandée | — |
+   | `auth_decorators::login_required(…)` et les autres gardes | Ne laisse passer la requête que pour le bon utilisateur | [Décorateurs d'accès](auth-decorators.md) |
 
    Chaque module intégré exporte un trait `…RouterExt` (`SecurityHeadersRouterExt`,
    `RateLimitRouterExt`, …). Amenez-le dans la portée et vous obtenez une méthode

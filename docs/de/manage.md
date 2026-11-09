@@ -831,7 +831,7 @@ Gibt die Version des **Rustango**-Frameworks aus.
 
 ```bash
 $ cargo run -- version
-rustango 0.65.1
+rustango 0.65.2
 ```
 
 ### `about`
@@ -843,7 +843,7 @@ Umgebungsvariablen. Legen Sie dies in Support-Tickets, wenn etwas nicht stimmt.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.65.1
+  version:        0.65.2
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local

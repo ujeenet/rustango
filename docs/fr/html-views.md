@@ -397,7 +397,7 @@ qui correspond à la façon dont votre application gère les connexions à la ba
 - **`.router(prefix, tera, pool)`** — mono-locataire ; capture un pool unique au moment du montage.
   C'est ce qu'utilisent les exemples ci-dessus.
 - **`.tenant_router(prefix, tera)`** — multi-locataire ; résout une connexion par requête à partir
-  de l'extracteur [`Tenant`](https://docs.rs). Disponible avec les fonctionnalités
+  de l'extracteur [`Tenant`](tenancy.md#comment-une-requête-trouve-son-tenant). Disponible avec les fonctionnalités
   `template_views` + `tenancy`. Les templates se portent inchangés de l'une à l'autre.
 
 Cela reflète la séparation des ViewSets (`router` vs `tenant_router`).

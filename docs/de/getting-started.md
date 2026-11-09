@@ -178,7 +178,7 @@ Das ergänzt den `cargo rustango ...`-Unterbefehl global. Bestätige, dass er vo
 cargo rustango --help
 ```
 
-Die Version des Scaffolders ist die, die dein Projekt pinnt — installierst du den neuesten, bekommst du das neueste rustango. Um ein Projekt auf einem älteren Release zu generieren, installiere stattdessen jenen Generator (`cargo install cargo-rustango --version 0.65.1`) — siehe [Scaffolding](scaffolding.md#die-version-des-generators-ist-die-die-dein-projekt-bekommt).
+Die Version des Scaffolders ist die, die dein Projekt pinnt — installierst du den neuesten, bekommst du das neueste rustango. Um ein Projekt auf einem älteren Release zu generieren, installiere stattdessen jenen Generator (`cargo install cargo-rustango --version 0.65.2`) — siehe [Scaffolding](scaffolding.md#die-version-des-generators-ist-die-die-dein-projekt-bekommt).
 
 ---
 
@@ -1363,13 +1363,14 @@ Stelle sicher, dass dein Reverse-Proxy:
 | Thema | Doku |
 |---|---|
 | Lauffähige Version dieses Leitfadens | [`examples/getting_started_blog`](https://github.com/ujeenet/rustango/tree/develop/crates/rustango/examples/getting_started_blog) |
+| Alltägliche Aufgaben (Registrierung, Upload, E-Mail, Jobs, Deployment) | [`docs/common-tasks.md`](common-tasks.md) |
 | Jeder `manage`-Unterbefehl | [`docs/manage.md`](manage.md) |
 | ORM-Kochbuch (fortgeschrittene Filter, Aggregationen, M2M, Soft-Delete) | [`docs/orm.md`](orm.md) |
 | Middleware (der vollständige Schichtenkatalog + Reihenfolge) | [`docs/middleware.md`](middleware.md) |
 | Performance-Benchmarks (vs. Go) | [`docs/benchmarks.md`](benchmarks.md) |
 | API-Konventionen (Benennung, Builder-Muster, Feature-Gates) | [`docs/api-conventions.md`](api-conventions.md) |
 | Security-Features im Detail | [`docs/security.md`](security.md) |
-| Multi-Tenancy | [README — Abschnitt Multi-tenancy](https://github.com/ujeenet/rustango/blob/develop/README.md#multi-tenancy) |
+| Multi-Tenancy | [`docs/tenancy.md`](tenancy.md) |
 | API-Doku | <https://docs.rs/rustango> |
 
 Wenn du auf etwas stößt, das nicht funktioniert oder unklar ist, öffne ein Issue.

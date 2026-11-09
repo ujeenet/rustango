@@ -386,6 +386,7 @@ jobs:
             --test docs_versions \
             --test docs_inventories \
             --test docs_live_suite_counts \
+            --test docs_glossary \
             --test env_override_spelling \
             --test every_ci_job_is_deduped \
             --test every_example_crate_is_built \

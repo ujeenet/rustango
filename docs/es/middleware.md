@@ -61,11 +61,19 @@ Hay dos formas, y usarás ambas:
    let app = router.security_headers(SecurityHeadersLayer::strict());
    ```
 
-   Los que sí son `tower::Layer` — y por tanto aceptan `.layer(…)` — son
-   `CachePageLayer`, `CsrfLayer`, `LocaleMiddleware`, `MethodOverrideLayer`,
-   `HmacAuthLayer`, `TracingLayer`, `RequestSignalsLayer` y el builder
-   `api_version`. Comprueba antes de recurrir a `.layer(…)`:
-   `rg 'impl.*tower::Layer' crates/rustango/src/`.
+   Solo estos son un `tower::Layer` real, así que solo estos aceptan `.layer(…)`:
+
+   | Layer | Qué hace | Más información |
+   | --- | --- | --- |
+   | `forms::csrf::CsrfLayer` | Bloquea envíos de formulario falsificados | [Protección CSRF](#protección-csrf) |
+   | `i18n::middleware::LocaleMiddleware` | Elige el idioma de cada petición | [Middleware consciente del locale](#middleware-consciente-del-locale) |
+   | `hmac_auth::HmacAuthLayer` | Verifica peticiones firmadas | [Firma de peticiones HMAC](auth-hmac.md) |
+   | `cache_page::CachePageLayer` | Guarda en caché respuestas GET completas | [Caché de páginas completas](caching.md#caché-de-páginas-completas) |
+   | `tracing_layer::TracingLayer` | Envuelve cada petición en un span de `tracing` | [Spans de petición](logging.md#spans-de-petición-y-opentelemetry) |
+   | `signals::request::RequestSignalsLayer` | Dispara `request_started` / `request_finished` | [Ciclo de vida de la petición](orm.md#ciclo-de-vida-de-la-petición) |
+   | `method_override::MethodOverrideLayer` | Permite que un formulario HTML envíe PUT / PATCH / DELETE | [El catálogo integrado](#el-catálogo-integrado) |
+   | `api_version::VersionStrategy::as_layer()` | Pone en la petición la versión de API solicitada | — |
+   | `auth_decorators::login_required(…)` y las demás guardas | Deja pasar la petición solo al usuario correcto | [Decoradores de acceso](auth-decorators.md) |
 
    Cada módulo integrado exporta un trait `…RouterExt` (`SecurityHeadersRouterExt`,
    `RateLimitRouterExt`, …). Tráelo al scope y obtienes un método

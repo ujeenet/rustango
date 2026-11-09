@@ -756,7 +756,11 @@ router.request_id(RequestIdLayer::always_generate());
 
 ## Gestionar secretos
 
-Nunca codifiques secretos (contraseñas de base de datos, claves de API) directamente en tu código fuente. Léelos en tiempo de ejecución a través del trait `Secrets`, que abstrae dónde viven realmente. (Un "trait" es la versión de Rust de una interfaz.) El `EnvSecrets` incorporado lee de las variables de entorno.
+Nunca codifiques secretos (contraseñas de base de datos, claves de API) directamente en tu código fuente.
+
+Tus archivos `config/*.toml` se suben a git, así que tampoco pongas contraseñas en ellos. Cualquier ajuste puede venir de una variable de entorno llamada `RUSTANGO__SECTION__KEY`. Por ejemplo, `RUSTANGO__MAIL__SMTP_PASSWORD` fija `[mail] smtp_password`. En tu máquina, ponla en `.env` (el `.gitignore` generado deja `.env` fuera de git); en producción, en los ajustes de secretos de tu hosting. Mira [Mantén la contraseña SMTP fuera de git](email.md#mantén-la-contraseña-smtp-fuera-de-git).
+
+Los secretos que necesita tu propio código léelos en tiempo de ejecución a través del trait `Secrets`, que abstrae dónde viven realmente. (Un "trait" es la versión de Rust de una interfaz.) El `EnvSecrets` incorporado lee de las variables de entorno.
 
 ```rust
 use rustango::secrets::{Secrets, EnvSecrets, BoxedSecrets};

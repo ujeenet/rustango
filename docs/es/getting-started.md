@@ -178,7 +178,7 @@ Esto añade el subcomando `cargo rustango ...` de forma global. Confirma que est
 cargo rustango --help
 ```
 
-La versión del propio generador de andamiaje es la que fija tu proyecto, así que instalar el más reciente te da el rustango más reciente. Para generar un proyecto sobre una versión anterior, instala ese generador en su lugar (`cargo install cargo-rustango --version 0.65.1`) — véase [Andamiaje](scaffolding.md#la-versión-del-propio-generador-es-la-que-obtiene-tu-proyecto).
+La versión del propio generador de andamiaje es la que fija tu proyecto, así que instalar el más reciente te da el rustango más reciente. Para generar un proyecto sobre una versión anterior, instala ese generador en su lugar (`cargo install cargo-rustango --version 0.65.2`) — véase [Andamiaje](scaffolding.md#la-versión-del-propio-generador-es-la-que-obtiene-tu-proyecto).
 
 ---
 
@@ -1363,13 +1363,14 @@ Asegúrate de que tu proxy inverso:
 | Tema | Doc |
 |---|---|
 | Versión ejecutable de esta guía | [`examples/getting_started_blog`](https://github.com/ujeenet/rustango/tree/develop/crates/rustango/examples/getting_started_blog) |
+| Tareas habituales (registro, subida de archivos, correo, tareas, despliegue) | [`docs/common-tasks.md`](common-tasks.md) |
 | Cada subcomando de `manage` | [`docs/manage.md`](manage.md) |
 | Recetario del ORM (filtros avanzados, agregaciones, M2M, soft delete) | [`docs/orm.md`](orm.md) |
 | Middleware (el catálogo completo de capas + ordenamiento) | [`docs/middleware.md`](middleware.md) |
 | Benchmarks de rendimiento (vs. Go) | [`docs/benchmarks.md`](benchmarks.md) |
 | Convenciones de la API (nomenclatura, patrones builder, feature gates) | [`docs/api-conventions.md`](api-conventions.md) |
 | Funciones de seguridad en profundidad | [`docs/security.md`](security.md) |
-| Multi-tenancy | [README — sección Multi-tenancy](https://github.com/ujeenet/rustango/blob/develop/README.md#multi-tenancy) |
+| Multi-tenancy | [`docs/tenancy.md`](tenancy.md) |
 | Documentación de la API | <https://docs.rs/rustango> |
 
 Si te topas con algo que no funciona o no queda claro, abre un issue.

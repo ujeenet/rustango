@@ -395,7 +395,7 @@ matches how your app manages database connections:
 - **`.router(prefix, tera, pool)`** — single-tenant; captures one pool at mount
   time. This is what the examples above use.
 - **`.tenant_router(prefix, tera)`** — multi-tenant; resolves a per-request
-  connection from the [`Tenant`](https://docs.rs) extractor. Available with the
+  connection from the [`Tenant`](tenancy.md#how-a-request-finds-its-tenant) extractor. Available with the
   `template_views` + `tenancy` features. Templates port between the two
   unchanged.
 

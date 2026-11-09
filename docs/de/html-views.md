@@ -392,7 +392,7 @@ passt, wie deine App Datenbankverbindungen verwaltet:
 - **`.router(prefix, tera, pool)`** — Single-Tenant; erfasst zur Einhängezeit einen Pool.
   Das nutzen die Beispiele oben.
 - **`.tenant_router(prefix, tera)`** — Multi-Tenant; löst eine Verbindung pro Request aus dem
-  [`Tenant`](https://docs.rs)-Extractor auf. Verfügbar mit den Features
+  [`Tenant`](tenancy.md#wie-eine-anfrage-ihren-tenant-findet)-Extractor auf. Verfügbar mit den Features
   `template_views` + `tenancy`. Templates portieren unverändert zwischen beiden.
 
 Das spiegelt die ViewSet-Aufteilung (`router` vs `tenant_router`).

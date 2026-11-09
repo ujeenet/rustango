@@ -750,7 +750,11 @@ router.request_id(RequestIdLayer::always_generate());
 
 ## Secrets verwalten
 
-Hardcode Secrets (Datenbank-Passwörter, API-Keys) niemals in deinem Quellcode. Lies sie zur Laufzeit über das `Secrets`-Trait, das darüber abstrahiert, wo sie tatsächlich liegen. (Ein „Trait" ist Rusts Version eines Interface.) Das eingebaute `EnvSecrets` liest aus Umgebungsvariablen.
+Hardcode Secrets (Datenbank-Passwörter, API-Keys) niemals in deinem Quellcode.
+
+Deine `config/*.toml`-Dateien landen in Git, also gehören auch dort keine Passwörter hinein. Jede Einstellung kann stattdessen aus einer Umgebungsvariable namens `RUSTANGO__SECTION__KEY` kommen. Zum Beispiel setzt `RUSTANGO__MAIL__SMTP_PASSWORD` den Wert `[mail] smtp_password`. Lokal kommt sie in `.env` (die generierte `.gitignore` hält `.env` aus Git heraus), in Produktion in die Secret-Einstellungen deines Hosters. Siehe [Das SMTP-Passwort aus Git heraushalten](email.md#das-smtp-passwort-aus-git-heraushalten).
+
+Die Secrets, die dein eigener Code braucht, liest du zur Laufzeit über das `Secrets`-Trait, das darüber abstrahiert, wo sie tatsächlich liegen. (Ein „Trait" ist Rusts Version eines Interface.) Das eingebaute `EnvSecrets` liest aus Umgebungsvariablen.
 
 ```rust
 use rustango::secrets::{Secrets, EnvSecrets, BoxedSecrets};
