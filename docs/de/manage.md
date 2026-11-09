@@ -652,7 +652,8 @@ Sie startet als `read_only`. Sichern Sie Schreibzugriffe vorher ab: mit
 `tenancy` fügen Sie hinter einer Auth-Schicht `permissions(create = "...", ...)`
 hinzu und entfernen `read_only`; in einer Single-Database-App setzen Sie Ihre
 eigene Auth-Schicht davor und ersetzen `read_only` durch `allow_anonymous`
-(Codenamen verweigern dort das Mounten). `--model Post` sucht `Post`
+(Codenamen verweigern dort das Mounten); [Erste Schritte, Schritt 14](getting-started.md#schritt-14-registrierung-login-und-jwt-authentifizierung)
+zeigt eine solche Schicht. `--model Post` sucht `Post`
 in `src/models.rs` oder im `models.rs` einer App und importiert es von dort;
 `--model blog::models::Post` nennt den Pfad direkt.
 
@@ -830,7 +831,7 @@ Gibt die Version des **Rustango**-Frameworks aus.
 
 ```bash
 $ cargo run -- version
-rustango 0.65.0
+rustango 0.65.1
 ```
 
 ### `about`
@@ -842,7 +843,7 @@ Umgebungsvariablen. Legen Sie dies in Support-Tickets, wenn etwas nicht stimmt.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.65.0
+  version:        0.65.1
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local

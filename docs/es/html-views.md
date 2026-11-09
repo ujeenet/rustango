@@ -95,7 +95,7 @@ página sale abierta por accidente. Llama a una de estas en cada vista:
 
 | Llamada | Quién entra |
 |---|---|
-| `.allow_anonymous()` | cualquiera que llegue al router; pon tu propia capa de auth delante si hace falta |
+| `.allow_anonymous()` | cualquiera que llegue al router; pon tu propia capa de auth delante si hace falta ([ejemplo](getting-started.md#paso-14-registro-inicio-de-sesión-y-autenticación-jwt)) |
 | `.login_required()` | cualquier usuario con sesión; los demás reciben `401` |
 | `.permissions(&["posts.change"])` | un usuario con sesión que tenga cada codename; los superusuarios pasan |
 | `.permissions_for_model()` | el codename del modelo: `view` para List y Detail, `add`, `change`, `delete` para las vistas de escritura |

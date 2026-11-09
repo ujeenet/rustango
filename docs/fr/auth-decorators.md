@@ -200,7 +200,9 @@ tenancy. Utilisez l'une de ces options :
   `redirect_to_login(login_url, "next", original_path)`. Dans le handler de
   connexion, lisez `?next=` avec `extract_next` et passez-le par `safe_next`,
   comme montré plus haut. Ces helpers n'ont pas besoin de la fonctionnalité
-  `tenancy`.
+  `tenancy`. Pour une API avec des jetons au lieu de cookies,
+  [Prise en main, étape 14](getting-started.md#étape-14--inscription-connexion-et-authentification-jwt) construit le tout :
+  un modèle d'utilisateur, des handlers d'inscription et de connexion et un middleware de jeton Bearer.
 
 ---
 

@@ -1,4 +1,4 @@
-use getting_started_blog::post_view_set::PostViewSet;
+use getting_started_blog::urls;
 use rustango::sql::Pool;
 use rustango::test_client::TestClient;
 use serde_json::json;
@@ -14,9 +14,8 @@ async fn app() -> axum::Router {
     let pool = Pool::connect(&std::env::var("DATABASE_URL").unwrap())
         .await
         .unwrap();
-    // `router` takes any backend's pool (#1273), so nothing here names
-    // a driver and this file compiles on all three.
-    PostViewSet::router("/api/posts", pool)
+    // The same `/api` routes `main.rs` mounts: posts plus register/login.
+    axum::Router::new().nest("/api", urls::rest_api(pool))
 }
 
 #[tokio::test]
@@ -29,22 +28,13 @@ async fn list_posts_returns_200() {
 }
 
 #[tokio::test]
-async fn create_post_returns_the_new_object() {
+async fn create_post_without_a_token_returns_401() {
     let client = TestClient::new(app().await);
     let response = client
         .post("/api/posts")
-        // These are the serializer's field names, not the model's:
-        // `content` is `Post.body` renamed, and `status` is absent from
-        // the serializer so posting it would be ignored.
-        .json(&json!({
-            "title": "Test",
-            "content": "x",
-            "author_id": 1,
-        }))
+        // The serializer's field names: `content` is `Post.body` renamed.
+        .json(&json!({ "title": "Test", "content": "x" }))
         .send()
         .await;
-    assert_eq!(response.status, 201);
-    let v: serde_json::Value = response.json();
-    assert_eq!(v["title"], "Test");
-    assert_eq!(v["content"], "x");
+    assert_eq!(response.status, 401);
 }

@@ -197,6 +197,9 @@ opciones:
   devuelve `redirect_to_login(login_url, "next", original_path)`. En el handler
   de login, lee `?next=` con `extract_next` y pásalo por `safe_next`, como se
   muestra arriba. Estos helpers no necesitan la característica `tenancy`.
+  Para una API con tokens en lugar de cookies, [Primeros pasos, Paso 14](getting-started.md#paso-14-registro-inicio-de-sesión-y-autenticación-jwt)
+  lo construye completo: un modelo de usuario, handlers de registro e inicio de
+  sesión y un middleware de token Bearer.
 
 ---
 

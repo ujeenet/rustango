@@ -787,7 +787,8 @@ is denied. `.permissions_for_model::<Post>()` auto-fills the standard
 the `posts` table). Codenames need the `tenancy` feature: without it a ViewSet
 that sets any refuses to mount, with a panic naming the fix. On a
 single-database app, put your own auth layer in front and use `allow_anonymous`,
-or `read_only`.
+or `read_only`. [Getting started, Step 14](getting-started.md#step-14-add-sign-up-login-and-jwt-authentication) shows such a
+layer in full: reads public, writes need a Bearer token.
 
 **Object permissions.** A ViewSet runs the same hooks as the admin
 (`register_object_permission!`, `register_queryset_scope!`):

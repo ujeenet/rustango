@@ -805,7 +805,8 @@ autocompleta los codenames estándar `<table>.view` / `.add` / `.change` /
 `.delete` (`posts.view`, … para la tabla `posts`). Los codenames requieren la
 feature `tenancy`: sin ella, un ViewSet que los fije se niega a montarse, con un
 panic que indica la solución. En una app de una sola base, pon tu propia capa de
-auth delante y usa `allow_anonymous`, o `read_only`.
+auth delante y usa `allow_anonymous`, o `read_only`. [Primeros pasos, Paso 14](getting-started.md#paso-14-registro-inicio-de-sesión-y-autenticación-jwt)
+muestra esa capa completa: lectura pública, escrituras con token Bearer.
 
 **Permisos por objeto.** Un ViewSet ejecuta los mismos hooks que el admin
 (`register_object_permission!`, `register_queryset_scope!`): `add` al crear (un
