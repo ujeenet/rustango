@@ -316,8 +316,8 @@ rustango::manage::Cli::new()
 It needs its own prefix: a second `nest_with("/api", …)` would clash with the
 ViewSet. `with_uploads` serves the files in `./var/uploads` at `/uploads/…`.
 It sends HTML, SVG and XML as downloads, so an uploaded page cannot run script
-on your site. `LocalStorage` creates the folders on the first save. Add `var/`
-to `.gitignore`.
+on your site. `LocalStorage` creates the folders on the first save. The
+scaffolded `.gitignore` already leaves `var/` out of git.
 
 ### 4. Try it
 

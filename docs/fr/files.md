@@ -320,8 +320,8 @@ l'étape 12b. Il lui faut son propre préfixe : un second `nest_with("/api", …
 entrerait en conflit avec le ViewSet. `with_uploads` sert les fichiers de
 `./var/uploads` sous `/uploads/…`. Il envoie le HTML, le SVG et le XML en
 téléchargement, pour qu'une page téléversée ne puisse pas exécuter de script sur
-votre site. `LocalStorage` crée les dossiers au premier enregistrement. Ajoutez
-`var/` à `.gitignore`.
+votre site. `LocalStorage` crée les dossiers au premier enregistrement. Le
+`.gitignore` généré exclut déjà `var/` de git.
 
 ### 4. Essayer
 

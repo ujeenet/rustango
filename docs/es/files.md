@@ -318,7 +318,7 @@ Paso 12b. Necesita su propio prefijo: un segundo `nest_with("/api", …)` chocar
 con el ViewSet. `with_uploads` sirve los archivos de `./var/uploads` en
 `/uploads/…`. Envía HTML, SVG y XML como descargas, para que una página subida no
 pueda ejecutar script en tu sitio. `LocalStorage` crea las carpetas en el primer
-guardado. Añade `var/` a `.gitignore`.
+guardado. El `.gitignore` generado ya deja `var/` fuera de git.
 
 ### 4. Pruébalo
 

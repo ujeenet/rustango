@@ -319,8 +319,8 @@ Schritt 12b. Er braucht ein eigenes Präfix: ein zweites `nest_with("/api", …)
 würde mit dem ViewSet kollidieren. `with_uploads` liefert die Dateien aus
 `./var/uploads` unter `/uploads/…` aus. HTML, SVG und XML gehen als Download
 raus, damit eine hochgeladene Seite kein Skript auf deiner Site ausführt.
-`LocalStorage` legt die Ordner beim ersten Speichern an. Trag `var/` in
-`.gitignore` ein.
+`LocalStorage` legt die Ordner beim ersten Speichern an. Die
+generierte `.gitignore` hält `var/` schon aus git heraus.
 
 ### 4. Ausprobieren
 

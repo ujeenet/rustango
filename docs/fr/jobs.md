@@ -258,14 +258,13 @@ plus. Le scaffolder met le corps dans `run()` ; les lignes vont là. Les lignes
 marquées `NEW` sont les ajouts — gardez les lignes de l'admin et des réglages :
 
 ```rust
-// src/main.rs
+// src/main.rs: keep the scaffolded main(), which calls run()
 use std::sync::Arc;
 
 use myblog::urls;
 use rustango::jobs::{InMemoryJobQueue, JobQueue}; // NEW
 
-#[rustango::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
     let loaded = rustango::config::Settings::load_from_env();
     let settings = loaded.as_ref().cloned().unwrap_or_default();
