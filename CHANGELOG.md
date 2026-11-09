@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Documentation
+
+- `files.md` shows an avatar upload end to end (model field, state, route, `Cli::with_uploads`, the `[server] max_body_bytes` limit), and a new Common tasks page links each everyday task and the cookbook.
+
 ## [0.65.0] — 2026-11-06
 
 ### Added
