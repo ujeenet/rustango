@@ -449,6 +449,8 @@ one of two ways:
   The admin mounts CSRF only with session auth, and Basic auth is re-sent by the
   browser on its own, so a Basic-auth admin's mutations are cross-site forgeable;
   see [Security → CSRF](security.md#protecting-against-csrf).
+  [Getting started, Step 14](getting-started.md#step-14-add-sign-up-login-and-jwt-authentication) shows how such a
+  middleware is built, with Bearer tokens for an API.
 
 When session auth is on, the sidebar footer shows a **"Signed in as _username_"**
 line and a **Logout** button (a `POST` form). Standalone admins post to

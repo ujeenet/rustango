@@ -666,7 +666,8 @@ Il démarre en `read_only`. Pour servir les écritures, protégez-les d'abord : 
 `tenancy`, ajoutez `permissions(create = "...", ...)` derrière une couche d'auth
 et retirez `read_only` ; dans une app mono-base, placez votre propre couche
 d'auth devant et remplacez `read_only` par `allow_anonymous` (des codenames y
-refusent le montage).
+refusent le montage) ; [Prise en main, étape 14](getting-started.md#étape-14--inscription-connexion-et-authentification-jwt)
+montre une telle couche.
 `--model Post` cherche `Post` dans `src/models.rs` ou dans le `models.rs` d'une
 app et l'importe de là ; `--model blog::models::Post` donne le chemin directement.
 

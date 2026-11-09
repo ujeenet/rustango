@@ -104,6 +104,8 @@ Each maps to one of **Rustango**'s three app shapes:
 | `fullstack` *(default)* | ORM + the **auto-admin** | A typical web app with a back-office |
 | `tenant` | Multi-tenancy + operator console + per-tenant apps | SaaS hosting many isolated tenants |
 
+**User accounts.** Only `--template tenant` has sign-in for your app's own users built in. With `api` or `fullstack`, the admin login is for staff only; build sign-up and login for your users as in [Getting started, Step 14](getting-started.md#step-14-add-sign-up-login-and-jwt-authentication).
+
 ```sh
 cargo rustango new myblog                      # fullstack (the default)
 cargo rustango new api_demo  --template api

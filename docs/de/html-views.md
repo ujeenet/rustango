@@ -92,7 +92,7 @@ geht keine Seite versehentlich offen live. Rufe auf jedem View eines davon auf:
 
 | Aufruf | Wer hineinkommt |
 |---|---|
-| `.allow_anonymous()` | jeder, der den Router erreicht; setze bei Bedarf deine eigene Auth-Schicht davor |
+| `.allow_anonymous()` | jeder, der den Router erreicht; setze bei Bedarf deine eigene Auth-Schicht davor ([Beispiel](getting-started.md#schritt-14-registrierung-login-und-jwt-authentifizierung)) |
 | `.login_required()` | jeder angemeldete Benutzer; andere bekommen `401` |
 | `.permissions(&["posts.change"])` | ein angemeldeter Benutzer mit jedem Codenamen; Superuser kommen durch |
 | `.permissions_for_model()` | der Codename des Modells: `view` für List und Detail, `add`, `change`, `delete` für die Schreib-Views |

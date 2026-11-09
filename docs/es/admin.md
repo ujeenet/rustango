@@ -461,6 +461,8 @@ Restríngelo de una de dos maneras:
   El admin solo monta CSRF con auth de sesión, y el navegador reenvía Basic auth por
   su cuenta, así que las mutaciones de un admin con Basic auth se pueden falsificar
   cross-site; consulta [Seguridad → CSRF](security.md#protección-contra-csrf).
+  [Primeros pasos, Paso 14](getting-started.md#paso-14-registro-inicio-de-sesión-y-autenticación-jwt) muestra cómo
+  se construye ese middleware, con tokens Bearer para una API.
 
 Cuando la auth de sesión está activa, el pie de la barra lateral muestra una línea
 **"Signed in as _username_"** y un botón **Logout** (un formulario `POST`). Los admins

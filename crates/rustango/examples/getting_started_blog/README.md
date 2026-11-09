@@ -2,7 +2,7 @@
 
 This is the exact project built step by step in
 [`docs/getting-started.md`](../../../../docs/getting-started.md): a blog with
-a `Post` model, the auto-admin, a JSON API (`PostViewSet`), a JWT helper, the
+a `Post` model, the auto-admin, a JSON API (`PostViewSet`), sign-up and login with JWTs, the
 security-middleware stack, and integration tests. Every documented step is
 exercised here so the guide can't silently drift from the framework.
 
@@ -16,9 +16,11 @@ It's an in-repo example, so it depends on the framework by path
 |---|---|
 | `src/blog/models.rs` — `Post` model | Step 8 |
 | `src/main.rs` — admin nested at `/admin` + ViewSet mounted at `/api/posts` | Steps 11–12 |
-| `src/post_view_set.rs` — `#[derive(ViewSet)]` | Step 12 |
+| `src/post_view_set.rs` — the Post API, writes guarded by a Bearer token | Steps 12, 14 |
 | `src/post_serializer.rs` — `#[derive(Serializer)]` | Step 13 |
-| `tests/post_smoke.rs` — list → 200, create → 201 | Steps 12 + 16 |
+| `src/blog/auth.rs` — `ApiUser` sign-up, login, the token guard | Step 14 |
+| `tests/auth_flow.rs` — every Step 14 case (SQLite without `DATABASE_URL`) | Step 14 |
+| `tests/post_smoke.rs` — list → 200, write without a token → 401 | Steps 12 + 16 |
 | `tests/auth_and_middleware.rs` — JWT roundtrip + the full middleware stack | Steps 14–15 |
 
 ## Run it
@@ -30,6 +32,7 @@ export DATABASE_URL=postgres://rustango:rustango@localhost:5432/getting_started_
 
 cargo run -- migrate     # create the framework + model tables
 cargo run -- create-admin alice --superuser  # the admin login
+export JWT_SECRET=$(openssl rand -base64 32)  # signs /api/login tokens (Step 14)
 cargo run                # serve on http://localhost:8080  (admin at /admin)
 cargo test               # run the integration tests (needs DATABASE_URL)
 ```

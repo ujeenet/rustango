@@ -652,7 +652,8 @@ Sie startet als `read_only`. Sichern Sie Schreibzugriffe vorher ab: mit
 `tenancy` fügen Sie hinter einer Auth-Schicht `permissions(create = "...", ...)`
 hinzu und entfernen `read_only`; in einer Single-Database-App setzen Sie Ihre
 eigene Auth-Schicht davor und ersetzen `read_only` durch `allow_anonymous`
-(Codenamen verweigern dort das Mounten). `--model Post` sucht `Post`
+(Codenamen verweigern dort das Mounten); [Erste Schritte, Schritt 14](getting-started.md#schritt-14-registrierung-login-und-jwt-authentifizierung)
+zeigt eine solche Schicht. `--model Post` sucht `Post`
 in `src/models.rs` oder im `models.rs` einer App und importiert es von dort;
 `--model blog::models::Post` nennt den Pfad direkt.
 
