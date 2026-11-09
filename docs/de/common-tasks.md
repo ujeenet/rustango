@@ -17,8 +17,8 @@ Ausführen. Diese Zeilen verlinken die nächstbeste Seite und sagen
 
 | Aufgabe | Antwort | Lesen |
 |---|---|---|
-| Einen Benutzer registrieren | Prüfe das Passwort mit `passwords::strength_score`, hashe es mit `passwords::hash` und speichere den Hash in der Benutzerzeile. | [Erste Schritte, Schritt 14](getting-started.md#schritt-14-jwt-authentifizierung-hinzufügen) · [Hashen bei der Registrierung](auth-passwords.md#hashen-bei-der-registrierung) (vollständiges Beispiel folgt) |
-| Anmelden | Prüfe das Passwort mit `passwords::verify` und starte dann eine Session oder gib ein JWT aus. | [Erste Schritte, Schritt 14](getting-started.md#schritt-14-jwt-authentifizierung-hinzufügen) · [Prüfen bei der Anmeldung](auth-passwords.md#prüfen-bei-der-anmeldung) · [Sessions](auth-sessions.md) (vollständiges Beispiel folgt) |
+| Einen Benutzer registrieren | Prüfe das Passwort mit `passwords::strength_score`, hashe es mit `passwords::hash` und speichere den Hash in der Benutzerzeile. | [Erste Schritte, Schritt 14](getting-started.md#schritt-14-registrierung-login-und-jwt-authentifizierung) · [Hashen bei der Registrierung](auth-passwords.md#hashen-bei-der-registrierung) |
+| Anmelden | Prüfe das Passwort mit `passwords::verify` und starte dann eine Session oder gib ein JWT aus. | [Erste Schritte, Schritt 14](getting-started.md#schritt-14-registrierung-login-und-jwt-authentifizierung) · [Prüfen bei der Anmeldung](auth-passwords.md#prüfen-bei-der-anmeldung) · [Sessions](auth-sessions.md) |
 | Ein Passwort zurücksetzen | `PasswordReset::issue` erzeugt einen signierten Link für die E-Mail; `confirm_password_reset_pool` prüft ihn und speichert den neuen Hash. | [Passwort-Zurücksetzung](auth-flows.md#passwort-zurücksetzung) (vollständiges Beispiel folgt) |
 | Eine Datei hochladen | `save_uploads` prüft die Datei und schreibt sie in ein `Storage`; du speicherst den zurückgegebenen Key in einem Model. | [Ein Avatar-Upload von Anfang bis Ende](files.md#ein-avatar-upload-von-anfang-bis-ende) |
 | Eine E-Mail senden | Baue eine `Email`, wähle einen Mailer und rufe `email.send(&mailer)` auf. | [E-Mails senden](email.md#schritt-1--eine-e-mail-bauen) |

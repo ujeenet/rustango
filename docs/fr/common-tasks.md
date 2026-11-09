@@ -17,8 +17,8 @@ venir) ».
 
 | Tâche | Réponse | À lire |
 |---|---|---|
-| Inscrire un utilisateur | Vérifiez le mot de passe avec `passwords::strength_score`, hachez-le avec `passwords::hash` et stockez le hash sur la ligne de l'utilisateur. | [Bien démarrer, étape 14](getting-started.md#étape-14--ajouter-lauthentification-jwt) · [Hachage à l'inscription](auth-passwords.md#hachage-à-linscription) (exemple complet à venir) |
-| Se connecter | Vérifiez le mot de passe avec `passwords::verify`, puis ouvrez une session ou émettez un JWT. | [Bien démarrer, étape 14](getting-started.md#étape-14--ajouter-lauthentification-jwt) · [Vérification à la connexion](auth-passwords.md#vérification-à-la-connexion) · [Sessions](auth-sessions.md) (exemple complet à venir) |
+| Inscrire un utilisateur | Vérifiez le mot de passe avec `passwords::strength_score`, hachez-le avec `passwords::hash` et stockez le hash sur la ligne de l'utilisateur. | [Bien démarrer, étape 14](getting-started.md#étape-14--inscription-connexion-et-authentification-jwt) · [Hachage à l'inscription](auth-passwords.md#hachage-à-linscription) |
+| Se connecter | Vérifiez le mot de passe avec `passwords::verify`, puis ouvrez une session ou émettez un JWT. | [Bien démarrer, étape 14](getting-started.md#étape-14--inscription-connexion-et-authentification-jwt) · [Vérification à la connexion](auth-passwords.md#vérification-à-la-connexion) · [Sessions](auth-sessions.md) |
 | Réinitialiser un mot de passe | `PasswordReset::issue` crée un lien signé à envoyer par e-mail ; `confirm_password_reset_pool` le vérifie et stocke le nouveau hash. | [Réinitialisation du mot de passe](auth-flows.md#réinitialisation-du-mot-de-passe) (exemple complet à venir) |
 | Téléverser un fichier | `save_uploads` vérifie le fichier et l'écrit dans un `Storage` ; vous enregistrez la clé renvoyée sur un modèle. | [Téléverser un avatar de bout en bout](files.md#téléverser-un-avatar-de-bout-en-bout) |
 | Envoyer un e-mail | Construisez un `Email`, choisissez un mailer et appelez `email.send(&mailer)`. | [Envoyer des e-mails](email.md#étape-1--construire-un-e-mail) |

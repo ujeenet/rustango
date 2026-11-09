@@ -16,8 +16,8 @@ closest page and say "(complete example coming)".
 
 | Task | Answer | Read |
 |---|---|---|
-| Sign up a user | Check the password with `passwords::strength_score`, hash it with `passwords::hash`, and store the hash on the user row. | [Getting started, Step 14](getting-started.md#step-14-add-jwt-authentication) · [Hashing on signup](auth-passwords.md#hashing-on-signup) (complete example coming) |
-| Log in | Check the password with `passwords::verify`, then start a session or issue a JWT. | [Getting started, Step 14](getting-started.md#step-14-add-jwt-authentication) · [Verifying on login](auth-passwords.md#verifying-on-login) · [Sessions](auth-sessions.md) (complete example coming) |
+| Sign up a user | Check the password with `passwords::strength_score`, hash it with `passwords::hash`, and store the hash on the user row. | [Getting started, Step 14](getting-started.md#step-14-add-sign-up-login-and-jwt-authentication) · [Hashing on signup](auth-passwords.md#hashing-on-signup) |
+| Log in | Check the password with `passwords::verify`, then start a session or issue a JWT. | [Getting started, Step 14](getting-started.md#step-14-add-sign-up-login-and-jwt-authentication) · [Verifying on login](auth-passwords.md#verifying-on-login) · [Sessions](auth-sessions.md) |
 | Reset a password | `PasswordReset::issue` makes a signed link to email; `confirm_password_reset_pool` checks it and stores the new hash. | [Password reset](auth-flows.md#password-reset) (complete example coming) |
 | Upload a file | `save_uploads` checks the file and writes it to a `Storage`; you save the returned key on a model. | [Upload an avatar, end to end](files.md#upload-an-avatar-end-to-end) |
 | Send an email | Build an `Email`, pick a mailer, and call `email.send(&mailer)`. | [Sending email](email.md#step-1--build-an-email) |

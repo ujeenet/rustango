@@ -16,8 +16,8 @@ filas enlazan a la página más cercana y dicen «(ejemplo completo en camino)»
 
 | Tarea | Respuesta | Leer |
 |---|---|---|
-| Registrar un usuario | Comprueba la contraseña con `passwords::strength_score`, hashéala con `passwords::hash` y guarda el hash en la fila del usuario. | [Primeros pasos, Paso 14](getting-started.md#paso-14-añadir-autenticación-jwt) · [Hashear al registrarse](auth-passwords.md#hashear-al-registrarse) (ejemplo completo en camino) |
-| Iniciar sesión | Comprueba la contraseña con `passwords::verify` y después abre una sesión o emite un JWT. | [Primeros pasos, Paso 14](getting-started.md#paso-14-añadir-autenticación-jwt) · [Verificar al iniciar sesión](auth-passwords.md#verificar-al-iniciar-sesión) · [Sesiones](auth-sessions.md) (ejemplo completo en camino) |
+| Registrar un usuario | Comprueba la contraseña con `passwords::strength_score`, hashéala con `passwords::hash` y guarda el hash en la fila del usuario. | [Primeros pasos, Paso 14](getting-started.md#paso-14-registro-inicio-de-sesión-y-autenticación-jwt) · [Hashear al registrarse](auth-passwords.md#hashear-al-registrarse) |
+| Iniciar sesión | Comprueba la contraseña con `passwords::verify` y después abre una sesión o emite un JWT. | [Primeros pasos, Paso 14](getting-started.md#paso-14-registro-inicio-de-sesión-y-autenticación-jwt) · [Verificar al iniciar sesión](auth-passwords.md#verificar-al-iniciar-sesión) · [Sesiones](auth-sessions.md) |
 | Restablecer una contraseña | `PasswordReset::issue` crea un enlace firmado para enviar por correo; `confirm_password_reset_pool` lo comprueba y guarda el nuevo hash. | [Restablecimiento de contraseña](auth-flows.md#restablecimiento-de-contraseña) (ejemplo completo en camino) |
 | Subir un archivo | `save_uploads` comprueba el archivo y lo escribe en un `Storage`; tú guardas la clave devuelta en un modelo. | [Subir un avatar de principio a fin](files.md#subir-un-avatar-de-principio-a-fin) |
 | Enviar un correo | Construye un `Email`, elige un mailer y llama a `email.send(&mailer)`. | [Enviar correo](email.md#paso-1--construye-un-correo) |

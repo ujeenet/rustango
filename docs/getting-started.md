@@ -1359,13 +1359,14 @@ Make sure your reverse proxy:
 | Topic | Doc |
 |---|---|
 | Runnable version of this guide | [`examples/getting_started_blog`](https://github.com/ujeenet/rustango/tree/develop/crates/rustango/examples/getting_started_blog) |
+| Everyday tasks (sign up, upload, email, jobs, deploy) | [`docs/common-tasks.md`](common-tasks.md) |
 | Every `manage` subcommand | [`docs/manage.md`](manage.md) |
 | ORM cookbook (advanced filters, aggregations, M2M, soft delete) | [`docs/orm.md`](orm.md) |
 | Middleware (the full layer catalog + ordering) | [`docs/middleware.md`](middleware.md) |
 | Performance benchmarks (vs Go) | [`docs/benchmarks.md`](benchmarks.md) |
 | API conventions (naming, builder patterns, feature gates) | [`docs/api-conventions.md`](api-conventions.md) |
 | Security features in depth | [`docs/security.md`](security.md) |
-| Multi-tenancy | [README — Multi-tenancy section](https://github.com/ujeenet/rustango/blob/develop/README.md#multi-tenancy) |
+| Multi-tenancy | [`docs/tenancy.md`](tenancy.md) |
 | API docs | <https://docs.rs/rustango> |
 
 If you hit something that doesn't work or is unclear, open an issue.

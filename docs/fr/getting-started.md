@@ -1367,13 +1367,14 @@ Assurez-vous que votre proxy inverse :
 | Sujet | Doc |
 |---|---|
 | Version exécutable de ce guide | [`examples/getting_started_blog`](https://github.com/ujeenet/rustango/tree/develop/crates/rustango/examples/getting_started_blog) |
+| Tâches courantes (inscription, envoi de fichiers, e-mail, tâches, déploiement) | [`docs/common-tasks.md`](common-tasks.md) |
 | Chaque sous-commande `manage` | [`docs/manage.md`](manage.md) |
 | Recueil de recettes ORM (filtres avancés, agrégations, M2M, suppression douce) | [`docs/orm.md`](orm.md) |
 | Middleware (le catalogue complet des couches + ordonnancement) | [`docs/middleware.md`](middleware.md) |
 | Benchmarks de performance (vs Go) | [`docs/benchmarks.md`](benchmarks.md) |
 | Conventions d'API (nommage, patrons de construction, feature gates) | [`docs/api-conventions.md`](api-conventions.md) |
 | Fonctionnalités de sécurité en détail | [`docs/security.md`](security.md) |
-| Multi-tenancy | [README — section Multi-tenancy](https://github.com/ujeenet/rustango/blob/develop/README.md#multi-tenancy) |
+| Multi-tenancy | [`docs/tenancy.md`](tenancy.md) |
 | Documentation de l'API | <https://docs.rs/rustango> |
 
 Si vous rencontrez quelque chose qui ne fonctionne pas ou qui n'est pas clair, ouvrez un ticket.
