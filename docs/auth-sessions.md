@@ -9,7 +9,7 @@ request.
 
 [![Sessions in Rustango: the cookie holds only an opaque id, the SessionStore keeps the data in Redis, and destroy() revokes it everywhere](img/auth-sessions.png)](img/auth-sessions.png)
 
-> **Source:** `rustango::sessions` (`Session`, `SessionStore`) +
+> **Source:** `rustango::sessions` (`Session`, `SessionStore`, `SessionLayer`, `CurrentSession`) +
 > `rustango::cache` (`BoxedCache`, `InMemoryCache`) — behind the `sessions`
 > feature (on by default; pulls `cache`). For a Redis-backed store in
 > production, add the `cache-redis` feature (off by default) to get `RedisCache`.
@@ -33,6 +33,7 @@ request.
 
 ## Table of contents
 - [Quick start](#quick-start) · [Sessions vs JWT](#sessions-vs-jwt)
+- [The session layer](#the-session-layer) · [Listing and revoking a user's sessions](#listing-and-revoking-a-users-sessions)
 - [The session bag](#the-session-bag) · [The cookie](#the-cookie)
 - [Picking a backend](#picking-a-backend) · [Expiry & sliding renewal](#expiry-and-sliding-renewal)
 - [Updating in place](#updating-a-session-in-place) · [Notes & limits](#notes-and-limits)
@@ -69,6 +70,66 @@ above the 128-bit floor for session tokens, and unguessable.
 Under tenancy, scope the store per request with
 `store.for_tenant(&TenantSlug::of(&t.org)?)`: the id carries no tenant, and with
 apex + path-prefix routing one `Path=/` cookie reaches every tenant.
+
+---
+
+## The session layer
+
+`SessionLayer` does the cookie work for you: it loads the session named by the
+cookie, hands it to handlers as `CurrentSession`, and saves it after the
+handler returns. The cookie is always `HttpOnly`, and `Secure` + `SameSite=Lax`
+by default; it lives as long as the store's TTL.
+
+```rust
+use rustango::sessions::{CurrentSession, SessionLayer, SessionStore};
+
+let app = Router::new()
+    .route("/login", post(login))
+    .route("/me", get(me))
+    .layer(SessionLayer::new(SessionStore::new(cache)));
+
+async fn login(session: CurrentSession /* , form … */) -> Result<&'static str, ApiError> {
+    // After the password check: a new id, bound to the user.
+    session.login(&user.id.to_string()).await.map_err(ApiError::internal)?;
+    session.set("theme", "dark");
+    Ok("ok")
+}
+
+async fn me(session: CurrentSession) -> String {
+    session.user().unwrap_or_default()
+}
+```
+
+- `login(user)` moves the session to a **new id**, so an id planted before
+  login is worthless. `cycle_id()` does the same after a rights change.
+- `logout()` deletes the session and expires the cookie.
+- Options: `cookie_name`, `cookie_path`, `cookie_domain`, `same_site`,
+  `allow_insecure_for_dev()` (plain-HTTP dev only) and `rolling()` (renew the
+  TTL and cookie on every request).
+- Under tenancy the layer scopes the store to the request's tenant.
+- For a CSRF token kept in the session, use `SessionLayer::with_csrf` — see
+  [CSRF](security.md#protecting-against-csrf).
+
+---
+
+## Listing and revoking a user's sessions
+
+Sessions made by `login` are bound to the user, so you can show "where you are
+logged in" and end them:
+
+```rust
+let store = session.store(); // the request's store, scoped to its tenant
+for s in store.sessions_of(&user_id).await? {
+    println!("{} since {}", s.key, s.created_at);
+}
+store.revoke(&user_id, &key).await?;                 // one device
+store.revoke_all(&user_id, session.id().as_deref()).await?; // all but this one
+```
+
+`key` names a session in listings; it is not the session id, so a listing never
+leaks a usable cookie. `revoke_all` also ends sessions the listing missed (two
+logins of one user at the same moment can drop an entry), because it bumps the
+user's revocation generation and older sessions stop loading.
 
 ---
 
@@ -180,9 +241,8 @@ store.save_with_id(&sid, &s).await?;
 - **Corrupt or unknown ids load as `None`** (fail-open): a cache schema change
   or a tampered cookie yields an empty session, not an error — the request is
   simply unauthenticated.
-- **The store doesn't set the cookie for you** — it manages server-side state;
-  you attach/read the `sid` cookie in your handler (or via a layer). This keeps
-  it usable from any framework wiring.
+- **The store alone doesn't set the cookie** — `SessionLayer` does; without it
+  you attach and read the `sid` cookie in your handler.
 - **Mint a fresh session id on privilege change** (e.g. right after login) to
   avoid session fixation — `save` already does this since it always generates a
   new id.

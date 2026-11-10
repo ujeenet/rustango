@@ -257,7 +257,8 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
             .into_response()
         }
     };
-    let Ok(space) = request_tenant(&mut parts).await else {
+    // Org id and slug, not the slug alone: a reused slug must not replay the old org's.
+    let Ok(space) = KeySpace::of_request(&mut parts).await else {
         // Running it unkeyed could charge twice; the client retries later.
         return unknown_tenant();
     };
@@ -630,25 +631,6 @@ fn principal_fields(h: &mut KeyHasher, parts: &Parts) -> bool {
 fn principal_fields(h: &mut KeyHasher, _parts: &Parts) -> bool {
     h.field(b"anonymous");
     false
-}
-
-/// The request's org id and slug, not its slug alone: a tenant that reuses a purged slug
-/// must not replay the old one's responses. `Err` when resolution failed; no match is global.
-#[cfg(feature = "tenancy")]
-async fn request_tenant(parts: &mut Parts) -> Result<KeySpace, ()> {
-    use crate::tenancy::RequestTenant;
-    match RequestTenant::resolve(parts).await {
-        RequestTenant::Tenant(t) => Ok(KeySpace::Tenant(t)),
-        RequestTenant::Unknown => Err(()),
-        // Global, or no tenant matched (an apex webhook): keyed globally, as before.
-        _ => Ok(KeySpace::Global),
-    }
-}
-
-#[cfg(not(feature = "tenancy"))]
-#[allow(clippy::unused_async)]
-async fn request_tenant(_parts: &mut Parts) -> Result<KeySpace, ()> {
-    Ok(KeySpace::Global)
 }
 
 fn hex(bytes: &[u8]) -> String {

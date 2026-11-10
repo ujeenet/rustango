@@ -150,6 +150,9 @@ untouched.
 
 ## Unreleased
 
+- The `sessions` feature now depends on axum (for `SessionLayer`).
+- `SessionStore::load` treats ids containing `:` as unknown: the per-user index and revocation keys share the session key space.
+
 ## 0.65.0
 
 - The deprecated items and the old tenant lock / idempotency key fallback that 0.64.0 announced for removal in 0.65.0 are still here; they go in 0.66.0. Deploy 0.64 or later everywhere before 0.66.0.

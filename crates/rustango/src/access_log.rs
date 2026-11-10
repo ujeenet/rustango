@@ -422,7 +422,7 @@ fn tenant_label(field: TenantField, tenant: Option<crate::tenant_log::TenantLabe
 /// socket); off, the socket. Never a raw forwarding header (#1745).
 fn resolve_client_ip(req: &Request, use_real_ip: bool) -> Option<String> {
     let ip = if use_real_ip {
-        crate::rate_limit::client_ip(req.extensions(), req.headers())
+        crate::real_ip::client_ip(req.extensions(), req.headers())
     } else {
         req.extensions()
             .get::<ConnectInfo<std::net::SocketAddr>>()

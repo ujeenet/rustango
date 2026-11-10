@@ -139,6 +139,7 @@ to get the method.
 | **Security & access** | | |
 | Security headers (HSTS, XFO, CSP…) | `SecurityHeadersLayer` | `.security_headers(..)` |
 | CSRF (double-submit cookie) | `CsrfLayer` | `.layer(csrf::layer())` |
+| Server-side session cookie (+ session-bound CSRF) | `SessionLayer` | `.layer(SessionLayer::new(store))` / `.layer(SessionLayer::new(store).with_csrf(cfg))` |
 | CORS | `CorsLayer` | `.cors(..)` |
 | Host allow-list | `AllowedHostsLayer` | `.allowed_hosts(..)` |
 | IP allow/block | `IpFilterLayer` | `.ip_filter(..)` |
@@ -160,7 +161,7 @@ to get the method.
 | [Access log](logging.md#the-access-log) (PII-redacted) | `AccessLogLayer` | `.access_log(..)` |
 | `tracing` spans | `TracingLayer` | `.layer(..)` |
 | `Server-Timing` header | `ServerTimingLayer` | `.server_timing(..)` |
-| Real client IP (behind proxies) | `RealIpLayer` | `.real_ip(..)` |
+| Real client IP (behind proxies) | `RealIpLayer` | `.real_ip(..)`; read it with the `ClientIp` extractor |
 | Request signals (`request_started` / `request_finished`) | `RequestSignalsLayer` | `.layer(..)` |
 | **Content & response** | | |
 | gzip/br compression | `CompressionLayer` | `.compression(..)` |

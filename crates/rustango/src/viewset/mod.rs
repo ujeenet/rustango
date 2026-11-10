@@ -2573,7 +2573,7 @@ impl ThrottleClient {
     /// (IPv6 by /64), else one shared `"global"` bucket. Never a raw
     /// forwarding header (#1745).
     fn new(parts: &axum::http::request::Parts, scope: &Scope) -> Self {
-        let ip = crate::rate_limit::client_ip(&parts.extensions, &parts.headers).map_or_else(
+        let ip = crate::real_ip::client_ip(&parts.extensions, &parts.headers).map_or_else(
             || {
                 crate::rate_limit::warn_missing_discriminator("IP (ConnectInfo missing)");
                 "global".to_owned()

@@ -850,17 +850,18 @@ pub mod webhook_delivery;
     feature = "_http_layers",
     feature = "webhook-delivery",
     feature = "oauth2",
-    all(feature = "notifications", feature = "http-client")
+    feature = "http-client"
 ))]
 mod cidr;
 
-/// Checked outbound HTTP client for config-supplied URLs (#1716).
+/// Outbound HTTP that refuses private, loopback and cloud-metadata targets.
+/// See [`outbound::Egress`] and [`outbound::resolve_public`].
 #[cfg(any(
     feature = "webhook-delivery",
     feature = "oauth2",
-    all(feature = "notifications", feature = "http-client")
+    feature = "http-client"
 ))]
-pub(crate) mod outbound;
+pub mod outbound;
 
 /// Standardized API error responses. See [`api_errors::ApiError`].
 /// Needs only axum, so every HTTP surface can answer in this shape.
