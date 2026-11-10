@@ -562,6 +562,18 @@ impl Pool {
         h.finish()
     }
 
+    /// What tells this pool's schema apart within its database, the same
+    /// in every process: the connect options and the tagged schema.
+    #[cfg(all(feature = "postgres", feature = "sse"))]
+    pub(crate) fn pg_schema_scope(pg: &sqlx::PgPool) -> String {
+        let o = pg.connect_options();
+        format!(
+            "{}|{}",
+            o.get_options().unwrap_or_default(),
+            schema_scope(&o).unwrap_or_default()
+        )
+    }
+
     /// Borrow as a `PgPool` for code that needs Postgres itself.
     /// `None` on any other backend.
     #[must_use]

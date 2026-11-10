@@ -367,6 +367,27 @@ and on every router added with `nest_with`, and it replaces axum's 2 MiB cap.
 A request whose `Content-Length` is larger gets `413 Payload Too Large`
 before your handler runs. Set it a little above your largest `max_bytes`.
 
+To let one route take more than the rest, give it its own cap, and its own
+timeout (`0` means none, so a slow upload is not cut at
+`request_timeout_secs`). The key is the route pattern as you registered it,
+nest prefix included:
+
+```toml
+[server]
+max_body_bytes = 2097152
+request_timeout_secs = 30
+
+[server.routes."/api/uploads"]
+max_body_bytes = 1073741824   # 1 GiB on this route only
+request_timeout_secs = 0
+```
+
+In code it is `BodyLimitLayer::new(n).route("/api/uploads", 1 << 30)` and
+`RequestTimeoutLayer::new(t).exempt("/api/uploads")` (or `.route(pattern, t)`).
+With route entries and no `max_body_bytes`, other routes keep axum's 2 MiB.
+The timeout ends when the handler returns its response, so a streamed
+download, an SSE stream or a WebSocket after its upgrade is never cut.
+
 The `Cli` reads this setting only when it has your settings. The scaffolded
 `main.rs` passes them with `.with_loaded_settings(loaded)`. Without that call
 (or `.with_settings_from_env()`) the value is ignored, and the server logs a

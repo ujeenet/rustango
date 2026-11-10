@@ -16,7 +16,9 @@ use std::time::{Duration, Instant};
 
 use rustango::core::SqlValue;
 use rustango::jobs::pg::PgJobQueue;
-use rustango::jobs::{Job, JobCtx, JobDeadLetter, JobError, JobQueue};
+use rustango::jobs::{
+    Dispatch, Enqueued, Job, JobCtx, JobDeadLetter, JobError, JobId, JobQueue, UniqueKey,
+};
 use rustango::sql::Pool;
 use rustango::tri_dialect_test;
 use serde::{Deserialize, Serialize};
@@ -1451,6 +1453,155 @@ async fn an_older_table_gets_the_queue_index(pool: &Pool) {
     assert_eq!(rows[0].0, 1, "no queue index");
 }
 
+/// A job scheduled for later waits, and its id cancels it, also once
+/// stored as text.
+async fn a_scheduled_job_waits_and_can_be_cancelled(pool: &Pool) {
+    let tok = token(pool, "scheduled");
+    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    let later = chrono::Utc::now() + chrono::Duration::hours(1);
+    let id = q
+        .dispatch_at(&Tick { token: tok.clone() }, later)
+        .await
+        .unwrap();
+    q.start().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(counts(&tok).0, 0, "ran before its time");
+    assert_eq!(rows_due_after(pool, chrono::Duration::minutes(59)).await, 1);
+    let stored: JobId = id.to_string().parse().unwrap();
+    assert!(q.cancel(&stored).await.unwrap(), "not cancelled");
+    assert_eq!(job_rows(pool).await, 0);
+    assert!(!q.cancel(&id).await.unwrap(), "cancelled twice");
+    q.shutdown().await;
+}
+
+/// A delayed job runs once due, under the id `enqueue` returned.
+async fn a_delayed_job_runs_under_the_returned_id(pool: &Pool) {
+    let tok = token(pool, "delayed");
+    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    q.register::<CtxProbe>().await;
+    let job = CtxProbe { token: tok.clone() };
+    let queued = q
+        .enqueue(&job, Dispatch::after(Duration::from_millis(800)))
+        .await
+        .unwrap();
+    q.start().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(ctx_seen(&tok).is_empty(), "ran before its delay");
+    wait_for("the delayed run", || !ctx_seen(&tok).is_empty()).await;
+    q.shutdown().await;
+    assert_eq!(ctx_seen(&tok)[0].0, queued.id().as_str());
+}
+
+/// A unique key holds while its job is queued; another key or job type
+/// does not collide, and a freed key queues again.
+async fn a_unique_key_skips_a_second_dispatch(pool: &Pool) {
+    let tok = token(pool, "unique");
+    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    let key = UniqueKey::new("delete-account:42").unwrap();
+    let later = Dispatch::at(chrono::Utc::now() + chrono::Duration::hours(1));
+    let tick = Tick { token: tok.clone() };
+    let first = q
+        .enqueue(&tick, later.clone().unique(key.clone()))
+        .await
+        .unwrap();
+    assert!(matches!(first, Enqueued::Queued(_)), "{first:?}");
+    let again = q
+        .enqueue(&tick, Dispatch::now().unique(key.clone()))
+        .await
+        .unwrap();
+    assert_eq!(again, Enqueued::Duplicate(first.id().clone()));
+    // Case matters on every backend, MySQL's collation included.
+    let upper = UniqueKey::new("DELETE-ACCOUNT:42").unwrap();
+    assert!(!q
+        .enqueue(&tick, later.clone().unique(upper))
+        .await
+        .unwrap()
+        .is_duplicate());
+    let slow = Slow {
+        token: tok.clone(),
+        first_ms: 0,
+        later_ms: 0,
+    };
+    assert!(!q
+        .enqueue(&slow, later.clone().unique(key.clone()))
+        .await
+        .unwrap()
+        .is_duplicate());
+    assert_eq!(job_rows(pool).await, 3);
+    assert!(q.cancel(first.id()).await.unwrap());
+    let freed = q.enqueue(&tick, later.unique(key)).await.unwrap();
+    assert!(
+        matches!(&freed, Enqueued::Queued(id) if id != first.id()),
+        "{freed:?}"
+    );
+}
+
+/// Inside one block, the second dispatch of a key sees the first.
+async fn a_unique_key_holds_inside_a_block(pool: &Pool) {
+    let q = Arc::new(queue(pool, 1, Duration::from_secs(60)).await);
+    let tok = token(pool, "unique-block");
+    let (first, second) = rustango::sql::atomic(pool, move |_tx| {
+        Box::pin(async move {
+            let key = UniqueKey::new("once").unwrap();
+            let tick = Tick { token: tok };
+            let a = q
+                .enqueue(&tick, Dispatch::now().unique(key.clone()))
+                .await
+                .unwrap();
+            let b = q.enqueue(&tick, Dispatch::now().unique(key)).await.unwrap();
+            Ok((a, b))
+        })
+    })
+    .await
+    .unwrap();
+    assert_eq!(second, Enqueued::Duplicate(first.id().clone()));
+    assert_eq!(job_rows(pool).await, 1);
+}
+
+/// A job a worker runs is not cancelled, and runs to its end.
+async fn a_running_job_cannot_be_cancelled(pool: &Pool) {
+    let tok = token(pool, "running");
+    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    let job = Slow {
+        token: tok.clone(),
+        first_ms: 800,
+        later_ms: 0,
+    };
+    let id = q.enqueue(&job, Dispatch::now()).await.unwrap().into_id();
+    q.start().await;
+    wait_for("the run to start", || counts(&tok).0 == 1).await;
+    assert!(!q.cancel(&id).await.unwrap(), "cancelled a running job");
+    wait_for("the run to finish", || counts(&tok).1 == 1).await;
+    q.shutdown().await;
+}
+
+/// `ensure_table_pool` adds `unique_key` to an older table; until then a
+/// unique dispatch is refused.
+async fn an_older_table_gets_the_unique_column(pool: &Pool) {
+    let mysql = pool.dialect().name() == "mysql";
+    let drop_idx = if mysql {
+        "DROP INDEX `rustango_jobs_unique_idx` ON `rustango_jobs`"
+    } else {
+        "DROP INDEX rustango_jobs_unique_idx"
+    };
+    for sql in [drop_idx, "ALTER TABLE rustango_jobs DROP COLUMN unique_key"] {
+        rustango::sql::raw_execute_pool(pool, sql, Vec::new())
+            .await
+            .expect(sql);
+    }
+    let tick = Tick {
+        token: token(pool, "old-unique"),
+    };
+    let unique = || Dispatch::now().unique(UniqueKey::new("k").unwrap());
+    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    let err = q.enqueue(&tick, unique()).await.unwrap_err();
+    assert!(err.to_string().contains("unique_key"), "{err}");
+    PgJobQueue::ensure_table_pool(pool).await.expect("ensure");
+    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    q.enqueue(&tick, unique()).await.expect("unique dispatch");
+    assert!(q.enqueue(&tick, unique()).await.unwrap().is_duplicate());
+}
+
 tri_dialect_test! {
     setup: setup,
     sqlite: file,
@@ -1490,6 +1641,12 @@ tri_dialect_test! {
         a_retry_keeps_the_job_id_and_counts_the_attempt,
         shutdown_fires_a_running_jobs_stop_signal,
         two_tenants_first_jobs_get_different_keys,
+        a_scheduled_job_waits_and_can_be_cancelled,
+        a_delayed_job_runs_under_the_returned_id,
+        a_unique_key_skips_a_second_dispatch,
+        a_unique_key_holds_inside_a_block,
+        a_running_job_cannot_be_cancelled,
+        an_older_table_gets_the_unique_column,
     ],
 }
 

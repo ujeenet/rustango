@@ -148,8 +148,8 @@ to get the method.
 | **Traffic & resilience** | | |
 | Rate limit (per-IP/global) | `RateLimitLayer` | `.rate_limit(..)` |
 | Distributed rate limit (cache-backed) | `CacheRateLimitLayer` | `.cache_rate_limit(..)` |
-| Request timeout | `RequestTimeoutLayer` | `.request_timeout(..)` |
-| Max body size | `BodyLimitLayer` | `.body_limit(..)` |
+| Request timeout (per route: `.route(..)`, `.exempt(..)`) | `RequestTimeoutLayer` | `.request_timeout(..)` |
+| Max body size (per route: `.route(..)`) | `BodyLimitLayer` | `.body_limit(..)` |
 | Maintenance mode (503) | `MaintenanceLayer` | `.maintenance(..)` |
 | Idempotency keys | `IdempotencyLayer` | `.idempotency(..)` |
 | Restrict HTTP methods | `MethodRestrictLayer` | `.require_get()` / `.require_post()` / `.require_safe()` / `.require_methods([..])` |

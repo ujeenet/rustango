@@ -1021,6 +1021,89 @@ pub(crate) async fn insert_or_ignore_tx(
     Ok(execute_tx(tx, &stmt.sql, stmt.params).await? > 0)
 }
 
+/// [`raw_execute_pool`] that joins an open [`atomic`] block on `pool`.
+#[cfg(any(feature = "jobs-postgres", all(feature = "sse", feature = "postgres")))]
+pub(crate) async fn raw_write(
+    pool: &Pool,
+    sql: &str,
+    binds: Vec<SqlValue>,
+) -> Result<u64, ExecError> {
+    crate::sql::refuse_unbindable_values(pool.dialect(), &binds)?;
+    write_pool(pool, sql, binds).await
+}
+
+/// Run a raw single-row `INSERT` and return the new row's `id_col`.
+/// Joins an open [`atomic`] block on `pool`; a failed insert there is
+/// rolled back alone, so the block goes on.
+#[cfg(feature = "jobs-postgres")]
+pub(crate) async fn raw_insert_id(
+    pool: &Pool,
+    sql: &str,
+    binds: Vec<SqlValue>,
+    id_col: &str,
+) -> Result<i64, ExecError> {
+    crate::sql::refuse_unbindable_values(pool.dialect(), &binds)?;
+    if let Some(w) = atomic::join(pool).await {
+        let mut w = w?;
+        let id = raw_insert_id_tx(&mut w, sql, binds, id_col).await?;
+        w.release().await?;
+        return Ok(id);
+    }
+    match pool {
+        // No RETURNING: the id comes from the INSERT's own reply.
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(my) => {
+            crate::test_assertions::query_counter::bump();
+            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                sqlx::query(sql);
+            for v in binds {
+                q = bind_query_my(q, v);
+            }
+            let id = q.execute(my).await?.last_insert_id();
+            Ok(i64::try_from(id).unwrap_or(i64::MAX))
+        }
+        #[allow(unreachable_patterns)]
+        _ => {
+            let sql = format!("{sql} RETURNING {}", pool.dialect().quote_ident(id_col));
+            let (id,): (i64,) = raw_query_pool(&sql, binds, pool)
+                .await?
+                .pop()
+                .ok_or(sqlx::Error::RowNotFound)?;
+            Ok(id)
+        }
+    }
+}
+
+#[cfg(feature = "jobs-postgres")]
+async fn raw_insert_id_tx(
+    tx: &mut PoolTx<'_>,
+    sql: &str,
+    binds: Vec<SqlValue>,
+    id_col: &str,
+) -> Result<i64, ExecError> {
+    #[cfg(feature = "mysql")]
+    #[allow(irrefutable_let_patterns)]
+    {
+        let gate = atomic::gate(tx)?;
+        if let TxConn::Mysql(t) = &mut tx.conn {
+            crate::test_assertions::query_counter::bump();
+            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                sqlx::query(sql);
+            for v in binds {
+                q = bind_query_my(q, v);
+            }
+            let done = gate.check(q.execute(&mut **t).await.map_err(ExecError::from))?;
+            return Ok(i64::try_from(done.last_insert_id()).unwrap_or(i64::MAX));
+        }
+    }
+    let sql = format!("{sql} RETURNING {}", tx.dialect().quote_ident(id_col));
+    let (id,): (i64,) = raw_query_tx(tx, &sql, binds)
+        .await?
+        .pop()
+        .ok_or(sqlx::Error::RowNotFound)?;
+    Ok(id)
+}
+
 /// `INSERT` that returns the new row's data, on any backend. The
 /// result shape differs per backend, so callers `match` on
 /// [`InsertReturningPool`].

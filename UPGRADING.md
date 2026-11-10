@@ -150,6 +150,11 @@ untouched.
 
 ## Unreleased
 
+- `PgJobQueue::ensure_table_pool` adds a `unique_key` column and a unique `(name, unique_key)` index to `rustango_jobs`; run it (or the same DDL) before using unique keys.
+- `BodyLimitLayer` and `RequestTimeoutLayer` gain a private field: build them with `new(..)`, not a struct literal.
+- `_http_layers` turns on axum's `matched-path` feature, which the route caps key on.
+- S3 and Azure failures with an HTTP status are now `StorageError::Status` instead of `Io`; the message is unchanged. Match `Status` (or call `http_status()`) where you matched `Io` for these.
+
 ## 0.65.0
 
 - The deprecated items and the old tenant lock / idempotency key fallback that 0.64.0 announced for removal in 0.65.0 are still here; they go in 0.66.0. Deploy 0.64 or later everywhere before 0.66.0.

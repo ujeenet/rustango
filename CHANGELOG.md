@@ -4,6 +4,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added
+
+- Jobs: `JobQueue::dispatch_at`, `enqueue` with `Dispatch` options (a run time, a `UniqueKey` held while the job is queued or running) and `cancel(&JobId)` on both queues; `JobId` parses back from its text. The database queue adds a `unique_key` column and index in `ensure_table_pool`.
+- `sse::KeyedEventBus` delivers each event only to its key's subscribers, and `sse::PgEventBus` (feature `postgres`) does the same across processes over `LISTEN`/`NOTIFY`; their `Subscription::recv` gives `Recv::Resync` when events were missed.
+- Per-route body caps and timeouts: `BodyLimitLayer::route`, `RequestTimeoutLayer::route` / `exempt`, and `[server.routes."<pattern>"]` in settings.
+- S3: `bucket_cors`, `bucket_versioning` and presigned DELETE URLs (`Storage::presigned_delete_url`); S3 and Azure errors carry the HTTP status (`StorageError::Status`, `http_status()`).
+
 ## [0.65.2] — 2026-11-09
 
 ### Documentation

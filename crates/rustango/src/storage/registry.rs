@@ -335,6 +335,10 @@ impl super::Storage for PresignVia {
         self.presign.presigned_put_url(key, ttl, put).await
     }
 
+    async fn presigned_delete_url(&self, key: &str, ttl: std::time::Duration) -> Option<String> {
+        self.presign.presigned_delete_url(key, ttl).await
+    }
+
     fn presigned_put_enforces_conditions(&self) -> bool {
         self.presign.presigned_put_enforces_conditions()
     }

@@ -136,9 +136,10 @@ _aead         = ["dep:chacha20poly1305", "_base64", "_rand", "dep:sha2"]
 # mounts them from `[server]`/`[security]` settings without `admin` (#1739),
 # and the request span, request id and access log with them (#1514), and
 # `static_files` for `Cli::with_static` (#2042), streamed off the runtime (#1531).
+# `axum/matched-path`: per-route body caps and timeouts key on the route pattern.
 _http_layers  = [
     "_axum", "_tower", "_base64", "_rand", "dep:http-body", "dep:http-body-util",
-    "dep:tokio-util", "tokio/fs", "tokio/io-util", "dep:sha2",
+    "dep:tokio-util", "tokio/fs", "tokio/io-util", "dep:sha2", "axum/matched-path",
 ]
 
 # Layered TOML config (`rustango::config`). Loads `config/default.toml`
