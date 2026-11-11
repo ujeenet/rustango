@@ -186,6 +186,9 @@ async fn a_connection_without_the_secret_cannot_listen_or_inject() {
         .execute(pool.as_postgres().unwrap())
         .await
         .unwrap();
+    // The spy hears only its own forgery on the name it knows.
+    let forged = tokio::time::timeout(Duration::from_secs(5), spy.recv()).await;
+    assert!(forged.is_ok_and(|n| n.is_ok_and(|n| n.payload().contains("forged"))));
     bus.publish(&1, &"real".to_owned()).await.unwrap();
     assert_eq!(next(&mut sub).await, Some(Recv::Event("real".into())));
     let heard = tokio::time::timeout(Duration::from_millis(300), spy.recv()).await;
