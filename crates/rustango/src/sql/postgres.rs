@@ -594,6 +594,10 @@ impl Dialect for Postgres {
         ))
     }
 
+    fn share_lock_suffix(&self) -> Option<&'static str> {
+        Some(" FOR SHARE")
+    }
+
     fn acquire_xact_lock_sql(&self) -> Option<String> {
         Some(format!(
             "SELECT pg_advisory_xact_lock({})",

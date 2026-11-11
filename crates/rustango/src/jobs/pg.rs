@@ -561,8 +561,8 @@ impl PgJobQueue {
         let rows: Result<Vec<(i64, DateTime<Utc>)>, _> = if crate::sql::in_block(&self.pool) {
             // A locking read sees a holder committed after the block's
             // snapshot, which MySQL's plain read would not.
-            if d.name() != "sqlite" {
-                sql.push_str(" FOR SHARE");
+            if let Some(lock) = d.share_lock_suffix() {
+                sql.push_str(lock);
             }
             crate::sql::atomic(&self.pool, move |tx| {
                 Box::pin(async move {

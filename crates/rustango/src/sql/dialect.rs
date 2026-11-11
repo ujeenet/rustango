@@ -1137,6 +1137,12 @@ pub trait Dialect: Send + Sync + sealed::Sealed {
         None
     }
 
+    /// The suffix for a `SELECT` that takes shared row locks until the
+    /// transaction ends. `None` where there are no row locks (SQLite).
+    fn share_lock_suffix(&self) -> Option<&'static str> {
+        None
+    }
+
     /// The column comment to splice into a `CREATE TABLE` column
     /// definition. Only MySQL writes one here; Postgres uses
     /// [`Self::column_comment_statement`] instead, and SQLite has no
