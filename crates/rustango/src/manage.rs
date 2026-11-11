@@ -2084,6 +2084,9 @@ fn inert_layer_settings(s: &crate::config::Settings) -> Vec<&'static str> {
     if s.server.max_body_bytes.is_some() {
         inert.push("server.max_body_bytes");
     }
+    if !s.server.routes.is_empty() {
+        inert.push("server.routes");
+    }
     if s.security.headers_preset.is_some() {
         inert.push("security.headers_preset");
     }

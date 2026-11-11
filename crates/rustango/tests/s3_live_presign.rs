@@ -6,7 +6,7 @@
 //!
 //! Skipped silently when RUSTANGO_S3_TEST_KEY etc. aren't set.
 
-use rustango::storage::s3::{S3Config, S3Credentials, S3Storage};
+use rustango::storage::s3::{BucketVersioning, S3Config, S3Credentials, S3Storage};
 use rustango::storage::{PutConditions, Storage};
 use std::time::Duration;
 
@@ -332,4 +332,62 @@ async fn save_stream_round_trip_create_only_and_cut_short() {
         .is_err());
     assert_eq!(storage.metadata(&cut).await.expect("head"), None);
     storage.delete(&key).await.expect("delete");
+}
+
+/// A presigned DELETE removes the object without the keys.
+#[tokio::test]
+async fn presigned_delete_removes_the_object() {
+    let Some(s) = maybe_storage() else {
+        eprintln!("skipping — set RUSTANGO_S3_TEST_KEY etc.");
+        return;
+    };
+    let key = format!("rustango-test/{}.txt", uuid::Uuid::new_v4());
+    s.save(&key, b"bye").await.expect("save");
+    let url = s
+        .presigned_delete_url(&key, Duration::from_secs(60))
+        .await
+        .expect("DELETE url");
+    let resp = reqwest::Client::new().delete(&url).send().await.unwrap();
+    assert!(resp.status().is_success(), "{}", resp.status());
+    assert!(!s.exists(&key).await.expect("exists"));
+}
+
+/// A refused request carries the status S3 answered with.
+#[tokio::test]
+async fn a_refused_request_carries_its_status() {
+    let Some(s) = maybe_storage() else {
+        eprintln!("skipping — set RUSTANGO_S3_TEST_KEY etc.");
+        return;
+    };
+    let mut cfg = S3Config::new(
+        std::env::var("RUSTANGO_S3_TEST_BUCKET").unwrap(),
+        std::env::var("RUSTANGO_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into()),
+    );
+    cfg.endpoint = std::env::var("RUSTANGO_S3_TEST_ENDPOINT").ok();
+    let path_style = cfg.endpoint.is_some();
+    let cfg = cfg.with_path_style(path_style);
+    let wrong = S3Storage::new(cfg, S3Credentials::new("nobody", "wrong-secret"));
+    let err = wrong
+        .save("rustango-test/denied.txt", b"x")
+        .await
+        .unwrap_err();
+    assert_eq!(err.http_status(), Some(403), "{err}");
+    drop(s);
+}
+
+/// The bucket-level reads: a fresh bucket is unversioned and has no CORS
+/// rules.
+#[tokio::test]
+async fn bucket_versioning_and_cors_are_read() {
+    let Some(s) = maybe_storage() else {
+        eprintln!("skipping — set RUSTANGO_S3_TEST_KEY etc.");
+        return;
+    };
+    let versioning = s.bucket_versioning().await.expect("versioning");
+    assert_eq!(versioning, BucketVersioning::Unversioned);
+    match s.bucket_cors().await {
+        Ok(cors) => assert_eq!(cors, None),
+        // MinIO does not implement bucket CORS; the status must come through.
+        Err(e) => assert_eq!(e.http_status(), Some(501), "{e}"),
+    }
 }

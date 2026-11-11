@@ -19,13 +19,20 @@
 //!     .body_limit(BodyLimitLayer::new(10 * 1024 * 1024)); // 10 MiB
 //! ```
 //!
-//! For a different cap on one route, put that route in a sub-router and
-//! merge it after the global layer.
+//! A route can have its own cap, above or below the global one, keyed by
+//! the pattern it was registered with:
+//!
+//! ```ignore
+//! BodyLimitLayer::new(10 << 20).route("/api/uploads", 1 << 30)
+//! ```
+//!
+//! A `BodyLimitLayer` inside another can only lower the cap.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::Request;
+use axum::extract::{MatchedPath, Request};
 use axum::http::{header, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse as _, Response};
@@ -39,6 +46,8 @@ pub struct BodyLimitLayer {
     /// QUERY. GET, DELETE and HEAD usually have no body, so they are
     /// skipped.
     pub methods: Vec<axum::http::Method>,
+    /// Caps that replace `max_bytes`, by route pattern.
+    routes: HashMap<String, usize>,
 }
 
 impl Default for BodyLimitLayer {
@@ -59,7 +68,26 @@ impl BodyLimitLayer {
                 Method::PATCH,
                 crate::http_query::QUERY.clone(),
             ],
+            routes: HashMap::new(),
         }
+    }
+
+    /// Cap the route registered as `pattern` (e.g. `"/files/{id}"`) at
+    /// `max_bytes` instead, above or below `max_bytes`. The pattern must
+    /// match the route as written, nest prefix included.
+    #[must_use]
+    pub fn route(mut self, pattern: impl Into<String>, max_bytes: usize) -> Self {
+        self.routes.insert(pattern.into(), max_bytes);
+        self
+    }
+
+    /// This request's cap: its route's, else `max_bytes`.
+    fn cap_for(&self, req: &Request<Body>) -> usize {
+        req.extensions()
+            .get::<MatchedPath>()
+            .and_then(|p| self.routes.get(p.as_str()))
+            .copied()
+            .unwrap_or(self.max_bytes)
     }
 
     /// Choose which methods to check. An empty vec checks every
@@ -70,9 +98,10 @@ impl BodyLimitLayer {
         self
     }
 
-    /// Build the layer from [`crate::config::ServerSettings`]. Returns
-    /// `None` when `max_body_bytes` is unset, so the layer is opt-in.
-    /// Methods stay at the default.
+    /// Build the layer from [`crate::config::ServerSettings`], with its
+    /// `[server.routes]` caps. Returns `None` when neither sets a cap, so
+    /// the layer is opt-in. With route caps only, other routes get axum's
+    /// 2 MiB default. Methods stay at the default.
     ///
     /// ```ignore
     /// let cfg = rustango::config::Settings::load_from_env()?;
@@ -83,11 +112,18 @@ impl BodyLimitLayer {
     #[cfg(feature = "config")]
     #[must_use]
     pub fn from_settings(s: &crate::config::ServerSettings) -> Option<Self> {
-        let max = s.max_body_bytes?;
         // On 32-bit targets a huge config value saturates instead of
         // wrapping, which is the safe way to fail.
-        let max = usize::try_from(max).unwrap_or(usize::MAX);
-        Some(Self::new(max))
+        let bytes = |n: u64| usize::try_from(n).unwrap_or(usize::MAX);
+        let routes = s
+            .routes
+            .iter()
+            .filter_map(|(pattern, r)| Some((pattern, bytes(r.max_body_bytes?))));
+        let mut layer = Self::new(s.max_body_bytes.map_or(2 << 20, bytes));
+        for (pattern, max) in routes {
+            layer = layer.route(pattern.clone(), max);
+        }
+        (s.max_body_bytes.is_some() || !layer.routes.is_empty()).then_some(layer)
     }
 }
 
@@ -112,7 +148,8 @@ async fn handle(cfg: Arc<BodyLimitLayer>, mut req: Request<Body>, next: Next) ->
     if !cfg.methods.is_empty() && !cfg.methods.contains(req.method()) {
         return next.run(req).await;
     }
-    let cap = effective_cap(&mut req, cfg.max_bytes);
+    let own = cfg.cap_for(&req);
+    let cap = effective_cap(&mut req, own);
     if let Some(declared) = req
         .headers()
         .get(header::CONTENT_LENGTH)
@@ -474,6 +511,79 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    fn sized(uri: &str, n: usize) -> Request<Body> {
+        Request::builder()
+            .method(Method::POST)
+            .uri(uri)
+            .header(header::CONTENT_LENGTH, n.to_string())
+            .body(Body::from("0".repeat(n)))
+            .unwrap()
+    }
+
+    async fn status(app: &Router, req: Request<Body>) -> StatusCode {
+        app.clone().oneshot(req).await.unwrap().status()
+    }
+
+    /// A route's cap replaces the global one, above or below it, for
+    /// that route only.
+    #[tokio::test]
+    async fn a_route_cap_replaces_the_global_one_on_its_route() {
+        let read = || post(|b: String| async move { b.len().to_string() });
+        let app = Router::new()
+            .route("/up", read())
+            .route("/small", read())
+            .route("/", read())
+            .body_limit(
+                BodyLimitLayer::new(10)
+                    .route("/up", 1000)
+                    .route("/small", 5),
+            );
+        assert_eq!(status(&app, sized("/up", 500)).await, StatusCode::OK);
+        assert_eq!(
+            status(&app, sized("/", 500)).await,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(
+            status(&app, sized("/small", 8)).await,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        let mut streamed = streamed(Method::POST, 500);
+        *streamed.uri_mut() = "/up".parse().unwrap();
+        assert_eq!(status(&app, streamed).await, StatusCode::OK);
+        assert_eq!(
+            status(&app, sized("/up", 1001)).await,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
+    /// The pattern is the route as written, nest prefix and all.
+    #[tokio::test]
+    async fn a_route_cap_matches_a_nested_pattern() {
+        let files = Router::new().route("/files/{id}", post(|b: String| async move { b }));
+        let app = Router::new()
+            .nest("/api", files)
+            .body_limit(BodyLimitLayer::new(10).route("/api/files/{id}", 1000));
+        assert_eq!(
+            status(&app, sized("/api/files/7", 500)).await,
+            StatusCode::OK
+        );
+    }
+
+    /// Route caps alone install the layer, other routes at axum's 2 MiB.
+    #[cfg(feature = "config")]
+    #[test]
+    fn from_settings_takes_route_caps() {
+        let mut s = crate::config::ServerSettings::default();
+        let mut up = crate::config::RouteLimits::default();
+        up.max_body_bytes = Some(1 << 30);
+        s.routes.insert("/up".into(), up);
+        let layer = BodyLimitLayer::from_settings(&s).expect("route caps install it");
+        assert_eq!(layer.max_bytes, 2 << 20);
+        assert_eq!(layer.routes.get("/up"), Some(&(1 << 30)));
+        s.routes.clear();
+        assert!(BodyLimitLayer::from_settings(&s).is_none());
     }
 
     #[test]

@@ -248,6 +248,14 @@ pub(super) fn send_error(e: &reqwest::Error) -> StorageError {
     StorageError::Io(msg)
 }
 
+/// A backend's error answer: `message` names the call and the status.
+pub(super) fn status_error(status: reqwest::StatusCode, message: String) -> StorageError {
+    StorageError::Status {
+        status: status.as_u16(),
+        message,
+    }
+}
+
 /// A header value as the signers sign it: trimmed, inner runs of spaces
 /// collapsed to one. `None` when empty; control characters are refused.
 pub(super) fn canonical_header_value(v: Option<&str>) -> Result<Option<String>, StorageError> {

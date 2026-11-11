@@ -152,6 +152,10 @@ untouched.
 
 - The `sessions` feature now depends on axum (for `SessionLayer`).
 - `SessionStore::load` treats ids containing `:` as unknown: the per-user index and revocation keys share the session key space.
+- `PgJobQueue::ensure_table_pool` adds a `unique_key` column and a unique `(name, unique_key)` index to `rustango_jobs`; run it (or the same DDL) before using unique keys.
+- `BodyLimitLayer` and `RequestTimeoutLayer` gain a private field: build them with `new(..)`, not a struct literal.
+- `_http_layers` turns on axum's `matched-path` feature, which the route caps key on.
+- S3 and Azure failures with an HTTP status are now `StorageError::Status` instead of `Io`; the message is unchanged. Match `Status` (or call `http_status()`) where you matched `Io` for these.
 
 ## 0.65.0
 
