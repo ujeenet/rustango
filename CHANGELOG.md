@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.66.0] — 2026-11-11
+
 ### Added
 
 - `sessions::SessionLayer` and the `CurrentSession` extractor: cookie handling for `SessionStore` (always `HttpOnly`; `Secure` and `SameSite=Lax` by default), `login()` moves the session to a new id, `logout()` ends it; scoped to the tenant under tenancy.
