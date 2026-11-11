@@ -30,6 +30,14 @@ async fn cross_schema_fks(pool: &sqlx::PgPool, schema: &str) -> Vec<String> {
     .unwrap()
 }
 
+/// Pools on the registry login, for DDL a tenant role may not run.
+fn shared_login(registry: &sqlx::PgPool) -> TenantPools {
+    TenantPools::new(registry.clone()).config(rustango::tenancy::TenantPoolsConfig {
+        schema_tenant_roles: false,
+        ..Default::default()
+    })
+}
+
 async fn run(pools: &TenantPools, url: &str, parts: &[&str]) -> Result<(), String> {
     let mut buf = Vec::new();
     let dir = std::env::temp_dir();
@@ -85,7 +93,7 @@ async fn seed_permissions_never_binds_a_tenant_fk_to_public() {
 
     // Once the tenant has its own users table, the same path succeeds
     // and every FK stays inside the tenant.
-    let scoped = pools.scoped_pool_dyn(&org).await.unwrap();
+    let scoped = shared_login(&registry).scoped_pool_dyn(&org).await.unwrap();
     rustango::testkit::migrate_framework(&scoped).await.unwrap();
     run(&pools, &url, &["seed-permissions"]).await.unwrap();
     assert_eq!(
@@ -165,7 +173,7 @@ async fn seed_permissions_continues_past_a_failing_tenant() {
         .await
         .unwrap()
         .remove(0);
-    let scoped = pools.scoped_pool_dyn(&ok).await.unwrap();
+    let scoped = shared_login(&registry).scoped_pool_dyn(&ok).await.unwrap();
     rustango::testkit::migrate_framework(&scoped).await.unwrap();
 
     let perms = || async {
@@ -476,15 +484,20 @@ async fn citext_in_public_compares_case_insensitively_for_a_tenant() {
         return;
     };
     run(&pools, db.url(), &["migrate-tenants"]).await.unwrap();
+    // DDL is the registry login's; the tenant role reads and writes.
+    let create = format!(
+        r#"CREATE TABLE "{}".ci_probe (email citext)"#,
+        org.schema_name.as_deref().unwrap_or(&org.slug)
+    );
+    sqlx::query(&create).execute(&registry).await.unwrap();
     let scoped = pools.scoped_pool_dyn(&org).await.unwrap();
-    for sql in [
-        "CREATE TABLE ci_probe (email citext)",
+    rustango::sql::raw_execute_pool(
+        &scoped,
         "INSERT INTO ci_probe VALUES ('A@x.io')",
-    ] {
-        rustango::sql::raw_execute_pool(&scoped, sql, Vec::new())
-            .await
-            .unwrap();
-    }
+        Vec::new(),
+    )
+    .await
+    .unwrap();
     let hits: i64 = sqlx::query_scalar("SELECT count(*) FROM ci_probe WHERE email = 'a@X.io'")
         .fetch_one(scoped.as_postgres().unwrap())
         .await

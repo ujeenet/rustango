@@ -67,8 +67,12 @@
 //!   which R2 and MinIO use.
 //! - `url(key)` gives a stable public URL when `endpoint` is set, or
 //!   when the bucket is public.
-//! - Presigned GET and PUT URLs, so a browser can download a private
-//!   file or upload straight to the bucket.
+//! - Presigned GET, PUT and DELETE URLs, so a browser can download a
+//!   private file, upload straight to the bucket or remove a file.
+//! - The bucket's CORS configuration and versioning state
+//!   ([`S3Storage::bucket_cors`], [`S3Storage::bucket_versioning`]).
+//! - Errors carry the HTTP status S3 answered with
+//!   ([`StorageError::http_status`]).
 //! - Streamed `save_stream` and `load_stream`. The PUT sends
 //!   `UNSIGNED-PAYLOAD` over https and signs each chunk over plain http.
 //!   Above 5 GiB it is a multipart upload, up to 5 TiB, aborted on any
@@ -76,7 +80,7 @@
 //!
 //! ## What it does not do
 //!
-//! - Creating or listing buckets.
+//! - Creating or listing buckets, or changing their settings.
 //! - Server-side encryption with your own keys (SSE-C).
 
 use std::fmt::Write as _;
@@ -86,7 +90,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 
 use super::transport::{
-    canonical_header_value, send_error, stream_body, Http, Parts, Split, MAX_PRESIGN_SECS,
+    canonical_header_value, send_error, status_error, stream_body, Http, Parts, Split,
+    MAX_PRESIGN_SECS,
 };
 #[cfg(test)]
 use super::transport::{upload_timeout, DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT};
@@ -120,6 +125,17 @@ enum Body<'a> {
     Unsigned(ByteStream, u64),
     /// `aws-chunked` with a signature per chunk, for plain-http endpoints.
     Chunked(ByteStream, u64),
+}
+
+/// A bucket's versioning state, from [`S3Storage::bucket_versioning`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BucketVersioning {
+    /// Never turned on.
+    Unversioned,
+    Enabled,
+    /// Turned on once, now off; old versions are kept.
+    Suspended,
 }
 
 /// How to reach the bucket. Build it with [`S3Config::new`]; the keys
@@ -389,6 +405,16 @@ impl S3Storage {
         format!("{}://{}{}", self.scheme(), self.host(), self.key_path(key))
     }
 
+    /// The URL path of the bucket itself, for bucket-level calls.
+    fn bucket_path(&self) -> String {
+        let prefix = self.endpoint_prefix();
+        if self.cfg.path_style {
+            format!("{prefix}/{}", self.cfg.bucket)
+        } else {
+            format!("{prefix}/")
+        }
+    }
+
     async fn signed_request(
         &self,
         method: &str,
@@ -398,6 +424,19 @@ impl S3Storage {
         put: &PutConditions,
     ) -> Result<reqwest::Response, StorageError> {
         validate_key(key)?;
+        self.send_signed(method, &self.key_path(key), query, body, put)
+            .await
+    }
+
+    /// Sign and send a request for `path`, an object's or the bucket's.
+    async fn send_signed(
+        &self,
+        method: &str,
+        path: &str,
+        query: &[(&str, &str)],
+        body: Body<'_>,
+        put: &PutConditions,
+    ) -> Result<reqwest::Response, StorageError> {
         let creds = self.creds.credentials().await?;
         let mut query: Vec<(String, String)> = query
             .iter()
@@ -409,11 +448,10 @@ impl S3Storage {
             .map(|(k, v)| format!("{k}={v}"))
             .collect::<Vec<_>>()
             .join("&");
-        let mut url = self.full_url(key);
+        let mut url = format!("{}://{}{path}", self.scheme(), self.host());
         if !canonical_query.is_empty() {
             url = format!("{url}?{canonical_query}");
         }
-        let path = self.key_path(key);
         let amz_date = format_amz_date(unix_now()?);
         let date_stamp = &amz_date[..8];
         let payload_hash = match &body {
@@ -529,9 +567,10 @@ impl S3Storage {
         }
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(StorageError::Io(format!(
-                "S3 PUT {key} -> {status}: {body}"
-            )));
+            return Err(status_error(
+                status,
+                format!("S3 PUT {key} -> {status}: {body}"),
+            ));
         }
         Ok(())
     }
@@ -584,9 +623,10 @@ impl S3Storage {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(StorageError::Io(format!(
-                "S3 CreateMultipartUpload {key} -> {status}: {text}"
-            )));
+            return Err(status_error(
+                status,
+                format!("S3 CreateMultipartUpload {key} -> {status}: {text}"),
+            ));
         }
         xml_text(&text, "UploadId").ok_or_else(|| {
             StorageError::Io(format!(
@@ -625,9 +665,10 @@ impl S3Storage {
             let status = resp.status();
             if !status.is_success() {
                 let text = resp.text().await.unwrap_or_default();
-                return Err(StorageError::Io(format!(
-                    "S3 UploadPart {key} #{number} -> {status}: {text}"
-                )));
+                return Err(status_error(
+                    status,
+                    format!("S3 UploadPart {key} #{number} -> {status}: {text}"),
+                ));
             }
             let etag = resp
                 .headers()
@@ -696,9 +737,10 @@ impl S3Storage {
             return Err(already_exists(key));
         }
         if !status.is_success() || code.is_some() {
-            return Err(StorageError::Io(format!(
-                "S3 CompleteMultipartUpload {key} -> {status}: {text}"
-            )));
+            return Err(status_error(
+                status,
+                format!("S3 CompleteMultipartUpload {key} -> {status}: {text}"),
+            ));
         }
         Ok(())
     }
@@ -718,9 +760,10 @@ impl S3Storage {
         if status.is_success() || status == reqwest::StatusCode::NOT_FOUND {
             return Ok(());
         }
-        Err(StorageError::Io(format!(
-            "S3 AbortMultipartUpload {key} -> {status}"
-        )))
+        Err(status_error(
+            status,
+            format!("S3 AbortMultipartUpload {key} -> {status}"),
+        ))
     }
 
     /// GET, its status checked.
@@ -734,11 +777,75 @@ impl S3Storage {
         }
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(StorageError::Io(format!(
-                "S3 GET {key} -> {status}: {body}"
-            )));
+            return Err(status_error(
+                status,
+                format!("S3 GET {key} -> {status}: {body}"),
+            ));
         }
         Ok(resp)
+    }
+
+    /// A bucket-level GET of `subresource` (`cors`, `versioning`): the
+    /// body, or `None` when S3 answers `absent_code`.
+    async fn bucket_get(
+        &self,
+        subresource: &str,
+        absent_code: Option<&str>,
+    ) -> Result<Option<String>, StorageError> {
+        let path = self.bucket_path();
+        let resp = self
+            .send_signed(
+                "GET",
+                &path,
+                &[(subresource, "")],
+                Body::Bytes(b""),
+                &PutConditions::new(),
+            )
+            .await?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| StorageError::Io(format!("read body: {e}")))?;
+        if status.is_success() {
+            return Ok(Some(text));
+        }
+        if absent_code.is_some() && xml_text(&text, "Code").as_deref() == absent_code {
+            return Ok(None);
+        }
+        Err(status_error(
+            status,
+            format!("S3 GET bucket ?{subresource} -> {status}: {text}"),
+        ))
+    }
+
+    /// The bucket's CORS configuration as S3 returns it (XML), or `None`
+    /// when it has none. Needs `s3:GetBucketCORS`.
+    ///
+    /// # Errors
+    /// The request failing, or S3 refusing it.
+    pub async fn bucket_cors(&self) -> Result<Option<String>, StorageError> {
+        self.bucket_get("cors", Some("NoSuchCORSConfiguration"))
+            .await
+    }
+
+    /// The bucket's versioning state. Needs `s3:GetBucketVersioning`.
+    ///
+    /// # Errors
+    /// The request failing, S3 refusing it, or an unknown status.
+    pub async fn bucket_versioning(&self) -> Result<BucketVersioning, StorageError> {
+        let text = self
+            .bucket_get("versioning", None)
+            .await?
+            .unwrap_or_default();
+        match xml_text(&text, "Status").as_deref() {
+            None => Ok(BucketVersioning::Unversioned),
+            Some("Enabled") => Ok(BucketVersioning::Enabled),
+            Some("Suspended") => Ok(BucketVersioning::Suspended),
+            Some(other) => Err(StorageError::Io(format!(
+                "S3 GET bucket ?versioning: unknown status `{other}`"
+            ))),
+        }
     }
 
     /// Build a URL whose SigV4 signature lives in the query string.
@@ -857,9 +964,10 @@ impl Storage for S3Storage {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(StorageError::Io(format!(
-                "S3 PUT {key} -> {status}: {body}"
-            )));
+            return Err(status_error(
+                status,
+                format!("S3 PUT {key} -> {status}: {body}"),
+            ));
         }
         Ok(())
     }
@@ -909,9 +1017,10 @@ impl Storage for S3Storage {
             return Ok(());
         }
         let body = resp.text().await.unwrap_or_default();
-        Err(StorageError::Io(format!(
-            "S3 DELETE {key} -> {status}: {body}"
-        )))
+        Err(status_error(
+            status,
+            format!("S3 DELETE {key} -> {status}: {body}"),
+        ))
     }
 
     async fn exists(&self, key: &str) -> Result<bool, StorageError> {
@@ -926,7 +1035,7 @@ impl Storage for S3Storage {
         if status.is_success() {
             return Ok(true);
         }
-        Err(StorageError::Io(format!("S3 HEAD {key} -> {status}")))
+        Err(status_error(status, format!("S3 HEAD {key} -> {status}")))
     }
 
     fn url(&self, key: &str) -> Option<String> {
@@ -950,6 +1059,12 @@ impl Storage for S3Storage {
             .ok()
     }
 
+    async fn presigned_delete_url(&self, key: &str, ttl: std::time::Duration) -> Option<String> {
+        self.build_presigned_url("DELETE", key, ttl.as_secs(), &PutConditions::default())
+            .await
+            .ok()
+    }
+
     /// Without `s3:ListBucket`, S3 answers a missing key with 403, not
     /// 404; that stays an error, so a finalize fails closed.
     async fn metadata(&self, key: &str) -> Result<Option<ObjectMeta>, StorageError> {
@@ -961,7 +1076,7 @@ impl Storage for S3Storage {
             return Ok(None);
         }
         if !status.is_success() {
-            return Err(StorageError::Io(format!("S3 HEAD {key} -> {status}")));
+            return Err(status_error(status, format!("S3 HEAD {key} -> {status}")));
         }
         // The header, not `content_length()`: a HEAD body is empty.
         let header = |name| {
@@ -1265,6 +1380,35 @@ mod tests {
         assert_eq!(encode_query("a/b"), "a%2Fb");
         assert_eq!(encode_query("plain-name_1.2~3"), "plain-name_1.2~3");
         assert_eq!(encode_query("a+b"), "a%2Bb");
+    }
+
+    /// A presigned DELETE signs only `host`, like a GET.
+    #[tokio::test]
+    async fn presigned_delete_url_signs_the_host() {
+        let s = store(cfg());
+        let url = s
+            .presigned_delete_url("avatars/alice.png", std::time::Duration::from_secs(60))
+            .await
+            .expect("S3 signs a DELETE");
+        assert!(
+            url.starts_with("https://examplebucket.s3.us-east-1.amazonaws.com/avatars/alice.png?")
+        );
+        assert!(url.contains("X-Amz-SignedHeaders=host&"), "{url}");
+        let get = s
+            .presigned_get_url("avatars/alice.png", std::time::Duration::from_secs(60))
+            .await
+            .unwrap();
+        let sig = |u: &str| u.rsplit_once("X-Amz-Signature=").unwrap().1.to_owned();
+        assert_ne!(sig(&url), sig(&get), "the method is signed");
+    }
+
+    #[test]
+    fn the_bucket_path_follows_the_url_style() {
+        assert_eq!(store(cfg()).bucket_path(), "/");
+        let mut c = cfg();
+        c.path_style = true;
+        c.endpoint = Some("https://x.supabase.co/storage/v1/s3".into());
+        assert_eq!(store(c).bucket_path(), "/storage/v1/s3/examplebucket");
     }
 
     #[tokio::test]
@@ -2098,7 +2242,7 @@ mod tests {
         assert!(matches!(err, StorageError::NotFound(_)), "{err}");
         let (ep, _req) = serve(403, String::new(), Vec::new()).await;
         let err = mock_storage(ep).load_stream("a.bin").await.unwrap_err();
-        assert!(matches!(err, StorageError::Io(_)), "{err}");
+        assert_eq!(err.http_status(), Some(403), "{err}");
     }
 
     /// The body is pulled only as fast as the server takes it, so memory

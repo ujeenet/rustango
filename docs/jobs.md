@@ -30,6 +30,7 @@ failures.
 - [Step 2 — Start a queue](#step-2--start-a-queue)
 - [Step 3 — Dispatch from a handler](#step-3--dispatch-from-a-handler)
 - [Step 4 — Wire it into your app](#step-4--wire-it-into-your-app) — the full example
+- [Delayed, cancellable and unique jobs](#delayed-cancellable-and-unique-jobs)
 - [Running the workers (CLI + production)](#running-the-workers-cli--production)
 - [Retries and backoff](#retries-and-backoff)
 - [The job context: id, attempt, stop](#the-job-context-id-attempt-stop)
@@ -149,6 +150,46 @@ for to in ["a@example.com", "b@example.com", "c@example.com"] {
 }
 // → all three WelcomeEmail::run() calls execute on the worker pool
 ```
+
+---
+
+## Delayed, cancellable and unique jobs
+
+`dispatch_at` queues a job to run later and returns its `JobId`. Store the id
+(`id.to_string()`), and `cancel` drops the job until a worker starts it:
+
+```rust
+use rustango::jobs::{Dispatch, JobId, JobQueue, UniqueKey};
+
+let when = chrono::Utc::now() + chrono::Duration::days(7);
+let id = queue.dispatch_at(&DeleteAccount { user_id: 42 }, when).await?;
+account.deletion_job = Some(id.to_string());
+
+// Later, maybe from another process:
+let id: JobId = stored.parse()?;
+let dropped = queue.cancel(&id).await?;   // false once the job runs or ran
+```
+
+`enqueue` takes every option. A `UniqueKey` keeps one job of a type with that
+key queued or running; a second dispatch returns `Enqueued::Duplicate` with the
+first job's id and queues nothing:
+
+```rust
+let key = UniqueKey::new(format!("delete-account:{}", user.id))?;
+let queued = queue
+    .enqueue(&DeleteAccount { user_id: user.id }, Dispatch::at(when).unique(key))
+    .await?;
+let id = queued.id();   // the new job, or the one already queued
+```
+
+- `cancel` also drops a job waiting on a retry. It never stops a running job.
+- A key is 1 to 200 characters, with no leading or trailing whitespace, and
+  compared exactly (case counts) on every backend. It is free again once its
+  job finishes, dead-letters or is cancelled.
+- On the database queue a key needs the `unique_key` column, which
+  `ensure_table_pool` adds; until then a unique dispatch is refused.
+- In an `atomic` block, both queues hold the key from the `enqueue`: a
+  second one in the block returns `Duplicate`, and a rollback frees it.
 
 ---
 
@@ -624,8 +665,9 @@ let orgs: Vec<Org> = Org::objects()
 
 let mut queues = Vec::new();
 for org in orgs {
+    // DDL as the registry login: a schema tenant's own role cannot create tables.
+    DatabaseJobQueue::ensure_table_pool(&pools.ddl_pool(&org).await?).await?;
     let pool = pools.scoped_pool_dyn(&org).await?;   // scoped for its lifetime
-    DatabaseJobQueue::ensure_table_pool(&pool).await?;
 
     let queue = Arc::new(
         DatabaseJobQueue::with_workers_pool(pool, 2)
@@ -743,7 +785,8 @@ the expected outcome, so nothing is logged. This is a known gap.
 | `Fatal(String)` | skip retries → dead-letter immediately |
 | `Queue(String)` | internal queue error (serialization/registration) |
 
-**`JobQueue` methods:** `register::<T>()` · `dispatch(&payload)` · `start()` ·
+**`JobQueue` methods:** `register::<T>()` · `dispatch(&payload)` ·
+`dispatch_at(&payload, when)` · `enqueue(&payload, Dispatch)` · `cancel(&id)` · `start()` ·
 `register_with::<T, _, _>(handler)` · `shutdown()` · `pending_count()` (jobs
 waiting to be picked up). `Job::run_with` gets a `JobCtx` (`id`, `attempt`,
 `stopping`). Both queues have `on_dead_letter` and

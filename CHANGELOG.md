@@ -4,6 +4,44 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.66.0] — 2026-11-11
+
+### Added
+
+- `sessions::SessionLayer` and the `CurrentSession` extractor: cookie handling for `SessionStore` (always `HttpOnly`; `Secure` and `SameSite=Lax` by default), `login()` moves the session to a new id, `logout()` ends it; scoped to the tenant under tenancy.
+- `SessionStore::login`, `sessions_of`, `revoke` and `revoke_all` list and end a user's sessions; listings name sessions by a hash, never the id.
+- Session-bound CSRF: `SessionLayer::with_csrf` checks the token kept in the session (`CurrentSession::csrf_token`), not the cookie.
+- `CsrfLayer::json_rejection()` and `reject_with()` answer refusals as JSON or your own response (`CsrfFailure`).
+- `real_ip::client_ip` and the `ClientAddr` extractor: the trusted-proxy-aware client address the limiter and IP filter use.
+- `outbound::Egress` (`public`, `public_or_allowed`, `check`) and `outbound::resolve_public` are public under `http-client`: fetch user-supplied URLs without reaching private or metadata addresses.
+- Jobs: `JobQueue::dispatch_at`, `enqueue` with `Dispatch` options (a run time, a `UniqueKey` held while the job is queued or running, from the `enqueue` inside an `atomic` block; no surrounding whitespace) and `cancel(&JobId)` on both queues; `JobId` parses back from its text. The database queue adds a `unique_key` column and index in `ensure_table_pool`.
+- `sse::KeyedEventBus` delivers each event only to its key's subscribers, and `sse::PgEventBus` (feature `postgres`) does the same across processes over `LISTEN`/`NOTIFY`, on a channel derived from a shared secret so SQL without it (a tenant role's) can neither listen in nor inject; their `Subscription::recv` gives `Recv::Resync` when events were missed.
+- Per-route body caps and timeouts: `BodyLimitLayer::route`, `RequestTimeoutLayer::route` / `exempt`, and `[server.routes."<pattern>"]` in settings.
+- S3: `bucket_cors`, `bucket_versioning` and presigned DELETE URLs (`Storage::presigned_delete_url`); S3 and Azure errors carry the HTTP status (`StorageError::Status`, `http_status()`).
+- `static_files::AssetManifest`: content-hashed names and SRI hashes for every static file, with `asset_url` / `asset_integrity` Tera functions; `StaticFiles::manifest` serves the hashed names `immutable`.
+- `embed_static!("dir")` and `StaticFiles::embedded`: static files compiled into the binary, with ETag, 304 and ranges.
+- `CspBuilder::strict_wasm_app()` preset, plus `add_source`, `blob_workers(policy)`, `script_hash` and `security_headers::csp_hash` for per-response inline script hashes.
+- Small public features `static-files`, `security-headers` and `test-client`, so apps without `admin` can use them; `cargo rustango new --features` offers them.
+- `Cli::before_serve(|pool| ..)`: a check that runs only before serving, after migrations and `seed`; its error stops the start.
+- Passkeys: `RegistrationOptions` / `AuthenticationOptions` with `UserVerification` and the PRF extension; `require(UserVerification::Required)` on both outcomes and `PasskeyError::UserNotVerified`.
+- `LoginScope::App(name)` for an app's own password login (with the account lock), `#[viewset(filter_backend = ..)]`, and public `bearer::token` and `ExecError::is_unique_violation`.
+
+### Changed
+
+- **Breaking:** schema tenants' pools log in as a role of their own (`rgo_t_<hash>`) with rights on their schema only, so tenant SQL naming another schema is refused. The role reads and writes rows but creates nothing (no trigger, function, table or temp object); the registry login revokes TEMP and schema CREATE from PUBLIC where it may, and boot refuses where it cannot. The registry login needs `CREATEROLE`; passwords derive from `RUSTANGO_TENANT_ROLE_SECRET`, with `RUSTANGO_TENANT_ROLE_SECRET_PREVIOUS` (or `TenantPools::tenant_role_secrets`) for a rotation. Provisioning and migrations set the role up, `ensure-tenant-roles` backfills and moves passwords to the current secret, purge and storage moves drop it; `TenantPoolsConfig::schema_tenant_roles = false` turns it off.
+- `TenantPools::ddl_pool(org)`: the registry login on a tenant's tables, for DDL at runtime such as `DatabaseJobQueue::ensure_table_pool`.
+- The `sessions` feature now pulls in axum, for `SessionLayer`.
+- The `sse` feature now pulls in the signing dependencies and `rustango::session`, for `PgEventBus`'s secret.
+- `SessionStore::load` returns `None` for a session ended by `revoke_all`, and for an id containing `:`.
+- A user keeps at most `sessions::MAX_SESSIONS_PER_USER` (100) sessions; a login past it ends the oldest.
+- Under tenancy, `SessionLayer` answers 503 when no tenant context is mounted; `allow_global()` opts into the platform-wide session space.
+- The "forwarding header but no trusted proxy" warning logs under `rustango::real_ip` (was `rustango::rate_limit`).
+
+### Fixed
+
+- `#[derive(Model)]` documents its typed column constants, so `#![deny(missing_docs)]` apps build.
+- `SessionLayer`: a session kept by `revoke_all` survives the request's own save, and a request never writes back a session ended while it ran.
+
 ## [0.65.2] — 2026-11-09
 
 ### Documentation

@@ -105,7 +105,7 @@ pub struct IdempotencyLayer {
     body_cap: usize,
     lock_ttl: Duration,
     cache_status: Arc<dyn Fn(StatusCode) -> bool + Send + Sync>,
-    /// Also use the 0.63 keys of tenant entries. Remove in 0.65.0.
+    /// Also use the 0.63 keys of tenant entries. Remove in 0.67.0.
     legacy_keys: bool,
 }
 
@@ -257,7 +257,8 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
             .into_response()
         }
     };
-    let Ok(space) = request_tenant(&mut parts).await else {
+    // Org id and slug, not the slug alone: a reused slug must not replay the old org's.
+    let Ok(space) = KeySpace::of_request(&mut parts).await else {
         // Running it unkeyed could charge twice; the client retries later.
         return unknown_tenant();
     };
@@ -274,7 +275,7 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
     // Miss: hold the in-flight marker, so a retry during this run can't run the handler too.
     let token = format!("{request_sha256}:{}", uuid::Uuid::new_v4().simple());
     let mut in_flight = Vec::new();
-    // Remove in 0.65.0: the 0.63 marker first, as locks do, so a pod still on
+    // Remove in 0.67.0: the 0.63 marker first, as locks do, so a pod still on
     // 0.63 and this one never run it side by side.
     let markers = keys
         .legacy
@@ -364,7 +365,7 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
         // A failed write is logged and ignored, so the caller still
         // gets the successful response.
         if let Ok(json) = serde_json::to_string(&stored) {
-            // Remove in 0.65.0: the 0.63 key too, so a retry on a 0.63 pod replays.
+            // Remove in 0.67.0: the 0.63 key too, so a retry on a 0.63 pod replays.
             for key in std::iter::once(cache_key).chain(keys.legacy.as_deref()) {
                 if let Err(e) = cfg.cache.set(key, &json, Some(cfg.ttl)).await {
                     tracing::warn!(error = %e, key, "idempotency: cache write failed");
@@ -485,7 +486,7 @@ fn busy(holder: &str, request_sha256: &str) -> Response<Body> {
 /// Where one request's answer and in-flight marker live.
 struct EntryKeys {
     key: String,
-    /// The 0.63 key of a tenant entry, read and written too. Remove in 0.65.0.
+    /// The 0.63 key of a tenant entry, read and written too. Remove in 0.67.0.
     legacy: Option<String>,
 }
 
@@ -630,25 +631,6 @@ fn principal_fields(h: &mut KeyHasher, parts: &Parts) -> bool {
 fn principal_fields(h: &mut KeyHasher, _parts: &Parts) -> bool {
     h.field(b"anonymous");
     false
-}
-
-/// The request's org id and slug, not its slug alone: a tenant that reuses a purged slug
-/// must not replay the old one's responses. `Err` when resolution failed; no match is global.
-#[cfg(feature = "tenancy")]
-async fn request_tenant(parts: &mut Parts) -> Result<KeySpace, ()> {
-    use crate::tenancy::RequestTenant;
-    match RequestTenant::resolve(parts).await {
-        RequestTenant::Tenant(t) => Ok(KeySpace::Tenant(t)),
-        RequestTenant::Unknown => Err(()),
-        // Global, or no tenant matched (an apex webhook): keyed globally, as before.
-        _ => Ok(KeySpace::Global),
-    }
-}
-
-#[cfg(not(feature = "tenancy"))]
-#[allow(clippy::unused_async)]
-async fn request_tenant(_parts: &mut Parts) -> Result<KeySpace, ()> {
-    Ok(KeySpace::Global)
 }
 
 fn hex(bytes: &[u8]) -> String {

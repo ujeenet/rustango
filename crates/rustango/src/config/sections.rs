@@ -569,6 +569,21 @@ pub struct ServerSettings {
     /// believed, so logs and per-IP limits see the real client. Empty
     /// trusts none. `Cli::with_trusted_proxies` in code wins.
     pub trusted_proxies: Vec<String>,
+    /// Per-route body caps and timeouts, keyed by the route pattern as
+    /// registered, e.g. `[server.routes."/api/uploads"]`.
+    pub routes: std::collections::BTreeMap<String, RouteLimits>,
+}
+
+/// One `[server.routes."<pattern>"]` entry. Each value replaces the
+/// server-wide one for that route.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
+pub struct RouteLimits {
+    /// Body cap for this route, above or below `max_body_bytes`.
+    pub max_body_bytes: Option<u64>,
+    /// Timeout for this route; `0` means none.
+    pub request_timeout_secs: Option<u64>,
 }
 
 impl ServerSettings {

@@ -150,6 +150,19 @@ untouched.
 
 ## Unreleased
 
+- Schema tenants now log in as their own roles. Before deploying: `ALTER ROLE <registry login> CREATEROLE`, set `RUSTANGO_TENANT_ROLE_SECRET` (same base64 key on every process; required on the prod tier), let these roles through `pg_hba.conf` (and PgBouncer `auth_query`), then run `ensure-tenant-roles`. Tenant code can no longer read registry tables or other schemas through a tenant pool, nor create anything through it (tables, triggers, functions, temp tables) or truncate: run DDL in migrations, or at runtime through `pools.ddl_pool(&org)` (for example `DatabaseJobQueue::ensure_table_pool`); manage verbs use the registry login. The registry login revokes TEMP on the database and CREATE on its schemas from PUBLIC; on Postgres 14 and older, where `public` belongs to the superuser, run `REVOKE CREATE ON SCHEMA public FROM PUBLIC` as the owner or boot refuses, and give other roles that need temp tables their own `GRANT TEMPORARY`. `max_cached_scoped_pools = 0` is refused with roles on. Behind PgBouncer each tenant role gets its own server pool: cap `max_db_connections`. To rotate the secret, keep the old value in `RUSTANGO_TENANT_ROLE_SECRET_PREVIOUS` until `ensure-tenant-roles` has run. To keep the old shared login, set `TenantPoolsConfig::schema_tenant_roles = false`.
+- `TenantPoolsConfig` has a new public field, `schema_tenant_roles`: a struct literal without `..Default::default()` needs it.
+- The `sessions` feature now depends on axum (for `SessionLayer`). Under tenancy, mount `SessionLayer` inside the tenant router, or call `.allow_global()` where no tenant context exists; otherwise those requests get 503.
+- A user keeps at most 100 sessions (`sessions::MAX_SESSIONS_PER_USER`); a login past it ends the oldest.
+- The warning about a forwarding header with no trusted proxy now logs under `rustango::real_ip`, not `rustango::rate_limit`: update log filters that keep it.
+- `SessionStore::load` treats ids containing `:` as unknown: the per-user index and revocation keys share the session key space.
+- `PgJobQueue::ensure_table_pool` adds a `unique_key` column and a unique `(name, unique_key)` index to `rustango_jobs`; run it (or the same DDL) before using unique keys.
+- `BodyLimitLayer` and `RequestTimeoutLayer` gain a private field: build them with `new(..)`, not a struct literal.
+- `_http_layers` turns on axum's `matched-path` feature, which the route caps key on.
+- S3 and Azure failures with an HTTP status are now `StorageError::Status` instead of `Io`; the message is unchanged. Match `Status` (or call `http_status()`) where you matched `Io` for these.
+- `passkey::RegistrationOutcome` gains `user_verified` and is now `#[non_exhaustive]`: build it only through `verify_registration`.
+- The deprecated items and the old tenant lock / idempotency key fallbacks that 0.65.0 announced for removal in 0.66.0 stay one more release; they go in 0.67.0.
+
 ## 0.65.0
 
 - The deprecated items and the old tenant lock / idempotency key fallback that 0.64.0 announced for removal in 0.65.0 are still here; they go in 0.66.0. Deploy 0.64 or later everywhere before 0.66.0.

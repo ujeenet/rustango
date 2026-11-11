@@ -308,7 +308,7 @@ async fn purge_media<DB: Database>(
             StorageMode::Database => exclusive_database(pools, registry, org).await?,
         }
         let (pool, own) = pools
-            .existing_pool_dyn(org)
+            .operator_pool_dyn(org)
             .await
             .map_err(|e| e.to_string())?;
         let rows = async {
@@ -801,6 +801,11 @@ where
             );
             if let Err(e) = crate::sql::raw_execute_pool(registry, &sql, Vec::new()).await {
                 return rep.fail(Step::DropSchema, e.into()).await;
+            }
+            // A rerun finds the schema gone and drops the role again.
+            #[cfg(feature = "postgres")]
+            if let Err(e) = super::pools::drop_schema_role(pools, &schema).await {
+                return rep.fail(Step::DropSchema, e).await;
             }
             report.schema_dropped = Some(schema);
             rep.ok(Step::DropSchema).await;

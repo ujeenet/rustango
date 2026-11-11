@@ -1357,7 +1357,8 @@ async fn reseal_covers_sealed_casts(pool: &Pool) {
     env.create(&dir, "mt-cast", opts).await.expect("tenant");
     let org = env.org("mt-cast").await.expect("org");
     let tenant = typed!(env.registry, p => p.scoped_pool_dyn(&org).await.expect("tenant pool"));
-    fresh_table::<Patient>(&tenant).await;
+    let ddl = typed!(env.registry, p => p.ddl_pool(&org).await.expect("tenant DDL pool"));
+    fresh_table::<Patient>(&ddl).await;
     fresh_table::<Vault>(&env.registry).await;
     let mut patient = Patient {
         id: Auto::default(),

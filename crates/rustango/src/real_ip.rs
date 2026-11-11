@@ -72,6 +72,76 @@ pub enum HeaderStrategy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TrustedRealIp(pub IpAddr);
 
+/// The client address, safe for security decisions: the [`TrustedRealIp`]
+/// when a trusted proxy forwarded the request, else the connecting socket.
+/// Never a bare header claim. `None` when the server runs without
+/// `into_make_service_with_connect_info::<SocketAddr>()`.
+pub fn client_ip(
+    extensions: &axum::http::Extensions,
+    headers: &axum::http::HeaderMap,
+) -> Option<IpAddr> {
+    if let Some(ip) = extensions.get::<TrustedRealIp>() {
+        return Some(ip.0);
+    }
+    let ci = extensions.get::<ConnectInfo<std::net::SocketAddr>>()?;
+    warn_forwarded_but_unresolved(headers);
+    Some(ci.ip())
+}
+
+/// Warn once that a forwarding header arrived but no [`TrustedRealIp`]
+/// did, so every client behind that proxy shows as the proxy.
+fn warn_forwarded_but_unresolved(headers: &axum::http::HeaderMap) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+
+    let forwarded = headers.contains_key("x-forwarded-for")
+        || headers.contains_key("x-real-ip")
+        || headers.contains_key("forwarded");
+    if forwarded && !WARNED.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            target: "rustango::real_ip",
+            "a forwarding header arrived but no trusted client address, so the \
+             connecting address is used and EVERY client behind that proxy looks \
+             the same (one rate-limit bucket, one IP in logs and filters). Mount \
+             `real_ip::RealIpLayer` outside the layers that read the IP AND name \
+             your proxies with `.trust_proxies([...])` — without that the header \
+             is only a claim and is deliberately ignored.",
+        );
+    }
+}
+
+/// Extractor for [`client_ip`]. Fails with `500` when no address is known
+/// (the server runs without connect info); take `Option<ClientAddr>` to allow that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientAddr(pub IpAddr);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for ClientAddr {
+    type Rejection = (axum::http::StatusCode, &'static str);
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _: &S,
+    ) -> Result<Self, Self::Rejection> {
+        client_ip(&parts.extensions, &parts.headers)
+            .map(Self)
+            .ok_or((
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "client address unknown: serve with into_make_service_with_connect_info",
+            ))
+    }
+}
+
+impl<S: Send + Sync> axum::extract::OptionalFromRequestParts<S> for ClientAddr {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _: &S,
+    ) -> Result<Option<Self>, Self::Rejection> {
+        Ok(client_ip(&parts.extensions, &parts.headers).map(Self))
+    }
+}
+
 /// The connecting socket matched [`RealIpLayer::trust_proxies`], even when
 /// it sent no forwarding header (so no [`TrustedRealIp`] is set).
 #[derive(Debug, Clone, Copy)]
@@ -652,6 +722,46 @@ mod tests {
     fn malformed_header_returns_none() {
         let r = req_with_header("x-real-ip", "not-an-ip");
         assert!(extract(&r, &HeaderStrategy::XRealIp).is_none());
+    }
+
+    /// `ClientAddr` takes the trusted hop, ignores a forged header from an
+    /// untrusted peer, and is `None` as an `Option` without connect info.
+    #[tokio::test]
+    async fn client_ip_extractor_trusts_only_named_proxies() {
+        use axum::routing::get;
+        use tower::ServiceExt;
+
+        async fn handler(ip: Option<ClientAddr>) -> String {
+            ip.map_or_else(|| "-".to_owned(), |ClientAddr(ip)| ip.to_string())
+        }
+        async fn strict(ClientAddr(ip): ClientAddr) -> String {
+            ip.to_string()
+        }
+        let app = Router::new()
+            .route("/", get(handler))
+            .route("/strict", get(strict))
+            .real_ip(trusting(HeaderStrategy::XForwardedFor));
+        let send = |uri: &'static str, peer: Option<&'static str>| {
+            let app = app.clone();
+            async move {
+                let mut req = Request::builder()
+                    .uri(uri)
+                    .header("x-forwarded-for", "203.0.113.7");
+                if let Some(p) = peer {
+                    req = req.extension(ConnectInfo(p.parse::<std::net::SocketAddr>().unwrap()));
+                }
+                let res = app.oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+                let status = res.status().as_u16();
+                let b = axum::body::to_bytes(res.into_body(), 1 << 16)
+                    .await
+                    .unwrap();
+                (status, String::from_utf8(b.to_vec()).unwrap())
+            }
+        };
+        assert_eq!(send("/", Some("10.0.0.2:1")).await.1, "203.0.113.7");
+        assert_eq!(send("/", Some("198.51.100.9:1")).await.1, "198.51.100.9");
+        assert_eq!(send("/", None).await.1, "-");
+        assert_eq!(send("/strict", None).await.0, 500);
     }
 
     #[tokio::test]

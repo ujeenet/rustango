@@ -33,11 +33,7 @@ impl CacheScope {
         if RequestTenant::unmounted(&parts.extensions) {
             return None;
         }
-        let space = match RequestTenant::resolve(parts).await {
-            RequestTenant::Tenant(t) => KeySpace::Tenant(t),
-            RequestTenant::Unknown => return None,
-            _ => KeySpace::Global,
-        };
+        let space = KeySpace::of_request(parts).await.ok()?;
         Some(Self {
             root: root.clone(),
             space,

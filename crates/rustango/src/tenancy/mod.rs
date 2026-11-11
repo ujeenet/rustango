@@ -105,6 +105,10 @@ pub mod org_host;
 pub mod password;
 pub mod permissions;
 mod pools;
+#[cfg(feature = "postgres")]
+pub(crate) mod schema_role;
+#[cfg(feature = "postgres")]
+pub use schema_role::{ROLE_SECRET_ENV, ROLE_SECRET_PREVIOUS_ENV};
 /// Reaching a tenant's database before anything is written to the
 /// registry, so a bad URL cannot leave a half-provisioned tenant.
 pub mod preflight;
@@ -216,10 +220,10 @@ pub use org_host::{
     add_host, list_for_org, normalize_hostname, remove_host, set_host_enabled, HostError, OrgHost,
     TenantHost,
 };
+#[cfg(feature = "postgres")]
+pub(crate) use pools::boot_checks;
 #[cfg(all(test, feature = "sqlite"))]
 pub(crate) use pools::build_database_pool;
-#[cfg(feature = "postgres")]
-pub(crate) use pools::refuse_registry_shadow;
 #[cfg(all(test, feature = "postgres"))]
 pub(crate) use pools::scoped_pool_options;
 #[cfg(any(feature = "postgres", feature = "manage"))]

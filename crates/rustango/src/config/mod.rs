@@ -49,8 +49,8 @@ pub use loader::{ConfigError, TomlSyntaxError};
 pub use sections::{
     AdminSettings, AuditSettings, AuthSettings, BrandSettings, CacheSettings, DatabaseSettings,
     DiskSettings, ErrorsSettings, I18nSettings, JobsSettings, JwtSettings, LoggingSettings,
-    MailSettings, McpSettings, RoutesSettings, SecuritySettings, ServerSettings, Settings,
-    StorageSettings, TenancySettings,
+    MailSettings, McpSettings, RouteLimits, RoutesSettings, SecuritySettings, ServerSettings,
+    Settings, StorageSettings, TenancySettings,
 };
 
 impl Settings {

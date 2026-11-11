@@ -135,8 +135,13 @@ async fn fixture() -> Option<(String, sqlx::PgPool, axum::Router)> {
     .await
     .expect("create_tenant_if_missing");
     // The Author table lives in the tenant's schema; `public` is off its path.
+    // DDL as the registry login: the tenant's own role reads and writes rows only.
+    let ddl = pools_for_init
+        .ddl_pool(&org)
+        .await
+        .expect("tenant DDL pool");
+    fresh_author_table(ddl.as_postgres().expect("schema tenants are Postgres")).await;
     let tenant_pool = pools_for_init.scoped_pool(&org).await.expect("tenant pool");
-    fresh_author_table(&tenant_pool).await;
 
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let resolver = ChainResolver::new().push(HeaderResolver::default());
@@ -153,12 +158,14 @@ async fn fixture() -> Option<(String, sqlx::PgPool, axum::Router)> {
     // `router(prefix, pool)` path, minus the pool. v0.30 unification:
     // filter_fields / search_fields / ordering / page_size all carry
     // over to the per-tenant path.
-    let vs_router = ViewSet::for_model(Author::SCHEMA, &["id", "name", "email", "bio", "joined_at"]).allow_anonymous()
-        .filter_fields(&["name"])
-        .search_fields(&["name", "email", "bio"])
-        .ordering(&[("id", false)])
-        .page_size(2)
-        .tenant_router("/api/authors");
+    let vs_router =
+        ViewSet::for_model(Author::SCHEMA, &["id", "name", "email", "bio", "joined_at"])
+            .allow_anonymous()
+            .filter_fields(&["name"])
+            .search_fields(&["name", "email", "bio"])
+            .ordering(&[("id", false)])
+            .page_size(2)
+            .tenant_router("/api/authors");
 
     let app = axum::Router::new().merge(vs_router).layer(Extension(ctx));
     Some((slug, tenant_pool, app))

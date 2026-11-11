@@ -27,6 +27,10 @@ pub enum PasskeyError {
     /// user interaction.
     #[error("user-present flag not set")]
     UserNotPresent,
+    /// The policy was [`UserVerification::Required`](super::ceremony::UserVerification::Required)
+    /// but the User-Verified flag wasn't set.
+    #[error("user-verified flag not set")]
+    UserNotVerified,
     /// `authenticatorData` / `attestationObject` was truncated or
     /// otherwise structurally invalid.
     #[error("malformed authenticator data: {0}")]

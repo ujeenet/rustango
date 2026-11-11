@@ -117,6 +117,18 @@ impl BootMigrate {
     }
 }
 
+/// [`Cli::seed`] then [`Cli::before_serve`]; an error stops the boot.
+async fn run_boot_hooks(
+    seed: Option<SeedFn>,
+    before_serve: Option<SeedFn>,
+    pool: &crate::sql::Pool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    for hook in [seed, before_serve].into_iter().flatten() {
+        hook(pool).await?;
+    }
+    Ok(())
+}
+
 /// Run the [`Cli::on_shutdown`] hook, if one was registered.
 async fn run_shutdown_hook(hook: Option<ShutdownFn>) {
     if let Some(hook) = hook {
@@ -167,6 +179,8 @@ impl CsrfMount {
 pub struct Cli {
     api: Router,
     seed: Option<SeedFn>,
+    /// See [`Cli::before_serve`].
+    before_serve: Option<SeedFn>,
     /// Ran after graceful shutdown drains the server, before `run`
     /// returns. Set via [`Cli::on_shutdown`] — the only place a job
     /// queue's `shutdown()` can actually execute (#1409).
@@ -277,6 +291,7 @@ impl Cli {
         Self {
             api: Router::new(),
             seed: None,
+            before_serve: None,
             on_shutdown: None,
             nested: Vec::new(),
             bind: std::env::var("RUSTANGO_BIND")
@@ -453,8 +468,9 @@ impl Cli {
         self
     }
 
-    /// Run a one-shot async hook on first boot — typical use is
-    /// inserting a demo tenant or a seed superuser. The hook receives
+    /// Insert demo or seed rows, such as a demo tenant or a first
+    /// superuser. Runs on every `runserver` start after migrations (so
+    /// it must be idempotent) and for no other verb. The hook receives
     /// the registry pool (or single-tenant pool when [`Cli::tenancy`]
     /// is off) as a tri-dialect [`crate::sql::Pool`].
     #[must_use]
@@ -464,6 +480,34 @@ impl Cli {
         Fut: Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send + 'static,
     {
         self.seed = Some(Box::new(move |pool| Box::pin(hook(pool))));
+        self
+    }
+
+    /// Check the app can serve, such as "the master key opens every
+    /// tenant key". Runs only on `runserver`, after migrations and
+    /// [`Cli::seed`], before the port is bound; an error stops the
+    /// start. Gets the same pool as [`Cli::seed`].
+    ///
+    /// ```no_run
+    /// # use rustango::manage::Cli;
+    /// # async fn check_keys(_: &rustango::sql::Pool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> { Ok(()) }
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// Cli::new()
+    ///     .before_serve(|pool| {
+    ///         let pool = pool.clone();
+    ///         async move { check_keys(&pool).await }
+    ///     })
+    ///     .run()
+    ///     .await
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn before_serve<F, Fut>(mut self, hook: F) -> Self
+    where
+        F: for<'a> FnOnce(&'a crate::sql::Pool) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send + 'static,
+    {
+        self.before_serve = Some(Box::new(move |pool| Box::pin(hook(pool))));
         self
     }
 
@@ -1158,7 +1202,7 @@ impl Cli {
         }
         if let Some(cmd) = args.first().and_then(|v| self.command_set.get(v)).cloned() {
             #[cfg(feature = "postgres")]
-            crate::tenancy::refuse_registry_shadow(&pools).await?;
+            crate::tenancy::boot_checks(&pools).await?;
             let ctx = self.command_context(pools.registry_pool());
             return command::run_tenancy(&cmd, ctx, std::sync::Arc::new(pools), args[1..].to_vec())
                 .await
@@ -1708,14 +1752,12 @@ impl Cli {
             self.boot_migrate()
                 .run(auto_migrate(&pool, &self.migrations_dir))
                 .await?;
-            if let Some(seed) = self.seed.take() {
-                // The seed hook's error is now `Send + Sync` (so a seed can
-                // hold an error across an `.await` without the future losing
-                // `Send`); coerce to this fn's `Box<dyn Error>` at the boundary.
-                seed(&pool)
-                    .await
-                    .map_err(|e| -> Box<dyn std::error::Error> { e })?;
-            }
+            // The hooks' error is `Send + Sync` (so a hook can hold an error
+            // across an `.await` without the future losing `Send`); coerce to
+            // this fn's `Box<dyn Error>` at the boundary.
+            run_boot_hooks(self.seed.take(), self.before_serve.take(), &pool)
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error> { e })?;
             let drain = self.drain_timeout();
             let app = self.assemble_app(pool)?;
             let listener = crate::shutdown::bind_announced(&self.bind, None).await?;
@@ -1745,11 +1787,9 @@ impl Cli {
                 self.boot_migrate()
                     .run(auto_migrate(&pool, &self.migrations_dir))
                     .await?;
-                if let Some(seed) = self.seed.take() {
-                    seed(&pool)
-                        .await
-                        .map_err(|e| -> Box<dyn std::error::Error> { e })?;
-                }
+                run_boot_hooks(self.seed.take(), self.before_serve.take(), &pool)
+                    .await
+                    .map_err(|e| -> Box<dyn std::error::Error> { e })?;
                 let drain = self.drain_timeout();
                 let app = self.assemble_app(pool)?;
                 let listener = crate::shutdown::bind_announced(&self.bind, None).await?;
@@ -1769,11 +1809,9 @@ impl Cli {
                     |held| crate::migrate::migrate_pool_locked(held, &enum_pool, dir, None),
                 ))
                 .await?;
-            if let Some(seed) = self.seed.take() {
-                seed(&crate::sql::Pool::from(pool.clone()))
-                    .await
-                    .map_err(|e| -> Box<dyn std::error::Error> { e })?;
-            }
+            run_boot_hooks(self.seed.take(), self.before_serve.take(), &enum_pool)
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error> { e })?;
             let drain = self.drain_timeout();
             let app = self.assemble_app(pool)?;
             let listener = crate::shutdown::bind_announced(&self.bind, None).await?;
@@ -1850,12 +1888,12 @@ impl Cli {
         if let Some(cfg) = self.tenant_pools.clone() {
             builder = builder.tenant_pools(cfg);
         }
-        if let Some(seed) = self.seed.take() {
-            // Tenancy Builder's seed_with takes (Arc<TenantPools>, PgPool,
-            // String); we forward the registry pool and discard the rest.
+        let (seed, before_serve) = (self.seed.take(), self.before_serve.take());
+        if seed.is_some() || before_serve.is_some() {
+            // The builder's hook gets (pools, registry, url); ours get the registry.
             builder = builder
                 .seed_with(move |_pools, registry, _url| async move {
-                    seed(&crate::sql::Pool::from(registry)).await
+                    run_boot_hooks(seed, before_serve, &crate::sql::Pool::from(registry)).await
                 })
                 .await?;
         }
@@ -1934,12 +1972,12 @@ impl Cli {
         if let Some(cfg) = self.tenant_pools.clone() {
             builder = builder.tenant_pools(cfg);
         }
-        if let Some(seed) = self.seed.take() {
-            // Mirror the PG arm above (line 828) so sqlite/mysql tenancy
-            // projects get their `Cli::seed` hook fired on boot too.
+        let (seed, before_serve) = (self.seed.take(), self.before_serve.take());
+        if seed.is_some() || before_serve.is_some() {
+            // The builder's hook gets (pools, registry, url); ours get the registry.
             builder = builder
                 .seed_with(move |_pools, registry, _url| async move {
-                    seed(&crate::sql::Pool::from(registry)).await
+                    run_boot_hooks(seed, before_serve, &crate::sql::Pool::from(registry)).await
                 })
                 .await?;
         }
@@ -2083,6 +2121,9 @@ fn inert_layer_settings(s: &crate::config::Settings) -> Vec<&'static str> {
     }
     if s.server.max_body_bytes.is_some() {
         inert.push("server.max_body_bytes");
+    }
+    if !s.server.routes.is_empty() {
+        inert.push("server.routes");
     }
     if s.security.headers_preset.is_some() {
         inert.push("security.headers_preset");
@@ -2761,6 +2802,30 @@ mod tests {
     fn seed_hook_stored() {
         let cli = Cli::new().seed(|_pool| async { Ok(()) });
         assert!(cli.seed.is_some());
+    }
+
+    /// `before_serve` runs after `seed`, and its error stops the boot.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn before_serve_runs_after_seed_and_its_error_stops_the_boot() {
+        use std::sync::{Arc, Mutex};
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let (o1, o2) = (Arc::clone(&order), Arc::clone(&order));
+        let mut cli = Cli::new()
+            .before_serve(move |_pool| async move {
+                o2.lock().unwrap().push("before_serve");
+                Err("tenant key does not open".into())
+            })
+            .seed(move |_pool| async move {
+                o1.lock().unwrap().push("seed");
+                Ok(())
+            });
+        let err = run_boot_hooks(cli.seed.take(), cli.before_serve.take(), &pool)
+            .await
+            .expect_err("a failing before_serve must stop the boot");
+        assert_eq!(err.to_string(), "tenant key does not open");
+        assert_eq!(*order.lock().unwrap(), ["seed", "before_serve"]);
     }
 
     fn args(v: &[&str]) -> Vec<String> {

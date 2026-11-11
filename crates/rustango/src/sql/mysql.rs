@@ -1160,6 +1160,11 @@ impl Dialect for MySql {
     // ---- advisory locks ----
 
     // GET_LOCK names are server-wide: suffix the database so tenants don't share one (#1991).
+    /// Not `FOR SHARE`: MariaDB has only this older form, which MySQL 8 keeps.
+    fn share_lock_suffix(&self) -> Option<&'static str> {
+        Some(" LOCK IN SHARE MODE")
+    }
+
     fn acquire_session_lock_sql(&self) -> Option<String> {
         Some(format!(
             "SELECT GET_LOCK({}, 0)",

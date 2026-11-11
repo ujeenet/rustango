@@ -2210,6 +2210,11 @@ pub(crate) async fn provision_schema<DB: Database>(
         let timeout = pg_pools.pool_config().database_pool_acquire_timeout;
         if crate::tenancy::pools::create_tenant_schema(pg_pools.registry(), schema, timeout).await?
         {
+            // Before migrate creates tables, so default privileges cover them.
+            if let Err(e) = pg_pools.ensure_tenant_role(schema).await {
+                release_schema(pools, schema).await;
+                return Err(e);
+            }
             return Ok(());
         }
         Err(TenancyError::Validation(format!(
@@ -2244,6 +2249,8 @@ pub(crate) async fn release_schema<DB: Database>(pools: &TenantPools<DB>, schema
             .await
         {
             tracing::warn!(target: "rustango::tenancy::provision", schema, error = %e, "could not drop the new schema");
+        } else if let Err(e) = pg_pools.drop_tenant_role(schema).await {
+            tracing::warn!(target: "rustango::tenancy::provision", schema, error = %e, "could not drop the new schema's role");
         }
     }
     #[cfg(not(feature = "postgres"))]

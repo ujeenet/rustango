@@ -221,8 +221,8 @@ gelaufen ist. Gut zu wissen, bevor du ein grünes Ergebnis als Abdeckung liest.
 
 | Variable | Suites | Was sie brauchen |
 |---|---:|---|
-| *(keine)* | 230 | Nichts — eine In-Memory- oder temporäre Datei-SQLite. Laufen immer. |
-| `DATABASE_URL` | 192 | Ein erreichbarer PostgreSQL-Server. |
+| *(keine)* | 232 | Nichts — eine In-Memory- oder temporäre Datei-SQLite. Laufen immer. |
+| `DATABASE_URL` | 194 | Ein erreichbarer PostgreSQL-Server. |
 | `MYSQL_TEST_URL` | 123 | Ein erreichbarer MySQL-8+-Server. **Nicht** `DATABASE_URL`. |
 | `REDIS_TEST_URL` | 2 | Ein erreichbares Redis. |
 

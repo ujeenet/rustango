@@ -604,6 +604,24 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
     assert_eq!(left, 0, "an interrupted move restored something");
     dst.close().await;
 
+    // The source schema's login role, which the move must not leave behind.
+    run_with_writer(
+        &pools,
+        &registry_url,
+        std::path::Path::new("."),
+        args(&["ensure-tenant-roles"]),
+        &mut Vec::new(),
+    )
+    .await
+    .expect("source role");
+    let source_roles = "SELECT count(*) FROM pg_roles WHERE rolname LIKE 'rgo\\_t\\_%' \
+                        AND has_schema_privilege(rolname, 't2189_src', 'USAGE')";
+    let held: i64 = rustango::sql::sqlx::query_scalar(source_roles)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(held, 1);
+
     // Offline before the dump: a write made during the drain moves, and
     // an edit made meanwhile survives (#2383).
     let edit = async {
@@ -688,6 +706,11 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
     assert_eq!(moved[0].storage_mode, StorageMode::Database.as_str());
     assert!(moved[0].active, "left inactive");
     assert_eq!(moved[0].display_name, "Renamed", "the edit was overwritten");
+    let held: i64 = rustango::sql::sqlx::query_scalar(source_roles)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(held, 0, "the old schema's role still logs in");
     assert_eq!(
         moved[0].database_url.as_deref(),
         Some("env://RUSTANGO_T2384_DST")

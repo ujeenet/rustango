@@ -77,6 +77,21 @@ pub enum StorageError {
     InvalidPath(String),
     #[error("io error: {0}")]
     Io(String),
+    /// A remote backend answered with an error status.
+    #[error("{message}")]
+    Status { status: u16, message: String },
+}
+
+impl StorageError {
+    /// The HTTP status a remote backend answered with; `None` for any
+    /// other error, [`Self::NotFound`] included.
+    #[must_use]
+    pub fn http_status(&self) -> Option<u16> {
+        match self {
+            Self::Status { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
 }
 
 /// The error a create-only write gives when `key` is already there.
@@ -322,6 +337,13 @@ pub trait Storage: Send + Sync + 'static {
         _ttl: std::time::Duration,
         _put: &PutConditions,
     ) -> Option<String> {
+        None
+    }
+
+    /// A DELETE URL for `key` that expires, so a client can remove one
+    /// file without your keys. `None` on a backend that cannot sign;
+    /// `S3Storage` signs with SigV4.
+    async fn presigned_delete_url(&self, _key: &str, _ttl: std::time::Duration) -> Option<String> {
         None
     }
 

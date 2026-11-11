@@ -327,7 +327,7 @@ where
     // `TenantPools::scoped_pool_dyn` (schema-mode-aware on PG, db-mode
     // elsewhere) + ORM `_pool` family so the same code runs on every
     // dialect.
-    let scoped = pools.scoped_pool_dyn(&org).await?;
+    let scoped = pools.operator_pool_dyn(&org).await?.0;
 
     let mut existing: Vec<User> = User::objects()
         .where_(User::username.eq(username.to_owned()))

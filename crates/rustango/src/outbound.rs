@@ -1,12 +1,15 @@
 //! Outbound HTTP to URLs that config can set: tenant SSO issuers,
 //! Slack hooks, webhook subscribers (#1670, #1716).
 //!
-//! [`Egress::check`] is the only way to send here: it refuses
+//! [`Egress::check`](crate::outbound::Egress::check) is the only way to send here: it refuses
 //! non-public addresses and never follows redirects. Without a proxy the
 //! client checks the addresses again at connect time. List private hosts and CIDRs in
 //! `RUSTANGO_OUTBOUND_ALLOW` to reach them, such as an IdP on your own
 //! network. Webhook delivery ignores that list. Set
 //! `RUSTANGO_OUTBOUND_PROXY` to send every call through an egress proxy.
+//!
+//! Apps fetching user-supplied URLs use the same guard: [`Egress::public`](crate::outbound::Egress::public)
+//! for HTTP, [`resolve_public`](crate::outbound::resolve_public) for raw sockets (connect to the returned addresses).
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -16,11 +19,7 @@ use crate::cidr::CidrRange;
 
 /// Env var: comma-separated hosts and CIDRs that SSO and Slack calls may
 /// reach even when private, e.g. `10.0.5.0/24,idp.internal`.
-#[cfg(any(
-    test,
-    feature = "oauth2",
-    all(feature = "notifications", feature = "http-client")
-))]
+#[cfg(any(test, feature = "oauth2", feature = "http-client"))]
 pub(crate) const ALLOW_ENV: &str = "RUSTANGO_OUTBOUND_ALLOW";
 
 /// The private targets a tenant-owned URL (a tenant's SSO issuer) may reach.
@@ -41,11 +40,7 @@ pub(crate) struct Allowlist {
 impl Allowlist {
     /// Parse a comma-separated list. Bad entries are skipped, so they
     /// allow nothing.
-    #[cfg(any(
-        test,
-        feature = "oauth2",
-        all(feature = "notifications", feature = "http-client")
-    ))]
+    #[cfg(any(test, feature = "oauth2", feature = "http-client"))]
     pub(crate) fn parse(spec: &str) -> Self {
         let mut list = Self::default();
         for entry in spec.split(',').map(str::trim).filter(|e| !e.is_empty()) {
@@ -92,7 +87,15 @@ fn normalize_host(host: &str) -> String {
 }
 
 /// Held by tests that set or read [`ALLOW_ENV`].
-#[cfg(all(test, any(feature = "webhook-delivery", feature = "sso")))]
+#[cfg(all(
+    test,
+    any(
+        feature = "webhook-delivery",
+        feature = "sso",
+        feature = "oauth2",
+        feature = "http-client"
+    )
+))]
 pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Which addresses a target may resolve to.
@@ -115,16 +118,12 @@ impl TargetPolicy {
     }
 
     /// Public addresses only.
-    #[cfg_attr(not(any(test, feature = "webhook-delivery")), allow(dead_code))]
     pub(crate) fn public_only() -> Self {
         Self::Public(Allowlist::default())
     }
 
     /// Public addresses plus the operator's [`ALLOW_ENV`] list.
-    #[cfg(any(
-        feature = "oauth2",
-        all(feature = "notifications", feature = "http-client")
-    ))]
+    #[cfg(any(feature = "oauth2", feature = "http-client"))]
     pub(crate) fn from_env() -> Self {
         Self::Public(Allowlist::parse(
             &std::env::var(ALLOW_ENV).unwrap_or_default(),
@@ -143,7 +142,8 @@ impl TargetPolicy {
 /// Why a target was refused. No variant names the address: it may be
 /// an internal one.
 #[derive(Debug)]
-pub(crate) enum TargetError {
+#[non_exhaustive]
+pub enum TargetError {
     /// Bad URL, scheme or host; retrying will not help.
     Invalid(String),
     /// Resolves to a non-public address.
@@ -284,17 +284,47 @@ impl reqwest::dns::Resolve for CheckingResolver {
     }
 }
 
-/// A client that only sends to targets that pass its policy.
-pub(crate) struct Egress {
+/// A client that only sends to targets that pass its policy. It never
+/// follows redirects, and checks every address again at connect time.
+#[derive(Clone)]
+pub struct Egress {
     policy: TargetPolicy,
     client: reqwest::Client,
     proxied: bool,
 }
 
 impl Egress {
+    /// The shared client for public addresses only.
+    ///
+    /// ```no_run
+    /// # async fn f(user_url: &str) -> Result<(), Box<dyn std::error::Error>> {
+    /// use rustango::outbound::Egress;
+    /// let target = Egress::public()?.check(user_url).await?;
+    /// let page = target.request(reqwest::Method::GET).send().await?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// # Errors
+    /// The HTTP client could not be built (bad `RUSTANGO_OUTBOUND_PROXY`).
+    pub fn public() -> reqwest::Result<Self> {
+        shared(TargetPolicy::public_only())
+    }
+
+    /// Public addresses plus the operator's `RUSTANGO_OUTBOUND_ALLOW` list.
+    ///
+    /// # Errors
+    /// As [`Self::public`].
+    #[cfg(any(feature = "oauth2", feature = "http-client"))]
+    pub fn public_or_allowed() -> reqwest::Result<Self> {
+        shared(TargetPolicy::from_env())
+    }
+
     /// Parse `url` and check it. Behind a proxy this is the only check:
     /// the proxy resolves the name itself.
-    pub(crate) async fn check(&self, url: &str) -> Result<CheckedTarget, TargetError> {
+    ///
+    /// # Errors
+    /// [`TargetError`] when the URL is bad, private, or does not resolve.
+    pub async fn check(&self, url: &str) -> Result<CheckedTarget, TargetError> {
         let url = check_url(url, &self.policy).await.map_err(|e| match e {
             // Fail closed: without local DNS nothing checks the target.
             TargetError::Dns(m) if self.proxied => TargetError::Dns(format!(
@@ -310,16 +340,32 @@ impl Egress {
 }
 
 /// A URL that passed its [`Egress`] policy, with the client to send it.
-pub(crate) struct CheckedTarget {
+pub struct CheckedTarget {
     url: reqwest::Url,
     client: reqwest::Client,
 }
 
 impl CheckedTarget {
     /// A request to the checked URL.
-    pub(crate) fn request(&self, method: reqwest::Method) -> reqwest::RequestBuilder {
+    pub fn request(&self, method: reqwest::Method) -> reqwest::RequestBuilder {
         self.client.request(method, self.url.clone())
     }
+
+    /// The checked URL.
+    #[must_use]
+    pub fn url(&self) -> &reqwest::Url {
+        &self.url
+    }
+}
+
+/// Resolve `host` once and return its addresses only if every one is public.
+/// Connect to these, never to `host` again: a second lookup can be rebound.
+///
+/// # Errors
+/// [`TargetError::Blocked`] for any non-public address, [`TargetError::Dns`]
+/// when the name does not resolve.
+pub async fn resolve_public(host: &str, port: u16) -> Result<Vec<SocketAddr>, TargetError> {
+    checked_lookup(host, port, &Allowlist::default()).await
 }
 
 async fn check_url(url: &str, policy: &TargetPolicy) -> Result<reqwest::Url, TargetError> {
@@ -392,15 +438,23 @@ async fn check_host(url: &reqwest::Url, allow: &Allowlist) -> Result<(), TargetE
         .host_str()
         .ok_or_else(|| TargetError::Invalid("target url has no host".into()))?;
     let port = url.port_or_known_default().unwrap_or(80);
+    checked_lookup(host, port, allow).await.map(drop)
+}
+
+/// `host`'s addresses, each checked; an IP literal is checked without a lookup.
+async fn checked_lookup(
+    host: &str,
+    port: u16,
+    allow: &Allowlist,
+) -> Result<Vec<SocketAddr>, TargetError> {
     let literal = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = literal.parse::<IpAddr>() {
-        return if refused_ip(ip, allow) {
-            Err(TargetError::Blocked)
-        } else {
-            Ok(())
-        };
+        if refused_ip(ip, allow) {
+            return Err(TargetError::Blocked);
+        }
+        return Ok(vec![SocketAddr::new(ip, port)]);
     }
-    checked_addrs(host, lookup(host, port).await?, allow).map(drop)
+    checked_addrs(host, lookup(host, port).await?, allow)
 }
 
 async fn lookup(host: &str, port: u16) -> Result<Vec<SocketAddr>, TargetError> {
@@ -587,6 +641,48 @@ mod tests {
                 "{ip} should be allowed"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn public_guard_refuses_private_targets() {
+        let egress = Egress::public().unwrap();
+        for url in [
+            "http://localhost/",
+            "http://10.0.0.1/",
+            "http://[::ffff:127.0.0.1]/",
+        ] {
+            let err = egress.check(url).await.err();
+            assert!(matches!(err, Some(TargetError::Blocked)), "{url}: {err:?}");
+        }
+        for host in [
+            "localhost",
+            "127.0.0.1",
+            "[::1]",
+            "169.254.169.254",
+            "::ffff:10.0.0.1",
+        ] {
+            let err = resolve_public(host, 80).await;
+            assert!(matches!(err, Err(TargetError::Blocked)), "{host}: {err:?}");
+        }
+        let at = resolve_public("203.0.113.7", 443).await.unwrap();
+        assert_eq!(at, vec!["203.0.113.7:443".parse::<SocketAddr>().unwrap()]);
+    }
+
+    /// The operator's allow list widens `public_or_allowed`, never `public`,
+    /// which user-supplied URLs go through.
+    #[cfg(any(feature = "oauth2", feature = "http-client"))]
+    #[tokio::test]
+    async fn public_ignores_the_allow_list() {
+        let _g = ENV_LOCK.lock().await;
+        std::env::set_var(ALLOW_ENV, "10.0.0.0/8");
+        let public = Egress::public().unwrap().check("http://10.0.0.1/").await;
+        let allowed = Egress::public_or_allowed()
+            .unwrap()
+            .check("http://10.0.0.1/")
+            .await;
+        std::env::remove_var(ALLOW_ENV);
+        assert!(matches!(public.err(), Some(TargetError::Blocked)));
+        assert!(allowed.is_ok());
     }
 
     #[tokio::test]

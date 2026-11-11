@@ -136,10 +136,18 @@ _aead         = ["dep:chacha20poly1305", "_base64", "_rand", "dep:sha2"]
 # mounts them from `[server]`/`[security]` settings without `admin` (#1739),
 # and the request span, request id and access log with them (#1514), and
 # `static_files` for `Cli::with_static` (#2042), streamed off the runtime (#1531).
+# `axum/matched-path`: per-route body caps and timeouts key on the route pattern.
 _http_layers  = [
     "_axum", "_tower", "_base64", "_rand", "dep:http-body", "dep:http-body-util",
-    "dep:tokio-util", "tokio/fs", "tokio/io-util", "dep:sha2",
+    "dep:tokio-util", "tokio/fs", "tokio/io-util", "dep:sha2", "axum/matched-path",
 ]
+
+# Small public HTTP features for apps without `admin` (an API plus a WASM
+# client, say): `rustango::static_files`, `rustango::security_headers`, and
+# `rustango::test_client` / `test_server` for tests.
+static-files     = ["_http_layers"]
+security-headers = ["_http_layers"]
+test-client      = ["_http_layers", "csrf"]
 
 # Layered TOML config (`rustango::config`). Loads `config/default.toml`
 # → `config/{env}.toml` → env-var overrides. Slice 8.3.
@@ -217,7 +225,7 @@ auth_flows = ["signed_url"]
 #
 # Empty list, not dead config — still gates `rustango::sse`. Carried
 # `dep:tokio` until tokio became unconditional.
-sse = []
+sse = ["_signing", "_rand"]
 
 # WebSocket handler scaffold (`rustango::ws`) — fan-out via the SSE
 # EventBus, axum upgrade handler with auto JSON encode/decode + ping/pong
@@ -261,8 +269,8 @@ csp-nonce = ["admin", "_rand"]
 
 # Server-side sessions (`rustango::sessions`) — opaque cookie ID
 # backed by any `Cache` implementation. Implies `cache` + rand for
-# the ID + base64 for encoding it.
-sessions = ["cache", "_rand", "dep:base64"]
+# the ID + base64 for encoding it, and axum for `SessionLayer`.
+sessions = ["cache", "_rand", "dep:base64", "_axum"]
 
 # HMAC-signed request authentication (`rustango::hmac_auth`) for
 # service-to-service traffic. AWS-style canonical request signed with
@@ -527,7 +535,7 @@ runserver = ["_axum"]
 
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
-rustango-macros = { version = "=0.65.2", path = "../rustango-macros" }
+rustango-macros = { version = "=0.66.0", path = "../rustango-macros" }
 
 # Always-on: core ORM + query layer + SQL writer + migration runner.
 chrono       = { workspace = true }

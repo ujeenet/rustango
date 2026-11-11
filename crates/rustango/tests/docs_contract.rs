@@ -75,7 +75,6 @@ const UNBACKED: &[(&str, usize)] = &[
     ("manage.md", 8),
     ("api-conventions.md", 5),
     ("query-method.md", 4),
-    ("websockets.md", 3),
     ("sso.md", 2),
     ("operator-console.md", 1),
     // `scaffolding.md` came off this list in #1421, which holds its

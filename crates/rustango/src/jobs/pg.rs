@@ -49,7 +49,8 @@
 //!     last_error   TEXT,
 //!     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 //!     context      JSONB, -- the enqueuer's audit source and timezone
-//!     queue_name   TEXT   -- see `PgJobQueue::queue_name`
+//!     queue_name   TEXT,  -- see `PgJobQueue::queue_name`
+//!     unique_key   TEXT   -- see `Dispatch::unique`; UNIQUE with `name`
 //! );
 //! ```
 //!
@@ -83,8 +84,8 @@ use sqlx::PgPool;
 use tokio::sync::{Mutex, Notify};
 
 use super::{
-    DeadLetterFn, HandlerRegistry, Job, JobCtx, JobDeadLetter, JobError, JobId, JobQueue, Next,
-    Registered, Running, StopSignal, DEFAULT_SHUTDOWN_GRACE,
+    DeadLetterFn, Dispatch, Enqueued, HandlerRegistry, Job, JobCtx, JobDeadLetter, JobError, JobId,
+    JobQueue, Next, Registered, Running, StopSignal, UniqueKey, DEFAULT_SHUTDOWN_GRACE,
 };
 use crate::sql::Pool;
 
@@ -108,18 +109,30 @@ pub struct PgJobQueue {
     heartbeat_interval: Duration,
     context_column: ContextColumn,
     queue_name: Option<Arc<str>>,
-    queue_column: QueueColumn,
+    queue_column: OptionalColumn,
+    unique_column: OptionalColumn,
     reclaim_after: Option<Duration>,
     sweeper: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// [`PgJobQueue::allow_unregistered_dispatch`].
     allow_unregistered: bool,
 }
 
-/// Whether `rustango_jobs` has the `queue_name` column. Decided once per queue.
-#[derive(Clone, Default)]
-struct QueueColumn(Arc<tokio::sync::OnceCell<bool>>);
+/// Whether `rustango_jobs` has an optional column (`queue_name`,
+/// `unique_key`). Decided once per queue.
+#[derive(Clone)]
+struct OptionalColumn {
+    name: &'static str,
+    known: Arc<tokio::sync::OnceCell<bool>>,
+}
 
-impl QueueColumn {
+impl OptionalColumn {
+    fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            known: Arc::default(),
+        }
+    }
+
     async fn present(&self, pool: &Pool) -> bool {
         let probe = || async {
             let cols = crate::migrate::ensure::live_columns(pool, "rustango_jobs")
@@ -129,9 +142,9 @@ impl QueueColumn {
             if cols.is_empty() {
                 return Err(());
             }
-            Ok(cols.contains("queue_name"))
+            Ok(cols.contains(self.name))
         };
-        self.0.get_or_try_init(probe).await.is_ok_and(|p| *p)
+        self.known.get_or_try_init(probe).await.is_ok_and(|p| *p)
     }
 }
 
@@ -146,13 +159,21 @@ enum QueueFilter<'a> {
     Named(&'a str),
 }
 
+const NO_UNIQUE_COLUMN: &str = "rustango_jobs has no `unique_key` column, so a unique key \
+     cannot be held; call PgJobQueue::ensure_table_pool, then restart";
+
+/// `at` cut to whole microseconds, the precision every backend stores.
+fn whole_micros(at: DateTime<Utc>) -> DateTime<Utc> {
+    DateTime::from_timestamp_micros(at.timestamp_micros()).unwrap_or(at)
+}
+
 const NO_QUEUE_COLUMN: &str = "rustango_jobs has no `queue_name` column, so a named queue \
      cannot run; call PgJobQueue::ensure_table_pool, then restart";
 
 impl<'a> QueueFilter<'a> {
     async fn of(
         name: Option<&'a str>,
-        column: &QueueColumn,
+        column: &OptionalColumn,
         pool: &Pool,
     ) -> Result<QueueFilter<'a>, &'static str> {
         match (name, column.present(pool).await) {
@@ -242,7 +263,8 @@ CREATE TABLE IF NOT EXISTS rustango_jobs (
     last_error   TEXT,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     context      JSONB,
-    queue_name   TEXT
+    queue_name   TEXT,
+    unique_key   TEXT
 );
 CREATE INDEX IF NOT EXISTS rustango_jobs_pickup_idx
     ON rustango_jobs (run_at)
@@ -264,7 +286,8 @@ CREATE TABLE IF NOT EXISTS `rustango_jobs` (
     `last_error`   TEXT,
     `created_at`   DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     `context`      JSON,
-    `queue_name`   VARCHAR(255)
+    `queue_name`   VARCHAR(255),
+    `unique_key`   VARCHAR(200) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin
 );
 CREATE INDEX `rustango_jobs_pickup_idx` ON `rustango_jobs` (`run_at`);
 CREATE INDEX `rustango_jobs_locked_idx` ON `rustango_jobs` (`locked_at`)";
@@ -289,7 +312,8 @@ CREATE TABLE IF NOT EXISTS rustango_jobs (
     last_error   TEXT,
     created_at   TEXT     NOT NULL DEFAULT {now},
     context      TEXT,
-    queue_name   TEXT
+    queue_name   TEXT,
+    unique_key   TEXT
 );
 CREATE INDEX IF NOT EXISTS rustango_jobs_pickup_idx
     ON rustango_jobs (run_at) WHERE locked_at IS NULL;
@@ -339,7 +363,8 @@ impl PgJobQueue {
             heartbeat_interval: Duration::from_secs(10),
             context_column: ContextColumn::default(),
             queue_name: None,
-            queue_column: QueueColumn::default(),
+            queue_column: OptionalColumn::new("queue_name"),
+            unique_column: OptionalColumn::new("unique_key"),
             reclaim_after: None,
             sweeper: Mutex::new(None),
             allow_unregistered: false,
@@ -471,28 +496,88 @@ impl PgJobQueue {
         let cols = crate::migrate::ensure::live_columns(pool, "rustango_jobs")
             .await
             .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
-        let queue_type = if pool.dialect().name() == "mysql" {
-            "VARCHAR(255)"
+        let mysql = pool.dialect().name() == "mysql";
+        let queue_type = if mysql { "VARCHAR(255)" } else { "TEXT" };
+        // Binary on MySQL, so keys compare as on the other backends.
+        let unique_type = if mysql {
+            "VARCHAR(200) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin"
         } else {
             "TEXT"
         };
-        let add: Vec<String> = [("context", context_type(pool)), ("queue_name", queue_type)]
-            .into_iter()
-            .filter(|(col, _)| !cols.contains(*col))
-            .map(|(col, ty)| format!("ALTER TABLE rustango_jobs ADD COLUMN {col} {ty}"))
-            .collect();
+        let add: Vec<String> = [
+            ("context", context_type(pool)),
+            ("queue_name", queue_type),
+            ("unique_key", unique_type),
+        ]
+        .into_iter()
+        .filter(|(col, _)| !cols.contains(*col))
+        .map(|(col, ty)| format!("ALTER TABLE rustango_jobs ADD COLUMN {col} {ty}"))
+        .collect();
         if !add.is_empty() {
             crate::migrate::ensure::run_statements(pool, &add).await?;
         }
-        // After the column exists: a named queue's pickup stays fast
-        // however busy its neighbours are.
-        let queue_idx = if pool.dialect().name() == "mysql" {
-            "CREATE INDEX `rustango_jobs_queue_idx` ON `rustango_jobs` (`queue_name`, `run_at`)"
+        // After the columns exist: a named queue's pickup stays fast
+        // however busy its neighbours are, and a unique key is held once.
+        let (queue_idx, unique_idx) = if mysql {
+            (
+                "CREATE INDEX `rustango_jobs_queue_idx` ON `rustango_jobs` (`queue_name`, `run_at`)",
+                "CREATE UNIQUE INDEX `rustango_jobs_unique_idx` ON `rustango_jobs` (`name`, `unique_key`)",
+            )
         } else {
-            "CREATE INDEX IF NOT EXISTS rustango_jobs_queue_idx \
-             ON rustango_jobs (queue_name, run_at) WHERE locked_at IS NULL"
+            (
+                "CREATE INDEX IF NOT EXISTS rustango_jobs_queue_idx \
+                 ON rustango_jobs (queue_name, run_at) WHERE locked_at IS NULL",
+                "CREATE UNIQUE INDEX IF NOT EXISTS rustango_jobs_unique_idx \
+                 ON rustango_jobs (name, unique_key)",
+            )
         };
-        crate::sql::run_ddl_idempotent(pool, queue_idx).await
+        crate::sql::run_ddl_idempotent(pool, queue_idx).await?;
+        crate::sql::run_ddl_idempotent(pool, unique_idx).await
+    }
+
+    /// Wake a worker, after the commit when inside a block.
+    fn wake(&self) {
+        if crate::sql::in_block(&self.pool) {
+            let notify = self.notify.clone();
+            crate::sql::on_commit(move || notify.notify_one());
+        } else {
+            self.notify.notify_one();
+        }
+    }
+
+    /// The queued or running job of type `name` that holds `key`.
+    async fn unique_holder(&self, name: &str, key: &UniqueKey) -> Result<Option<JobId>, JobError> {
+        use crate::core::SqlValue;
+        let d = self.pool.dialect();
+        let mut sql = format!(
+            "SELECT id, created_at FROM rustango_jobs WHERE name = {} AND unique_key = {}",
+            d.placeholder(1),
+            d.placeholder(2)
+        );
+        let binds = vec![
+            SqlValue::String(name.to_owned()),
+            SqlValue::String(key.as_str().to_owned()),
+        ];
+        let rows: Result<Vec<(i64, DateTime<Utc>)>, _> = if crate::sql::in_block(&self.pool) {
+            // A locking read sees a holder committed after the block's
+            // snapshot, which MySQL's plain read would not.
+            if let Some(lock) = d.share_lock_suffix() {
+                sql.push_str(lock);
+            }
+            crate::sql::atomic(&self.pool, move |tx| {
+                Box::pin(async move {
+                    crate::sql::raw_query_tx(&mut *tx.lock().await?, &sql, binds).await
+                })
+            })
+            .await
+        } else {
+            crate::sql::raw_query_pool(&sql, binds, &self.pool).await
+        };
+        let rows = rows.map_err(|e| JobError::Queue(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .next()
+            .map(|(id, at)| JobId::of_row(id, Some(at))))
     }
 
     /// PG-typed shim around [`Self::reclaim_stuck_jobs_pool`].
@@ -574,6 +659,12 @@ impl JobQueue for PgJobQueue {
     /// Inside an `atomic` block on this queue's pool, the insert joins that
     /// block; do not hold its `TxGuard` across this call.
     async fn dispatch<T: Job>(&self, payload: &T) -> Result<(), JobError> {
+        self.enqueue(payload, Dispatch::now()).await.map(drop)
+    }
+
+    /// As [`Self::dispatch`]. A unique key needs the `unique_key` column
+    /// [`Self::ensure_table_pool`] adds.
+    async fn enqueue<T: Job>(&self, payload: &T, opts: Dispatch) -> Result<Enqueued, JobError> {
         use crate::core::SqlValue;
         if !self.allow_unregistered {
             self.registry.lock().await.require(T::NAME).map_err(|_| {
@@ -588,70 +679,108 @@ impl JobQueue for PgJobQueue {
         let value = serde_json::to_value(payload).map_err(|e| JobError::Queue(e.to_string()))?;
         let max_attempts = i32::try_from(super::max_attempts(payload)).unwrap_or(i32::MAX);
         let dialect = self.pool.dialect();
-        let (p1, p2, p3, p4, p5) = (
-            dialect.placeholder(1),
-            dialect.placeholder(2),
-            dialect.placeholder(3),
-            dialect.placeholder(4),
-            dialect.placeholder(5),
-        );
+        // Whole µs, as every backend stores it, so the id returned here is
+        // the one the run sees.
+        let now = whole_micros(Utc::now());
         // Bind `run_at` / `created_at` instead of letting the column
         // default fill them. An older table may still default to
         // `CURRENT_TIMESTAMP`, and SQLite cannot ALTER a default. Such
         // a row sorts below every canonical one and would jump the
         // `ORDER BY run_at, id` pickup queue forever.
-        let now = Utc::now();
         // `SqlValue::Json` stores as JSONB on PG, JSON on MySQL and
         // TEXT on SQLite, so one call covers all three backends.
+        let mut cols = vec!["name", "payload", "max_attempts", "run_at", "created_at"];
         let mut binds = vec![
             SqlValue::String(T::NAME.to_owned()),
             SqlValue::Json(value),
             SqlValue::I32(max_attempts),
-            SqlValue::DateTime(now),
+            SqlValue::DateTime(opts.run_at().unwrap_or(now)),
             SqlValue::DateTime(now),
         ];
-        let (mut cols, mut vals) = (String::new(), String::new());
-        let mut add = |col: &str, v: SqlValue| {
-            binds.push(v);
-            cols.push_str(&format!(", {col}"));
-            vals.push_str(&format!(", {}", dialect.placeholder(binds.len())));
-        };
         if let Some(ctx) = crate::task_context::TaskContext::capture().to_stored() {
             if self.context_column.present(&self.pool).await {
-                add("context", SqlValue::Json(ctx));
+                cols.push("context");
+                binds.push(SqlValue::Json(ctx));
             }
         }
         let queue = QueueFilter::of(self.queue_name.as_deref(), &self.queue_column, &self.pool)
             .await
             .map_err(|e| JobError::Queue(e.to_owned()))?;
         if let Some(name) = queue.name() {
-            add("queue_name", SqlValue::String(name.to_owned()));
+            cols.push("queue_name");
+            binds.push(SqlValue::String(name.to_owned()));
         }
+        let unique = opts.unique_key();
+        if let Some(key) = unique {
+            if !self.unique_column.present(&self.pool).await {
+                return Err(JobError::Queue(NO_UNIQUE_COLUMN.to_owned()));
+            }
+            cols.push("unique_key");
+            binds.push(SqlValue::String(key.as_str().to_owned()));
+        }
+        let vals: Vec<String> = (1..=binds.len()).map(|n| dialect.placeholder(n)).collect();
         let sql = format!(
-            "INSERT INTO rustango_jobs (name, payload, max_attempts, run_at, created_at{cols}) \
-             VALUES ({p1}, {p2}, {p3}, {p4}, {p5}{vals})"
+            "INSERT INTO rustango_jobs ({}) VALUES ({})",
+            cols.join(", "),
+            vals.join(", ")
         );
-        // Inside an `atomic` block on the queue's pool the row joins that
-        // transaction, and the worker is woken only once it commits.
-        if crate::sql::in_block(&self.pool) {
-            let notify = self.notify.clone();
-            return crate::sql::atomic(&self.pool, move |tx| {
-                Box::pin(async move {
-                    crate::sql::raw_execute_tx(&mut *tx.lock().await?, &sql, binds).await?;
-                    crate::sql::on_commit(move || notify.notify_one());
-                    Ok(())
-                })
-            })
-            .await
-            .map_err(|e| JobError::Queue(e.to_string()));
+        // A plain insert, not `ON CONFLICT`: SQLite checks a conflict target
+        // against a connection's cached schema, which may predate the index.
+        // A holder can finish between the refusal and the lookup; then insert again.
+        for _ in 0..3 {
+            // Inside an `atomic` block on the queue's pool the row joins that
+            // transaction, and the worker is woken only once it commits.
+            match crate::sql::raw_insert_id(&self.pool, &sql, binds.clone(), "id").await {
+                Ok(id) => {
+                    self.wake();
+                    return Ok(Enqueued::Queued(JobId::of_row(id, Some(now))));
+                }
+                Err(e) => match unique {
+                    Some(key) if e.is_unique_violation() => {
+                        if let Some(holder) = self.unique_holder(T::NAME, key).await? {
+                            return Ok(Enqueued::Duplicate(holder));
+                        }
+                    }
+                    _ => return Err(JobError::Queue(e.to_string())),
+                },
+            }
         }
-        crate::sql::raw_execute_pool(&self.pool, &sql, binds)
+        Err(JobError::Queue(format!(
+            "unique key `{}` kept changing hands; try again",
+            unique.map_or("", UniqueKey::as_str)
+        )))
+    }
+
+    /// Only a job no worker holds: queued, or waiting on a retry.
+    async fn cancel(&self, id: &JobId) -> Result<bool, JobError> {
+        use crate::core::SqlValue;
+        let Some((row, created_at)) = id.row_key() else {
+            return Err(JobError::Queue(format!(
+                "`{id}` is not an id this queue gave out"
+            )));
+        };
+        let queue = QueueFilter::of(self.queue_name.as_deref(), &self.queue_column, &self.pool)
+            .await
+            .map_err(|e| JobError::Queue(e.to_owned()))?;
+        let d = self.pool.dialect();
+        let mut sql = format!(
+            "DELETE FROM rustango_jobs WHERE id = {} AND locked_at IS NULL",
+            d.placeholder(1)
+        );
+        let mut binds = vec![SqlValue::I64(row)];
+        // A recreated table reuses row ids; its enqueue time tells them apart.
+        if let Some(at) = created_at {
+            binds.push(SqlValue::DateTime(at));
+            sql = format!("{sql} AND created_at = {}", d.placeholder(binds.len()));
+        }
+        sql.push_str(&queue.and(&d.placeholder(binds.len() + 1)));
+        if let Some(name) = queue.name() {
+            binds.push(SqlValue::String(name.to_owned()));
+        }
+        let gone = crate::sql::raw_write(&self.pool, &sql, binds)
             .await
             .map_err(|e| JobError::Queue(e.to_string()))?;
-        // Wake one waiting worker so the job starts before the next
-        // poll tick.
-        self.notify.notify_one();
-        Ok(())
+        Ok(gone > 0)
     }
 
     async fn start(&self) {
@@ -732,7 +861,7 @@ struct Worker {
     heartbeat: Duration,
     context_column: ContextColumn,
     queue_name: Option<Arc<str>>,
-    queue_column: QueueColumn,
+    queue_column: OptionalColumn,
 }
 
 async fn worker_loop(
@@ -1378,7 +1507,7 @@ mod tests {
             heartbeat: Duration::from_millis(20),
             context_column: ContextColumn::default(),
             queue_name: None,
-            queue_column: QueueColumn::default(),
+            queue_column: OptionalColumn::new("queue_name"),
         };
         let job = async {
             let _conn = sqlite.acquire().await.expect("conn");
@@ -1392,6 +1521,13 @@ mod tests {
             "stalled for {:?}",
             started.elapsed()
         );
+    }
+
+    /// Every backend stores whole µs; the id `enqueue` returns must match.
+    #[test]
+    fn enqueue_times_are_cut_to_whole_micros() {
+        let at = DateTime::from_timestamp(1_700_000_000, 123_456_789).unwrap();
+        assert_eq!(whole_micros(at).timestamp_subsec_nanos(), 123_456_000);
     }
 
     #[tokio::test]

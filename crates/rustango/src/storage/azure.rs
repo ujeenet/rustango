@@ -45,8 +45,8 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 
 use super::transport::{
-    canonical_header_value, send_error, split_endpoint, stream_body, Http, Parts, Split,
-    MAX_PRESIGN_SECS,
+    canonical_header_value, send_error, split_endpoint, status_error, stream_body, Http, Parts,
+    Split, MAX_PRESIGN_SECS,
 };
 use super::{
     already_exists, check_declared_len, validate_key, ByteStream, ObjectMeta, PutConditions,
@@ -199,11 +199,14 @@ impl AzureBlobStorage {
         match resp.status() {
             reqwest::StatusCode::CREATED => Ok(true),
             reqwest::StatusCode::CONFLICT => Ok(false),
-            status => Err(StorageError::Io(format!(
-                "Azure create container {} -> {status}: {}",
-                self.container,
-                resp.text().await.unwrap_or_default()
-            ))),
+            status => Err(status_error(
+                status,
+                format!(
+                    "Azure create container {} -> {status}: {}",
+                    self.container,
+                    resp.text().await.unwrap_or_default()
+                ),
+            )),
         }
     }
 
@@ -421,9 +424,10 @@ impl AzureBlobStorage {
             let status = resp.status();
             if !status.is_success() {
                 let text = resp.text().await.unwrap_or_default();
-                return Err(StorageError::Io(format!(
-                    "Azure Put Block {key} -> {status}: {text}"
-                )));
+                return Err(status_error(
+                    status,
+                    format!("Azure Put Block {key} -> {status}: {text}"),
+                ));
             }
             parts = back.await.map_err(|_| {
                 StorageError::Io(format!("Azure Put Block {key}: block not fully sent"))
@@ -469,9 +473,10 @@ impl AzureBlobStorage {
         }
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(StorageError::Io(format!(
-                "Azure GET {key} -> {status}: {body}"
-            )));
+            return Err(status_error(
+                status,
+                format!("Azure GET {key} -> {status}: {body}"),
+            ));
         }
         Ok(resp)
     }
@@ -515,9 +520,10 @@ async fn check_put(
     }
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return Err(StorageError::Io(format!(
-            "Azure {what} {key} -> {status}: {body}"
-        )));
+        return Err(status_error(
+            status,
+            format!("Azure {what} {key} -> {status}: {body}"),
+        ));
     }
     Ok(())
 }
@@ -626,9 +632,10 @@ impl Storage for AzureBlobStorage {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(StorageError::Io(format!(
-                "Azure PUT {key} -> {status}: {body}"
-            )));
+            return Err(status_error(
+                status,
+                format!("Azure PUT {key} -> {status}: {body}"),
+            ));
         }
         Ok(())
     }
@@ -682,9 +689,10 @@ impl Storage for AzureBlobStorage {
             return Ok(());
         }
         let body = resp.text().await.unwrap_or_default();
-        Err(StorageError::Io(format!(
-            "Azure DELETE {key} -> {status}: {body}"
-        )))
+        Err(status_error(
+            status,
+            format!("Azure DELETE {key} -> {status}: {body}"),
+        ))
     }
 
     async fn exists(&self, key: &str) -> Result<bool, StorageError> {
@@ -731,7 +739,10 @@ impl Storage for AzureBlobStorage {
             return Ok(None);
         }
         if !status.is_success() {
-            return Err(StorageError::Io(format!("Azure HEAD {key} -> {status}")));
+            return Err(status_error(
+                status,
+                format!("Azure HEAD {key} -> {status}"),
+            ));
         }
         let header = |name| {
             resp.headers()

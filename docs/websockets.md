@@ -34,6 +34,8 @@ Both fan out through the same in-process **broadcast bus** ([`EventBus`]), so
 - [Server-Sent Events](#server-sent-events)
 - [WebSockets](#websockets)
 - [Sending from elsewhere](#sending-from-elsewhere)
+- [Per-user events](#per-user-events)
+- [Across processes](#across-processes)
 - [Auth & tenancy](#auth--tenancy)
 - [Scaling notes](#scaling-notes)
 - [Feature flags](#feature-flags)
@@ -196,6 +198,72 @@ One `EventBus` can back **both** an SSE route and a WebSocket route at once —
 `WsHub::bus()` hands you the underlying bus to share with an SSE handler, so
 clients on either transport see the same stream.
 
+## Per-user events
+
+`KeyedEventBus<K, T>` gives each key, such as a user or account id, its own
+topic: `send(&key, event)` reaches only that key's subscribers, and a topic
+lives only while someone subscribes. A `Subscription` reads with `recv()`:
+
+```rust
+use rustango::sse::{KeyedEventBus, Recv};
+
+let bus: KeyedEventBus<i64, Notification> = KeyedEventBus::new(100);
+
+// In the SSE handler, after auth:
+let mut sub = bus.subscribe(user.id);
+let stream = async_stream::stream! {
+    while let Some(got) = sub.recv().await {
+        let event = match got {
+            Recv::Event(n) => Event::default().event("notification")
+                .data(serde_json::to_string(&n).unwrap_or_default()),
+            // Events were missed: tell the client to reload its state.
+            Recv::Resync => Event::default().event("resync").data(""),
+            _ => continue,
+        };
+        yield Ok::<_, Infallible>(event);
+    }
+};
+
+// Anywhere else:
+bus.send(&user.id, Notification { kind: "info".into(), message: "Saved".into() });
+```
+
+**Lag contract.** `Recv::Resync` means events were missed: the subscriber fell
+more than `capacity` behind, or (on `PgEventBus`) the database connection
+dropped. Nothing is replayed, so the client reloads what it shows and keeps
+listening. `recv()` gives `None` once the bus is gone.
+
+## Across processes
+
+`PgEventBus<K, T>` (features `sse` + `postgres`) is the keyed bus over
+PostgreSQL `LISTEN`/`NOTIFY`, so a worker in another process can publish:
+
+```rust
+use rustango::session::SessionSecret;
+use rustango::sse::PgEventBus;
+
+// In every process, on the same channel name and secret:
+let secret = SessionSecret::require_from_env()?;
+let bus: PgEventBus<i64, Notification> =
+    PgEventBus::connect(&pool, "notifications", 100, &secret).await?;
+
+let mut sub = bus.subscribe(user.id);            // web process
+bus.publish(&user.id, &notification).await?;      // any process
+```
+
+- `K` and `T` travel as JSON; an event over PostgreSQL's 8000-byte limit is
+  refused (`BusError::TooLarge`). Send an id and let the client fetch the rest.
+- Inside an `atomic` block on the same pool, `publish` goes out at the commit
+  and not at all on a rollback.
+- A lost connection is re-opened, and every subscriber gets `Recv::Resync`.
+- `LISTEN` and `NOTIFY` need no privilege and are database-wide, so the
+  channel on the wire is an HMAC of the name and the pool's schema under
+  `secret`. SQL without the secret, such as a schema tenant's role, can
+  neither listen in nor inject, and a bus on a schema-scoped pool only hears
+  its own schema. Tenants with their own database are apart anyway.
+- Each bus keeps one connection of its pool for `LISTEN`: build one per
+  process (it is `Clone`), not one per request.
+
 ## Auth & tenancy
 
 The SSE/WS routes are ordinary axum routes — layer your usual auth on them
@@ -211,10 +279,9 @@ authenticated, per-agent SSE channel is built on this same `sse` foundation.
 `EventBus` is an **in-process** `tokio::sync::broadcast` — fan-out is instant
 and lock-light, but it only reaches clients connected to *this* process. Running
 multiple app instances behind a load balancer? A client connected to node A
-won't see an event sent on node B. To fan out across nodes, bridge the bus to an
-external pub/sub (e.g. Redis) — publish domain events there and have each node's
-subscriber re-`send` them onto its local `EventBus`. Single-node (the common
-case) needs none of this.
+won't see an event sent on node B. On PostgreSQL, use
+[`PgEventBus`](#across-processes); otherwise bridge the bus to an external
+pub/sub (e.g. Redis). Single-node (the common case) needs none of this.
 
 Also size `EventBus::new(capacity)` for your burst rate: it's the per-subscriber
 buffer, and a client that falls further behind than `capacity` gets a
@@ -224,7 +291,7 @@ buffer, and a client that falls further behind than `capacity` gets a
 
 ```toml
 # Cargo.toml — both are in Rustango's default set; list them if you slim features.
-rustango = { version = "0.65", features = ["sse", "websocket"] }
+rustango = { version = "0.66", features = ["sse", "websocket"] }
 ```
 
 - **`sse`** — the `EventBus` broadcast bus (no extra dependencies). Enough for

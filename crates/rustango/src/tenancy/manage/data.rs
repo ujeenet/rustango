@@ -46,7 +46,7 @@ where
     };
     let (pool, scope) = match &org {
         Some(org) => (
-            pools.scoped_pool_dyn(org).await?,
+            pools.operator_pool_dyn(org).await?.0,
             DataScope::Tenant {
                 schema: org.own_schema(),
             },

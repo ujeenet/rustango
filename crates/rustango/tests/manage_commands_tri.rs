@@ -187,7 +187,7 @@ impl Env {
         let dir = self.dir();
         let org = typed!(self.registry, p => create_tenant(&p, &self.url, &dir, slug, rustango::testkit::routed_opts(slug, opts)).await)
             .expect("create tenant");
-        let pool = typed!(self.registry, p => p.scoped_pool_dyn(&org).await.expect("tenant pool"));
+        let pool = typed!(self.registry, p => p.ddl_pool(&org).await.expect("tenant DDL pool"));
         rustango::sql::raw_execute_pool(&pool, "CREATE TABLE cmd_marker (id INT)", Vec::new())
             .await
             .expect("marker table");

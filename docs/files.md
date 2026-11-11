@@ -367,6 +367,27 @@ and on every router added with `nest_with`, and it replaces axum's 2 MiB cap.
 A request whose `Content-Length` is larger gets `413 Payload Too Large`
 before your handler runs. Set it a little above your largest `max_bytes`.
 
+To let one route take more than the rest, give it its own cap, and its own
+timeout (`0` means none, so a slow upload is not cut at
+`request_timeout_secs`). The key is the route pattern as you registered it,
+nest prefix included:
+
+```toml
+[server]
+max_body_bytes = 2097152
+request_timeout_secs = 30
+
+[server.routes."/api/uploads"]
+max_body_bytes = 1073741824   # 1 GiB on this route only
+request_timeout_secs = 0
+```
+
+In code it is `BodyLimitLayer::new(n).route("/api/uploads", 1 << 30)` and
+`RequestTimeoutLayer::new(t).exempt("/api/uploads")` (or `.route(pattern, t)`).
+With route entries and no `max_body_bytes`, other routes keep axum's 2 MiB.
+The timeout ends when the handler returns its response, so a streamed
+download, an SSE stream or a WebSocket after its upgrade is never cut.
+
 The `Cli` reads this setting only when it has your settings. The scaffolded
 `main.rs` passes them with `.with_loaded_settings(loaded)`. Without that call
 (or `.with_settings_from_env()`) the value is ignored, and the server logs a
@@ -703,6 +724,47 @@ tables, whenever you run `migrate` / provision a tenant. There is no lazy
 > The reconcile guard demanded a migration be purely `CreateTable`, while a
 > generated initial migration is tables *and* indexes, so it bailed on every real
 > one. 0.51.2 is the release where this actually fires.
+
+---
+
+## Static assets: hashed names, SRI and one-file images
+
+Your own CSS, JS and WASM are not uploads; serve them with
+`static_files::StaticFiles`. Apps without `admin` turn on just the
+`static-files` feature (and `security-headers`, `test-client` as needed).
+
+`AssetManifest` gives each file a content-hashed name and a Subresource
+Integrity hash. Mount it with the files so the hashed names are served
+`immutable` for a year, and link to them from templates:
+
+```rust
+use rustango::static_files::{static_router, AssetManifest, StaticFiles};
+
+let manifest = AssetManifest::from_dir("static")?.prefix("/static");
+let app = Router::new()
+    .nest("/static", static_router(StaticFiles::new("static").manifest(manifest.clone())));
+manifest.register_tera(&mut tera); // asset_url(name=...) and asset_integrity(name=...)
+```
+
+```html
+<script src="{{ asset_url(name='js/app.js') }}"
+        integrity="{{ asset_integrity(name='js/app.js') }}" crossorigin="anonymous"></script>
+```
+
+The manifest is built from the files as they are at boot, so it never goes
+stale; `to_json()` writes it for a bundler. To ship one binary with no
+`static/` folder, compile the directory in:
+
+```rust
+use rustango::static_files::{AssetManifest, EmbeddedDir, StaticFiles};
+
+static ASSETS: EmbeddedDir = rustango::embed_static!("static");
+let manifest = AssetManifest::from_embedded(&ASSETS).prefix("/static");
+let files = StaticFiles::embedded(ASSETS).manifest(manifest);
+```
+
+`embed_static!` leaves out names starting with `.`. Edits rebuild the crate; a
+new file needs `println!("cargo:rerun-if-changed=static");` in `build.rs`.
 
 ---
 

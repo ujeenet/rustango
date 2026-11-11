@@ -360,7 +360,7 @@ pub async fn send_user_login_failed(ctx: UserLoginFailedContext) {
 // ---------------------------------------------------------------- Helpers
 
 /// Build [`AuthRequestMeta`] from request parts: `User-Agent`, and the
-/// client IP from [`crate::rate_limit::client_ip`] (a `TrustedRealIp`,
+/// client IP from [`crate::real_ip::client_ip`] (a `TrustedRealIp`,
 /// else the socket). Raw forwarding headers are never read (#1745).
 #[cfg(feature = "admin")]
 pub fn meta_from_parts(
@@ -369,7 +369,7 @@ pub fn meta_from_parts(
     path: Option<&str>,
 ) -> AuthRequestMeta {
     AuthRequestMeta {
-        ip_address: crate::rate_limit::client_ip(extensions, headers).map(|ip| ip.to_string()),
+        ip_address: crate::real_ip::client_ip(extensions, headers).map(|ip| ip.to_string()),
         user_agent: headers
             .get(axum::http::header::USER_AGENT)
             .and_then(|v| v.to_str().ok())

@@ -467,12 +467,74 @@ impl CsrfCookieSpec {
     }
 }
 
+/// Why the layer refused a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CsrfFailure {
+    /// The `Origin` is neither the request's host nor a trusted origin.
+    Origin,
+    /// The token is missing or does not match.
+    Token,
+}
+
+impl CsrfFailure {
+    /// The text the default plain-text refusal sends.
+    #[must_use]
+    pub fn detail(self) -> &'static str {
+        match self {
+            Self::Origin => {
+                "CSRF: request Origin not in CSRF_TRUSTED_ORIGINS and does not match Host"
+            }
+            Self::Token => TOKEN_REFUSED,
+        }
+    }
+}
+
+type RejectFn = dyn Fn(CsrfFailure) -> Response<Body> + Send + Sync;
+
+/// How a refusal is answered: `403` plain text unless the layer says otherwise.
+#[derive(Clone, Default)]
+enum Rejection {
+    #[default]
+    Text,
+    Json,
+    Custom(Arc<RejectFn>),
+}
+
+impl Rejection {
+    fn respond(&self, failure: CsrfFailure) -> Response<Body> {
+        match self {
+            Self::Text => forbid_response(failure.detail()),
+            Self::Json => {
+                axum::response::IntoResponse::into_response(crate::api_errors::ApiError::new(
+                    StatusCode::FORBIDDEN,
+                    "csrf_failed",
+                    failure.detail(),
+                ))
+            }
+            Self::Custom(f) => f(failure),
+        }
+    }
+}
+
+/// What a submitted token is checked against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenSource {
+    /// The double-submit cookie.
+    Cookie,
+    /// The token in the request's session; only `SessionLayer::with_csrf` builds it.
+    #[cfg(feature = "sessions")]
+    Session,
+}
+
 /// The [`tower::Layer`] implementation. Wraps inner services with
 /// [`CsrfService`].
 #[derive(Clone)]
 pub struct CsrfLayer {
     cfg: Arc<CsrfConfig>,
     secure_from: SecureFrom,
+    source: TokenSource,
+    reject: Rejection,
 }
 
 impl CsrfLayer {
@@ -480,7 +542,36 @@ impl CsrfLayer {
         Self {
             cfg: Arc::new(cfg),
             secure_from,
+            source: TokenSource::Cookie,
+            reject: Rejection::default(),
         }
+    }
+
+    /// Check tokens against the session's; [`crate::sessions::SessionLayer`] wraps it.
+    #[cfg(feature = "sessions")]
+    pub(crate) fn session_bound(cfg: CsrfConfig) -> Self {
+        Self {
+            source: TokenSource::Session,
+            ..Self::new(cfg, SecureFrom::Config)
+        }
+    }
+
+    /// Refuse with the JSON error shape of [`crate::api_errors::ApiError`]
+    /// (`403`, code `csrf_failed`), for API routes.
+    #[must_use]
+    pub fn json_rejection(mut self) -> Self {
+        self.reject = Rejection::Json;
+        self
+    }
+
+    /// Answer refusals with `f`.
+    #[must_use]
+    pub fn reject_with<F>(mut self, f: F) -> Self
+    where
+        F: Fn(CsrfFailure) -> Response<Body> + Send + Sync + 'static,
+    {
+        self.reject = Rejection::Custom(Arc::new(f));
+        self
     }
 
     #[cfg(all(test, feature = "manage"))]
@@ -496,6 +587,8 @@ impl<S> tower::Layer<S> for CsrfLayer {
             inner,
             cfg: Arc::clone(&self.cfg),
             secure_from: self.secure_from,
+            source: self.source,
+            reject: self.reject.clone(),
         }
     }
 }
@@ -507,6 +600,8 @@ pub struct CsrfService<S> {
     inner: S,
     cfg: Arc<CsrfConfig>,
     secure_from: SecureFrom,
+    source: TokenSource,
+    reject: Rejection,
 }
 
 impl<S> Service<Request<Body>> for CsrfService<S>
@@ -529,7 +624,30 @@ where
     fn call(&mut self, req: Request<Body>) -> Self::Future {
         let cfg = Arc::clone(&self.cfg);
         let secure_from = self.secure_from;
+        let reject = self.reject.clone();
         let mut inner = self.inner.clone();
+        match self.source {
+            TokenSource::Cookie => {}
+            #[cfg(feature = "sessions")]
+            TokenSource::Session => {
+                return Box::pin(async move {
+                    let req = if is_enforced(&req, &cfg) {
+                        let report = is_browser_report(&req, &cfg.report_paths);
+                        let expected = req
+                            .extensions()
+                            .get::<crate::sessions::CurrentSession>()
+                            .and_then(crate::sessions::CurrentSession::existing_csrf_token);
+                        match check_request(req, &cfg, expected.as_deref(), report, &reject).await {
+                            Ok(req) => req,
+                            Err(refused) => return Ok(refused),
+                        }
+                    } else {
+                        req
+                    };
+                    inner.call(req).await
+                })
+            }
+        }
         Box::pin(async move {
             let mut req = req;
             // An outer layer's names win (#1722). If it verified the token,
@@ -566,64 +684,12 @@ where
             };
             let result = async move {
                 let cookie_value = read_csrf_cookie(&req, &cfg.cookie_name);
-
-                // Enforce on unsafe methods — unless the path is exempt
-                // (beacon/collector endpoints; see `CsrfConfig::exempt_prefix`).
-                let enforced = !method_is_csrf_exempt(req.method(), &cfg)
-                    && !path_is_exempt(req.uri().path(), &cfg.exempt_prefixes)
-                    && !cfg.exempt_paths.iter().any(|p| p == req.uri().path());
+                let enforced = is_enforced(&req, &cfg);
                 let report = is_browser_report(&req, &cfg.report_paths);
                 let mut req = if enforced {
-                    // Origin-header defense-in-depth. Always runs; an empty
-                    // `trusted_origins` means same-host only (#1529). A report
-                    // only logs, so one sent without an Origin is taken.
-                    let no_origin = !req.headers().contains_key(axum::http::header::ORIGIN);
-                    if !((report && no_origin) || origin_allowed(&req, &cfg.trusted_origins)) {
-                        return Ok(forbid_response(
-                            "CSRF: request Origin not in CSRF_TRUSTED_ORIGINS \
-                         and does not match Host",
-                        ));
-                    }
-                    let header_value = req
-                        .headers()
-                        .get(&cfg.header_name)
-                        .and_then(|v| v.to_str().ok())
-                        .map(str::to_owned);
-                    if report {
-                        // Reports carry no token.
-                        req
-                    } else if let Some(h) = header_value {
-                        // Header path — short-circuit, no body buffering.
-                        if !tokens_match(cookie_value.as_deref(), Some(&h)) {
-                            return Ok(forbid_response(TOKEN_REFUSED));
-                        }
-                        req
-                    } else if is_form_encoded(&req) {
-                        // Form-encoded POST without the header — read
-                        // `_csrf` from the body. Body is consumed once,
-                        // so we buffer + replace so the inner handler
-                        // can still parse it. `Bytes` stops at the limit the handler's
-                        // `Form` gets, so the read never goes past what it accepts.
-                        let (parts, body) = req.into_parts();
-                        let mut limited = Request::new(body);
-                        *limited.extensions_mut() = parts.extensions.clone();
-                        cap_an_unbounded_read(&mut limited);
-                        let bytes = match axum::RequestExt::extract::<axum::body::Bytes, _>(limited)
-                            .await
-                        {
-                            Ok(b) => b,
-                            Err(rejection) => {
-                                return Ok(axum::response::IntoResponse::into_response(rejection))
-                            }
-                        };
-                        let form_token = read_form_field(&bytes, CSRF_FORM_FIELD);
-                        if !tokens_match(cookie_value.as_deref(), form_token.as_deref()) {
-                            return Ok(forbid_response(TOKEN_REFUSED));
-                        }
-                        Request::from_parts(parts, Body::from(bytes))
-                    } else {
-                        // Neither header nor form body — reject.
-                        return Ok(forbid_response(TOKEN_REFUSED));
+                    match check_request(req, &cfg, cookie_value.as_deref(), report, &reject).await {
+                        Ok(req) => req,
+                        Err(refused) => return Ok(refused),
                     }
                 } else {
                     req
@@ -676,6 +742,67 @@ where
             })
         })
     }
+}
+
+/// Whether `req` must carry a token: an unsafe method on a path not exempt.
+fn is_enforced(req: &Request<Body>, cfg: &CsrfConfig) -> bool {
+    !method_is_csrf_exempt(req.method(), cfg)
+        && !path_is_exempt(req.uri().path(), &cfg.exempt_prefixes)
+        && !cfg.exempt_paths.iter().any(|p| p == req.uri().path())
+}
+
+/// The one token check: the Origin, then the header or the `_csrf` form
+/// field against `expected`. The request comes back with its body intact.
+async fn check_request(
+    req: Request<Body>,
+    cfg: &CsrfConfig,
+    expected: Option<&str>,
+    report: bool,
+    reject: &Rejection,
+) -> Result<Request<Body>, Response<Body>> {
+    // Origin-header defense-in-depth. Always runs; an empty
+    // `trusted_origins` means same-host only (#1529). A report
+    // only logs, so one sent without an Origin is taken.
+    let no_origin = !req.headers().contains_key(axum::http::header::ORIGIN);
+    if !((report && no_origin) || origin_allowed(&req, &cfg.trusted_origins)) {
+        return Err(reject.respond(CsrfFailure::Origin));
+    }
+    if report {
+        // Reports carry no token.
+        return Ok(req);
+    }
+    let header_value = req
+        .headers()
+        .get(&cfg.header_name)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    if let Some(h) = header_value {
+        // Header path — short-circuit, no body buffering.
+        if !tokens_match(expected, Some(&h)) {
+            return Err(reject.respond(CsrfFailure::Token));
+        }
+        return Ok(req);
+    }
+    if !is_form_encoded(&req) {
+        // Neither header nor form body — reject.
+        return Err(reject.respond(CsrfFailure::Token));
+    }
+    // Form-encoded POST without the header — read `_csrf` from the body.
+    // Body is consumed once, so we buffer + replace so the inner handler
+    // can still parse it. `Bytes` stops at the limit the handler's
+    // `Form` gets, so the read never goes past what it accepts.
+    let (parts, body) = req.into_parts();
+    let mut limited = Request::new(body);
+    *limited.extensions_mut() = parts.extensions.clone();
+    cap_an_unbounded_read(&mut limited);
+    let bytes = axum::RequestExt::extract::<axum::body::Bytes, _>(limited)
+        .await
+        .map_err(axum::response::IntoResponse::into_response)?;
+    let form_token = read_form_field(&bytes, CSRF_FORM_FIELD);
+    if !tokens_match(expected, form_token.as_deref()) {
+        return Err(reject.respond(CsrfFailure::Token));
+    }
+    Ok(Request::from_parts(parts, Body::from(bytes)))
 }
 
 /// The form read's cap when nothing outside bounds it.
@@ -820,7 +947,7 @@ fn read_form_field(body: &[u8], name: &str) -> Option<String> {
 use crate::url_codec::url_decode_strict;
 
 /// Generate a fresh 32-byte token, base64url-encoded (no padding).
-fn mint_token() -> String {
+pub(crate) fn mint_token() -> String {
     let mut bytes = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
@@ -1500,6 +1627,43 @@ mod tests {
             }
         }
         assert!(passed.is_empty(), "empty tokens passed via {passed:?}");
+    }
+
+    /// API routes can refuse in JSON or their own shape; the default stays text.
+    #[tokio::test]
+    async fn refusals_follow_the_layer_rejection() {
+        use tower::ServiceExt as _;
+        let send = |layer: CsrfLayer| async move {
+            let app = axum::Router::new()
+                .route("/save", axum::routing::post(|| async { "saved" }))
+                .layer(layer);
+            let req = Request::builder().method("POST").uri("/save");
+            let res = app.oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+            let status = res.status();
+            let ct = res.headers()["content-type"].to_str().unwrap().to_owned();
+            let body = axum::body::to_bytes(res.into_body(), 1 << 16)
+                .await
+                .unwrap();
+            (status, ct, String::from_utf8(body.to_vec()).unwrap())
+        };
+        let (status, ct, body) = send(layer()).await;
+        assert_eq!(
+            (status, ct.as_str(), body.as_str()),
+            (StatusCode::FORBIDDEN, "text/plain", TOKEN_REFUSED)
+        );
+        let (status, ct, body) = send(layer().json_rejection()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(ct.starts_with("application/json"), "{ct}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["error"], "csrf_failed");
+        let custom = layer().reject_with(|f| {
+            let mut r = Response::new(Body::from(format!("{f:?}")));
+            *r.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
+            r.headers_mut()
+                .insert("content-type", HeaderValue::from_static("text/x-csrf"));
+            r
+        });
+        assert_eq!(send(custom).await.2, "Token");
     }
 
     /// #1695 — a matching pair from a foreign Origin is refused.
