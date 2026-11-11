@@ -183,12 +183,13 @@ let id = queued.id();   // the new job, or the one already queued
 ```
 
 - `cancel` also drops a job waiting on a retry. It never stops a running job.
-- A key is 1 to 200 characters and compared exactly (case counts) on every
-  backend. It is free again once its job finishes, dead-letters or is
-  cancelled.
+- A key is 1 to 200 characters, with no leading or trailing whitespace, and
+  compared exactly (case counts) on every backend. It is free again once its
+  job finishes, dead-letters or is cancelled.
 - On the database queue a key needs the `unique_key` column, which
-  `ensure_table_pool` adds; until then a unique dispatch is refused. A
-  job dispatched in an `atomic` block holds its key once the block commits.
+  `ensure_table_pool` adds; until then a unique dispatch is refused.
+- In an `atomic` block, both queues hold the key from the `enqueue`: a
+  second one in the block returns `Duplicate`, and a rollback frees it.
 
 ---
 

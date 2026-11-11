@@ -207,7 +207,9 @@ impl UniqueKey {
     pub const MAX_CHARS: usize = 200;
 
     /// # Errors
-    /// [`JobError::Queue`] for an empty key or one over [`Self::MAX_CHARS`].
+    /// [`JobError::Queue`] for an empty key, one over [`Self::MAX_CHARS`], or
+    /// one with leading or trailing whitespace (MySQL ignores trailing spaces
+    /// when it compares, the other backends do not).
     pub fn new(key: impl Into<String>) -> Result<Self, JobError> {
         let key = key.into();
         let chars = key.chars().count();
@@ -215,6 +217,11 @@ impl UniqueKey {
             return Err(JobError::Queue(format!(
                 "a unique key needs 1 to {} characters, got {chars}",
                 Self::MAX_CHARS
+            )));
+        }
+        if key.trim() != key {
+            return Err(JobError::Queue(format!(
+                "a unique key may not start or end with whitespace: {key:?}"
             )));
         }
         Ok(Self(key.into()))
@@ -546,6 +553,8 @@ struct Ledger {
 struct Live {
     unique: Option<(&'static str, UniqueKey)>,
     running: bool,
+    /// Enqueued in an `atomic` block that has not committed yet.
+    uncommitted: bool,
 }
 
 impl Ledger {
@@ -555,8 +564,9 @@ impl Ledger {
         self.unique.get(&(job.name, key)).cloned()
     }
 
-    /// Track `job`, or name the job that holds its key.
-    fn admit(&mut self, job: &JobEnvelope) -> Result<(), JobId> {
+    /// Track `job`, or name the job that holds its key. `uncommitted` holds
+    /// the key for a job that waits for its block's commit.
+    fn admit(&mut self, job: &JobEnvelope, uncommitted: bool) -> Result<(), JobId> {
         if let Some(holder) = self.holder(job) {
             return Err(holder);
         }
@@ -567,9 +577,17 @@ impl Ledger {
         let live = Live {
             unique,
             running: false,
+            uncommitted,
         };
         self.live.insert(job.id.clone(), live);
         Ok(())
+    }
+
+    /// Its block committed: the job is queued now.
+    fn commit(&mut self, id: &JobId) {
+        if let Some(j) = self.live.get_mut(id) {
+            j.uncommitted = false;
+        }
     }
 
     /// Mark `id` running; `false` once it was cancelled.
@@ -592,9 +610,9 @@ impl Ledger {
         }
     }
 
-    /// Drop `id` unless a worker runs it.
+    /// Drop `id` unless a worker runs it or its block has not committed.
     fn cancel(&mut self, id: &JobId) -> bool {
-        if self.live.get(id).is_none_or(|j| j.running) {
+        if self.live.get(id).is_none_or(|j| j.running || j.uncommitted) {
             return false;
         }
         self.finish(id);
@@ -603,6 +621,27 @@ impl Ledger {
 }
 
 type SharedLedger = Arc<std::sync::Mutex<Ledger>>;
+
+/// A key held for a job in an uncommitted block; dropped unfired (a
+/// rollback drops the block's `on_commit` hooks) it frees the key.
+struct Reservation {
+    ledger: SharedLedger,
+    id: Option<JobId>,
+}
+
+impl Reservation {
+    fn keep(mut self) -> JobId {
+        self.id.take().expect("kept once")
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if let Some(id) = self.id.take() {
+            lock(&self.ledger).finish(&id);
+        }
+    }
+}
 
 fn lock(ledger: &SharedLedger) -> std::sync::MutexGuard<'_, Ledger> {
     ledger
@@ -972,8 +1011,8 @@ impl JobQueue for InMemoryJobQueue {
         self.enqueue(payload, Dispatch::now()).await.map(drop)
     }
 
-    /// Inside an `atomic` block the job waits for the commit; a unique
-    /// key taken by then drops it.
+    /// Inside an `atomic` block the job waits for the commit; its unique
+    /// key is held from the enqueue, and freed by a rollback.
     async fn enqueue<T: Job>(&self, payload: &T, opts: Dispatch) -> Result<Enqueued, JobError> {
         // Memory is the job's only copy, and only this process's workers read it.
         self.registry.lock().await.require(T::NAME)?;
@@ -997,20 +1036,22 @@ impl JobQueue for InMemoryJobQueue {
         // Inside an `atomic` block the job waits for the commit, as on
         // the DB queue, and a rollback drops it.
         if crate::sql::in_any_block() {
-            if let Some(holder) = lock(&self.ledger).holder(&envelope) {
+            // The key is held from here, so a second enqueue sees it as on the DB queue.
+            if let Err(holder) = lock(&self.ledger).admit(&envelope, true) {
                 return Ok(Enqueued::Duplicate(holder));
             }
             let id = envelope.id.clone();
+            let reservation = Reservation {
+                ledger: self.ledger.clone(),
+                id: Some(id.clone()),
+            };
             let (tx, pending, ledger) =
                 (self.tx.clone(), self.pending.clone(), self.ledger.clone());
-            crate::sql::on_commit(move || match submit(&tx, &pending, &ledger, envelope) {
-                Ok(Enqueued::Duplicate(_)) => {
-                    tracing::warn!(
-                        "job dispatched in a committed block dropped: its unique key was taken"
-                    );
-                }
-                Ok(_) => {}
-                Err(e) => {
+            crate::sql::on_commit(move || {
+                let id = reservation.keep();
+                lock(&ledger).commit(&id);
+                if let Err(e) = enqueue(&tx, &pending, envelope) {
+                    lock(&ledger).finish(&id);
                     tracing::error!(error = %e, "job dispatched in a committed block was lost");
                 }
             });
@@ -1096,7 +1137,7 @@ fn submit(
     envelope: JobEnvelope,
 ) -> Result<Enqueued, JobError> {
     let id = envelope.id.clone();
-    if let Err(holder) = lock(ledger).admit(&envelope) {
+    if let Err(holder) = lock(ledger).admit(&envelope, false) {
         return Ok(Enqueued::Duplicate(holder));
     }
     enqueue(tx, pending, envelope).inspect_err(|_| lock(ledger).finish(&id))?;

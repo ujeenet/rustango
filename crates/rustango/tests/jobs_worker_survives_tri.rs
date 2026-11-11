@@ -1558,6 +1558,44 @@ async fn a_unique_key_holds_inside_a_block(pool: &Pool) {
     assert_eq!(job_rows(pool).await, 1);
 }
 
+/// The in-memory queue holds a key from an in-block enqueue: a second one
+/// is a duplicate, as on the database queue, and a rollback frees it.
+async fn the_memory_queue_holds_a_key_inside_a_block(pool: &Pool) {
+    let q = Arc::new(rustango::jobs::InMemoryJobQueue::with_workers(1));
+    q.register::<Tick>().await;
+    let tick = || Tick {
+        token: token(pool, "mem-unique"),
+    };
+    let key = || Dispatch::now().unique(UniqueKey::new("mem-once").unwrap());
+    let (qa, ta, tb) = (q.clone(), tick(), tick());
+    let (first, second) = rustango::sql::atomic(pool, move |_tx| {
+        Box::pin(async move {
+            let a = qa.enqueue(&ta, key()).await.unwrap();
+            let b = qa.enqueue(&tb, key()).await.unwrap();
+            Ok((a, b))
+        })
+    })
+    .await
+    .unwrap();
+    assert_eq!(second, Enqueued::Duplicate(first.id().clone()));
+    assert!(q.cancel(first.id()).await.unwrap());
+    let (qr, tr) = (q.clone(), tick());
+    let rolled: Result<(), _> = rustango::sql::atomic(pool, move |_tx| {
+        Box::pin(async move {
+            qr.enqueue(&tr, key()).await.unwrap();
+            Err(rustango::sql::ExecError::AtomicAborted)
+        })
+    })
+    .await;
+    assert!(rolled.is_err());
+    assert!(
+        !q.enqueue(&tick(), key()).await.unwrap().is_duplicate(),
+        "rollback kept the key"
+    );
+    // MySQL ignores trailing spaces when it compares; every backend refuses them.
+    assert!(UniqueKey::new("mem-once ").is_err() && UniqueKey::new(" mem-once").is_err());
+}
+
 /// A job a worker runs is not cancelled, and runs to its end.
 async fn a_running_job_cannot_be_cancelled(pool: &Pool) {
     let tok = token(pool, "running");
@@ -1645,6 +1683,7 @@ tri_dialect_test! {
         a_delayed_job_runs_under_the_returned_id,
         a_unique_key_skips_a_second_dispatch,
         a_unique_key_holds_inside_a_block,
+        the_memory_queue_holds_a_key_inside_a_block,
         a_running_job_cannot_be_cancelled,
         an_older_table_gets_the_unique_column,
     ],
