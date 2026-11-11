@@ -26,7 +26,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Changed
 
-- **Breaking:** schema tenants' pools log in as a role of their own (`rgo_t_<hash>`) with rights on their schema only, so tenant SQL naming another schema is refused. The registry login needs `CREATEROLE`; passwords derive from `RUSTANGO_TENANT_ROLE_SECRET`. Provisioning and migrations set the role up, `ensure-tenant-roles` backfills, purge drops it; `TenantPoolsConfig::schema_tenant_roles = false` turns it off.
+- **Breaking:** schema tenants' pools log in as a role of their own (`rgo_t_<hash>`) with rights on their schema only, so tenant SQL naming another schema is refused. The role reads and writes rows but creates nothing (no trigger, function, table or temp object); the registry login revokes TEMP and schema CREATE from PUBLIC where it may, and boot refuses where it cannot. The registry login needs `CREATEROLE`; passwords derive from `RUSTANGO_TENANT_ROLE_SECRET`, with `RUSTANGO_TENANT_ROLE_SECRET_PREVIOUS` (or `TenantPools::tenant_role_secrets`) for a rotation. Provisioning and migrations set the role up, `ensure-tenant-roles` backfills and moves passwords to the current secret, purge and storage moves drop it; `TenantPoolsConfig::schema_tenant_roles = false` turns it off.
+- `TenantPools::ddl_pool(org)`: the registry login on a tenant's tables, for DDL at runtime such as `DatabaseJobQueue::ensure_table_pool`.
 - The `sessions` feature now pulls in axum, for `SessionLayer`.
 - `SessionStore::load` returns `None` for a session ended by `revoke_all`, and for an id containing `:`.
 

@@ -368,8 +368,18 @@ fn media_disk() -> (
 /// Two uploads into `pool`, creating the media table if needed; their keys.
 #[cfg(feature = "media")]
 async fn upload(pool: &Pool, storage: &rustango::storage::StorageRegistry) -> Vec<String> {
+    upload_with(pool, pool, storage).await
+}
+
+/// [`upload`], creating the table through `ddl`.
+#[cfg(feature = "media")]
+async fn upload_with(
+    ddl: &Pool,
+    pool: &Pool,
+    storage: &rustango::storage::StorageRegistry,
+) -> Vec<String> {
     use rustango::media::{Media, MediaManager, SaveOpts};
-    rustango::testkit::create_tables_for::<Media>(pool)
+    rustango::testkit::create_tables_for::<Media>(ddl)
         .await
         .unwrap();
     let mgr = MediaManager::new(pool.clone(), storage.clone());
@@ -435,8 +445,10 @@ async fn schema_purge_deletes_only_the_tenant_schemas_media() {
     rustango::testkit::migrate_schema_tenant(&pools, &org, &registry_url())
         .await
         .expect("migrate tenant");
+    // The tenant role cannot create the table; the registry login can.
+    let ddl = pools.ddl_pool(&org).await.unwrap();
     let scoped = Pool::Postgres(pools.scoped_pool(&org).await.unwrap());
-    let keys = upload(&scoped, &storage).await;
+    let keys = upload_with(&ddl, &scoped, &storage).await;
     drop(scoped);
     let report = decommission(&pools, &org.slug, action)
         .await

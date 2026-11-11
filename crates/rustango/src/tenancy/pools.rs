@@ -396,6 +396,8 @@ pub(super) struct CachedPool<DB: Database> {
     pub(super) pool: Arc<sqlx::Pool<DB>>,
     source: PoolSource,
     last_used: AtomicU64,
+    /// A miss from then on: a pool on a rotated-out password is retried.
+    expires: Option<std::time::Instant>,
 }
 
 /// What a cached pool was built from. An `Org` naming another source is
@@ -422,7 +424,15 @@ impl<DB: Database> CachedPool<DB> {
             pool,
             source,
             last_used: AtomicU64::new(tick),
+            expires: None,
         }
+    }
+
+    /// Rebuilt once `ttl` has passed.
+    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
+    pub(super) fn expiring(mut self, ttl: std::time::Duration) -> Self {
+        self.expires = Some(std::time::Instant::now() + ttl);
+        self
     }
 
     /// The cached pool for `slug`, only if it was built from `source`.
@@ -431,7 +441,9 @@ impl<DB: Database> CachedPool<DB> {
         slug: &str,
         source: &PoolSource,
     ) -> Option<&'a Self> {
-        cache.get(slug).filter(|entry| entry.source == *source)
+        cache.get(slug).filter(|entry| {
+            entry.source == *source && entry.expires.is_none_or(|t| std::time::Instant::now() < t)
+        })
     }
 
     /// Mark as just used. Takes `&self` so a hit records itself under
@@ -642,9 +654,9 @@ pub struct TenantPools<DB: Database = DefaultTenantDb> {
     building_held: SingleFlight<sqlx::Pool<DB>>,
     /// Built from `config` on first use, so `.config(…)` still applies.
     gate: std::sync::OnceLock<BuildGate>,
-    /// The key tenant role passwords derive from, loaded on first use.
-    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
-    role_secret: Arc<std::sync::OnceLock<Result<crate::session::SessionSecret, String>>>,
+    /// The keys tenant role passwords derive from, loaded on first use.
+    #[cfg(feature = "postgres")]
+    role_secret: Arc<std::sync::OnceLock<Result<super::schema_role::RoleSecrets, String>>>,
     /// The registry's `current_database()`, part of each tenant role's name.
     #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
     database_name: Arc<tokio::sync::OnceCell<String>>,
@@ -741,6 +753,7 @@ impl<DB: Database> TenantPools<DB> {
             building_scoped: SingleFlight::default(),
             building_held: SingleFlight::default(),
             gate: std::sync::OnceLock::new(),
+            #[cfg(feature = "postgres")]
             role_secret: Arc::default(),
             database_name: Arc::default(),
         }
@@ -792,7 +805,10 @@ impl<DB: Database> TenantPools<DB> {
     pub(crate) fn fresh(&self) -> Self {
         let mut pools = Self::new(self.registry.clone()).config(self.config.clone());
         pools.secrets = self.secrets.clone();
-        pools.role_secret = Arc::clone(&self.role_secret);
+        #[cfg(feature = "postgres")]
+        {
+            pools.role_secret = Arc::clone(&self.role_secret);
+        }
         pools.database_name = Arc::clone(&self.database_name);
         pools
     }
@@ -842,7 +858,8 @@ pub(crate) async fn registry_shadow(pg: &PgPool) -> Result<Option<(String, Strin
 /// Checks every boot path runs on a Postgres registry: no schema shadows it
 /// ([`registry_shadow`]), and with schema tenants and
 /// [`TenantPoolsConfig::schema_tenant_roles`] on, the registry login can create
-/// their roles and the role secret loads.
+/// their roles, the role secret loads, scoped pools are cached, and no role
+/// can create objects (PUBLIC's TEMP and schema CREATE are revoked where it may).
 #[cfg(feature = "postgres")]
 pub(crate) async fn boot_checks<DB: Database>(pools: &TenantPools<DB>) -> Result<(), TenancyError> {
     let Some(pg) = (pools as &dyn std::any::Any).downcast_ref::<TenantPools<sqlx::Postgres>>()
@@ -858,7 +875,17 @@ pub(crate) async fn boot_checks<DB: Database>(pools: &TenantPools<DB>) -> Result
     }
     if pg.config.schema_tenant_roles && has_schema_tenants(pg.registry()).await? {
         super::schema_role::check_can_create_roles(pg.registry()).await?;
-        pg.role_secret()?;
+        pg.role_secrets()?;
+        if pg.config.max_cached_scoped_pools == 0 {
+            return Err(TenancyError::Validation(
+                "max_cached_scoped_pools = 0 with schema_tenant_roles opens a new login per \
+                 request; set a cap, or turn off TenantPoolsConfig::schema_tenant_roles"
+                    .into(),
+            ));
+        }
+        let mut conn = pg.registry().acquire().await?;
+        super::schema_role::revoke_public_writes(&mut conn).await?;
+        super::schema_role::refuse_writable(&mut conn, "public").await?;
     }
     Ok(())
 }
@@ -1445,6 +1472,18 @@ where
         Ok((self.scoped_pool_dyn(org).await?, false))
     }
 
+    /// A pool on `org`'s tables for DDL at runtime, such as
+    /// `DatabaseJobQueue::ensure_table_pool`. A schema tenant's own role
+    /// cannot change tables, so this one logs in as the registry on the
+    /// tenant's schema. Not cached: drop it when done, and keep row work
+    /// on [`Self::scoped_pool_dyn`].
+    ///
+    /// # Errors
+    /// As [`Self::scoped_pool_dyn`].
+    pub async fn ddl_pool(&self, org: &Org) -> Result<crate::sql::Pool, TenancyError> {
+        Ok(self.operator_pool_dyn(org).await?.0)
+    }
+
     /// Pre-warm pools for every active database-mode tenant. Useful
     /// at boot so the *first* request per tenant doesn't pay TCP +
     /// TLS + auth + sqlx-ramp-up on the hot path. Bounded by
@@ -1520,6 +1559,11 @@ where
 
 // ============================================================ PG-only schema-mode methods
 
+/// How long a pool on the previous role secret is kept before a rebuild
+/// tries the current one again.
+#[cfg(feature = "postgres")]
+const ROTATION_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[cfg(feature = "postgres")]
 impl TenantPools<sqlx::Postgres> {
     /// Build (or fetch from cache) the pool for `org`. Schema-mode
@@ -1561,8 +1605,9 @@ impl TenantPools<sqlx::Postgres> {
     /// comes from a per-tenant pool with `search_path` in its connect
     /// options, separate from [`Self::scoped_pool`]'s, so one busy
     /// tenant can block neither the others nor its own `t.pool()`.
-    /// With `max_cached_scoped_pools = 0` it is a registry connection
-    /// with `SET search_path`, reset on release.
+    /// With `max_cached_scoped_pools = 0` and tenant roles off it is a
+    /// registry connection with `SET search_path`, reset on release; with
+    /// roles on, boot refuses that cap (a login per request).
     /// For database mode it comes from the tenant's second pool, apart
     /// from the one `t.pool()` uses, for the same reason.
     ///
@@ -1709,7 +1754,7 @@ impl TenantPools<sqlx::Postgres> {
             let timeout = self.config.database_pool_acquire_timeout;
             let path =
                 TenantSearchPath::open(&registry, &schema, FallThrough::OpenPool, timeout).await?;
-            let scoped = self.build_scoped_pool(&path, &registry, &schema).await?;
+            let (scoped, on_previous) = self.build_scoped_pool(&path, &registry, &schema).await?;
             tracing::info!(
                 target: "rustango::tenancy::pools",
                 slug = %org.slug,
@@ -1741,10 +1786,11 @@ impl TenantPools<sqlx::Postgres> {
             if self.config.max_cached_scoped_pools == 0 {
                 return Ok(scoped);
             }
-            cache.insert(
-                org.slug.clone(),
-                CachedPool::new(Arc::new(scoped.clone()), source, self.next_tick()),
-            );
+            let mut entry = CachedPool::new(Arc::new(scoped.clone()), source, self.next_tick());
+            if on_previous {
+                entry = entry.expiring(ROTATION_RETRY);
+            }
+            cache.insert(org.slug.clone(), entry);
             // Held pools mirror the queries cache; warn for one of them only.
             if of == PoolUse::Queries {
                 self.schema_near_cap
@@ -1770,35 +1816,46 @@ impl TenantPools<sqlx::Postgres> {
 
     /// Build one `search_path`-scoped pool against the registry
     /// server. Split out of [`Self::scoped_pool`] so the cache-miss
-    /// path stays readable.
+    /// path stays readable. `true` when it logs in with the previous
+    /// role secret: a rotation `ensure-tenant-roles` has not finished.
     async fn build_scoped_pool(
         &self,
         path: &TenantSearchPath,
         registry: &PgPool,
         schema: &str,
-    ) -> Result<PgPool, TenancyError> {
-        let mut opts = (*registry.connect_options()).clone();
-        let role = self.tenant_role(schema).await?;
-        if let Some(role) = &role {
-            // A missing role, or a schema recreated since its grants: set it up first.
-            if !super::schema_role::can_use(registry, role, schema).await? {
-                super::schema_role::ensure(registry, role, schema, &path.schemas[1..]).await?;
-            }
-            opts = role.login(opts);
+    ) -> Result<(PgPool, bool), TenancyError> {
+        let base = (*registry.connect_options())
+            .clone()
+            .options([("search_path", path.startup_option())]);
+        let Some(role) = self.tenant_role(schema).await? else {
+            return Ok((
+                scoped_pool_options(&self.config).connect_with(base).await?,
+                false,
+            ));
+        };
+        // A missing role, or a schema recreated since its grants: set it up first.
+        if !super::schema_role::can_use(registry, &role, schema).await? {
+            super::schema_role::ensure(registry, &role, schema, &path.schemas[1..]).await?;
         }
-        opts = opts.options([("search_path", path.startup_option())]);
-        match scoped_pool_options(&self.config)
-            .connect_with(opts.clone())
+        // Never reset the password here: two secrets would flip it back and forth.
+        let err = match scoped_pool_options(&self.config)
+            .connect_with(role.login(base.clone()))
             .await
         {
-            // A rotated secret: reset the password, once.
-            Err(e) if role.is_some() && super::schema_role::is_login_refused(&e) => {
-                let role = role.as_ref().expect("checked above");
-                super::schema_role::ensure(registry, role, schema, &path.schemas[1..]).await?;
-                Ok(scoped_pool_options(&self.config).connect_with(opts).await?)
+            Ok(pool) => return Ok((pool, false)),
+            Err(e) => e,
+        };
+        if super::schema_role::is_bad_password(&err) {
+            if let Some(previous) = self.previous_tenant_role(schema).await? {
+                if let Ok(pool) = scoped_pool_options(&self.config)
+                    .connect_with(previous.login(base))
+                    .await
+                {
+                    return Ok((pool, true));
+                }
             }
-            other => Ok(other?),
         }
+        Err(super::schema_role::login_error(&role, err))
     }
 
     /// A small uncached pool on the tenant's schema logging in as the registry.
@@ -1821,15 +1878,26 @@ impl TenantPools<sqlx::Postgres> {
     /// `RUSTANGO_TENANT_ROLE_SECRET`, as from a secret manager.
     #[must_use]
     pub fn tenant_role_secret(self, secret: crate::session::SessionSecret) -> Self {
+        self.tenant_role_secrets(secret, None)
+    }
+
+    /// [`Self::tenant_role_secret`] during a rotation: pools log in with
+    /// `previous` until `ensure-tenant-roles` moves the roles to `current`.
+    #[must_use]
+    pub fn tenant_role_secrets(
+        self,
+        current: crate::session::SessionSecret,
+        previous: Option<crate::session::SessionSecret>,
+    ) -> Self {
         let cell = std::sync::OnceLock::new();
-        let _ = cell.set(Ok(secret));
+        let _ = cell.set(Ok(super::schema_role::RoleSecrets { current, previous }));
         Self {
             role_secret: Arc::new(cell),
             ..self
         }
     }
 
-    fn role_secret(&self) -> Result<&crate::session::SessionSecret, TenancyError> {
+    fn role_secrets(&self) -> Result<&super::schema_role::RoleSecrets, TenancyError> {
         self.role_secret
             .get_or_init(super::schema_role::load_secret)
             .as_ref()
@@ -1857,10 +1925,24 @@ impl TenantPools<sqlx::Postgres> {
         if !self.config.schema_tenant_roles {
             return Ok(None);
         }
-        let secret = self.role_secret()?;
+        let secret = &self.role_secrets()?.current;
         let database = self.database_name().await?;
         Ok(Some(super::schema_role::TenantRole::derive(
             secret, database, schema,
+        )))
+    }
+
+    /// `schema`'s role under the previous secret, during a rotation.
+    async fn previous_tenant_role(
+        &self,
+        schema: &str,
+    ) -> Result<Option<super::schema_role::TenantRole>, TenancyError> {
+        let Some(previous) = &self.role_secrets()?.previous else {
+            return Ok(None);
+        };
+        let database = self.database_name().await?;
+        Ok(Some(super::schema_role::TenantRole::derive(
+            previous, database, schema,
         )))
     }
 

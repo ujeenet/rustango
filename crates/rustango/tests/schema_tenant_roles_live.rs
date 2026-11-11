@@ -178,16 +178,18 @@ async fn tenant_sql_cannot_read_another_tenants_schema() {
     );
     drop(held);
 
-    // Uncached, a held connection is not borrowed from the registry.
+    // Uncached, every request would open a new login: boot refuses it.
     let uncached = TenantPools::new(env.raw.clone())
         .config(TenantPoolsConfig {
             max_cached_scoped_pools: 0,
             ..TenantPoolsConfig::default()
         })
         .tenant_role_secret(SessionSecret::from_bytes(vec![42; 32]));
-    let mut c = uncached.acquire(&alpha).await.expect("uncached");
-    assert_eq!(current_user(&mut c).await, role);
-    drop(c);
+    let err = env
+        .run(&uncached, &["list-tenants"])
+        .await
+        .expect_err("cap 0 with roles");
+    assert!(err.contains("max_cached_scoped_pools"), "{err}");
 
     let beta_pool = pools.scoped_pool(&beta).await.expect("beta pool");
     let n: i64 = sqlx::query_scalar("SELECT count(*) FROM notes")
@@ -283,10 +285,30 @@ async fn tenants_from_before_roles_get_them() {
         .await
         .expect("grants on the recreated schema");
     assert_eq!(n, 0);
-    // A rotated secret is picked up the same way.
-    let rotated = TenantPools::new(env.raw.clone())
-        .tenant_role_secret(SessionSecret::from_bytes(vec![7; 32]));
-    rotated.scoped_pool(&delta).await.expect("rotated secret");
+    // A new secret alone is refused, never reset: two secrets would undo
+    // each other. With the old one as previous, pools log in on either.
+    let secret = |b: u8| SessionSecret::from_bytes(vec![b; 32]);
+    let new_only = TenantPools::new(env.raw.clone()).tenant_role_secret(secret(7));
+    let err = new_only
+        .scoped_pool(&delta)
+        .await
+        .expect_err("new secret alone");
+    assert!(err.to_string().contains("ensure-tenant-roles"), "{err}");
+    let rotating =
+        TenantPools::new(env.raw.clone()).tenant_role_secrets(secret(7), Some(secret(42)));
+    rotating.scoped_pool(&delta).await.expect("previous secret");
+    env.pools(true)
+        .scoped_pool(&delta)
+        .await
+        .expect("old process still logs in");
+    env.run(&rotating, &["ensure-tenant-roles"])
+        .await
+        .expect("move to the new secret");
+    TenantPools::new(env.raw.clone())
+        .tenant_role_secret(secret(7))
+        .scoped_pool(&delta)
+        .await
+        .expect("new secret after ensure-tenant-roles");
 
     for slug in ["gamma", "delta"] {
         env.run(&on, &["purge-tenant", slug, "--confirm", slug])
@@ -344,4 +366,134 @@ async fn a_registry_login_without_createrole_is_refused() {
     env.run(&off, &["purge-tenant", "eps", "--confirm", "eps"])
         .await
         .expect("purge");
+}
+
+/// The SQLSTATE of each statement on a fresh tenant connection.
+async fn refusals(pool: &PgPool, stmts: &[&str]) -> Vec<Option<String>> {
+    let mut out = Vec::new();
+    for sql in stmts {
+        let mut c = pool.acquire().await.unwrap();
+        out.push(refusal(&mut c, sql).await);
+    }
+    out
+}
+
+/// A tenant role creates nothing the registry login could later run: no
+/// trigger, no function in `public` (PUBLIC's CREATE there on Postgres 14),
+/// no temp object, no table; nor may it truncate. Boot takes a PUBLIC
+/// CREATE granted again later.
+#[tokio::test]
+async fn a_tenant_role_creates_nothing() {
+    let Some(env) = Env::boot("rgo_roles_plant").await else {
+        return;
+    };
+    let pools = env.pools(true);
+    env.run(&pools, &["migrate-registry"])
+        .await
+        .expect("registry");
+    let theta = env.create_schema_tenant(&pools, "theta").await;
+    sqlx::query("CREATE TABLE theta.notes (x int)")
+        .execute(&env.raw)
+        .await
+        .unwrap();
+    let scoped = pools.scoped_pool(&theta).await.expect("theta pool");
+    let got = refusals(
+        &scoped,
+        &[
+            "CREATE TRIGGER plant BEFORE UPDATE ON notes FOR EACH ROW \
+             EXECUTE FUNCTION suppress_redundant_updates_trigger()",
+            "CREATE FUNCTION public.plant() RETURNS int LANGUAGE sql AS 'SELECT 1'",
+            "CREATE TEMP TABLE plant (x int)",
+            "CREATE TABLE plant (x int)",
+            "TRUNCATE notes",
+        ],
+    )
+    .await;
+    assert_eq!(got, vec![Some("42501".to_owned()); 5], "{got:?}");
+    assert_eq!(
+        refusals(&scoped, &["INSERT INTO notes VALUES (1)"]).await,
+        [None]
+    );
+
+    sqlx::query("GRANT CREATE ON SCHEMA public TO PUBLIC")
+        .execute(&env.raw)
+        .await
+        .unwrap();
+    env.run(&pools, &["list-tenants"]).await.expect("boot");
+    let open: bool =
+        sqlx::query_scalar("SELECT has_schema_privilege('public', 'public', 'CREATE')")
+            .fetch_one(&env.raw)
+            .await
+            .unwrap();
+    assert!(!open, "boot left PUBLIC's CREATE on public");
+    env.run(&pools, &["purge-tenant", "theta", "--confirm", "theta"])
+        .await
+        .expect("purge");
+}
+
+/// Provisioning sets the role up before any pool opens, and `migrate-tenants`
+/// grants a table some other role made while the tenant role kept its USAGE.
+#[tokio::test]
+async fn provisioning_and_migrations_set_up_the_role() {
+    let Some(env) = Env::boot("rgo_roles_grants").await else {
+        return;
+    };
+    let pools = env.pools(true);
+    env.run(&pools, &["migrate-registry"])
+        .await
+        .expect("registry");
+    env.run(
+        &pools,
+        &[
+            "create-tenant",
+            "iota",
+            "--mode",
+            "schema",
+            "--schema-name",
+            "iota",
+            "--no-migrate",
+        ],
+    )
+    .await
+    .expect("create-tenant");
+    let roles: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_roles WHERE rolname LIKE 'rgo\\_t\\_%' \
+         AND has_schema_privilege(rolname, 'iota', 'USAGE')",
+    )
+    .fetch_one(&env.raw)
+    .await
+    .unwrap();
+    assert_eq!(roles, 1, "provisioning made no role");
+
+    let kappa = env.create_schema_tenant(&pools, "kappa").await;
+    let tenant = pools.scoped_pool(&kappa).await.expect("kappa pool");
+    let other = format!("rgo_other_{}", std::process::id());
+    let mut c = env.raw.acquire().await.unwrap();
+    for sql in [
+        format!("DROP ROLE IF EXISTS {other}"),
+        format!("CREATE ROLE {other}"),
+        format!("GRANT USAGE, CREATE ON SCHEMA kappa TO {other}"),
+        format!("SET ROLE {other}"),
+        "CREATE TABLE kappa.made_outside (x int)".to_owned(),
+        "RESET ROLE".to_owned(),
+    ] {
+        sqlx::query(&sql).execute(&mut *c).await.unwrap();
+    }
+    drop(c);
+    let read = "SELECT count(*) FROM made_outside";
+    assert_eq!(refusals(&tenant, &[read]).await, [Some("42501".to_owned())]);
+    env.run(&pools, &["migrate-tenants"])
+        .await
+        .expect("migrate");
+    assert_eq!(refusals(&tenant, &[read]).await, [None]);
+
+    for slug in ["iota", "kappa"] {
+        env.run(&pools, &["purge-tenant", slug, "--confirm", slug])
+            .await
+            .expect("purge");
+    }
+    sqlx::query(&format!("DROP ROLE {other}"))
+        .execute(&env.raw)
+        .await
+        .unwrap();
 }

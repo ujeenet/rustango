@@ -325,6 +325,15 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
     .await?;
 
     writeln!(writer, "  Org row updated")?;
+    // The old copy stays for the operator; its login must not.
+    if let Some(s) = &source_schema {
+        if let Err(e) = pools.drop_tenant_role(&s.0).await {
+            writeln!(
+                writer,
+                "  ! could not drop the old schema's login role: {e}"
+            )?;
+        }
+    }
     writeln!(
         writer,
         "  running servers switch to the new location within {} s (their tenant cache TTL)",

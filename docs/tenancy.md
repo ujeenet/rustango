@@ -184,7 +184,10 @@ role (`rgo_t_<hash>`) that can use the tenant's schema and nothing else, so
 tenant SQL that names another tenant's schema, or a registry table, gets
 `permission denied`, even after a `SET ROLE` or `set_config('role', …)`.
 Migrations, provisioning, manage verbs and the operator console keep the
-registry login; a tenant pool reads and writes rows but cannot change tables.
+registry login. A tenant pool reads and writes rows, but creates nothing: no
+table, trigger, function or temporary object. For DDL at runtime, such as a
+jobs table, use `pools.ddl_pool(&org)`: the registry login on the tenant's
+schema.
 
 - The registry login needs `CREATEROLE`
   (`ALTER ROLE <login> CREATEROLE`); the CLI and the server refuse to start
@@ -197,8 +200,23 @@ registry login; a tenant pool reads and writes rows but cannot change tables.
   grants. A tenant from before 0.66.0 gets its role on its first login;
   `cargo run -- ensure-tenant-roles` does it for all of them at once.
   Purging a tenant drops its role.
+- The registry login takes TEMP on the database and CREATE on every schema
+  from PUBLIC, where it may. Where it cannot (on Postgres 14 and older
+  `public` belongs to the bootstrap superuser), boot refuses and names the
+  `REVOKE` to run as the owner. Other roles that need temporary tables
+  need their own `GRANT TEMPORARY`.
+- To rotate the secret, set the new value in `RUSTANGO_TENANT_ROLE_SECRET`
+  and the old one in `RUSTANGO_TENANT_ROLE_SECRET_PREVIOUS` on every process.
+  Pools log in with whichever the role has. Then run `ensure-tenant-roles`
+  and, once it is done, drop the old value. A pool never resets a password
+  itself, so two processes on different secrets never undo each other.
 - `pg_hba.conf` must let these roles log in like the registry login. Behind
-  PgBouncer, give it an `auth_query` so it can authenticate them.
+  PgBouncer, give it an `auth_query` so it can authenticate them. PgBouncer
+  keeps one server pool per user, so each active tenant gets its own:
+  budget `max_db_connections` (or a per-user `pool_size`), not
+  `default_pool_size` times the tenant count.
+- `max_cached_scoped_pools = 0` is refused at boot: each request would
+  open a new login.
 - `TenantPoolsConfig { schema_tenant_roles: false, .. }` turns this off and
   shares the registry login, as before 0.66.0.
 

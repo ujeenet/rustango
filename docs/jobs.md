@@ -664,8 +664,9 @@ let orgs: Vec<Org> = Org::objects()
 
 let mut queues = Vec::new();
 for org in orgs {
+    // DDL as the registry login: a schema tenant's own role cannot create tables.
+    DatabaseJobQueue::ensure_table_pool(&pools.ddl_pool(&org).await?).await?;
     let pool = pools.scoped_pool_dyn(&org).await?;   // scoped for its lifetime
-    DatabaseJobQueue::ensure_table_pool(&pool).await?;
 
     let queue = Arc::new(
         DatabaseJobQueue::with_workers_pool(pool, 2)

@@ -108,7 +108,7 @@ mod pools;
 #[cfg(feature = "postgres")]
 pub(crate) mod schema_role;
 #[cfg(feature = "postgres")]
-pub use schema_role::ROLE_SECRET_ENV;
+pub use schema_role::{ROLE_SECRET_ENV, ROLE_SECRET_PREVIOUS_ENV};
 /// Reaching a tenant's database before anything is written to the
 /// registry, so a bad URL cannot leave a half-provisioned tenant.
 pub mod preflight;
