@@ -609,7 +609,7 @@ jobs:
       contents: read
       packages: read
     needs: [gate, tests_compile]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # pg_dump on 26.04 is newer than the PG 16 service; a restore into it fails
     strategy:
       fail-fast: false
       matrix:
@@ -1347,7 +1347,7 @@ jobs:
       - run: |
           cargo nextest run --profile ci -p rustango \
             --no-default-features \
-            --features sqlite,batteries,tenancy,mcp,admin-sso,passkey,cache-redis,cache-page,email-smtp,http2,testkit,test_utils \
+            --features sqlite,batteries,tenancy,mcp,admin-sso,passkey,cache-redis,cache-page,email-smtp,http2,static-files,security-headers,test-client,testkit,test_utils \
             --test '*_sqlite_live' \
             --test '*_tri' \
             --test sqlite_pragmas_live \
@@ -1933,7 +1933,7 @@ jobs:
       contents: read
       packages: read
     needs: gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # Playwright has no chromium build for 26.04 yet
     strategy:
       fail-fast: false
       matrix:
@@ -2042,7 +2042,7 @@ jobs:
       contents: read
       packages: read
     needs: gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # Playwright has no chromium build for 26.04 yet
     strategy:
       fail-fast: false
       matrix:
