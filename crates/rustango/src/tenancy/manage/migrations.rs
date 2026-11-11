@@ -250,7 +250,7 @@ where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
     let (pool, own) = pools
-        .existing_pool_dyn(org)
+        .operator_pool_dyn(org)
         .await
         .map_err(|e| e.to_string())?;
     let mut out: [std::collections::HashSet<String>; N] =
@@ -752,7 +752,7 @@ where
     let mut failed = 0;
     for org in &orgs {
         let step = async {
-            let (pool, own) = pools.existing_pool_dyn(org).await?;
+            let (pool, own) = pools.operator_pool_dyn(org).await?;
             let result = async {
                 let ledger = rustango::migrate::LEDGER_TABLE;
                 let order = crate::migrate::ApplyOrder::read_or_empty(&pool, ledger).await?;
@@ -902,8 +902,8 @@ where
     let mut failures = 0;
     for org in &orgs {
         writeln!(w, "tenant `{}`:", org.slug)?;
-        let pool = match pools.scoped_pool_dyn(org).await {
-            Ok(p) => p,
+        let pool = match pools.operator_pool_dyn(org).await {
+            Ok((p, _)) => p,
             Err(e) => {
                 failures += 1;
                 writeln!(w, "  ! could not open a pool: {e}")?;

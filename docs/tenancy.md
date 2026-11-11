@@ -179,6 +179,29 @@ A tenant pool **refuses to open** when:
 - an extension schema on the path, such as `public`, holds a tenant table
   the tenant's schema lacks. Queries would read that table instead.
 
+**Each schema tenant logs in as its own role.** Tenant pools connect as a
+role (`rgo_t_<hash>`) that can use the tenant's schema and nothing else, so
+tenant SQL that names another tenant's schema, or a registry table, gets
+`permission denied`, even after a `SET ROLE` or `set_config('role', …)`.
+Migrations, provisioning, manage verbs and the operator console keep the
+registry login; a tenant pool reads and writes rows but cannot change tables.
+
+- The registry login needs `CREATEROLE`
+  (`ALTER ROLE <login> CREATEROLE`); the CLI and the server refuse to start
+  without it once a schema tenant exists.
+- Role passwords are an HMAC under `RUSTANGO_TENANT_ROLE_SECRET` (base64,
+  32+ bytes: `openssl rand -base64 32`). Set it on the prod tier, the same
+  on every process; dev keeps one in `./var/.rustango_tenant_role.key`.
+  The server only ever receives a SCRAM verifier, never the password.
+- Provisioning creates the role and its grants, and migrations refresh the
+  grants. A tenant from before 0.66.0 gets its role on its first login;
+  `cargo run -- ensure-tenant-roles` does it for all of them at once.
+  Purging a tenant drops its role.
+- `pg_hba.conf` must let these roles log in like the registry login. Behind
+  PgBouncer, give it an `auth_query` so it can authenticate them.
+- `TenantPoolsConfig { schema_tenant_roles: false, .. }` turns this off and
+  shares the registry login, as before 0.66.0.
+
 An extension in the tenant's own schema is fine: that schema is first on
 the path. An extension in another tenant's schema, or in a schema with
 objects of its own, stays off the path, with a warning. Move it with
@@ -204,7 +227,7 @@ A tenant uses the registry's backend.
 | | Schema mode | Database mode |
 |---|---|---|
 | Backends | Postgres | Postgres, MySQL, SQLite |
-| Isolation | schemas in one database, one login | a database each, and its own login on a saved server |
+| Isolation | schemas in one database, a login role each | a database each, and its own login on a saved server |
 | Connections | to the registry server | per tenant database |
 | Backup and restore | the whole database | per tenant |
 | Good for | many small tenants | fewer, larger or regulated tenants |

@@ -1158,7 +1158,7 @@ impl Cli {
         }
         if let Some(cmd) = args.first().and_then(|v| self.command_set.get(v)).cloned() {
             #[cfg(feature = "postgres")]
-            crate::tenancy::refuse_registry_shadow(&pools).await?;
+            crate::tenancy::boot_checks(&pools).await?;
             let ctx = self.command_context(pools.registry_pool());
             return command::run_tenancy(&cmd, ctx, std::sync::Arc::new(pools), args[1..].to_vec())
                 .await

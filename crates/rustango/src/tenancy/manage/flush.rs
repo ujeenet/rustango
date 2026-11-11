@@ -48,7 +48,7 @@ where
     let org = super::api::find_org(pools, &slug)
         .await?
         .ok_or_else(|| TenancyError::Validation(format!("tenant `{slug}` not found")))?;
-    let scoped = pools.scoped_pool_dyn(&org).await?;
+    let scoped = pools.operator_pool_dyn(&org).await?.0;
     // Same name the scoped pool's `search_path` uses.
     let schema = org.own_schema();
     crate::migrate::manage::flush_cmd(&scoped, &rest, FlushScope::Tenant { schema }, w)

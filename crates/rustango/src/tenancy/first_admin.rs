@@ -381,7 +381,7 @@ pub(crate) async fn create<DB: sqlx::Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    let pool = pools.scoped_pool_dyn(org).await?;
+    let pool = pools.operator_pool_dyn(org).await?.0;
     let taken: Vec<User> = User::objects()
         .where_(User::username.eq(admin.username.clone()))
         .limit(1)
@@ -483,7 +483,7 @@ pub async fn hand_over_user<DB: sqlx::Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    let pool = pools.scoped_pool_dyn(org).await?;
+    let pool = pools.operator_pool_dyn(org).await?.0;
     let user = User::objects()
         .where_(User::username.eq(username.to_owned()))
         .fetch(&pool)

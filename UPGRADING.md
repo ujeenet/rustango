@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+- Schema tenants now log in as their own roles. Before deploying: `ALTER ROLE <registry login> CREATEROLE`, set `RUSTANGO_TENANT_ROLE_SECRET` (same base64 key on every process; required on the prod tier), let these roles through `pg_hba.conf` (and PgBouncer `auth_query`), then run `ensure-tenant-roles`. Tenant code can no longer read registry tables or other schemas through a tenant pool, nor change tables (DDL) through it: run DDL in migrations; manage verbs use the registry login. To keep the old shared login, set `TenantPoolsConfig::schema_tenant_roles = false`.
+- `TenantPoolsConfig` has a new public field, `schema_tenant_roles`: a struct literal without `..Default::default()` needs it.
 - The `sessions` feature now depends on axum (for `SessionLayer`).
 - `SessionStore::load` treats ids containing `:` as unknown: the per-user index and revocation keys share the session key space.
 - `PgJobQueue::ensure_table_pool` adds a `unique_key` column and a unique `(name, unique_key)` index to `rustango_jobs`; run it (or the same DDL) before using unique keys.

@@ -19,6 +19,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Changed
 
+- **Breaking:** schema tenants' pools log in as a role of their own (`rgo_t_<hash>`) with rights on their schema only, so tenant SQL naming another schema is refused. The registry login needs `CREATEROLE`; passwords derive from `RUSTANGO_TENANT_ROLE_SECRET`. Provisioning and migrations set the role up, `ensure-tenant-roles` backfills, purge drops it; `TenantPoolsConfig::schema_tenant_roles = false` turns it off.
 - The `sessions` feature now pulls in axum, for `SessionLayer`.
 - `SessionStore::load` returns `None` for a session ended by `revoke_all`, and for an id containing `:`.
 

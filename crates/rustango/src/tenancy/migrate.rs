@@ -1043,6 +1043,11 @@ async fn run_for_one_tenant(
                     applied.len()
                 )));
             }
+            // Tables this run made, or made outside rustango, reach the tenant role.
+            if let Err(e) = pools.ensure_tenant_role(&schema).await {
+                pool.close().await;
+                return Err(e);
+            }
             // Data seeders (rows, not DDL — kept): CRUD permission
             // codenames for every registered model (#61) + the
             // content-type catalog (#89). Idempotent.

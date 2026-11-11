@@ -207,7 +207,7 @@ where
         orgs.sort_by(|a, b| a.slug.cmp(&b.slug));
         for org in orgs {
             use crate::sso::SsoProvider as P;
-            let Ok((pool, own)) = pools.existing_pool_dyn(&org).await else {
+            let Ok((pool, own)) = pools.operator_pool_dyn(&org).await else {
                 tally.failed += 1;
                 writeln!(w, "  sso {}: cannot reach the tenant", org.slug)?;
                 continue;
@@ -257,7 +257,7 @@ where
             let mut orgs: Vec<Org> = Org::objects().fetch(&registry).await?;
             orgs.sort_by(|a, b| a.slug.cmp(&b.slug));
             for org in orgs {
-                let (pool, own) = match pools.existing_pool_dyn(&org).await {
+                let (pool, own) = match pools.operator_pool_dyn(&org).await {
                     Ok(p) => p,
                     Err(_) => {
                         tally.failed += 1;

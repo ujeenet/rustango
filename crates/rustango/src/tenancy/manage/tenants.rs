@@ -816,3 +816,39 @@ fn truncate(s: &str, n: usize) -> String {
         format!("{}…", &s[..n.saturating_sub(1)])
     }
 }
+
+/// `ensure-tenant-roles`: create or refresh every schema tenant's login role
+/// and grants, as a deploy step before the first request would.
+#[cfg(feature = "postgres")]
+pub(crate) async fn ensure_tenant_roles<W: Write + Send>(
+    pools: &TenantPools<sqlx::Postgres>,
+    args: &[String],
+    writer: &mut W,
+) -> Result<(), TenancyError> {
+    super::args::no_args(args, "ensure-tenant-roles")?;
+    if !pools.pool_config().schema_tenant_roles {
+        return Err(TenancyError::Validation(
+            "TenantPoolsConfig::schema_tenant_roles is off; schema tenants share the registry login"
+                .into(),
+        ));
+    }
+    crate::tenancy::schema_role::check_can_create_roles(pools.registry()).await?;
+    let orgs: Vec<Org> = Org::objects()
+        .where_(Org::storage_mode.eq(StorageMode::Schema.as_str()))
+        .fetch_on(pools.registry())
+        .await?;
+    for org in &orgs {
+        let schema = org.effective_schema();
+        if let Some(role) = pools.ensure_tenant_role(schema).await? {
+            writeln!(writer, "  {}: schema `{schema}` -> role `{role}`", org.slug)?;
+        }
+        // Pools built as the registry login, or with an old password, reconnect.
+        pools.invalidate(&org.slug).await;
+    }
+    writeln!(
+        writer,
+        "ensure-tenant-roles: {} schema tenant(s)",
+        orgs.len()
+    )?;
+    Ok(())
+}

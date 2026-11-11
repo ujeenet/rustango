@@ -299,7 +299,7 @@ where
                 .ok_or_else(|| {
                     crate::tenancy::TenancyError::Validation(format!("tenant `{slug}` not found"))
                 })?;
-            let pool = self.scoped_pool_dyn(&org).await?;
+            let pool = self.operator_pool_dyn(&org).await?.0;
             Ok((org, pool))
         })
     }
