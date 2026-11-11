@@ -296,13 +296,14 @@ mod pg {
     /// `NOTIFY`, and every process's bus on the same channel delivers it
     /// to its local subscribers, the publisher's included.
     ///
-    /// A pool scoped to one schema only hears events published through
-    /// a pool of the same schema, so schema-mode tenants stay apart.
+    /// `LISTEN` and `NOTIFY` need no privilege, so the wire channel is an
+    /// HMAC of the name and the pool's schema under a shared secret: SQL
+    /// that cannot read the secret, a tenant role's included, can neither
+    /// listen in nor inject, and each schema gets its own channel.
     pub struct PgEventBus<K, T> {
         local: KeyedEventBus<K, T>,
         pool: Pool,
         channel: Arc<str>,
-        scope: Arc<str>,
         resync: watch::Receiver<u64>,
         listener_task: Arc<AbortOnDrop>,
     }
@@ -313,7 +314,6 @@ mod pg {
                 local: self.local.clone(),
                 pool: self.pool.clone(),
                 channel: self.channel.clone(),
-                scope: self.scope.clone(),
                 resync: self.resync.clone(),
                 listener_task: self.listener_task.clone(),
             }
@@ -330,16 +330,24 @@ mod pg {
 
     #[derive(Serialize)]
     struct Outgoing<'a, K, T> {
-        s: &'a str,
         k: &'a K,
         e: &'a T,
     }
 
     #[derive(Deserialize)]
     struct Incoming<K, T> {
-        s: String,
         k: K,
         e: T,
+    }
+
+    /// The channel `LISTEN`/`NOTIFY` use for `name` on `scope`'s schema.
+    fn wire_channel(secret: &crate::session::SessionSecret, scope: &str, name: &str) -> String {
+        let mac = crate::session::sign_tagged(
+            secret,
+            b"rustango.event-bus.v1",
+            format!("{scope}\0{name}").as_bytes(),
+        );
+        format!("rgo_ev_{}", &crate::hex::hex_encode(&mac)[..40])
     }
 
     impl<K, T> PgEventBus<K, T>
@@ -348,7 +356,8 @@ mod pg {
         T: Serialize + DeserializeOwned + Clone + Send + 'static,
     {
         /// `LISTEN` on `channel` and start delivering. `capacity` is each
-        /// key's buffer, as for [`KeyedEventBus::new`].
+        /// key's buffer, as for [`KeyedEventBus::new`]. Every process passes
+        /// the same `secret`; buses on different secrets never meet.
         ///
         /// # Errors
         /// [`BusError::NotPostgres`], [`BusError::Channel`], or the
@@ -357,31 +366,30 @@ mod pg {
             pool: &Pool,
             channel: &str,
             capacity: usize,
+            secret: &crate::session::SessionSecret,
         ) -> Result<Self, BusError> {
             let pg = pool.as_postgres().ok_or(BusError::NotPostgres)?.clone();
             if channel.is_empty() || channel.len() > 63 {
                 return Err(BusError::Channel(channel.to_owned()));
             }
-            let scope: Arc<str> = Pool::pg_schema_scope(&pg).into();
-            let listener = listen(&pg, channel).await?;
+            let wire = wire_channel(secret, &Pool::pg_schema_scope(&pg), channel);
+            let listener = listen(&pg, &wire).await?;
             let local = KeyedEventBus::new(capacity);
             let (bump, resync) = watch::channel(0);
-            let feed = feed::<K, T>(
-                pg,
-                channel.to_owned(),
-                scope.clone(),
-                local.clone(),
-                bump,
-                listener,
-            );
+            let feed = feed::<K, T>(pg, wire.clone(), local.clone(), bump, listener);
             Ok(Self {
                 local,
                 pool: pool.clone(),
-                channel: channel.into(),
-                scope,
+                channel: wire.into(),
                 resync,
                 listener_task: Arc::new(AbortOnDrop(tokio::spawn(feed))),
             })
+        }
+
+        /// The channel name `LISTEN` and `NOTIFY` use on the wire.
+        #[must_use]
+        pub fn wire_channel(&self) -> &str {
+            &self.channel
         }
 
         /// Send `event` to `key`'s subscribers in every process. Inside an
@@ -393,11 +401,7 @@ mod pg {
         /// the database failing.
         pub async fn publish(&self, key: &K, event: &T) -> Result<(), BusError> {
             use crate::core::SqlValue;
-            let out = Outgoing {
-                s: &self.scope,
-                k: key,
-                e: event,
-            };
+            let out = Outgoing { k: key, e: event };
             let payload =
                 serde_json::to_string(&out).map_err(|e| BusError::Encode(e.to_string()))?;
             if payload.len() > MAX_PAYLOAD {
@@ -446,7 +450,6 @@ mod pg {
     async fn feed<K, T>(
         pg: sqlx::PgPool,
         channel: String,
-        scope: Arc<str>,
         local: KeyedEventBus<K, T>,
         bump: watch::Sender<u64>,
         mut listener: PgListener,
@@ -457,10 +460,9 @@ mod pg {
         loop {
             match listener.try_recv().await {
                 Ok(Some(note)) => match serde_json::from_str::<Incoming<K, T>>(note.payload()) {
-                    Ok(msg) if *msg.s == *scope => {
+                    Ok(msg) => {
                         local.send(&msg.k, msg.e);
                     }
-                    Ok(_) => {}
                     Err(e) => tracing::warn!(channel, error = %e, "undecodable event; dropped"),
                 },
                 Ok(None) | Err(_) => {

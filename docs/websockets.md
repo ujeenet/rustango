@@ -239,10 +239,13 @@ listening. `recv()` gives `None` once the bus is gone.
 PostgreSQL `LISTEN`/`NOTIFY`, so a worker in another process can publish:
 
 ```rust
+use rustango::session::SessionSecret;
 use rustango::sse::PgEventBus;
 
-// In every process, on the same channel name:
-let bus: PgEventBus<i64, Notification> = PgEventBus::connect(&pool, "notifications", 100).await?;
+// In every process, on the same channel name and secret:
+let secret = SessionSecret::require_from_env()?;
+let bus: PgEventBus<i64, Notification> =
+    PgEventBus::connect(&pool, "notifications", 100, &secret).await?;
 
 let mut sub = bus.subscribe(user.id);            // web process
 bus.publish(&user.id, &notification).await?;      // any process
@@ -253,9 +256,13 @@ bus.publish(&user.id, &notification).await?;      // any process
 - Inside an `atomic` block on the same pool, `publish` goes out at the commit
   and not at all on a rollback.
 - A lost connection is re-opened, and every subscriber gets `Recv::Resync`.
-- `NOTIFY` is database-wide. A bus built on a schema-scoped pool only hears
-  events published through a pool of the same schema, so schema-mode tenants
-  stay apart; tenants with their own database are apart anyway.
+- `LISTEN` and `NOTIFY` need no privilege and are database-wide, so the
+  channel on the wire is an HMAC of the name and the pool's schema under
+  `secret`. SQL without the secret, such as a schema tenant's role, can
+  neither listen in nor inject, and a bus on a schema-scoped pool only hears
+  its own schema. Tenants with their own database are apart anyway.
+- Each bus keeps one connection of its pool for `LISTEN`: build one per
+  process (it is `Clone`), not one per request.
 
 ## Auth & tenancy
 

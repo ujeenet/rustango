@@ -1210,7 +1210,12 @@ pub mod password_hashers;
 /// `sign(secret, msg)` helper, shared by every layer that sets a signed
 /// cookie so the crypto lives in one place. See [`session::SessionSecret`].
 /// `csrf` too: its cookie reads `session::secure_cookies` (#1608).
-#[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
+#[cfg(any(
+    feature = "admin",
+    feature = "tenancy",
+    feature = "csrf",
+    feature = "sse"
+))]
 pub mod session;
 
 /// Graceful-shutdown signal handling — SIGINT **and** SIGTERM in one place,

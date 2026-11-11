@@ -15,6 +15,7 @@
 use base64::Engine;
 use hmac::{Hmac, Mac};
 
+#[cfg(any(feature = "csrf", feature = "passkey", feature = "oauth2"))]
 pub use crate::sealed::{Expiring, SealError, SealedToken};
 use rand::{rngs::OsRng, RngCore};
 use sha2::Sha256;

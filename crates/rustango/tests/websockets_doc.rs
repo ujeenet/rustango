@@ -54,8 +54,10 @@ async fn across_processes(
     notification: &Notification,
 ) -> Result<(), rustango::sse::BusError> {
     use rustango::sse::PgEventBus;
+    // The same secret in every process.
+    let secret = rustango::session::SessionSecret::from_bytes(vec![0; 32]);
     let bus: PgEventBus<i64, Notification> =
-        PgEventBus::connect(pool, "notifications", 100).await?;
+        PgEventBus::connect(pool, "notifications", 100, &secret).await?;
     let _sub = bus.subscribe(user_id);
     bus.publish(&user_id, notification).await?;
     Ok(())

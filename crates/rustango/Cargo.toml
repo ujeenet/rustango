@@ -225,7 +225,7 @@ auth_flows = ["signed_url"]
 #
 # Empty list, not dead config — still gates `rustango::sse`. Carried
 # `dep:tokio` until tokio became unconditional.
-sse = []
+sse = ["_signing", "_rand"]
 
 # WebSocket handler scaffold (`rustango::ws`) — fan-out via the SSE
 # EventBus, axum upgrade handler with auto JSON encode/decode + ping/pong

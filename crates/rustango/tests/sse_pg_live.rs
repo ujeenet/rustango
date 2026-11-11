@@ -5,8 +5,13 @@
 use std::time::Duration;
 
 use rustango::core::SqlValue;
+use rustango::session::SessionSecret;
 use rustango::sql::Pool;
 use rustango::sse::{PgEventBus, Recv, Subscription};
+
+fn secret() -> SessionSecret {
+    SessionSecret::from_bytes(vec![9; 32])
+}
 
 async fn pool() -> Option<Pool> {
     let url = std::env::var("DATABASE_URL").ok()?;
@@ -39,8 +44,12 @@ async fn an_event_reaches_the_keys_subscribers_on_every_bus() {
         return;
     };
     let ch = channel();
-    let web: PgEventBus<i64, String> = PgEventBus::connect(&pool, &ch, 16).await.unwrap();
-    let worker: PgEventBus<i64, String> = PgEventBus::connect(&pool, &ch, 16).await.unwrap();
+    let web: PgEventBus<i64, String> = PgEventBus::connect(&pool, &ch, 16, &secret())
+        .await
+        .unwrap();
+    let worker: PgEventBus<i64, String> = PgEventBus::connect(&pool, &ch, 16, &secret())
+        .await
+        .unwrap();
     let (mut alice, mut bob) = (web.subscribe(1), web.subscribe(2));
     let mut own = worker.subscribe(1);
     worker.publish(&1, &"hello".to_owned()).await.unwrap();
@@ -56,7 +65,9 @@ async fn a_publish_in_a_block_waits_for_the_commit() {
         eprintln!("DATABASE_URL not set — skipping");
         return;
     };
-    let bus: PgEventBus<i64, String> = PgEventBus::connect(&pool, &channel(), 16).await.unwrap();
+    let bus: PgEventBus<i64, String> = PgEventBus::connect(&pool, &channel(), 16, &secret())
+        .await
+        .unwrap();
     let mut sub = bus.subscribe(1);
     let b = bus.clone();
     let rolled: Result<(), _> = rustango::sql::atomic(&pool, move |_tx| {
@@ -95,8 +106,12 @@ async fn another_schemas_bus_does_not_hear_it() {
         .options([("search_path", "tenant_b")]);
     let other = Pool::Postgres(sqlx::PgPool::connect_with(opts).await.expect("connect"));
     let ch = channel();
-    let a: PgEventBus<i64, String> = PgEventBus::connect(&pool, &ch, 16).await.unwrap();
-    let b: PgEventBus<i64, String> = PgEventBus::connect(&other, &ch, 16).await.unwrap();
+    let a: PgEventBus<i64, String> = PgEventBus::connect(&pool, &ch, 16, &secret())
+        .await
+        .unwrap();
+    let b: PgEventBus<i64, String> = PgEventBus::connect(&other, &ch, 16, &secret())
+        .await
+        .unwrap();
     let (mut on_a, mut on_b) = (a.subscribe(1), b.subscribe(1));
     a.publish(&1, &"for a".to_owned()).await.unwrap();
     assert_eq!(next(&mut on_a).await, Some(Recv::Event("for a".into())));
@@ -111,12 +126,14 @@ async fn a_lost_connection_resyncs_then_delivers() {
         return;
     };
     let ch = channel();
-    let bus: PgEventBus<i64, String> = PgEventBus::connect(&pool, &ch, 16).await.unwrap();
+    let bus: PgEventBus<i64, String> = PgEventBus::connect(&pool, &ch, 16, &secret())
+        .await
+        .unwrap();
     let mut sub = bus.subscribe(1);
     let killed: Vec<(bool,)> = rustango::sql::raw_query_pool(
         "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
          WHERE query LIKE '%' || $1 || '%' AND query LIKE 'LISTEN%'",
-        vec![SqlValue::String(ch.clone())],
+        vec![SqlValue::String(bus.wire_channel().to_owned())],
         &pool,
     )
     .await
@@ -134,7 +151,47 @@ async fn an_oversized_event_is_refused() {
         eprintln!("DATABASE_URL not set — skipping");
         return;
     };
-    let bus: PgEventBus<i64, String> = PgEventBus::connect(&pool, &channel(), 16).await.unwrap();
+    let bus: PgEventBus<i64, String> = PgEventBus::connect(&pool, &channel(), 16, &secret())
+        .await
+        .unwrap();
     let err = bus.publish(&1, &"x".repeat(9000)).await.unwrap_err();
     assert!(matches!(err, rustango::sse::BusError::TooLarge(_)), "{err}");
+}
+
+/// SQL that knows the channel name but not the secret, such as a tenant
+/// role's, neither hears the events nor injects one; nor does a bus on
+/// another secret.
+#[tokio::test]
+async fn a_connection_without_the_secret_cannot_listen_or_inject() {
+    let Some(pool) = pool().await else {
+        eprintln!("DATABASE_URL not set — skipping");
+        return;
+    };
+    let ch = channel();
+    let bus: PgEventBus<i64, String> = PgEventBus::connect(&pool, &ch, 16, &secret())
+        .await
+        .unwrap();
+    let other: PgEventBus<i64, String> =
+        PgEventBus::connect(&pool, &ch, 16, &SessionSecret::from_bytes(vec![8; 32]))
+            .await
+            .unwrap();
+    let mut spy = sqlx::postgres::PgListener::connect_with(pool.as_postgres().unwrap())
+        .await
+        .unwrap();
+    spy.listen(&ch).await.unwrap();
+    let (mut sub, mut on_other) = (bus.subscribe(1), other.subscribe(1));
+    sqlx::query("SELECT pg_notify($1, $2)")
+        .bind(&ch)
+        .bind(r#"{"k":1,"e":"forged"}"#)
+        .execute(pool.as_postgres().unwrap())
+        .await
+        .unwrap();
+    bus.publish(&1, &"real".to_owned()).await.unwrap();
+    assert_eq!(next(&mut sub).await, Some(Recv::Event("real".into())));
+    let heard = tokio::time::timeout(Duration::from_millis(300), spy.recv()).await;
+    assert!(heard.is_err(), "the channel name alone heard {heard:?}");
+    assert!(
+        nothing_within(&mut on_other, 300).await,
+        "another secret heard it"
+    );
 }
