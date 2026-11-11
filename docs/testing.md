@@ -220,8 +220,8 @@ you read a green result as coverage.
 
 | Variable | Suites | What they need |
 |---|---:|---|
-| *(none)* | 230 | Nothing — an in-memory or temp-file SQLite. Always run. |
-| `DATABASE_URL` | 192 | A reachable PostgreSQL server. |
+| *(none)* | 232 | Nothing — an in-memory or temp-file SQLite. Always run. |
+| `DATABASE_URL` | 194 | A reachable PostgreSQL server. |
 | `MYSQL_TEST_URL` | 123 | A reachable MySQL 8+ server. **Not** `DATABASE_URL`. |
 | `REDIS_TEST_URL` | 2 | A reachable Redis. |
 

@@ -48,13 +48,17 @@ pub struct Asset {
 /// Mount it with [`StaticFiles::manifest`](super::StaticFiles::manifest) so the
 /// hashed names are served (`immutable`), and link to them from templates:
 ///
-/// ```ignore
+/// ```no_run
+/// # use rustango::static_files::{static_router, AssetManifest, StaticFiles};
+/// # fn app() -> std::io::Result<axum::Router> {
 /// let manifest = AssetManifest::from_dir("static")?.prefix("/static");
-/// let app = Router::new()
+/// let app = axum::Router::new()
 ///     .nest("/static", static_router(StaticFiles::new("static").manifest(manifest.clone())));
-/// manifest.register_tera(&mut tera);
+/// // With Tera (`register_tera`, needs a Tera feature):
+/// // manifest.register_tera(&mut tera);
 /// // <script src="{{ asset_url(name='app.js') }}"
 /// //         integrity="{{ asset_integrity(name='app.js') }}" crossorigin="anonymous"></script>
+/// # Ok(app) }
 /// ```
 ///
 /// Build it once the files are in place: a file changed after that keeps its

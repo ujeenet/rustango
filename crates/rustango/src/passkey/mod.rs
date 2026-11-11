@@ -22,7 +22,7 @@
 //!
 //! ## User verification and PRF
 //!
-//! [`RegistrationOptions`] and [`AuthenticationOptions`] ask for
+//! [`RegistrationOptions`](crate::passkey::RegistrationOptions) and [`AuthenticationOptions`](crate::passkey::AuthenticationOptions) ask for
 //! `userVerification: "required"` and the PRF extension; check the flag on
 //! the outcome with `require(UserVerification::Required)`. The browser
 //! gets base64url fields; decode them before calling the API:

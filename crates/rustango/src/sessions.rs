@@ -14,9 +14,9 @@
 //! a new ID. Reusing the ID across the login boundary leaves the door
 //! open to session fixation.
 //!
-//! [`SessionLayer`] sets and reads the cookie for you; handlers take
-//! [`CurrentSession`]. [`SessionStore::login`] binds a session to a user,
-//! so [`SessionStore::sessions_of`] lists and `revoke_all` ends them.
+//! [`SessionLayer`](crate::sessions::SessionLayer) sets and reads the cookie for you; handlers take
+//! [`CurrentSession`](crate::sessions::CurrentSession). [`SessionStore::login`](crate::sessions::SessionStore::login) binds a session to a user,
+//! so [`SessionStore::sessions_of`](crate::sessions::SessionStore::sessions_of) lists and `revoke_all` ends them.
 //!
 //! Under tenancy, scope the store per request with `SessionStore::for_tenant`:
 //! session ids carry no tenant, and on a shared apex host one cookie reaches

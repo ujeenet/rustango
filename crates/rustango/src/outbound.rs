@@ -1,15 +1,15 @@
 //! Outbound HTTP to URLs that config can set: tenant SSO issuers,
 //! Slack hooks, webhook subscribers (#1670, #1716).
 //!
-//! [`Egress::check`] is the only way to send here: it refuses
+//! [`Egress::check`](crate::outbound::Egress::check) is the only way to send here: it refuses
 //! non-public addresses and never follows redirects. Without a proxy the
 //! client checks the addresses again at connect time. List private hosts and CIDRs in
 //! `RUSTANGO_OUTBOUND_ALLOW` to reach them, such as an IdP on your own
 //! network. Webhook delivery ignores that list. Set
 //! `RUSTANGO_OUTBOUND_PROXY` to send every call through an egress proxy.
 //!
-//! Apps fetching user-supplied URLs use the same guard: [`Egress::public`]
-//! for HTTP, [`resolve_public`] for raw sockets (connect to the returned addresses).
+//! Apps fetching user-supplied URLs use the same guard: [`Egress::public`](crate::outbound::Egress::public)
+//! for HTTP, [`resolve_public`](crate::outbound::resolve_public) for raw sockets (connect to the returned addresses).
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -87,7 +87,15 @@ fn normalize_host(host: &str) -> String {
 }
 
 /// Held by tests that set or read [`ALLOW_ENV`].
-#[cfg(all(test, any(feature = "webhook-delivery", feature = "sso")))]
+#[cfg(all(
+    test,
+    any(
+        feature = "webhook-delivery",
+        feature = "sso",
+        feature = "oauth2",
+        feature = "http-client"
+    )
+))]
 pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Which addresses a target may resolve to.

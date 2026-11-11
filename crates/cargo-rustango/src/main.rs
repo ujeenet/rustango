@@ -298,6 +298,15 @@ pub const OPTIONAL_FEATURES: &[(&str, &str)] = &[
         "Model Context Protocol server for AI agents (tenant only)",
     ),
     ("http2", "serve cleartext HTTP/2 (h2c) next to HTTP/1"),
+    (
+        "static-files",
+        "static file serving and hashed asset names, without admin",
+    ),
+    (
+        "security-headers",
+        "security headers and CSP builder, without admin",
+    ),
+    ("test-client", "in-process HTTP test client, without admin"),
     ("testkit", "test-only schema builders and model factories"),
     ("test_utils", "test-only constructors for downstream crates"),
 ];

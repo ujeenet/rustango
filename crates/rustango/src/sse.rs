@@ -48,12 +48,12 @@
 //!
 //! ## Per-user events and other processes
 //!
-//! [`KeyedEventBus`] delivers an event only to the subscribers of its key,
-//! such as a user or an account id. [`PgEventBus`] (feature `postgres`)
+//! [`KeyedEventBus`](crate::sse::KeyedEventBus) delivers an event only to the subscribers of its key,
+//! such as a user or an account id. [`PgEventBus`](crate::sse::PgEventBus) (feature `postgres`)
 //! is the same bus across processes, over PostgreSQL `LISTEN`/`NOTIFY`.
 //!
-//! **Lag contract.** Both hand out a [`Subscription`]. Its
-//! [`Subscription::recv`] gives [`Recv::Resync`] when events were missed:
+//! **Lag contract.** Both hand out a [`Subscription`](crate::sse::Subscription). Its
+//! [`Subscription::recv`](crate::sse::Subscription::recv) gives [`Recv::Resync`](crate::sse::Recv::Resync) when events were missed:
 //! the subscriber fell behind the buffer, or the database connection
 //! dropped. Reload what the client shows (send it an SSE `resync` event),
 //! then keep reading. No event is replayed.

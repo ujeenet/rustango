@@ -488,10 +488,18 @@ impl Cli {
     /// [`Cli::seed`], before the port is bound; an error stops the
     /// start. Gets the same pool as [`Cli::seed`].
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use rustango::manage::Cli;
+    /// # async fn check_keys(_: &rustango::sql::Pool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> { Ok(()) }
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
     /// Cli::new()
-    ///     .before_serve(|pool| async move { keys::check_all(pool).await })
-    ///     .run().await
+    ///     .before_serve(|pool| {
+    ///         let pool = pool.clone();
+    ///         async move { check_keys(&pool).await }
+    ///     })
+    ///     .run()
+    ///     .await
+    /// # }
     /// ```
     #[must_use]
     pub fn before_serve<F, Fut>(mut self, hook: F) -> Self

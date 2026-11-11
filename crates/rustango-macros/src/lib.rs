@@ -222,7 +222,7 @@ pub fn embed_migrations(input: TokenStream) -> TokenStream {
 /// `rustango::static_files::EmbeddedDir`. The path is relative to the
 /// crate's `Cargo.toml`; names starting with `.` are left out.
 ///
-/// ```ignore
+/// ```text
 /// static ASSETS: rustango::static_files::EmbeddedDir = rustango::embed_static!("static");
 /// ```
 ///

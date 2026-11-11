@@ -43,10 +43,10 @@
 //!
 //! ## Hashed names, SRI and embedded files
 //!
-//! [`AssetManifest`] gives every file a content-hashed name and an SRI
-//! hash for templates; [`StaticFiles::manifest`] serves those names
+//! [`AssetManifest`](crate::static_files::AssetManifest) gives every file a content-hashed name and an SRI
+//! hash for templates; [`StaticFiles::manifest`](crate::static_files::StaticFiles::manifest) serves those names
 //! `immutable`. [`embed_static!`](crate::embed_static) compiles a
-//! directory into the binary, served by [`StaticFiles::embedded`].
+//! directory into the binary, served by [`StaticFiles::embedded`](crate::static_files::StaticFiles::embedded).
 //!
 //! [`StaticFiles::no_canonicalize`]: crate::static_files::StaticFiles::no_canonicalize
 //! [`StaticFiles::serve_hidden`]: crate::static_files::StaticFiles::serve_hidden
@@ -102,9 +102,12 @@ impl StaticFiles {
     /// Serve files compiled into the binary by
     /// [`embed_static!`](crate::embed_static), for a one-file image:
     ///
-    /// ```ignore
-    /// static ASSETS: EmbeddedDir = rustango::embed_static!("static");
-    /// let app = Router::new().nest("/static", static_router(StaticFiles::embedded(ASSETS)));
+    /// ```no_run
+    /// # use rustango::static_files::{static_router, EmbeddedDir, StaticFiles};
+    /// # fn app(assets: EmbeddedDir) -> axum::Router {
+    /// // static ASSETS: EmbeddedDir = rustango::embed_static!("static");
+    /// axum::Router::new().nest("/static", static_router(StaticFiles::embedded(assets)))
+    /// # }
     /// ```
     #[must_use]
     pub fn embedded(dir: EmbeddedDir) -> Self {
