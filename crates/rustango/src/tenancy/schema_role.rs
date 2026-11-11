@@ -180,7 +180,7 @@ pub(crate) async fn ensure(
             .fetch_one(&mut *tx)
             .await?;
     // The emitters send a SCRAM verifier, so the server never sees the password.
-    let mut stmts = if exists {
+    let login = if exists {
         vec![pg
             .alter_login_password_sql(&role.login, &role.password, false)
             .expect("Postgres alters logins")]
@@ -191,9 +191,13 @@ pub(crate) async fn ensure(
             format!("ALTER ROLE {r} NOINHERIT"),
         ]
     };
+    // First: the USAGE checks below need the role.
+    for sql in &login {
+        run(&mut tx, sql, schema).await?;
+    }
     // Rows only: TRIGGER, TRUNCATE or REFERENCES would let tenant SQL act
     // when the registry login writes these tables.
-    stmts.extend([
+    let mut stmts = vec![
         format!("GRANT USAGE ON SCHEMA {s} TO {r}"),
         format!("GRANT {TABLE_RIGHTS} ON ALL TABLES IN SCHEMA {s} TO {r}"),
         format!("GRANT {SEQUENCE_RIGHTS} ON ALL SEQUENCES IN SCHEMA {s} TO {r}"),
@@ -204,7 +208,7 @@ pub(crate) async fn ensure(
         ),
         format!("ALTER DEFAULT PRIVILEGES IN SCHEMA {s} GRANT EXECUTE ON FUNCTIONS TO {r}"),
         format!("ALTER DEFAULT PRIVILEGES IN SCHEMA {s} GRANT USAGE ON TYPES TO {r}"),
-    ]);
+    ];
     for ext in extension_schemas {
         let usable: bool = sqlx::query_scalar("SELECT has_schema_privilege($1, $2, 'USAGE')")
             .bind(&role.name)
