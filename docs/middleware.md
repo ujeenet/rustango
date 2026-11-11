@@ -375,10 +375,11 @@ let csp = CspBuilder::strict_wasm_app()
 
 Use `blob_workers` only when the worker script is fetched with SRI and the
 policy admits that one blob. A page with an inline import map needs its hash:
-build the CSP per response with `.import_map_hash(&html)` (or
-`.script_hash(text)` for any inline script) and set it on that response. The
-layer keeps a CSP header the handler already set, so the static policy still
-covers every other response.
+build the CSP per response with `.script_hash(&import_map)`, passing the map
+text your code embeds (never text parsed back out of the HTML, which injected
+markup could choose), and set it on that response. The layer keeps a CSP
+header the handler already set, so the static policy still covers every other
+response.
 
 ---
 

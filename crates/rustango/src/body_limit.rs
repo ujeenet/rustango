@@ -22,8 +22,9 @@
 //! A route can have its own cap, above or below the global one, keyed by
 //! the pattern it was registered with:
 //!
-//! ```ignore
-//! BodyLimitLayer::new(10 << 20).route("/api/uploads", 1 << 30)
+//! ```
+//! # use rustango::body_limit::BodyLimitLayer;
+//! let layer = BodyLimitLayer::new(10 << 20).route("/api/uploads", 1 << 30);
 //! ```
 //!
 //! A `BodyLimitLayer` inside another can only lower the cap.

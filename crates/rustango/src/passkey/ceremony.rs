@@ -83,6 +83,9 @@ impl UserVerification {
 }
 
 /// Verify a registration response (WebAuthn §7.1, `none`/self attestation).
+/// It checks presence, not user verification: when the options asked for
+/// [`UserVerification::Required`], call `.require(UserVerification::Required)`
+/// on the outcome, or a touch-only key is accepted.
 ///
 /// `challenge` is the value handed to [`registration_options_json`];
 /// `client_data_json` + `attestation_object` are the decoded
@@ -135,7 +138,8 @@ pub fn verify_registration(
 }
 
 /// Verify an authentication (assertion) response (WebAuthn §7.2).
-/// Returns the new signature counter and the UV flag.
+/// Returns the new signature counter and the UV flag. As with
+/// [`verify_registration`], enforce a `Required` policy with `.require(..)`.
 ///
 /// # Errors
 /// The matching [`PasskeyError`] for whichever check fails (including
@@ -510,6 +514,27 @@ mod tests {
             "origin": origin,
         }))
         .unwrap()
+    }
+
+    /// A registration with the UV flag reports it, and passes `Required`.
+    #[test]
+    fn a_verified_registration_passes_required() {
+        let (rp_id, origins) = ("example.com", vec!["https://example.com".to_owned()]);
+        let cose = TestSigner::new().cose();
+        let challenge = generate_challenge();
+        let mut ad = reg_auth_data(rp_id, b"cred-uv", &cose, 1);
+        ad[32] |= 0b0000_0100; // UV, after the 32-byte rpIdHash
+        let client = client_data("webauthn.create", &challenge, "https://example.com");
+        let outcome = verify_registration(
+            &challenge,
+            rp_id,
+            &origins,
+            &client,
+            &attestation_object(&ad),
+        )
+        .unwrap();
+        assert!(outcome.user_verified);
+        assert!(outcome.require(UserVerification::Required).is_ok());
     }
 
     #[test]

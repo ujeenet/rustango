@@ -660,6 +660,23 @@ mod tests {
         assert_eq!(at, vec!["203.0.113.7:443".parse::<SocketAddr>().unwrap()]);
     }
 
+    /// The operator's allow list widens `public_or_allowed`, never `public`,
+    /// which user-supplied URLs go through.
+    #[cfg(any(feature = "oauth2", feature = "http-client"))]
+    #[tokio::test]
+    async fn public_ignores_the_allow_list() {
+        let _g = ENV_LOCK.lock().await;
+        std::env::set_var(ALLOW_ENV, "10.0.0.0/8");
+        let public = Egress::public().unwrap().check("http://10.0.0.1/").await;
+        let allowed = Egress::public_or_allowed()
+            .unwrap()
+            .check("http://10.0.0.1/")
+            .await;
+        std::env::remove_var(ALLOW_ENV);
+        assert!(matches!(public.err(), Some(TargetError::Blocked)));
+        assert!(allowed.is_ok());
+    }
+
     #[tokio::test]
     async fn metadata_and_private_targets_are_refused() {
         for url in [

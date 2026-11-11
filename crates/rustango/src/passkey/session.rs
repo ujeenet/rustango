@@ -20,7 +20,8 @@
 //!
 //! // /passkey/register/finish
 //! let (challenge, ctx) = passkey::open_challenge(&cookie, Registration, secret, &*cache).await?; // ctx = user id bytes
-//! let outcome = passkey::verify_registration(&challenge, rp_id, &origins, &client_data, &att_obj)?;
+//! let outcome = passkey::verify_registration(&challenge, rp_id, &origins, &client_data, &att_obj)?
+//!     .require(UserVerification::Required)?; // the policy the options sent
 //! passkey::register(pool, user_id, &outcome.credential_id, outcome.cose_public_key, outcome.sign_count, "").await?;
 //! ```
 

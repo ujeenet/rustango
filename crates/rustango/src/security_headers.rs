@@ -560,15 +560,16 @@ impl CspBuilder {
     /// ```
     ///
     /// Widen it with [`Self::add_source`], [`Self::blob_workers`] and
-    /// [`Self::import_map_hash`]:
+    /// [`Self::script_hash`] (for an inline import map, the map text the
+    /// page embeds):
     ///
     /// ```
     /// use rustango::security_headers::CspBuilder;
-    /// let html = r#"<script type="importmap">{"imports":{}}</script>"#;
+    /// let import_map = r#"{"imports":{}}"#;
     /// let csp = CspBuilder::strict_wasm_app()
     ///     .add_source("connect-src", "https://bucket.example.com")
     ///     .blob_workers("app-boot")
-    ///     .import_map_hash(html)
+    ///     .script_hash(import_map)
     ///     .build();
     /// assert!(csp.contains("worker-src 'self' blob:"));
     /// assert!(csp.contains("trusted-types app-boot"));
@@ -611,22 +612,12 @@ impl CspBuilder {
             .add_source("require-trusted-types-for", "'script'")
     }
 
-    /// Admit one inline script by its hash. Hash the exact text between
-    /// the tags, as served; see [`csp_hash`].
+    /// Admit one inline script by its hash. Pass the text your code puts
+    /// between the tags (an import map, say), never text read back from
+    /// the HTML, where injected markup could choose it; see [`csp_hash`].
     #[must_use]
     pub fn script_hash(self, inline_script: &str) -> Self {
         self.add_source("script-src", &csp_hash(inline_script.as_bytes()))
-    }
-
-    /// Admit the page's inline `<script type="importmap">` by its hash.
-    /// Build it per response from the HTML as served, so a rebuilt page
-    /// never meets a stale hash. A page with no import map adds nothing.
-    #[must_use]
-    pub fn import_map_hash(self, html: &str) -> Self {
-        match inline_import_map(html) {
-            Some(map) => self.script_hash(map),
-            None => self,
-        }
     }
 
     /// Render the policy as a string ready to drop into the CSP header.
@@ -650,14 +641,6 @@ pub fn csp_hash(content: &[u8]) -> String {
         "'sha256-{}'",
         base64::engine::general_purpose::STANDARD.encode(digest)
     )
-}
-
-/// The body of the first `<script type="importmap">` in `html`.
-fn inline_import_map(html: &str) -> Option<&str> {
-    const OPEN: &str = r#"<script type="importmap">"#;
-    let start = html.find(OPEN)? + OPEN.len();
-    let len = html[start..].find("</script>")?;
-    Some(&html[start..start + len])
 }
 
 #[cfg(test)]
@@ -981,22 +964,19 @@ mod tests {
     }
 
     #[test]
-    fn import_map_hash_hashes_the_map_as_served() {
+    fn script_hash_hashes_the_given_text() {
         // sha256("") is a known vector.
         assert_eq!(
             csp_hash(b""),
             "'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='"
         );
         let map = r#"{"imports":{"a":"/app/a.1.js"}}"#;
-        let html = format!(r#"<head><script type="importmap">{map}</script></head>"#);
-        let csp = CspBuilder::strict_wasm_app().import_map_hash(&html).build();
+        let csp = CspBuilder::strict_wasm_app().script_hash(map).build();
         let want = format!(
             "script-src 'self' 'wasm-unsafe-eval' {}",
             csp_hash(map.as_bytes())
         );
         assert!(csp.contains(&want), "{csp}");
-        let plain = CspBuilder::strict_wasm_app().import_map_hash("<p>no map</p>");
-        assert_eq!(plain.build(), CspBuilder::strict_wasm_app().build());
     }
 }
 

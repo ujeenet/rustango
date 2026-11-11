@@ -28,10 +28,12 @@
 //! not cut. A handler that reads a large upload is. Give such a route its
 //! own timeout, or none, by the pattern it was registered with:
 //!
-//! ```ignore
-//! RequestTimeoutLayer::new(Duration::from_secs(30))
+//! ```
+//! # use rustango::request_timeout::RequestTimeoutLayer;
+//! # use std::time::Duration;
+//! let layer = RequestTimeoutLayer::new(Duration::from_secs(30))
 //!     .route("/api/exports", Duration::from_secs(300))
-//!     .exempt("/api/uploads")
+//!     .exempt("/api/uploads");
 //! ```
 
 use std::collections::HashMap;

@@ -1,7 +1,10 @@
 //! The `Authorization: Bearer` credential and the 401 challenge for it.
 
-use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::http::header::AUTHORIZATION;
+use axum::http::HeaderMap;
+#[cfg(any(feature = "tenancy", feature = "admin", feature = "mcp"))]
+use axum::http::{header::WWW_AUTHENTICATE, HeaderValue, StatusCode};
+#[cfg(any(feature = "tenancy", feature = "admin", feature = "mcp"))]
 use axum::response::Response;
 
 /// The bearer token in `headers`. The scheme is case-insensitive
@@ -21,47 +24,46 @@ pub fn token(headers: &HeaderMap) -> Option<&str> {
     (scheme.eq_ignore_ascii_case("bearer") && !token.is_empty()).then_some(token)
 }
 
-/// What the client sent, which picks the challenge (RFC 6750 §3).
-#[cfg_attr(
-    not(any(feature = "tenancy", feature = "admin", feature = "mcp")),
-    allow(dead_code)
-)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Sent {
-    Nothing,
-    BadToken,
-}
+#[cfg(any(feature = "tenancy", feature = "admin", feature = "mcp"))]
+pub(crate) use challenge::{challenge, Sent};
 
-#[cfg_attr(
-    not(any(feature = "tenancy", feature = "admin", feature = "mcp")),
-    allow(dead_code)
-)]
-impl Sent {
-    /// From the request's headers.
-    pub(crate) fn of(headers: &HeaderMap) -> Self {
-        if token(headers).is_some() {
-            Self::BadToken
-        } else {
-            Self::Nothing
+/// The 401 challenge, for the auth layers that send one.
+#[cfg(any(feature = "tenancy", feature = "admin", feature = "mcp"))]
+mod challenge {
+    use super::{token, HeaderMap, HeaderValue, Response, StatusCode, WWW_AUTHENTICATE};
+
+    /// What the client sent, which picks the challenge (RFC 6750 §3).
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Sent {
+        Nothing,
+        BadToken,
+    }
+
+    impl Sent {
+        /// From the request's headers.
+        pub(crate) fn of(headers: &HeaderMap) -> Self {
+            if token(headers).is_some() {
+                Self::BadToken
+            } else {
+                Self::Nothing
+            }
         }
     }
-}
 
-/// `resp` with a `Bearer` challenge, when it is a 401 that has none.
-#[cfg_attr(
-    not(any(feature = "tenancy", feature = "admin", feature = "mcp")),
-    allow(dead_code)
-)]
-pub(crate) fn challenge(mut resp: Response, sent: Sent) -> Response {
-    if resp.status() == StatusCode::UNAUTHORIZED && !resp.headers().contains_key(WWW_AUTHENTICATE) {
-        let value = match sent {
-            Sent::Nothing => "Bearer",
-            Sent::BadToken => r#"Bearer error="invalid_token""#,
-        };
-        resp.headers_mut()
-            .insert(WWW_AUTHENTICATE, HeaderValue::from_static(value));
+    /// `resp` with a `Bearer` challenge, when it is a 401 that has none.
+    pub(crate) fn challenge(mut resp: Response, sent: Sent) -> Response {
+        if resp.status() == StatusCode::UNAUTHORIZED
+            && !resp.headers().contains_key(WWW_AUTHENTICATE)
+        {
+            let value = match sent {
+                Sent::Nothing => "Bearer",
+                Sent::BadToken => r#"Bearer error="invalid_token""#,
+            };
+            resp.headers_mut()
+                .insert(WWW_AUTHENTICATE, HeaderValue::from_static(value));
+        }
+        resp
     }
-    resp
 }
 
 #[cfg(test)]
@@ -70,7 +72,10 @@ mod tests {
 
     fn with(value: &str) -> HeaderMap {
         let mut h = HeaderMap::new();
-        h.insert(AUTHORIZATION, HeaderValue::from_str(value).unwrap());
+        h.insert(
+            AUTHORIZATION,
+            axum::http::HeaderValue::from_str(value).unwrap(),
+        );
         h
     }
 
