@@ -10,7 +10,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `SessionStore::login`, `sessions_of`, `revoke` and `revoke_all` list and end a user's sessions; listings name sessions by a hash, never the id.
 - Session-bound CSRF: `SessionLayer::with_csrf` checks the token kept in the session (`CurrentSession::csrf_token`), not the cookie.
 - `CsrfLayer::json_rejection()` and `reject_with()` answer refusals as JSON or your own response (`CsrfFailure`).
-- `real_ip::client_ip` and the `ClientIp` extractor: the trusted-proxy-aware client address the limiter and IP filter use.
+- `real_ip::client_ip` and the `ClientAddr` extractor: the trusted-proxy-aware client address the limiter and IP filter use.
 - `outbound::Egress` (`public`, `public_or_allowed`, `check`) and `outbound::resolve_public` are public under `http-client`: fetch user-supplied URLs without reaching private or metadata addresses.
 - Jobs: `JobQueue::dispatch_at`, `enqueue` with `Dispatch` options (a run time, a `UniqueKey` held while the job is queued or running) and `cancel(&JobId)` on both queues; `JobId` parses back from its text. The database queue adds a `unique_key` column and index in `ensure_table_pool`.
 - `sse::KeyedEventBus` delivers each event only to its key's subscribers, and `sse::PgEventBus` (feature `postgres`) does the same across processes over `LISTEN`/`NOTIFY`; their `Subscription::recv` gives `Recv::Resync` when events were missed.
@@ -30,10 +30,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `TenantPools::ddl_pool(org)`: the registry login on a tenant's tables, for DDL at runtime such as `DatabaseJobQueue::ensure_table_pool`.
 - The `sessions` feature now pulls in axum, for `SessionLayer`.
 - `SessionStore::load` returns `None` for a session ended by `revoke_all`, and for an id containing `:`.
+- A user keeps at most `sessions::MAX_SESSIONS_PER_USER` (100) sessions; a login past it ends the oldest.
+- Under tenancy, `SessionLayer` answers 503 when no tenant context is mounted; `allow_global()` opts into the platform-wide session space.
+- The "forwarding header but no trusted proxy" warning logs under `rustango::real_ip` (was `rustango::rate_limit`).
 
 ### Fixed
 
 - `#[derive(Model)]` documents its typed column constants, so `#![deny(missing_docs)]` apps build.
+- `SessionLayer`: a session kept by `revoke_all` survives the request's own save, and a request never writes back a session ended while it ran.
 
 ## [0.65.2] — 2026-11-09
 

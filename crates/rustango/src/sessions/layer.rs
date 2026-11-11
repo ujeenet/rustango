@@ -68,9 +68,16 @@ impl CookieSpec {
 /// Loads the session named by the request's cookie and saves it once the
 /// handler returns. Mount it outside every route that takes [`CurrentSession`].
 ///
-/// ```ignore
-/// use rustango::sessions::{SessionLayer, SessionStore};
-/// let app = Router::new()
+/// ```
+/// use rustango::cache::{BoxedCache, InMemoryCache};
+/// use rustango::sessions::{CurrentSession, SessionLayer, SessionStore};
+/// # use axum::{routing::get, Router};
+/// # use std::sync::Arc;
+/// async fn me(s: CurrentSession) -> String {
+///     s.user().unwrap_or_default()
+/// }
+/// let cache: BoxedCache = Arc::new(InMemoryCache::new());
+/// let app: Router = Router::new()
 ///     .route("/me", get(me))
 ///     .layer(SessionLayer::new(SessionStore::new(cache)));
 /// ```
@@ -78,6 +85,7 @@ impl CookieSpec {
 pub struct SessionLayer {
     store: SessionStore,
     cookie: Arc<CookieSpec>,
+    allow_global: bool,
 }
 
 impl SessionLayer {
@@ -94,7 +102,17 @@ impl SessionLayer {
                 secure: true,
                 rolling: false,
             }),
+            allow_global: false,
         }
+    }
+
+    /// Under tenancy, serve requests with no tenant context from the
+    /// platform-wide session space. Without it they get a 503, so a layer
+    /// mounted outside the tenant router never shares sessions across tenants.
+    #[must_use]
+    pub fn allow_global(mut self) -> Self {
+        self.allow_global = true;
+        self
     }
 
     fn spec(mut self, f: impl FnOnce(&mut CookieSpec)) -> Self {
@@ -161,6 +179,7 @@ impl<S> tower::Layer<S> for SessionLayer {
             inner,
             store: self.store.clone(),
             cookie: Arc::clone(&self.cookie),
+            allow_global: self.allow_global,
         }
     }
 }
@@ -171,6 +190,7 @@ pub struct SessionService<S> {
     inner: S,
     store: SessionStore,
     cookie: Arc<CookieSpec>,
+    allow_global: bool,
 }
 
 impl<S> Service<Request<Body>> for SessionService<S>
@@ -194,8 +214,19 @@ where
         let mut inner = self.inner.clone();
         let store = self.store.clone();
         let cookie = Arc::clone(&self.cookie);
+        let allow_global = self.allow_global;
         Box::pin(async move {
             let (mut parts, body) = req.into_parts();
+            #[cfg(feature = "tenancy")]
+            if !allow_global && crate::tenancy::RequestTenant::unmounted(&parts.extensions) {
+                return Ok(status(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "SessionLayer has no tenant context: mount it inside the tenant router, \
+                     or call allow_global()",
+                ));
+            }
+            #[cfg(not(feature = "tenancy"))]
+            let _ = allow_global;
             let Ok(space) = KeySpace::of_request(&mut parts).await else {
                 return Ok(status(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -410,7 +441,15 @@ impl CurrentSession {
         if ended {
             return Ok(had_cookie.then(|| cookie.remove()).flatten());
         }
+        let mut session = session;
         match id {
+            // Ended meanwhile (revoked, logged out elsewhere): never revive it.
+            Some(id)
+                if (rotate || session.is_dirty())
+                    && !self.store.refresh_mark(&id, &mut session).await? =>
+            {
+                Ok(had_cookie.then(|| cookie.remove()).flatten())
+            }
             Some(old) if rotate => {
                 let new = self.store.reissue(&old, &session).await?;
                 Ok(cookie.issue(&new, ttl))
@@ -484,7 +523,39 @@ mod tests {
                 "/logout",
                 post(|s: CurrentSession| async move { s.logout().await.map(|()| "out").unwrap() }),
             )
-            .layer(SessionLayer::new(store))
+            .route(
+                "/keep-this-device",
+                post(|s: CurrentSession| async move {
+                    let user = s.user().unwrap();
+                    s.store()
+                        .revoke_all(&user, s.id().as_deref())
+                        .await
+                        .unwrap();
+                    s.cycle_id();
+                    "kept"
+                }),
+            )
+            .route(
+                "/flash-after-revoke",
+                post(|s: CurrentSession| async move {
+                    let user = s.user().unwrap();
+                    s.store()
+                        .revoke_all(&user, s.id().as_deref())
+                        .await
+                        .unwrap();
+                    s.set("flash", "password changed");
+                    "kept"
+                }),
+            )
+            .route(
+                "/set-after-end",
+                post(|s: CurrentSession| async move {
+                    s.store().destroy(&s.id().unwrap()).await.unwrap();
+                    s.set("n", 2);
+                    "late"
+                }),
+            )
+            .layer(SessionLayer::new(store).allow_global())
     }
 
     fn store() -> SessionStore {
@@ -589,6 +660,64 @@ mod tests {
         assert_eq!(send(&app, "GET", "/get", Some(&id)).await.0, "None None");
     }
 
+    /// "Sign out other devices" keeps this one through the request's own
+    /// save, after a new id or a session write.
+    #[tokio::test]
+    async fn revoke_all_keeps_the_current_session_through_its_save() {
+        let app = app(store());
+        for route in ["/keep-this-device", "/flash-after-revoke"] {
+            let (_, set) = send(&app, "POST", "/login", None).await;
+            let id = sid(&set.unwrap());
+            let (_, set) = send(&app, "POST", route, Some(&id)).await;
+            let id = set.map_or(id, |c| sid(&c));
+            assert_eq!(
+                send(&app, "GET", "/get", Some(&id)).await.0,
+                "None Some(\"u1\")",
+                "{route} logged this device out"
+            );
+        }
+    }
+
+    /// A request still running when its session is ended does not write it back.
+    #[tokio::test]
+    async fn an_ended_session_is_not_revived_by_a_late_save() {
+        let app = app(store());
+        let (_, set) = send(&app, "POST", "/login", None).await;
+        let id = sid(&set.unwrap());
+        let (_, set) = send(&app, "POST", "/set-after-end", Some(&id)).await;
+        assert!(set.expect("no removal cookie").contains("Max-Age=0"));
+        assert_eq!(send(&app, "GET", "/get", Some(&id)).await.0, "None None");
+    }
+
+    /// A user keeps at most `MAX_SESSIONS_PER_USER`; the oldest ends first.
+    #[tokio::test]
+    async fn a_users_sessions_are_capped() {
+        use crate::sessions::MAX_SESSIONS_PER_USER;
+        let store = store();
+        let first = store.login("u1", &Session::new()).await.unwrap();
+        for _ in 0..MAX_SESSIONS_PER_USER {
+            store.login("u1", &Session::new()).await.unwrap();
+        }
+        assert_eq!(
+            store.sessions_of("u1").await.unwrap().len(),
+            MAX_SESSIONS_PER_USER
+        );
+        assert!(store.load(&first).await.unwrap().is_none(), "oldest kept");
+    }
+
+    /// Under tenancy, a layer with no tenant context refuses rather than
+    /// sharing one session space across tenants.
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn no_tenant_context_is_refused_under_tenancy() {
+        let app = axum::Router::new()
+            .route("/get", get(|| async { "ok" }))
+            .layer(SessionLayer::new(store()));
+        let req = Request::builder().uri("/get").body(Body::empty()).unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
     /// Under tenancy a session saved for one tenant never loads for another,
     /// and a request whose tenant failed to resolve gets no session.
     #[cfg(feature = "tenancy")]
@@ -668,7 +797,11 @@ mod tests {
                     |s: CurrentSession| async move { s.login("u1").await.map(|()| "in").unwrap() },
                 ),
             )
-            .layer(SessionLayer::new(store()).with_csrf(CsrfConfig::default()));
+            .layer(
+                SessionLayer::new(store())
+                    .allow_global()
+                    .with_csrf(CsrfConfig::default()),
+            );
         let (token, set) = send(&app, "GET", "/token", None).await;
         let id = sid(&set.unwrap());
         let hdr = |t: &str| ("x-csrf-token", t.to_owned());

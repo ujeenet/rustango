@@ -99,7 +99,7 @@ fn warn_forwarded_but_unresolved(headers: &axum::http::HeaderMap) {
         || headers.contains_key("forwarded");
     if forwarded && !WARNED.swap(true, Ordering::Relaxed) {
         tracing::warn!(
-            target: "rustango::rate_limit",
+            target: "rustango::real_ip",
             "a forwarding header arrived but no trusted client address, so the \
              connecting address is used and EVERY client behind that proxy looks \
              the same (one rate-limit bucket, one IP in logs and filters). Mount \
@@ -111,11 +111,11 @@ fn warn_forwarded_but_unresolved(headers: &axum::http::HeaderMap) {
 }
 
 /// Extractor for [`client_ip`]. Fails with `500` when no address is known
-/// (the server runs without connect info); take `Option<ClientIp>` to allow that.
+/// (the server runs without connect info); take `Option<ClientAddr>` to allow that.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ClientIp(pub IpAddr);
+pub struct ClientAddr(pub IpAddr);
 
-impl<S: Send + Sync> axum::extract::FromRequestParts<S> for ClientIp {
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for ClientAddr {
     type Rejection = (axum::http::StatusCode, &'static str);
 
     async fn from_request_parts(
@@ -131,7 +131,7 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for ClientIp {
     }
 }
 
-impl<S: Send + Sync> axum::extract::OptionalFromRequestParts<S> for ClientIp {
+impl<S: Send + Sync> axum::extract::OptionalFromRequestParts<S> for ClientAddr {
     type Rejection = std::convert::Infallible;
 
     async fn from_request_parts(
@@ -724,17 +724,17 @@ mod tests {
         assert!(extract(&r, &HeaderStrategy::XRealIp).is_none());
     }
 
-    /// `ClientIp` takes the trusted hop, ignores a forged header from an
+    /// `ClientAddr` takes the trusted hop, ignores a forged header from an
     /// untrusted peer, and is `None` as an `Option` without connect info.
     #[tokio::test]
     async fn client_ip_extractor_trusts_only_named_proxies() {
         use axum::routing::get;
         use tower::ServiceExt;
 
-        async fn handler(ip: Option<ClientIp>) -> String {
-            ip.map_or_else(|| "-".to_owned(), |ClientIp(ip)| ip.to_string())
+        async fn handler(ip: Option<ClientAddr>) -> String {
+            ip.map_or_else(|| "-".to_owned(), |ClientAddr(ip)| ip.to_string())
         }
-        async fn strict(ClientIp(ip): ClientIp) -> String {
+        async fn strict(ClientAddr(ip): ClientAddr) -> String {
             ip.to_string()
         }
         let app = Router::new()

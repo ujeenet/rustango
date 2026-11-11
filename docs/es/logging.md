@@ -149,9 +149,11 @@ Cada evento lleva un **target**, y es contra eso que casa
 | `rustango::passkey` | Desafíos de passkey rechazados por el caché |
 | `rustango::passwords` | Actualización de hashes de contraseña al iniciar sesión |
 | `rustango::rate_limit` | Limitación de tasa |
+| `rustango::real_ip` | Cabeceras reenviadas sin proxies de confianza |
 | `rustango::request_timeout` | Timeout por petición |
 | `rustango::scheduler` | Cron / tareas programadas |
 | `rustango::server` | Arranque y apagado del servidor |
+| `rustango::sessions` | Fallos del almacén de sesiones en `SessionLayer` |
 | `rustango::shutdown` | Manejo de señales y hooks de apagado |
 | `rustango::sql` | Ejecución de consultas |
 | `rustango::sql::lock` | Cláusulas de bloqueo de fila |

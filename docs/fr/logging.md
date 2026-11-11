@@ -151,9 +151,11 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::passkey` | Défis passkey refusés par le cache |
 | `rustango::passwords` | Mise à niveau des hachages de mot de passe à la connexion |
 | `rustango::rate_limit` | Limitation de débit |
+| `rustango::real_ip` | En-têtes transférés sans proxy de confiance |
 | `rustango::request_timeout` | Délai par requête |
 | `rustango::scheduler` | Cron / tâches planifiées |
 | `rustango::server` | Démarrage et arrêt du serveur |
+| `rustango::sessions` | Échecs du stockage de sessions dans `SessionLayer` |
 | `rustango::shutdown` | Gestion des signaux et hooks d'arrêt |
 | `rustango::sql` | Exécution des requêtes |
 | `rustango::sql::lock` | Clauses de verrou de ligne |

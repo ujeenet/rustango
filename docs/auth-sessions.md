@@ -106,7 +106,11 @@ async fn me(session: CurrentSession) -> String {
 - Options: `cookie_name`, `cookie_path`, `cookie_domain`, `same_site`,
   `allow_insecure_for_dev()` (plain-HTTP dev only) and `rolling()` (renew the
   TTL and cookie on every request).
-- Under tenancy the layer scopes the store to the request's tenant.
+- Under tenancy the layer scopes the store to the request's tenant. A request
+  with no tenant context gets a 503; `allow_global()` serves it from the
+  platform-wide space instead.
+- A request never writes back a session that ended while it ran (revoked,
+  or logged out elsewhere): the cookie is removed instead.
 - For a CSRF token kept in the session, use `SessionLayer::with_csrf` — see
   [CSRF](security.md#protecting-against-csrf).
 
@@ -129,7 +133,11 @@ store.revoke_all(&user_id, session.id().as_deref()).await?; // all but this one
 `key` names a session in listings; it is not the session id, so a listing never
 leaks a usable cookie. `revoke_all` also ends sessions the listing missed (two
 logins of one user at the same moment can drop an entry), because it bumps the
-user's revocation generation and older sessions stop loading.
+user's revocation generation and older sessions stop loading. The kept session
+stays valid through the request's own save, `cycle_id()` included.
+
+A user keeps at most `MAX_SESSIONS_PER_USER` (100) sessions; a login past it
+ends the oldest.
 
 ---
 

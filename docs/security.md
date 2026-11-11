@@ -262,16 +262,16 @@ A request with no `ConnectInfo` is refused by `allow_only` and let through by `b
 ## Reading the client IP
 
 For audit logs, per-IP limits of your own, or "new sign-in from" emails, take the
-`ClientIp` extractor (or call `real_ip::client_ip(&parts.extensions, &parts.headers)`).
+`ClientAddr` extractor (or call `real_ip::client_ip(&parts.extensions, &parts.headers)`).
 It is the address the rate limiter and IP filter use: the `TrustedRealIp` when a
 proxy named in `RealIpLayer::trust_proxies` forwarded the request, else the
 connecting socket. A forwarded header from anyone else is ignored.
 
 ```rust
-use rustango::real_ip::ClientIp;
+use rustango::real_ip::ClientAddr;
 
-async fn sign_in(ClientIp(ip): ClientIp) { /* … */ }        // 500 without ConnectInfo
-async fn audit(ip: Option<ClientIp>) { /* … */ }             // None without ConnectInfo
+async fn sign_in(ClientAddr(ip): ClientAddr) { /* … */ }        // 500 without ConnectInfo
+async fn audit(ip: Option<ClientAddr>) { /* … */ }             // None without ConnectInfo
 ```
 
 ---

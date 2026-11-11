@@ -62,6 +62,8 @@ const DEFAULT_TTL_SECS: u64 = 60 * 60 * 24 * 14; // 2 weeks
 const ID_BYTES: usize = 24; // 192 bits, base64 → 32 chars
 /// The session key holding who logged in; set only by [`SessionStore::login`].
 const AUTH_KEY: &str = "_auth";
+/// Most live sessions a user keeps; a login past it ends the oldest.
+pub const MAX_SESSIONS_PER_USER: usize = 100;
 
 /// Who a session belongs to and the user's revocation generation at login.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -292,9 +294,31 @@ impl SessionStore {
         let id = self.save(&session).await?;
         let mut index = self.live_index(user).await?;
         index.push(IndexEntry { id: id.clone(), at });
+        // Oldest first: a client that never logs out cannot grow it without end.
+        let over = index.len().saturating_sub(MAX_SESSIONS_PER_USER);
+        for old in index.drain(..over) {
+            self.destroy(&old.id).await?;
+        }
         self.write_index(user, &index).await?;
         session.dirty = false;
         Ok((id, session))
+    }
+
+    /// Before a request writes `session` back under `id`: take the stored
+    /// login mark (a `revoke_all` that kept it moved its generation), or
+    /// `false` when the stored session has ended, so it is never revived.
+    pub(crate) async fn refresh_mark(
+        &self,
+        id: &str,
+        session: &mut Session,
+    ) -> Result<bool, SessionError> {
+        let Some(stored) = self.load(id).await? else {
+            return Ok(false);
+        };
+        if let Some(mark) = stored.data.get(AUTH_KEY) {
+            session.data.insert(AUTH_KEY.to_owned(), mark.clone());
+        }
+        Ok(true)
     }
 
     /// Move `session` from `old` to a new id; a user's listing follows it.
@@ -408,16 +432,29 @@ impl SessionStore {
             .unwrap_or_default())
     }
 
-    /// The index without entries whose session ended or moved to another user.
+    /// The index without entries whose session ended, was revoked or moved
+    /// to another user. One generation read and one batch read.
     async fn live_index(&self, user: &str) -> Result<Vec<IndexEntry>, SessionError> {
-        let mut live = Vec::new();
-        for entry in self.read_index(user).await? {
-            let session = self.load(&entry.id).await?;
-            if session.is_some_and(|s| s.user().as_deref() == Some(user)) {
-                live.push(entry);
-            }
+        let index = self.read_index(user).await?;
+        if index.is_empty() {
+            return Ok(index);
         }
-        Ok(live)
+        let gen = self.generation(user).await?;
+        let keys: Vec<String> = index.iter().map(|e| self.cache_key(&e.id)).collect();
+        let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+        let found = self.cache.get_many(&refs).await?;
+        Ok(index
+            .into_iter()
+            .zip(&keys)
+            .filter(|(_, key)| {
+                found
+                    .get(*key)
+                    .and_then(|raw| serde_json::from_str::<Session>(raw).ok())
+                    .and_then(|s| s.get::<AuthMark>(AUTH_KEY))
+                    .is_some_and(|m| m.user == user && m.gen == gen)
+            })
+            .map(|(e, _)| e)
+            .collect())
     }
 
     async fn write_index(&self, user: &str, index: &[IndexEntry]) -> Result<(), SessionError> {
