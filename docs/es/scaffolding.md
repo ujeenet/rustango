@@ -146,6 +146,8 @@ Una plantilla enciende un conjunto razonable; `--features` añade las opciones q
 | `email-smtp` | Transporte SMTP para el framework de email |
 | `mcp` | Servidor Model Context Protocol para agentes de IA (solo plantilla tenant) |
 | `http2` | Servir HTTP/2 sin cifrar (h2c) junto a HTTP/1 |
+| `static-files` / `security-headers` | Servir archivos estáticos con nombres de assets con hash / cabeceras de seguridad y constructor de CSP, sin el admin |
+| `test-client` | Cliente HTTP de pruebas en proceso, sin el admin |
 | `testkit` / `test_utils` | Constructores de esquema, factorías y constructores solo para tests |
 
 `--features tenancy` solo elige `--template tenant`; con otra plantilla se rechaza, porque solo el `main.rs` de la plantilla tenant sirve la multi-tenancy. `cargo rustango new --help` imprime esta lista. Los backends **no** son válidos aquí — usa `--backend`. Nombrar uno como funcionalidad se rechaza, porque fijaría el backend del framework mientras la funcionalidad propia del proyecto quedaría apagada, y `#[derive(Model)]` alinea lo que emite con las funcionalidades del proyecto.

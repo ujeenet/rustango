@@ -146,6 +146,8 @@ A template turns on a sensible set; `--features` adds the opt-ins none of them r
 | `email-smtp` | SMTP transport for the email framework |
 | `mcp` | Model Context Protocol server for AI agents (tenant template only) |
 | `http2` | Serve cleartext HTTP/2 (h2c) next to HTTP/1 |
+| `static-files` / `security-headers` | Static file serving with hashed asset names / security headers and the CSP builder, without the admin |
+| `test-client` | In-process HTTP test client, without the admin |
 | `testkit` / `test_utils` | Test-only schema builders, factories, and constructors |
 
 `--features tenancy` alone picks `--template tenant`; with another template it is refused, because only the tenant `main.rs` serves tenancy. `cargo rustango new --help` prints this list. Backends are **not** valid here — pass `--backend` instead; naming one as a feature is refused, because it would pin the framework's backend while the project's own feature stayed off, and `#[derive(Model)]` gates its emissions on the project's features.

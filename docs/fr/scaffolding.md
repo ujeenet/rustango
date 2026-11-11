@@ -146,6 +146,8 @@ Un template active un ensemble raisonnable ; `--features` ajoute les options qu'
 | `email-smtp` | Transport SMTP pour le framework e-mail |
 | `mcp` | Serveur Model Context Protocol pour les agents IA (modèle tenant uniquement) |
 | `http2` | Servir HTTP/2 en clair (h2c) à côté de HTTP/1 |
+| `static-files` / `security-headers` | Service de fichiers statiques avec noms d'assets hachés / en-têtes de sécurité et constructeur de CSP, sans l'admin |
+| `test-client` | Client HTTP de test en processus, sans l'admin |
 | `testkit` / `test_utils` | Constructeurs de schéma, fabriques et constructeurs réservés aux tests |
 
 `--features tenancy` seul choisit `--template tenant` ; avec un autre template il est refusé, car seul le `main.rs` du template tenant sert la multi-tenancy. `cargo rustango new --help` affiche cette liste. Les backends ne sont **pas** valides ici — passez par `--backend`. En nommer un comme fonctionnalité est refusé : cela figerait le backend du framework alors que la fonctionnalité propre au projet resterait éteinte, et `#[derive(Model)]` aligne ses émissions sur les fonctionnalités du projet.

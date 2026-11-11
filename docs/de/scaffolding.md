@@ -150,6 +150,8 @@ Eine Vorlage schaltet einen sinnvollen Satz ein; `--features` ergänzt die Opt-i
 | `email-smtp` | SMTP-Transport für das E-Mail-Framework |
 | `mcp` | Model-Context-Protocol-Server für KI-Agenten (nur Tenant-Template) |
 | `http2` | Klartext-HTTP/2 (h2c) neben HTTP/1 bereitstellen |
+| `static-files` / `security-headers` | Auslieferung statischer Dateien mit gehashten Asset-Namen / Security-Header und CSP-Builder, ohne Admin |
+| `test-client` | Prozessinterner HTTP-Testclient, ohne Admin |
 | `testkit` / `test_utils` | Nur-Test-Schema-Builder, Factories und Konstruktoren |
 
 `--features tenancy` allein wählt `--template tenant`; mit einer anderen Vorlage wird es abgelehnt, weil nur die `main.rs` der Tenant-Vorlage Tenancy bedient. `cargo rustango new --help` gibt diese Liste aus. Backends sind hier **nicht** gültig — nimm dafür `--backend`. Eines als Feature zu nennen wird abgelehnt, weil es das Backend des Frameworks festnageln würde, während das eigene Feature des Projekts aus bliebe, und `#[derive(Model)]` seine Ausgaben an den Features des Projekts ausrichtet.
