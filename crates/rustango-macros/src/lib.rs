@@ -96,6 +96,8 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
 ///   `serializer` feature.
 /// * `permissions(list = "...", retrieve = "...", create = "...",
 ///   update = "...", destroy = "...")` — codenames required per action.
+/// * `filter_backend = expr` — a `ViewSetFilter` (a unit struct, a call
+///   or a closure), as `ViewSet::filter_backend`; repeat it to stack.
 #[proc_macro_derive(ViewSet, attributes(viewset))]
 pub fn derive_viewset(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -214,6 +216,82 @@ pub fn embed_migrations(input: TokenStream) -> TokenStream {
     expand_embed_migrations(input.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
+}
+
+/// Compile a static directory into the binary as a
+/// `rustango::static_files::EmbeddedDir`. The path is relative to the
+/// crate's `Cargo.toml`; names starting with `.` are left out.
+///
+/// ```ignore
+/// static ASSETS: rustango::static_files::EmbeddedDir = rustango::embed_static!("static");
+/// ```
+///
+/// Edits to embedded files rebuild the crate; a new file needs a
+/// `build.rs` with `println!("cargo:rerun-if-changed=static");`.
+#[proc_macro]
+pub fn embed_static(input: TokenStream) -> TokenStream {
+    expand_embed_static(input.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+fn expand_embed_static(input: TokenStream2) -> syn::Result<TokenStream2> {
+    let lit: LitStr = syn::parse2(input)?;
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").map_err(|_| {
+        syn::Error::new(
+            lit.span(),
+            "embed_static! needs a Cargo build (CARGO_MANIFEST_DIR not set)",
+        )
+    })?;
+    let root = std::path::Path::new(&manifest).join(lit.value());
+    if !root.is_dir() {
+        return Err(syn::Error::new(
+            lit.span(),
+            format!("embed_static!: {} is not a directory", root.display()),
+        ));
+    }
+    let mut files = Vec::new();
+    walk_static(&root, "", &mut files)
+        .map_err(|e| syn::Error::new(lit.span(), format!("embed_static!: {e}")))?;
+    files.sort();
+    let entries = files.iter().map(|(rel, abs)| {
+        quote! { (#rel, ::core::include_bytes!(#abs) as &'static [u8]) }
+    });
+    let root_path = rustango_root();
+    Ok(quote! {
+        #root_path::static_files::EmbeddedDir::__new(&[ #( #entries ),* ])
+    })
+}
+
+/// `(relative path, absolute path)` of every non-hidden file under `dir`.
+fn walk_static(
+    dir: &std::path::Path,
+    rel: &str,
+    out: &mut Vec<(String, String)>,
+) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.starts_with('.') {
+            continue;
+        }
+        let path = if rel.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{rel}/{name}")
+        };
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            walk_static(&entry.path(), &path, out)?;
+        } else if kind.is_file() {
+            let abs = entry.path().to_str().map(str::to_owned).ok_or_else(|| {
+                std::io::Error::other(format!("{} is not UTF-8", entry.path().display()))
+            })?;
+            out.push((path, abs));
+        }
+    }
+    Ok(())
 }
 
 /// `Q!()` — `Model.field__lookup = value` filter syntax, resolved at
@@ -8036,7 +8114,10 @@ fn column_const_tokens(module_ident: &syn::Ident, entries: &[ColumnEntry]) -> To
     let lines = entries.iter().map(|e| {
         let ident = &e.ident;
         let col_ty = column_type_ident(ident);
+        // Documented so apps with `#![deny(missing_docs)]` build.
+        let doc = format!("Typed column for the `{}` field.", e.name);
         quote! {
+            #[doc = #doc]
             #[allow(non_upper_case_globals)]
             pub const #ident: #module_ident::#col_ty = #module_ident::#col_ty;
         }
@@ -12965,6 +13046,8 @@ fn render_form_validators(
 
 struct ViewSetAttrs {
     model: syn::Path,
+    /// `filter_backend = expr`, in order.
+    filter_backends: Vec<syn::Expr>,
     fields: Vec<String>,
     filter_fields: Vec<String>,
     search_fields: Vec<String>,
@@ -13042,6 +13125,9 @@ fn expand_viewset(input: &DeriveInput) -> syn::Result<TokenStream2> {
         quote!(.ordering(&[ #(#pairs),* ]))
     };
 
+    let filter_backends = &attrs.filter_backends;
+    let filter_backend_calls = quote!( #( .filter_backend(#filter_backends) )* );
+
     let page_size_call = if let Some(n) = attrs.page_size {
         quote!(.page_size(#n))
     } else {
@@ -13112,6 +13198,7 @@ fn expand_viewset(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     &[ #(#field_lits),* ],
                 )
                     #filter_fields_call
+                    #filter_backend_calls
                     #search_fields_call
                     #ordering_call
                     #page_size_call
@@ -13136,6 +13223,7 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
     let mut allow_anonymous = false;
     let mut perms = ViewSetPermsAttrs::default();
     let mut serializer: Option<syn::Path> = None;
+    let mut filter_backends: Vec<syn::Expr> = Vec::new();
 
     for attr in &input.attrs {
         if !attr.path().is_ident("viewset") {
@@ -13155,6 +13243,10 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
             if meta.path.is_ident("fields") {
                 let s: LitStr = meta.value()?.parse()?;
                 fields = Some(split_field_list(&s.value()));
+                return Ok(());
+            }
+            if meta.path.is_ident("filter_backend") {
+                filter_backends.push(meta.value()?.parse()?);
                 return Ok(());
             }
             if meta.path.is_ident("filter_fields") {
@@ -13212,7 +13304,7 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
             }
             Err(meta.error(
                 "unknown viewset attribute (supported: model, fields, filter_fields, \
-                 search_fields, ordering, page_size, read_only, allow_anonymous, serializer, \
+                 filter_backend, search_fields, ordering, page_size, read_only, allow_anonymous, serializer, \
                  permissions(...))",
             ))
         })?;
@@ -13231,6 +13323,7 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
 
     Ok(ViewSetAttrs {
         model,
+        filter_backends,
         fields,
         filter_fields,
         search_fields,

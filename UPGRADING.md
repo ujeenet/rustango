@@ -158,6 +158,7 @@ untouched.
 - `BodyLimitLayer` and `RequestTimeoutLayer` gain a private field: build them with `new(..)`, not a struct literal.
 - `_http_layers` turns on axum's `matched-path` feature, which the route caps key on.
 - S3 and Azure failures with an HTTP status are now `StorageError::Status` instead of `Io`; the message is unchanged. Match `Status` (or call `http_status()`) where you matched `Io` for these.
+- `passkey::RegistrationOutcome` gains `user_verified` and is now `#[non_exhaustive]`: build it only through `verify_registration`.
 
 ## 0.65.0
 

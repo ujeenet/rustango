@@ -6,7 +6,15 @@ use axum::response::Response;
 
 /// The bearer token in `headers`. The scheme is case-insensitive
 /// (RFC 9110 §11.1); an empty token is none.
-pub(crate) fn token(headers: &HeaderMap) -> Option<&str> {
+///
+/// ```
+/// use axum::http::{header, HeaderMap};
+/// let mut h = HeaderMap::new();
+/// h.insert(header::AUTHORIZATION, "bearer abc".parse().unwrap());
+/// assert_eq!(rustango::bearer::token(&h), Some("abc"));
+/// ```
+#[must_use]
+pub fn token(headers: &HeaderMap) -> Option<&str> {
     let value = headers.get(AUTHORIZATION)?.to_str().ok()?;
     let (scheme, rest) = value.trim_start().split_once(' ')?;
     let token = rest.trim();
@@ -14,12 +22,20 @@ pub(crate) fn token(headers: &HeaderMap) -> Option<&str> {
 }
 
 /// What the client sent, which picks the challenge (RFC 6750 §3).
+#[cfg_attr(
+    not(any(feature = "tenancy", feature = "admin", feature = "mcp")),
+    allow(dead_code)
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Sent {
     Nothing,
     BadToken,
 }
 
+#[cfg_attr(
+    not(any(feature = "tenancy", feature = "admin", feature = "mcp")),
+    allow(dead_code)
+)]
 impl Sent {
     /// From the request's headers.
     pub(crate) fn of(headers: &HeaderMap) -> Self {
@@ -32,6 +48,10 @@ impl Sent {
 }
 
 /// `resp` with a `Bearer` challenge, when it is a 401 that has none.
+#[cfg_attr(
+    not(any(feature = "tenancy", feature = "admin", feature = "mcp")),
+    allow(dead_code)
+)]
 pub(crate) fn challenge(mut resp: Response, sent: Sent) -> Response {
     if resp.status() == StatusCode::UNAUTHORIZED && !resp.headers().contains_key(WWW_AUTHENTICATE) {
         let value = match sent {

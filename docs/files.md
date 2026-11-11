@@ -727,6 +727,47 @@ tables, whenever you run `migrate` / provision a tenant. There is no lazy
 
 ---
 
+## Static assets: hashed names, SRI and one-file images
+
+Your own CSS, JS and WASM are not uploads; serve them with
+`static_files::StaticFiles`. Apps without `admin` turn on just the
+`static-files` feature (and `security-headers`, `test-client` as needed).
+
+`AssetManifest` gives each file a content-hashed name and a Subresource
+Integrity hash. Mount it with the files so the hashed names are served
+`immutable` for a year, and link to them from templates:
+
+```rust
+use rustango::static_files::{static_router, AssetManifest, StaticFiles};
+
+let manifest = AssetManifest::from_dir("static")?.prefix("/static");
+let app = Router::new()
+    .nest("/static", static_router(StaticFiles::new("static").manifest(manifest.clone())));
+manifest.register_tera(&mut tera); // asset_url(name=...) and asset_integrity(name=...)
+```
+
+```html
+<script src="{{ asset_url(name='js/app.js') }}"
+        integrity="{{ asset_integrity(name='js/app.js') }}" crossorigin="anonymous"></script>
+```
+
+The manifest is built from the files as they are at boot, so it never goes
+stale; `to_json()` writes it for a bundler. To ship one binary with no
+`static/` folder, compile the directory in:
+
+```rust
+use rustango::static_files::{AssetManifest, EmbeddedDir, StaticFiles};
+
+static ASSETS: EmbeddedDir = rustango::embed_static!("static");
+let manifest = AssetManifest::from_embedded(&ASSETS).prefix("/static");
+let files = StaticFiles::embedded(ASSETS).manifest(manifest);
+```
+
+`embed_static!` leaves out names starting with `.`. Edits rebuild the crate; a
+new file needs `println!("cargo:rerun-if-changed=static");` in `build.rs`.
+
+---
+
 ## Reference
 
 **`Storage` trait:** `save(key, &bytes)` · `load(key)` · `delete(key)` ·

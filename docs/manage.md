@@ -40,6 +40,13 @@ and unlocks the multi-tenant commands.
 > (or pre-v0.16 ones) still ship `src/bin/manage.rs`. Those use
 > `cargo run --bin manage -- <verb>`. Both forms accept the same verbs.
 
+Two hooks run only for `runserver`, after migrations and before the
+port is bound; an error stops the start. `.seed(|pool| ..)` inserts
+demo rows (it runs on every start, so make it idempotent), and
+`.before_serve(|pool| ..)` checks the app can serve, such as "the master
+key opens every tenant key". Both get the registry pool under
+`.tenancy()`, else the app's pool; `seed` runs first.
+
 Every command prints to stdout and exits with a non-zero code on
 validation or I/O errors. Run `cargo run -- --help` (or `<verb> --help`)
 for inline usage.

@@ -27,6 +27,7 @@ pub fn generate_challenge() -> Vec<u8> {
 /// What a verified registration yields — store these via
 /// [`super::register`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RegistrationOutcome {
     /// base64url (no pad) of the raw credential id.
     pub credential_id: String,
@@ -34,6 +35,51 @@ pub struct RegistrationOutcome {
     pub cose_public_key: Vec<u8>,
     /// The authenticator's initial signature counter.
     pub sign_count: i64,
+    /// The UV flag: the user passed a PIN or biometric, not just a touch.
+    pub user_verified: bool,
+}
+
+impl RegistrationOutcome {
+    /// Refuse the registration when `policy` is [`UserVerification::Required`]
+    /// and the authenticator did not verify the user.
+    ///
+    /// # Errors
+    /// [`PasskeyError::UserNotVerified`].
+    pub fn require(self, policy: UserVerification) -> Result<Self, PasskeyError> {
+        policy.check(self.user_verified).map(|()| self)
+    }
+}
+
+/// Whether the authenticator must verify the user (PIN or biometric).
+/// Send it in the options, then check it on the outcome with `require`:
+/// the browser's answer is not proof.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UserVerification {
+    /// Fail unless the user is verified. Needed to trust PRF output.
+    Required,
+    /// Verify when the authenticator can.
+    #[default]
+    Preferred,
+    /// Skip verification when possible.
+    Discouraged,
+}
+
+impl UserVerification {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Required => "required",
+            Self::Preferred => "preferred",
+            Self::Discouraged => "discouraged",
+        }
+    }
+
+    fn check(self, user_verified: bool) -> Result<(), PasskeyError> {
+        if self == Self::Required && !user_verified {
+            return Err(PasskeyError::UserNotVerified);
+        }
+        Ok(())
+    }
 }
 
 /// Verify a registration response (WebAuthn §7.1, `none`/self attestation).
@@ -71,6 +117,7 @@ pub fn verify_registration(
     if !ad.user_present() {
         return Err(PasskeyError::UserNotPresent);
     }
+    let user_verified = ad.user_verified();
     let attested = ad.attested.ok_or_else(|| {
         PasskeyError::AuthData("registration authData has no attested credential data".into())
     })?;
@@ -83,6 +130,7 @@ pub fn verify_registration(
         credential_id: verify::b64url_encode(&attested.credential_id),
         cose_public_key: attested.cose_public_key,
         sign_count: i64::from(ad.sign_count),
+        user_verified,
     })
 }
 
@@ -143,10 +191,22 @@ pub struct AuthenticationOutcome {
     pub user_verified: bool,
 }
 
+impl AuthenticationOutcome {
+    /// Refuse the sign-in when `policy` is [`UserVerification::Required`]
+    /// and the authenticator did not verify the user.
+    ///
+    /// # Errors
+    /// [`PasskeyError::UserNotVerified`].
+    pub fn require(self, policy: UserVerification) -> Result<Self, PasskeyError> {
+        policy.check(self.user_verified).map(|()| self)
+    }
+}
+
 /// `PublicKeyCredentialCreationOptions` JSON for
 /// `navigator.credentials.create({ publicKey })`. `user_id` is encoded
 /// base64url; `exclude` lists the user's existing credential ids (their
 /// stored base64url form) so the authenticator won't double-register.
+/// [`RegistrationOptions`] adds user verification and PRF.
 #[must_use]
 pub fn registration_options_json(
     rp_id: &str,
@@ -156,47 +216,224 @@ pub fn registration_options_json(
     challenge: &[u8],
     exclude_credential_ids: &[String],
 ) -> serde_json::Value {
-    let exclude: Vec<serde_json::Value> = exclude_credential_ids
-        .iter()
-        .map(|id| serde_json::json!({ "type": "public-key", "id": id }))
-        .collect();
-    serde_json::json!({
-        "challenge": verify::b64url_encode(challenge),
-        "rp": { "id": rp_id, "name": rp_name },
-        "user": {
-            "id": verify::b64url_encode(user_id),
-            "name": user_name,
-            "displayName": user_name,
-        },
-        // -7 = ES256 (the only algorithm this slice verifies).
-        "pubKeyCredParams": [ { "type": "public-key", "alg": -7 } ],
-        "timeout": 60000,
-        "attestation": "none",
-        "excludeCredentials": exclude,
-        "authenticatorSelection": { "userVerification": "preferred", "residentKey": "preferred" },
-    })
+    RegistrationOptions::new(rp_id, rp_name, user_id, user_name, challenge)
+        .exclude(exclude_credential_ids)
+        .to_json()
 }
 
 /// `PublicKeyCredentialRequestOptions` JSON for
 /// `navigator.credentials.get({ publicKey })`. `allow_credential_ids` are
 /// the user's stored base64url credential ids.
+/// [`AuthenticationOptions`] adds user verification and PRF.
 #[must_use]
 pub fn authentication_options_json(
     rp_id: &str,
     challenge: &[u8],
     allow_credential_ids: &[String],
 ) -> serde_json::Value {
-    let allow: Vec<serde_json::Value> = allow_credential_ids
-        .iter()
+    AuthenticationOptions::new(rp_id, challenge)
+        .allow(allow_credential_ids)
+        .to_json()
+}
+
+/// Options for `navigator.credentials.create()`, with user verification
+/// and the PRF extension.
+///
+/// ```
+/// use rustango::passkey::{RegistrationOptions, UserVerification};
+/// let opts = RegistrationOptions::new("example.com", "Example", b"u1", "alice", b"chal")
+///     .user_verification(UserVerification::Required)
+///     .prf()
+///     .to_json();
+/// assert_eq!(opts["authenticatorSelection"]["userVerification"], "required");
+/// assert!(opts["extensions"]["prf"].is_object());
+/// ```
+#[derive(Debug, Clone)]
+#[must_use]
+pub struct RegistrationOptions<'a> {
+    rp_id: &'a str,
+    rp_name: &'a str,
+    user_id: &'a [u8],
+    user_name: &'a str,
+    challenge: &'a [u8],
+    exclude: &'a [String],
+    user_verification: UserVerification,
+    prf: bool,
+}
+
+impl<'a> RegistrationOptions<'a> {
+    /// Options for one user; see [`registration_options_json`] for the fields.
+    pub fn new(
+        rp_id: &'a str,
+        rp_name: &'a str,
+        user_id: &'a [u8],
+        user_name: &'a str,
+        challenge: &'a [u8],
+    ) -> Self {
+        Self {
+            rp_id,
+            rp_name,
+            user_id,
+            user_name,
+            challenge,
+            exclude: &[],
+            user_verification: UserVerification::default(),
+            prf: false,
+        }
+    }
+
+    /// The user's existing credential ids, so none is registered twice.
+    pub fn exclude(mut self, credential_ids: &'a [String]) -> Self {
+        self.exclude = credential_ids;
+        self
+    }
+
+    /// Ask for user verification; check it with [`RegistrationOutcome::require`].
+    pub fn user_verification(mut self, policy: UserVerification) -> Self {
+        self.user_verification = policy;
+        self
+    }
+
+    /// Ask the authenticator to enable the PRF extension (`prf: {}`). Read
+    /// `getClientExtensionResults().prf.enabled` in the browser.
+    pub fn prf(mut self) -> Self {
+        self.prf = true;
+        self
+    }
+
+    /// The JSON the browser needs.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut v = serde_json::json!({
+            "challenge": verify::b64url_encode(self.challenge),
+            "rp": { "id": self.rp_id, "name": self.rp_name },
+            "user": {
+                "id": verify::b64url_encode(self.user_id),
+                "name": self.user_name,
+                "displayName": self.user_name,
+            },
+            // -7 = ES256 (the only algorithm this slice verifies).
+            "pubKeyCredParams": [ { "type": "public-key", "alg": -7 } ],
+            "timeout": 60000,
+            "attestation": "none",
+            "excludeCredentials": credential_list(self.exclude),
+            "authenticatorSelection": {
+                "userVerification": self.user_verification.as_str(),
+                "residentKey": "preferred",
+            },
+        });
+        if self.prf {
+            v["extensions"] = serde_json::json!({ "prf": {} });
+        }
+        v
+    }
+}
+
+/// Options for `navigator.credentials.get()`, with user verification and
+/// PRF salts. The PRF output stays in the browser; the app stores the
+/// per-credential salt.
+///
+/// ```
+/// use rustango::passkey::{AuthenticationOptions, UserVerification};
+/// let ids = ["cred1".to_owned()];
+/// let opts = AuthenticationOptions::new("example.com", b"chal")
+///     .allow(&ids)
+///     .user_verification(UserVerification::Required)
+///     .prf_salt(b"salt-for-everyone")
+///     .prf_salt_for("cred1", b"salt-for-cred1")
+///     .to_json();
+/// assert_eq!(opts["userVerification"], "required");
+/// assert!(opts["extensions"]["prf"]["eval"]["first"].is_string());
+/// assert!(opts["extensions"]["prf"]["evalByCredential"]["cred1"]["first"].is_string());
+/// ```
+#[derive(Debug, Clone)]
+#[must_use]
+pub struct AuthenticationOptions<'a> {
+    rp_id: &'a str,
+    challenge: &'a [u8],
+    allow: &'a [String],
+    user_verification: UserVerification,
+    prf_salt: Option<&'a [u8]>,
+    prf_by_credential: Vec<(&'a str, &'a [u8])>,
+}
+
+impl<'a> AuthenticationOptions<'a> {
+    /// Options for one sign-in; see [`authentication_options_json`].
+    pub fn new(rp_id: &'a str, challenge: &'a [u8]) -> Self {
+        Self {
+            rp_id,
+            challenge,
+            allow: &[],
+            user_verification: UserVerification::default(),
+            prf_salt: None,
+            prf_by_credential: Vec::new(),
+        }
+    }
+
+    /// The user's stored credential ids; empty lets any passkey answer.
+    pub fn allow(mut self, credential_ids: &'a [String]) -> Self {
+        self.allow = credential_ids;
+        self
+    }
+
+    /// Ask for user verification; check it with [`AuthenticationOutcome::require`].
+    pub fn user_verification(mut self, policy: UserVerification) -> Self {
+        self.user_verification = policy;
+        self
+    }
+
+    /// PRF input for any credential (`prf.eval.first`).
+    pub fn prf_salt(mut self, salt: &'a [u8]) -> Self {
+        self.prf_salt = Some(salt);
+        self
+    }
+
+    /// PRF input for one credential id (`prf.evalByCredential`), such as
+    /// the salt stored with that credential. Needs it in [`Self::allow`].
+    pub fn prf_salt_for(mut self, credential_id: &'a str, salt: &'a [u8]) -> Self {
+        self.prf_by_credential.push((credential_id, salt));
+        self
+    }
+
+    /// The JSON the browser needs.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut v = serde_json::json!({
+            "challenge": verify::b64url_encode(self.challenge),
+            "rpId": self.rp_id,
+            "timeout": 60000,
+            "userVerification": self.user_verification.as_str(),
+            "allowCredentials": credential_list(self.allow),
+        });
+        let mut prf = serde_json::Map::new();
+        if let Some(salt) = self.prf_salt {
+            prf.insert("eval".into(), prf_values(salt));
+        }
+        if !self.prf_by_credential.is_empty() {
+            let by: serde_json::Map<String, serde_json::Value> = self
+                .prf_by_credential
+                .iter()
+                .map(|(id, salt)| ((*id).to_owned(), prf_values(salt)))
+                .collect();
+            prf.insert("evalByCredential".into(), by.into());
+        }
+        if !prf.is_empty() {
+            v["extensions"] = serde_json::json!({ "prf": prf });
+        }
+        v
+    }
+}
+
+/// `[{ type: "public-key", id }]` for stored base64url ids.
+fn credential_list(ids: &[String]) -> Vec<serde_json::Value> {
+    ids.iter()
         .map(|id| serde_json::json!({ "type": "public-key", "id": id }))
-        .collect();
-    serde_json::json!({
-        "challenge": verify::b64url_encode(challenge),
-        "rpId": rp_id,
-        "timeout": 60000,
-        "userVerification": "preferred",
-        "allowCredentials": allow,
-    })
+        .collect()
+}
+
+/// `{ first: <base64url salt> }`; the browser decodes it to a BufferSource.
+fn prf_values(salt: &[u8]) -> serde_json::Value {
+    serde_json::json!({ "first": verify::b64url_encode(salt) })
 }
 
 /// Pull the `authData` byte string out of an attestationObject CBOR map.
@@ -293,6 +530,12 @@ mod tests {
             verify_registration(&reg_challenge, rp_id, &origins, &reg_client, &att_obj).unwrap();
         assert_eq!(outcome.credential_id, verify::b64url_encode(cred_id));
         assert_eq!(outcome.sign_count, 1);
+        // A touch-only registration fails a `Required` policy.
+        assert!(!outcome.user_verified);
+        assert!(matches!(
+            outcome.clone().require(UserVerification::Required),
+            Err(PasskeyError::UserNotVerified)
+        ));
         // The stored key must verify a signature from `sk`.
         verify::cose_es256_key(&outcome.cose_public_key).unwrap();
 
@@ -385,5 +628,53 @@ mod tests {
         let auth = authentication_options_json("example.com", b"chal", &["abc".to_owned()]);
         assert_eq!(auth["rpId"], "example.com");
         assert_eq!(auth["allowCredentials"][0]["id"], "abc");
+        // The plain helpers keep `preferred` and send no extensions.
+        assert_eq!(
+            reg["authenticatorSelection"]["userVerification"],
+            "preferred"
+        );
+        assert_eq!(auth["userVerification"], "preferred");
+        assert!(reg.get("extensions").is_none() && auth.get("extensions").is_none());
+    }
+
+    #[test]
+    fn prf_and_required_uv_reach_the_options() {
+        let reg = RegistrationOptions::new("example.com", "Example", b"u", "alice", b"chal")
+            .user_verification(UserVerification::Required)
+            .prf()
+            .to_json();
+        assert_eq!(
+            reg["authenticatorSelection"]["userVerification"],
+            "required"
+        );
+        assert_eq!(reg["extensions"], serde_json::json!({ "prf": {} }));
+        let ids = ["c1".to_owned()];
+        let auth = AuthenticationOptions::new("example.com", b"chal")
+            .allow(&ids)
+            .user_verification(UserVerification::Required)
+            .prf_salt(b"s0")
+            .prf_salt_for("c1", b"s1")
+            .to_json();
+        assert_eq!(auth["userVerification"], "required");
+        assert_eq!(
+            auth["extensions"]["prf"],
+            serde_json::json!({
+                "eval": { "first": verify::b64url_encode(b"s0") },
+                "evalByCredential": { "c1": { "first": verify::b64url_encode(b"s1") } },
+            })
+        );
+    }
+
+    /// `Required` refuses an assertion without the UV flag.
+    #[test]
+    fn required_user_verification_refuses_a_touch_only_assertion() {
+        let touch = assert_with(0b0000_0001, 1, 0).unwrap();
+        assert!(matches!(
+            touch.require(UserVerification::Required),
+            Err(PasskeyError::UserNotVerified)
+        ));
+        assert!(touch.require(UserVerification::Preferred).is_ok());
+        let verified = assert_with(0b0000_0101, 1, 0).unwrap();
+        assert!(verified.require(UserVerification::Required).is_ok());
     }
 }

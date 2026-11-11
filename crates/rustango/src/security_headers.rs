@@ -548,6 +548,87 @@ impl CspBuilder {
             .directive("base-uri", &["'self'"])
     }
 
+    /// Strict preset for a same-origin WebAssembly app: WASM may compile
+    /// (`'wasm-unsafe-eval'`) but no JS `eval`, no inline script or style,
+    /// and DOM script sinks need Trusted Types.
+    ///
+    /// ```text
+    /// default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self';
+    /// style-src 'self'; img-src 'self' blob:; media-src 'self' blob:;
+    /// connect-src 'self'; object-src 'none'; base-uri 'none';
+    /// form-action 'self'; frame-ancestors 'none'; require-trusted-types-for 'script'
+    /// ```
+    ///
+    /// Widen it with [`Self::add_source`], [`Self::blob_workers`] and
+    /// [`Self::import_map_hash`]:
+    ///
+    /// ```
+    /// use rustango::security_headers::CspBuilder;
+    /// let html = r#"<script type="importmap">{"imports":{}}</script>"#;
+    /// let csp = CspBuilder::strict_wasm_app()
+    ///     .add_source("connect-src", "https://bucket.example.com")
+    ///     .blob_workers("app-boot")
+    ///     .import_map_hash(html)
+    ///     .build();
+    /// assert!(csp.contains("worker-src 'self' blob:"));
+    /// assert!(csp.contains("trusted-types app-boot"));
+    /// assert!(csp.contains("script-src 'self' 'wasm-unsafe-eval' 'sha256-"));
+    /// ```
+    #[must_use]
+    pub fn strict_wasm_app() -> Self {
+        Self::new()
+            .default_src(&["'none'"])
+            .script_src(&["'self'", "'wasm-unsafe-eval'"])
+            .directive("worker-src", &["'self'"])
+            .style_src(&["'self'"])
+            .img_src(&["'self'", "blob:"])
+            .directive("media-src", &["'self'", "blob:"])
+            .connect_src(&["'self'"])
+            .object_src(&["'none'"])
+            .directive("base-uri", &["'none'"])
+            .directive("form-action", &["'self'"])
+            .frame_ancestors(&["'none'"])
+            .directive("require-trusted-types-for", &["'script'"])
+    }
+
+    /// Append one source to `directive`, keeping the ones already set.
+    #[must_use]
+    pub fn add_source(mut self, directive: &str, source: &str) -> Self {
+        let sources = self.directives.entry(directive.to_owned()).or_default();
+        if !sources.iter().any(|s| s == source) {
+            sources.push(source.to_owned());
+        }
+        self
+    }
+
+    /// Let workers start from `blob:` URLs, which only `policy` (a Trusted
+    /// Types policy name) may mint. Fetch the worker script with SRI and
+    /// have the policy admit only that blob, so no other code can start one.
+    #[must_use]
+    pub fn blob_workers(self, policy: &str) -> Self {
+        self.add_source("worker-src", "blob:")
+            .add_source("trusted-types", policy)
+            .add_source("require-trusted-types-for", "'script'")
+    }
+
+    /// Admit one inline script by its hash. Hash the exact text between
+    /// the tags, as served; see [`csp_hash`].
+    #[must_use]
+    pub fn script_hash(self, inline_script: &str) -> Self {
+        self.add_source("script-src", &csp_hash(inline_script.as_bytes()))
+    }
+
+    /// Admit the page's inline `<script type="importmap">` by its hash.
+    /// Build it per response from the HTML as served, so a rebuilt page
+    /// never meets a stale hash. A page with no import map adds nothing.
+    #[must_use]
+    pub fn import_map_hash(self, html: &str) -> Self {
+        match inline_import_map(html) {
+            Some(map) => self.script_hash(map),
+            None => self,
+        }
+    }
+
     /// Render the policy as a string ready to drop into the CSP header.
     #[must_use]
     pub fn build(&self) -> String {
@@ -557,6 +638,26 @@ impl CspBuilder {
             .collect::<Vec<_>>()
             .join("; ")
     }
+}
+
+/// A CSP hash source for `content`: `'sha256-<base64>'`, quotes included.
+#[must_use]
+pub fn csp_hash(content: &[u8]) -> String {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(content);
+    format!(
+        "'sha256-{}'",
+        base64::engine::general_purpose::STANDARD.encode(digest)
+    )
+}
+
+/// The body of the first `<script type="importmap">` in `html`.
+fn inline_import_map(html: &str) -> Option<&str> {
+    const OPEN: &str = r#"<script type="importmap">"#;
+    let start = html.find(OPEN)? + OPEN.len();
+    let len = html[start..].find("</script>")?;
+    Some(&html[start..start + len])
 }
 
 #[cfg(test)]
@@ -830,6 +931,72 @@ mod tests {
         s.csp = Some("default-src 'self'; img-src *".into());
         let l = SecurityHeadersLayer::from_settings(&s);
         assert_eq!(l.csp.as_deref(), Some("default-src 'self'; img-src *"));
+    }
+
+    #[test]
+    fn strict_wasm_app_is_the_documented_policy() {
+        let csp = CspBuilder::strict_wasm_app().build();
+        let mut got: Vec<&str> = csp.split("; ").collect();
+        got.sort_unstable();
+        let mut want = vec![
+            "default-src 'none'",
+            "script-src 'self' 'wasm-unsafe-eval'",
+            "worker-src 'self'",
+            "style-src 'self'",
+            "img-src 'self' blob:",
+            "media-src 'self' blob:",
+            "connect-src 'self'",
+            "object-src 'none'",
+            "base-uri 'none'",
+            "form-action 'self'",
+            "frame-ancestors 'none'",
+            "require-trusted-types-for 'script'",
+        ];
+        want.sort_unstable();
+        assert_eq!(got, want);
+    }
+
+    /// `blob:` workers come only with a Trusted Types policy and enforcement.
+    #[test]
+    fn blob_workers_bind_blob_to_a_trusted_types_policy() {
+        let csp = CspBuilder::new()
+            .directive("worker-src", &["'self'"])
+            .blob_workers("app-boot")
+            .build();
+        assert!(csp.contains("worker-src 'self' blob:"), "{csp}");
+        assert!(csp.contains("trusted-types app-boot"), "{csp}");
+        assert!(csp.contains("require-trusted-types-for 'script'"), "{csp}");
+    }
+
+    #[test]
+    fn add_source_appends_once() {
+        let csp = CspBuilder::strict_wasm_app()
+            .add_source("connect-src", "https://b.example")
+            .add_source("connect-src", "https://b.example")
+            .build();
+        assert!(
+            csp.contains("connect-src 'self' https://b.example;"),
+            "{csp}"
+        );
+    }
+
+    #[test]
+    fn import_map_hash_hashes_the_map_as_served() {
+        // sha256("") is a known vector.
+        assert_eq!(
+            csp_hash(b""),
+            "'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='"
+        );
+        let map = r#"{"imports":{"a":"/app/a.1.js"}}"#;
+        let html = format!(r#"<head><script type="importmap">{map}</script></head>"#);
+        let csp = CspBuilder::strict_wasm_app().import_map_hash(&html).build();
+        let want = format!(
+            "script-src 'self' 'wasm-unsafe-eval' {}",
+            csp_hash(map.as_bytes())
+        );
+        assert!(csp.contains(&want), "{csp}");
+        let plain = CspBuilder::strict_wasm_app().import_map_hash("<p>no map</p>");
+        assert_eq!(plain.build(), CspBuilder::strict_wasm_app().build());
     }
 }
 
