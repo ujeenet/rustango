@@ -518,7 +518,12 @@ impl MoveCtx<'_> {
         }
 
         // 4. Before the Org row moves, so a bad restore leaves it in place.
-        self.smoke(writer).await
+        self.smoke(writer).await?;
+        // The restored tables belong to the registry login; the tenant role needs them.
+        if let Some(s) = self.target_schema {
+            self.pools.ensure_tenant_role(&s.0).await?;
+        }
+        Ok(())
     }
 
     /// Drain, then 3. dump → restore.

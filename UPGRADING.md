@@ -150,6 +150,9 @@ untouched.
 
 ## Unreleased
 
+- Schema tenants now log in as their own roles. Before deploying: `ALTER ROLE <registry login> CREATEROLE`, set `RUSTANGO_TENANT_ROLE_SECRET` (same base64 key on every process; required on the prod tier), let these roles through `pg_hba.conf` (and PgBouncer `auth_query`), then run `ensure-tenant-roles`. Tenant code can no longer read registry tables or other schemas through a tenant pool, nor change tables (DDL) through it: run DDL in migrations; manage verbs use the registry login. To keep the old shared login, set `TenantPoolsConfig::schema_tenant_roles = false`.
+- `TenantPoolsConfig` has a new public field, `schema_tenant_roles`: a struct literal without `..Default::default()` needs it.
+
 ## 0.65.0
 
 - The deprecated items and the old tenant lock / idempotency key fallback that 0.64.0 announced for removal in 0.65.0 are still here; they go in 0.66.0. Deploy 0.64 or later everywhere before 0.66.0.

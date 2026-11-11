@@ -1056,8 +1056,8 @@ async fn a_busy_schema_tenant_does_not_block_other_tenants() {
     }
 }
 
-/// With the scoped-pool cache off, a held connection comes from the
-/// registry pool, not from a pool built per request.
+/// With the scoped-pool cache and tenant roles off, a held connection comes
+/// from the registry pool, not from a pool built per request.
 #[tokio::test]
 async fn uncached_schema_tenant_holds_a_registry_connection() {
     use std::time::Duration;
@@ -1073,8 +1073,10 @@ async fn uncached_schema_tenant_holds_a_registry_connection() {
         .connect(&url)
         .await
         .unwrap();
+    // A tenant role logs in on its own, so only the shared login borrows.
     let cfg = rustango::tenancy::TenantPoolsConfig {
         max_cached_scoped_pools: 0,
+        schema_tenant_roles: false,
         ..Default::default()
     };
     let pools = TenantPools::new(registry.clone()).config(cfg);
@@ -1170,7 +1172,11 @@ async fn schema_tenant_migrate_lock_is_its_own() {
         .execute(&mut *holder)
         .await
         .unwrap();
-    let pools = TenantPools::new(admin.clone());
+    // Migrations run as the registry login: tenant roles cannot change tables.
+    let pools = TenantPools::new(admin.clone()).config(rustango::tenancy::TenantPoolsConfig {
+        schema_tenant_roles: false,
+        ..Default::default()
+    });
     let tenant: rustango::sql::Pool = pools.scoped_pool(&schema_org(schema)).await.unwrap().into();
     let limit = Duration::from_secs(2);
     let ran = with_lock_timeout(

@@ -398,7 +398,7 @@ async fn seed_one<DB: Database>(pools: &TenantPools<DB>, org: &Org) -> Result<()
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    let pool = pools.scoped_pool_dyn(org).await?;
+    let pool = pools.operator_pool_dyn(org).await?.0;
     permissions::ensure_tables_pool(&pool)
         .await
         .map_err(TenancyError::Driver)?;
@@ -427,7 +427,7 @@ where
         .into_iter()
         .next()
         .ok_or_else(|| TenancyError::Validation(format!("tenant `{slug}` not found")))?;
-    pools.scoped_pool_dyn(&org).await
+    Ok(pools.operator_pool_dyn(&org).await?.0)
 }
 
 async fn user_id_by_username(username: &str, pool: &crate::sql::Pool) -> Result<i64, TenancyError> {

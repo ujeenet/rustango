@@ -162,6 +162,7 @@ The two cache verbs need the `cache` feature; without it they are left out of `-
 | `test-tenant-connection` | Verify a tenant's database is reachable |
 | `reseal-tenant-secrets [--apply]` | Re-seal stored tenant URLs, server passwords, operator TOTP, SSO secrets and `Cast<EncryptedString>` columns with the current `RUSTANGO_SECRET_KEY`; a dry run without `--apply` |
 | `prewarm-pools` | Open tenant pools ahead of first request |
+| `ensure-tenant-roles` | Create or refresh each schema tenant's login role and grants |
 | `run-server` / `runserver` | Run the multi-tenant server |
 | `init` / `init-tenancy` / `wizard` / `menu` / `actions` | Setup and interactive entry points |
 
@@ -1433,6 +1434,18 @@ recorded, which is what tells you *where* a failure happened.
 
 Tenants created from the CLI are recorded too, tagged `requested_by =
 cli`, so the history covers both surfaces.
+
+### `ensure-tenant-roles`
+
+Creates or refreshes the login role of every schema tenant and grants it its
+schema. Run it once after upgrading to 0.66.0, before traffic: otherwise each
+tenant's first request sets its role up. It needs `CREATEROLE` on the registry
+login and `RUSTANGO_TENANT_ROLE_SECRET`. See
+[schema mode](tenancy.md#schema-mode-postgres-only).
+
+```bash
+cargo run -- ensure-tenant-roles
+```
 
 ### `prewarm-pools`
 
