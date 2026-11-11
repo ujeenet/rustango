@@ -4,6 +4,20 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added
+
+- `sessions::SessionLayer` and the `CurrentSession` extractor: cookie handling for `SessionStore` (always `HttpOnly`; `Secure` and `SameSite=Lax` by default), `login()` moves the session to a new id, `logout()` ends it; scoped to the tenant under tenancy.
+- `SessionStore::login`, `sessions_of`, `revoke` and `revoke_all` list and end a user's sessions; listings name sessions by a hash, never the id.
+- Session-bound CSRF: `SessionLayer::with_csrf` checks the token kept in the session (`CurrentSession::csrf_token`), not the cookie.
+- `CsrfLayer::json_rejection()` and `reject_with()` answer refusals as JSON or your own response (`CsrfFailure`).
+- `real_ip::client_ip` and the `ClientIp` extractor: the trusted-proxy-aware client address the limiter and IP filter use.
+- `outbound::Egress` (`public`, `public_or_allowed`, `check`) and `outbound::resolve_public` are public under `http-client`: fetch user-supplied URLs without reaching private or metadata addresses.
+
+### Changed
+
+- The `sessions` feature now pulls in axum, for `SessionLayer`.
+- `SessionStore::load` returns `None` for a session ended by `revoke_all`, and for an id containing `:`.
+
 ## [0.65.2] — 2026-11-09
 
 ### Documentation

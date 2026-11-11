@@ -119,7 +119,7 @@ impl<'a> ActionCtx<'a> {
     /// The client address, as the rate limiter sees it.
     #[must_use]
     pub fn client_ip(&self) -> Option<IpAddr> {
-        crate::rate_limit::client_ip(&self.parts.extensions, &self.parts.headers)
+        crate::real_ip::client_ip(&self.parts.extensions, &self.parts.headers)
     }
 
     /// The raw request parts, cookies and `Authorization` included.

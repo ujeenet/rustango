@@ -78,6 +78,24 @@ impl KeySpace {
         }
     }
 
+    /// The request's space: its tenant, else global (no tenant matched, or none
+    /// mounted). `Err` when resolution failed: nothing may be shared then.
+    #[cfg(feature = "_axum")]
+    #[allow(clippy::unused_async)]
+    pub(crate) async fn of_request(_parts: &mut axum::http::request::Parts) -> Result<Self, ()> {
+        #[cfg(feature = "tenancy")]
+        {
+            use crate::tenancy::RequestTenant;
+            match RequestTenant::resolve(_parts).await {
+                RequestTenant::Tenant(t) => Ok(Self::Tenant(t)),
+                RequestTenant::Unknown => Err(()),
+                _ => Ok(Self::Global),
+            }
+        }
+        #[cfg(not(feature = "tenancy"))]
+        Ok(Self::Global)
+    }
+
     /// The tenant's `#org:<id>:<slug>`; `None` for global.
     pub(crate) fn namespace(&self) -> Option<String> {
         match self {

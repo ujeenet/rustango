@@ -231,7 +231,7 @@ impl ClientIp {
     /// Resolve from request parts, as [`crate::rate_limit`] does.
     #[must_use]
     pub fn from_parts(extensions: &Extensions, headers: &HeaderMap) -> Self {
-        Self(crate::rate_limit::client_ip(extensions, headers).map(crate::rate_limit::ip_bucket))
+        Self(crate::real_ip::client_ip(extensions, headers).map(crate::rate_limit::ip_bucket))
     }
 }
 

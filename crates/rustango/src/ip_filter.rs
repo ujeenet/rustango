@@ -166,7 +166,7 @@ async fn handle(cfg: Arc<IpFilterLayer>, req: Request<Body>, next: Next) -> Resp
             .extensions()
             .get::<ConnectInfo<SocketAddr>>()
             .map(|ci| ci.ip()),
-        Source::ClientIp => crate::rate_limit::client_ip(req.extensions(), req.headers()),
+        Source::ClientIp => crate::real_ip::client_ip(req.extensions(), req.headers()),
     };
     if cfg.allow(ip) {
         next.run(req).await

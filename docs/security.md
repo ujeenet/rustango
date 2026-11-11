@@ -11,6 +11,7 @@ This guide covers every security feature **Rustango** ships and how to combine t
 - [Allowing cross-origin requests (CORS)](#allowing-cross-origin-requests-cors)
 - [Rate limiting requests](#rate-limiting-requests)
 - [Allowing or blocking IPs](#allowing-or-blocking-ips)
+- [Reading the client IP](#reading-the-client-ip)
 - [Protecting against CSRF](#protecting-against-csrf)
 - [Preventing XSS](#preventing-xss)
 - [Preventing SQL injection](#preventing-sql-injection)
@@ -21,6 +22,7 @@ This guide covers every security feature **Rustango** ships and how to combine t
 - [Adding two-factor auth (TOTP)](#adding-two-factor-auth-totp)
 - [Sending signed URLs (magic links)](#sending-signed-urls-magic-links)
 - [Verifying incoming webhooks](#verifying-incoming-webhooks)
+- [Fetching user-supplied URLs](#fetching-user-supplied-urls)
 - [Keeping secrets out of your logs](#keeping-secrets-out-of-your-logs)
 - [Tracing requests across services](#tracing-requests-across-services)
 - [Managing secrets](#managing-secrets)
@@ -257,6 +259,23 @@ A request with no `ConnectInfo` is refused by `allow_only` and let through by `b
 
 ---
 
+## Reading the client IP
+
+For audit logs, per-IP limits of your own, or "new sign-in from" emails, take the
+`ClientIp` extractor (or call `real_ip::client_ip(&parts.extensions, &parts.headers)`).
+It is the address the rate limiter and IP filter use: the `TrustedRealIp` when a
+proxy named in `RealIpLayer::trust_proxies` forwarded the request, else the
+connecting socket. A forwarded header from anyone else is ignored.
+
+```rust
+use rustango::real_ip::ClientIp;
+
+async fn sign_in(ClientIp(ip): ClientIp) { /* … */ }        // 500 without ConnectInfo
+async fn audit(ip: Option<ClientIp>) { /* … */ }             // None without ConnectInfo
+```
+
+---
+
 ## Protecting against CSRF
 
 > **CSRF and token APIs.** CSRF protects **cookie-authenticated** requests. A
@@ -276,6 +295,30 @@ let app = Router::new()
 ```
 
 `csrf::layer()` takes the cookie's `Secure` flag from `session::secure_cookies()`: the boot policy (`[security] secure_cookies`, which the `manage` path sets to `true` by default), else `Secure` on the prod tier. The `template_views` CBVs mint their cookie through `forms::csrf::ensure_token`, which follows the same policy. `csrf::with_config(CsrfConfig)` uses `CsrfConfig::secure` instead (default `true`); on `http://localhost` call `CsrfConfig::default().allow_insecure_for_dev()`, or the browser drops the cookie and every POST gets `403`. `with_config` also sets the cookie/header names and `trusted_origins` — extra origins allowed beside the request's own Host (`.trust_origin("https://app.example.com")`, `*.example.com` wildcards allowed). The Origin check runs even when it is empty: a foreign `Origin` gets `403`, and over TLS so does a POST with no `Origin`. In templates, `{{ csrf_token }}` gives you the raw token and `{{ csrf_input }}` a ready-made hidden `<input>` — write it as `{{ csrf_input | safe }}`, because templates autoescape and without the filter the page renders a visible literal `<input …>` and the form carries no `_csrf` field, so every POST 403s. Both variables are only in context for the `template_views` CBVs or after you call `forms::csrf::stamp_into_context` yourself — a hand-rolled handler has neither. It uses the double-submit cookie pattern. GET, HEAD, OPTIONS and TRACE are safe, and so is QUERY unless `require_csrf_on_query` is set. On every other method the layer checks the `X-CSRF-Token` header (or the `_csrf` form field) against the `rustango_csrf` cookie; a mismatch returns `403 Forbidden`.
+
+**API routes.** The refusal is a plain-text `403` by default. Call
+`.json_rejection()` on the layer for the [`ApiError`](api-conventions.md) JSON
+shape (`"error": "csrf_failed"`), or `.reject_with(|failure| …)` to build your own
+response from a `CsrfFailure` (`Origin` or `Token`).
+
+**Session-bound tokens.** With a [`SessionLayer`](auth-sessions.md#the-session-layer),
+`SessionLayer::with_csrf(CsrfConfig)` checks the token against one kept in the
+session instead of the `rustango_csrf` cookie, so a cookie planted from a sibling
+subdomain cannot pass. Hand the token to the client with
+`CurrentSession::csrf_token()` (for example from a `GET /api/csrf` route) and send
+it back as `X-CSRF-Token` or the `_csrf` form field. `login()` drops the token, so
+fetch a new one after login. The Origin check and exemptions work as above; mount
+it on your own routes, not around the admin, whose forms carry cookie tokens.
+
+```rust
+use rustango::forms::csrf::CsrfConfig;
+use rustango::sessions::{CurrentSession, SessionLayer, SessionStore};
+
+let api = Router::new()
+    .route("/api/csrf", get(|s: CurrentSession| async move { s.csrf_token() }))
+    .route("/api/messages", post(send_message))
+    .layer(SessionLayer::new(SessionStore::new(cache)).with_csrf(CsrfConfig::default()));
+```
 
 **Exempting collector endpoints.** `CsrfConfig::exempt_prefix("/path")` (repeatable) skips CSRF enforcement for unsafe methods on requests whose path starts with the given prefix. This is for append-only, no-auth-state endpoints hit via `navigator.sendBeacon` — e.g. an analytics collector — which can't set an `X-CSRF-Token` header and, when the page is served from a CDN cache that strips `Set-Cookie`, may carry no CSRF cookie at all. Keep prefixes narrow and never exempt anything that reads or writes auth state.
 
@@ -688,6 +731,29 @@ The signature comparison is constant-time, meaning it always takes the same amou
 Outbound calls to URLs that config can set (webhook delivery, Slack `webhook_callback`, OAuth2/OIDC discovery, token and userinfo) refuse loopback, private, link-local and metadata addresses and never follow redirects. To reach an IdP or Slack hook on your own network, list it in `RUSTANGO_OUTBOUND_ALLOW` (comma-separated hosts and CIDRs, e.g. `10.0.5.0/24,idp.internal`); everything else stays refused. A host entry trusts whatever that name resolves to, so list only names you control. The list never applies to webhook delivery: a subscription opts in with `allow_private_targets(true)`. Nor does it apply to a tenant's own SSO provider rows, which a tenant admin sets: those read `RUSTANGO_TENANT_OUTBOUND_ALLOW` (empty by default, so public addresses only).
 
 These calls ignore `HTTPS_PROXY`/`NO_PROXY`. To send them through an egress proxy, set `RUSTANGO_OUTBOUND_PROXY` (e.g. `http://proxy.internal:3128`); the proxy itself may be private. The app still resolves and checks each target first, so it needs local DNS for them; a lookup failure refuses the call. The proxy resolves the name again, so it must refuse private and metadata destinations too: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16 (incl. 169.254.169.254, 169.254.170.2, 169.254.170.23), 100.64.0.0/10 (incl. 100.100.100.200), ::1, fc00::/7 (incl. fd00:ec2::254, fd00:ec2::23) and fe80::/10. Without a proxy, addresses are checked again at connect time.
+
+---
+
+## Fetching user-supplied URLs
+
+A URL a user or tenant gives you (a link preview, a webhook target, an avatar
+URL) must not reach your private network or the cloud metadata endpoint. Send it
+through `outbound::Egress` (the `http-client` feature):
+
+```rust
+use rustango::outbound::Egress;
+
+let target = Egress::public()?.check(&user_url).await?; // TargetError::Blocked if private
+let resp = target.request(reqwest::Method::GET).send().await?;
+```
+
+`Egress::public()` refuses loopback, private, link-local, CGNAT and metadata
+addresses, never follows redirects, and checks every address again when it
+connects, so a name that changes its answer after the check (DNS rebinding) gets
+nowhere. `Egress::public_or_allowed()` also lets through the hosts and CIDRs in
+`RUSTANGO_OUTBOUND_ALLOW`. For a raw socket, `outbound::resolve_public(host, port)`
+resolves once and returns only public addresses: connect to those, never to the
+name again.
 
 ---
 

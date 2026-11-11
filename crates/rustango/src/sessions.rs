@@ -14,6 +14,10 @@
 //! a new ID. Reusing the ID across the login boundary leaves the door
 //! open to session fixation.
 //!
+//! [`SessionLayer`] sets and reads the cookie for you; handlers take
+//! [`CurrentSession`]. [`SessionStore::login`] binds a session to a user,
+//! so [`SessionStore::sessions_of`] lists and `revoke_all` ends them.
+//!
 //! Under tenancy, scope the store per request with `SessionStore::for_tenant`:
 //! session ids carry no tenant, and on a shared apex host one cookie reaches
 //! every tenant.
@@ -51,8 +55,37 @@ use serde_json::Value;
 
 use crate::cache::{BoxedCache, CacheError};
 
+mod layer;
+pub use layer::{CurrentSession, SessionLayer};
+
 const DEFAULT_TTL_SECS: u64 = 60 * 60 * 24 * 14; // 2 weeks
 const ID_BYTES: usize = 24; // 192 bits, base64 → 32 chars
+/// The session key holding who logged in; set only by [`SessionStore::login`].
+const AUTH_KEY: &str = "_auth";
+
+/// Who a session belongs to and the user's revocation generation at login.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AuthMark {
+    user: String,
+    gen: i64,
+    at: chrono::DateTime<chrono::Utc>,
+}
+
+/// One live session of a user, as [`SessionStore::sessions_of`] lists it.
+/// `key` names it for [`SessionStore::revoke`]; it is not the session id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct SessionInfo {
+    pub key: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// A user's index entry: the id and when it was issued.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IndexEntry {
+    id: String,
+    at: chrono::DateTime<chrono::Utc>,
+}
 
 /// Per-request session bag: typed values under string keys, plus a
 /// dirty flag so the store can skip a write when nothing changed.
@@ -123,6 +156,12 @@ impl Session {
     pub fn keys(&self) -> impl Iterator<Item = &String> {
         self.data.keys()
     }
+
+    /// The user [`SessionStore::login`] bound this session to.
+    #[must_use]
+    pub fn user(&self) -> Option<String> {
+        self.get::<AuthMark>(AUTH_KEY).map(|m| m.user)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -151,7 +190,6 @@ impl SessionStore {
         }
     }
 
-    #[cfg(feature = "tenancy")]
     pub(crate) fn in_space(mut self, space: crate::cache::keyspace::KeySpace) -> Self {
         self.space = space;
         self
@@ -197,13 +235,17 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Load a session by ID. Missing, expired and unreadable entries
-    /// all give `Ok(None)`.
+    /// Load a session by ID. Missing, expired, unreadable and revoked
+    /// entries all give `Ok(None)`.
     ///
     /// # Errors
     /// A cache error. A value that fails to parse gives `Ok(None)`
     /// instead, so a stored-format change does not 500 every request.
     pub async fn load(&self, id: &str) -> Result<Option<Session>, SessionError> {
+        // The user index and generation keys share the area; never load them.
+        if id.contains(':') {
+            return Ok(None);
+        }
         let Some(raw) = self.cache.get(&self.cache_key(id)).await? else {
             return Ok(None);
         };
@@ -211,9 +253,188 @@ impl SessionStore {
             Ok(s) => s,
             Err(_) => return Ok(None),
         };
+        if let Some(mark) = session.get::<AuthMark>(AUTH_KEY) {
+            if mark.gen != self.generation(&mark.user).await? {
+                return Ok(None);
+            }
+        }
         // A freshly loaded session is clean until something changes it.
         session.dirty = false;
         Ok(Some(session))
+    }
+
+    /// Store `session` under a new id bound to `user`, so it shows in
+    /// [`Self::sessions_of`] and dies with [`Self::revoke_all`].
+    ///
+    /// # Errors
+    /// A cache or serialization error.
+    pub async fn login(&self, user: &str, session: &Session) -> Result<String, SessionError> {
+        Ok(self.login_session(user, session).await?.0)
+    }
+
+    /// [`Self::login`], plus the session as stored (clean, with its mark).
+    pub(crate) async fn login_session(
+        &self,
+        user: &str,
+        session: &Session,
+    ) -> Result<(String, Session), SessionError> {
+        let at = chrono::Utc::now();
+        let mut session = session.clone();
+        let gen = self.generation(user).await?;
+        session.set(
+            AUTH_KEY,
+            AuthMark {
+                user: user.to_owned(),
+                gen,
+                at,
+            },
+        );
+        let id = self.save(&session).await?;
+        let mut index = self.live_index(user).await?;
+        index.push(IndexEntry { id: id.clone(), at });
+        self.write_index(user, &index).await?;
+        session.dirty = false;
+        Ok((id, session))
+    }
+
+    /// Move `session` from `old` to a new id; a user's listing follows it.
+    pub(crate) async fn reissue(
+        &self,
+        old: &str,
+        session: &Session,
+    ) -> Result<String, SessionError> {
+        let id = self.save(session).await?;
+        self.destroy(old).await?;
+        if let Some(user) = session.user() {
+            let mut index = self.read_index(&user).await?;
+            if let Some(e) = index.iter_mut().find(|e| e.id == old) {
+                e.id.clone_from(&id);
+                self.write_index(&user, &index).await?;
+            }
+        }
+        Ok(id)
+    }
+
+    pub(crate) fn ttl_value(&self) -> Duration {
+        *self.ttl
+    }
+
+    /// The user's live sessions, oldest first. Under concurrent logins of
+    /// one user an entry can be missed; [`Self::revoke_all`] still ends it.
+    ///
+    /// # Errors
+    /// A cache error.
+    pub async fn sessions_of(&self, user: &str) -> Result<Vec<SessionInfo>, SessionError> {
+        let index = self.live_index(user).await?;
+        self.write_index(user, &index).await?;
+        Ok(index
+            .iter()
+            .map(|e| SessionInfo {
+                key: public_key(&e.id),
+                created_at: e.at,
+            })
+            .collect())
+    }
+
+    /// End the user's session that [`SessionInfo::key`] names. `false` when
+    /// none of the user's live sessions has that key.
+    ///
+    /// # Errors
+    /// A cache error.
+    pub async fn revoke(&self, user: &str, key: &str) -> Result<bool, SessionError> {
+        let mut index = self.live_index(user).await?;
+        let Some(at) = index.iter().position(|e| public_key(&e.id) == key) else {
+            return Ok(false);
+        };
+        let gone = index.remove(at);
+        self.destroy(&gone.id).await?;
+        self.write_index(user, &index).await?;
+        Ok(true)
+    }
+
+    /// End every session of `user`, listed or not, except `keep` (a session
+    /// id, such as the current one). Bumps the user's generation, so a
+    /// session the index missed fails to load too.
+    ///
+    /// # Errors
+    /// A cache or serialization error.
+    pub async fn revoke_all(&self, user: &str, keep: Option<&str>) -> Result<(), SessionError> {
+        let kept = match keep {
+            Some(id) => self
+                .load(id)
+                .await?
+                .filter(|s| s.user().as_deref() == Some(user)),
+            None => None,
+        };
+        let gen = self
+            .cache
+            .incr(&self.user_key("gen", user), 1, None)
+            .await?;
+        for entry in self.read_index(user).await? {
+            if Some(entry.id.as_str()) != keep {
+                self.destroy(&entry.id).await?;
+            }
+        }
+        let mut left = Vec::new();
+        if let (Some(id), Some(mut session)) = (keep, kept) {
+            if let Some(mut mark) = session.get::<AuthMark>(AUTH_KEY) {
+                mark.gen = gen;
+                let at = mark.at;
+                session.set(AUTH_KEY, mark);
+                self.save_with_id(id, &session).await?;
+                left.push(IndexEntry {
+                    id: id.to_owned(),
+                    at,
+                });
+            }
+        }
+        self.write_index(user, &left).await
+    }
+
+    /// The user's revocation generation; 0 until the first `revoke_all`.
+    async fn generation(&self, user: &str) -> Result<i64, SessionError> {
+        Ok(self
+            .cache
+            .get(&self.user_key("gen", user))
+            .await?
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0))
+    }
+
+    async fn read_index(&self, user: &str) -> Result<Vec<IndexEntry>, SessionError> {
+        let raw = self.cache.get(&self.user_key("user", user)).await?;
+        Ok(raw
+            .and_then(|r| serde_json::from_str(&r).ok())
+            .unwrap_or_default())
+    }
+
+    /// The index without entries whose session ended or moved to another user.
+    async fn live_index(&self, user: &str) -> Result<Vec<IndexEntry>, SessionError> {
+        let mut live = Vec::new();
+        for entry in self.read_index(user).await? {
+            let session = self.load(&entry.id).await?;
+            if session.is_some_and(|s| s.user().as_deref() == Some(user)) {
+                live.push(entry);
+            }
+        }
+        Ok(live)
+    }
+
+    async fn write_index(&self, user: &str, index: &[IndexEntry]) -> Result<(), SessionError> {
+        let key = self.user_key("user", user);
+        if index.is_empty() {
+            self.cache.delete(&key).await?;
+            return Ok(());
+        }
+        let json =
+            serde_json::to_string(index).map_err(|e| SessionError::Serialization(e.to_string()))?;
+        self.cache.set(&key, &json, Some(*self.ttl)).await?;
+        Ok(())
+    }
+
+    /// `user:<user>` (index) and `gen:<user>`: a `:` keeps them apart from ids.
+    fn user_key(&self, kind: &str, user: &str) -> String {
+        self.cache_key(&format!("{kind}:{user}"))
     }
 
     /// Delete the session, as on logout. Does nothing for an unknown
@@ -242,6 +463,19 @@ impl SessionStore {
     fn cache_key(&self, id: &str) -> String {
         self.space.key(crate::cache::keyspace::Area::Session, id)
     }
+}
+
+/// The shape [`generate_id`] makes: anything else in a cookie is not looked up.
+fn is_session_id(s: &str) -> bool {
+    s.len() == 32
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// A session's name in listings: a hash, so a listing never leaks an id.
+fn public_key(id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    crate::hex::hex_encode(&Sha256::digest(id.as_bytes())[..12])
 }
 
 /// Make a 32-character base64url session ID with 192 bits of entropy,
@@ -497,6 +731,67 @@ mod tests {
             );
             assert!(SessionStore::new(root).load(&id).await.unwrap().is_none());
         }
+    }
+
+    /// Logins list per user by a key that is not the id; revoke ends one.
+    #[tokio::test]
+    async fn login_lists_and_revokes_per_user() {
+        let store = store();
+        let a = store.login("u1", &Session::new()).await.unwrap();
+        let b = store.login("u1", &Session::new()).await.unwrap();
+        let other = store.login("u2", &Session::new()).await.unwrap();
+        let listed = store.sessions_of("u1").await.unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed.iter().all(|i| i.key != a && i.key != b));
+        let u2_key = store.sessions_of("u2").await.unwrap()[0].key.clone();
+        assert!(
+            !store.revoke("u1", &u2_key).await.unwrap(),
+            "revoked another user's"
+        );
+        assert!(store.revoke("u1", &listed[0].key).await.unwrap());
+        assert!(store.load(&a).await.unwrap().is_none());
+        assert!(store.load(&b).await.unwrap().is_some());
+        assert!(store.load(&other).await.unwrap().is_some());
+        assert_eq!(store.sessions_of("u1").await.unwrap().len(), 1);
+        assert_eq!(
+            store.load(&b).await.unwrap().unwrap().user().as_deref(),
+            Some("u1")
+        );
+    }
+
+    /// `revoke_all` ends a session the index lost, and keeps the named one.
+    #[tokio::test]
+    async fn revoke_all_ends_unlisted_sessions_and_keeps_one() {
+        let store = store();
+        let keep = store.login("u", &Session::new()).await.unwrap();
+        let lost = store.login("u", &Session::new()).await.unwrap();
+        store
+            .cache
+            .delete(&store.user_key("user", "u"))
+            .await
+            .unwrap();
+        let listed = store.login("u", &Session::new()).await.unwrap();
+        store.revoke_all("u", Some(&keep)).await.unwrap();
+        assert!(
+            store.load(&lost).await.unwrap().is_none(),
+            "unlisted survived"
+        );
+        assert!(store.load(&listed).await.unwrap().is_none());
+        assert!(store.load(&keep).await.unwrap().is_some());
+        assert_eq!(store.sessions_of("u").await.unwrap().len(), 1);
+        // A later login is live again.
+        let next = store.login("u", &Session::new()).await.unwrap();
+        assert!(store.load(&next).await.unwrap().is_some());
+    }
+
+    /// A cookie naming the index or generation key loads nothing.
+    #[tokio::test]
+    async fn index_keys_never_load_as_sessions() {
+        let store = store();
+        store.login("u", &Session::new()).await.unwrap();
+        store.revoke_all("u", None).await.unwrap();
+        assert!(store.load("user:u").await.unwrap().is_none());
+        assert!(store.load("gen:u").await.unwrap().is_none());
     }
 
     #[test]

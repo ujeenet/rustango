@@ -369,7 +369,7 @@ pub fn meta_from_parts(
     path: Option<&str>,
 ) -> AuthRequestMeta {
     AuthRequestMeta {
-        ip_address: crate::rate_limit::client_ip(extensions, headers).map(|ip| ip.to_string()),
+        ip_address: crate::real_ip::client_ip(extensions, headers).map(|ip| ip.to_string()),
         user_agent: headers
             .get(axum::http::header::USER_AGENT)
             .and_then(|v| v.to_str().ok())

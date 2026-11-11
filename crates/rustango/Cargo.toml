@@ -261,8 +261,8 @@ csp-nonce = ["admin", "_rand"]
 
 # Server-side sessions (`rustango::sessions`) — opaque cookie ID
 # backed by any `Cache` implementation. Implies `cache` + rand for
-# the ID + base64 for encoding it.
-sessions = ["cache", "_rand", "dep:base64"]
+# the ID + base64 for encoding it, and axum for `SessionLayer`.
+sessions = ["cache", "_rand", "dep:base64", "_axum"]
 
 # HMAC-signed request authentication (`rustango::hmac_auth`) for
 # service-to-service traffic. AWS-style canonical request signed with
