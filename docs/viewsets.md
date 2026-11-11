@@ -582,6 +582,7 @@ mount the ViewSet and override the one route with your own handler (see
 | `serializer` | `serializer = path::To::S` | none | Wire a serializer for typed **output + input** (see [above](#the-serializer-marriage-input--output)). |
 | `fields` | `"id, title, body"` | **required** | The only fields responses render and bodies may write; other keys are ignored. A serializer narrows it. |
 | `filter_fields` | `"author_id, status"` | none | Fields filterable via `?field=value` (+ lookups). |
+| `filter_backend` | `filter_backend = OwnerOnly` | none | A `ViewSetFilter` (unit struct, call or closure) scoping every action, as `.filter_backend(..)`; repeat to stack. |
 | `search_fields` | `"title, body"` | none | Fields the `?search=` box matches (case-insensitive OR). |
 | `ordering` | `"-published_at, id"` | none | Default sort (`-` = DESC). |
 | `page_size` | `20` | 20 | Rows per page (client `?page_size=` capped at 100). |

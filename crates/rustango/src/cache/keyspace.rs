@@ -78,6 +78,24 @@ impl KeySpace {
         }
     }
 
+    /// The request's space: its tenant, else global (no tenant matched, or none
+    /// mounted). `Err` when resolution failed: nothing may be shared then.
+    #[cfg(feature = "_axum")]
+    #[allow(clippy::unused_async)]
+    pub(crate) async fn of_request(_parts: &mut axum::http::request::Parts) -> Result<Self, ()> {
+        #[cfg(feature = "tenancy")]
+        {
+            use crate::tenancy::RequestTenant;
+            match RequestTenant::resolve(_parts).await {
+                RequestTenant::Tenant(t) => Ok(Self::Tenant(t)),
+                RequestTenant::Unknown => Err(()),
+                _ => Ok(Self::Global),
+            }
+        }
+        #[cfg(not(feature = "tenancy"))]
+        Ok(Self::Global)
+    }
+
     /// The tenant's `#org:<id>:<slug>`; `None` for global.
     pub(crate) fn namespace(&self) -> Option<String> {
         match self {
@@ -97,7 +115,7 @@ impl KeySpace {
 
     /// The 0.63 key of `rest`, still used beside the new one so a pod on 0.63
     /// and one on this release never both run it (locks, idempotency) and see
-    /// each other's page invalidations. Remove in 0.65.0.
+    /// each other's page invalidations. Remove in 0.67.0.
     pub(crate) fn legacy_key(&self, area: Area, rest: &str) -> Option<String> {
         let ns = self.namespace()?;
         match area {

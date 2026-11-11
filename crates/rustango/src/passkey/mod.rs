@@ -20,6 +20,24 @@
 //!
 //! Gated behind the `passkey` feature; builds without it are unchanged.
 //!
+//! ## User verification and PRF
+//!
+//! [`RegistrationOptions`](crate::passkey::RegistrationOptions) and [`AuthenticationOptions`](crate::passkey::AuthenticationOptions) ask for
+//! `userVerification: "required"` and the PRF extension; check the flag on
+//! the outcome with `require(UserVerification::Required)`. The browser
+//! gets base64url fields; decode them before calling the API:
+//!
+//! ```text
+//! const b64 = s => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), c => c.charCodeAt(0));
+//! const prf = opts.extensions?.prf;
+//! if (prf?.eval) prf.eval.first = b64(prf.eval.first);
+//! for (const v of Object.values(prf?.evalByCredential ?? {})) v.first = b64(v.first);
+//! opts.challenge = b64(opts.challenge);
+//! (opts.allowCredentials ?? []).forEach(c => c.id = b64(c.id));
+//! const cred = await navigator.credentials.get({ publicKey: opts });
+//! const key = cred.getClientExtensionResults().prf?.results?.first; // stays in the browser
+//! ```
+//!
 //! [`ensure_table`]: crate::passkey::ensure_table
 
 pub mod ceremony;
@@ -29,7 +47,8 @@ pub mod verify;
 
 pub use ceremony::{
     authentication_options_json, generate_challenge, registration_options_json,
-    verify_authentication, verify_registration, AuthenticationOutcome, RegistrationOutcome,
+    verify_authentication, verify_registration, AuthenticationOptions, AuthenticationOutcome,
+    RegistrationOptions, RegistrationOutcome, UserVerification,
 };
 pub use error::PasskeyError;
 pub use session::{open_challenge, seal_challenge, CeremonyPurpose, CHALLENGE_TTL};

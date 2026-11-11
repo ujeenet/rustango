@@ -41,10 +41,18 @@
 //!
 //! Bodies stream from disk, and a single `Range: bytes=` span gets a 206.
 //!
+//! ## Hashed names, SRI and embedded files
+//!
+//! [`AssetManifest`](crate::static_files::AssetManifest) gives every file a content-hashed name and an SRI
+//! hash for templates; [`StaticFiles::manifest`](crate::static_files::StaticFiles::manifest) serves those names
+//! `immutable`. [`embed_static!`](crate::embed_static) compiles a
+//! directory into the binary, served by [`StaticFiles::embedded`](crate::static_files::StaticFiles::embedded).
+//!
 //! [`StaticFiles::no_canonicalize`]: crate::static_files::StaticFiles::no_canonicalize
 //! [`StaticFiles::serve_hidden`]: crate::static_files::StaticFiles::serve_hidden
 //! [`StaticFiles::cache_control`]: crate::static_files::StaticFiles::cache_control
 
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -56,6 +64,12 @@ use axum::response::Response;
 use axum::routing::get;
 use axum::Router;
 
+mod assets;
+pub use assets::{Asset, AssetManifest, EmbeddedDir};
+
+/// `Cache-Control` for a content-hashed name: a year, never revalidated.
+const HASHED_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
+
 /// Static file server config.
 #[derive(Clone, Debug)]
 pub struct StaticFiles {
@@ -64,6 +78,10 @@ pub struct StaticFiles {
     serve_hidden: bool,
     canonicalize: bool,
     user_content: bool,
+    /// Files compiled into the binary; `root` is unused then.
+    embedded: Option<EmbeddedDir>,
+    /// Hashed names to serve as well as the plain ones.
+    manifest: Option<Arc<AssetManifest>>,
 }
 
 impl StaticFiles {
@@ -76,7 +94,36 @@ impl StaticFiles {
             serve_hidden: false,
             canonicalize: true,
             user_content: false,
+            embedded: None,
+            manifest: None,
         }
+    }
+
+    /// Serve files compiled into the binary by
+    /// [`embed_static!`](crate::embed_static), for a one-file image:
+    ///
+    /// ```no_run
+    /// # use rustango::static_files::{static_router, EmbeddedDir, StaticFiles};
+    /// # fn app(assets: EmbeddedDir) -> axum::Router {
+    /// // static ASSETS: EmbeddedDir = rustango::embed_static!("static");
+    /// axum::Router::new().nest("/static", static_router(StaticFiles::embedded(assets)))
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn embedded(dir: EmbeddedDir) -> Self {
+        Self {
+            embedded: Some(dir),
+            ..Self::new(PathBuf::new())
+        }
+    }
+
+    /// Also serve each file under its hashed name from `manifest`, with
+    /// `Cache-Control: public, max-age=31536000, immutable`. The plain
+    /// names keep [`Self::cache_control`].
+    #[must_use]
+    pub fn manifest(mut self, manifest: AssetManifest) -> Self {
+        self.manifest = Some(Arc::new(manifest));
+        self
     }
 
     /// The directory files are served from.
@@ -147,16 +194,29 @@ pub(crate) fn warn_if_uploads_prefix(prefix: &str) {
 /// `.nest("/static", static_router(...))`.
 #[must_use]
 pub fn static_router(files: StaticFiles) -> Router {
-    let root = if files.canonicalize {
+    let root = if files.canonicalize && files.embedded.is_none() {
         std::fs::canonicalize(&files.root).ok()
     } else {
         None
     };
+    let by_hashed = files
+        .manifest
+        .as_ref()
+        .map(|m| m.by_hashed())
+        .unwrap_or_default();
+    let embedded = files
+        .embedded
+        .iter()
+        .flat_map(|d| d.files().iter())
+        .map(|&(path, bytes)| (path, (bytes, content_etag(bytes))))
+        .collect();
     Router::new()
         .route("/{*path}", get(serve))
         .with_state(Arc::new(Mount {
             files,
             root: std::sync::RwLock::new(root.map(|r| (r, std::time::Instant::now()))),
+            by_hashed,
+            embedded,
         }))
 }
 
@@ -164,6 +224,10 @@ pub fn static_router(files: StaticFiles) -> Router {
 struct Mount {
     files: StaticFiles,
     root: std::sync::RwLock<Option<(PathBuf, std::time::Instant)>>,
+    /// Hashed name → plain name, from [`StaticFiles::manifest`].
+    by_hashed: HashMap<String, String>,
+    /// Embedded path → (bytes, ETag), from [`StaticFiles::embedded`].
+    embedded: HashMap<&'static str, (&'static [u8], String)>,
 }
 
 /// How long a cached root is trusted before it is resolved again, so a
@@ -177,9 +241,24 @@ const ROOT_TTL: Duration = if cfg!(test) {
 /// An open file, checked to be a regular file under the root.
 struct Opened {
     path: PathBuf,
-    file: std::fs::File,
+    source: Source,
     len: u64,
     mtime: Option<u64>,
+    etag: Option<String>,
+}
+
+/// Where an [`Opened`] body comes from.
+enum Source {
+    File(std::fs::File),
+    Embedded(&'static [u8]),
+}
+
+/// Strong validator from the content, for embedded files (no mtime).
+fn content_etag(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    let d = sha2::Sha256::digest(bytes);
+    let hex: String = d[..8].iter().map(|b| format!("{b:02x}")).collect();
+    format!("\"{hex}\"")
 }
 
 /// Strong validator from size and mtime, so a `206` and its `200` share it.
@@ -194,33 +273,50 @@ async fn serve(
     headers: HeaderMap,
     method: Method,
 ) -> Response {
-    // Every filesystem call runs off the async workers (#1531).
-    let m = Arc::clone(&mount);
-    let opened = match tokio::task::spawn_blocking(move || open_file(&m, &rel)).await {
-        Ok(Some(o)) => o,
-        Ok(None) | Err(_) => return not_found(),
+    // A hashed name serves its plain file, cached for good.
+    let (rel, cache_control) = match mount.by_hashed.get(&rel) {
+        Some(plain) => (plain.clone(), HASHED_CACHE_CONTROL),
+        None => (rel, mount.files.cache_control.as_str()),
+    };
+    let opened = if mount.files.embedded.is_some() {
+        match mount.embedded.get(rel.as_str()) {
+            Some(&(bytes, ref etag)) => Opened {
+                path: PathBuf::from(&rel),
+                source: Source::Embedded(bytes),
+                len: bytes.len() as u64,
+                mtime: None,
+                etag: Some(etag.clone()),
+            },
+            None => return not_found(),
+        }
+    } else {
+        // Every filesystem call runs off the async workers (#1531).
+        let m = Arc::clone(&mount);
+        match tokio::task::spawn_blocking(move || open_file(&m, &rel)).await {
+            Ok(Some(o)) => o,
+            Ok(None) | Err(_) => return not_found(),
+        }
     };
     let files = &mount.files;
     let Opened {
         path,
-        file,
+        source,
         len,
         mtime,
+        etag,
     } = opened;
-
-    let etag = file_etag(len, mtime);
     let etag = etag.as_deref();
     // `If-None-Match` wins over `If-Modified-Since` (RFC 9110 §13.1.3).
     if let Some(inm) = headers.get(header::IF_NONE_MATCH) {
         let inm = inm.to_str().unwrap_or("");
         if etag.is_some_and(|e| crate::etag::if_none_match(inm, e)) {
-            return not_modified(mtime, etag, &files.cache_control);
+            return not_modified(mtime, etag, cache_control);
         }
     } else if let Some(secs) = mtime {
         if let Some(ims) = headers.get(header::IF_MODIFIED_SINCE) {
             if let Some(client_secs) = parse_http_date(ims.to_str().unwrap_or("")) {
                 if secs <= client_secs {
-                    return not_modified(mtime, etag, &files.cache_control);
+                    return not_modified(mtime, etag, cache_control);
                 }
             }
         }
@@ -233,19 +329,26 @@ async fn serve(
     };
     let (start, count) = range.unwrap_or((0, len));
 
-    let body = if method == Method::HEAD {
-        Body::empty()
-    } else {
-        use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
-        let mut file = tokio::fs::File::from_std(file);
-        if start > 0 && file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
-            return not_found();
+    let body = match source {
+        _ if method == Method::HEAD => Body::empty(),
+        Source::Embedded(bytes) => {
+            // `requested_range` keeps the span inside `len`.
+            let from = usize::try_from(start).unwrap_or(bytes.len());
+            let to = usize::try_from(start + count).unwrap_or(bytes.len());
+            Body::from(&bytes[from..to])
         }
-        // Streamed, so memory per request is one read buffer, not the file.
-        Body::new(KnownLen {
-            inner: Body::from_stream(tokio_util::io::ReaderStream::new(file.take(count))),
-            len: count,
-        })
+        Source::File(file) => {
+            use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
+            let mut file = tokio::fs::File::from_std(file);
+            if start > 0 && file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+                return not_found();
+            }
+            // Streamed, so memory per request is one read buffer, not the file.
+            Body::new(KnownLen {
+                inner: Body::from_stream(tokio_util::io::ReaderStream::new(file.take(count))),
+                len: count,
+            })
+        }
     };
 
     let mut mime = mime_for(&path);
@@ -275,8 +378,8 @@ async fn serve(
         }
     }
     h.insert(header::CONTENT_TYPE, mime);
-    if !files.cache_control.is_empty() {
-        if let Ok(v) = HeaderValue::from_str(&files.cache_control) {
+    if !cache_control.is_empty() {
+        if let Ok(v) = HeaderValue::from_str(cache_control) {
             h.insert(header::CACHE_CONTROL, v);
         }
     }
@@ -334,11 +437,13 @@ fn open_file(mount: &Mount, rel: &str) -> Option<Opened> {
         .ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_secs());
+    let len = meta.len();
     Some(Opened {
         path,
-        file,
-        len: meta.len(),
+        source: Source::File(file),
+        len,
         mtime,
+        etag: file_etag(len, mtime),
     })
 }
 
@@ -1130,5 +1235,153 @@ mod tests {
         // chrono RFC 2822 → numeric offset, not "GMT".
         let parsed = parse_http_date("Thu, 02 May 2024 12:00:00 +0000").unwrap();
         assert_eq!(parsed, 1_714_651_200);
+    }
+
+    async fn body_of(resp: Response) -> Vec<u8> {
+        http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec()
+    }
+
+    #[test]
+    fn hashed_names_keep_dir_and_extension() {
+        assert_eq!(assets_hashed("js/app.js", "ab"), "js/app.ab.js");
+        assert_eq!(assets_hashed("app.min.js", "ab"), "app.ab.min.js");
+        assert_eq!(assets_hashed("LICENSE", "ab"), "LICENSE.ab");
+        assert_eq!(assets_hashed(".x", "ab"), ".x.ab");
+    }
+
+    fn assets_hashed(path: &str, tag: &str) -> String {
+        let m = AssetManifest::from_files([(path, &b""[..])]);
+        let hashed = &m.get(path).unwrap().hashed;
+        // Swap the real tag for `tag` so the shape is easy to read.
+        let real: String = hashed
+            .split('.')
+            .find(|p| p.len() == 12 && p.bytes().all(|b| b.is_ascii_hexdigit()))
+            .unwrap()
+            .to_owned();
+        hashed.replace(&real, tag)
+    }
+
+    /// The hashed URL serves the file `immutable`, and its SRI hash is the
+    /// SHA-384 of the bytes served.
+    #[tokio::test]
+    async fn manifest_serves_hashed_names_with_matching_sri() {
+        use base64::Engine as _;
+        use sha2::Digest as _;
+        let dir = TempDir::new().unwrap();
+        write_file(&dir, "js/app.js", b"console.log(1)");
+        write_file(&dir, ".env", b"SECRET=1");
+        let manifest = AssetManifest::from_dir(dir.path())
+            .unwrap()
+            .prefix("/static/");
+        assert!(manifest.get(".env").is_none(), "hidden files stay out");
+        let url = manifest.url("js/app.js").unwrap();
+        assert!(
+            url.starts_with("/static/js/app.") && url.ends_with(".js"),
+            "{url}"
+        );
+        let want_sri = format!(
+            "sha384-{}",
+            base64::engine::general_purpose::STANDARD
+                .encode(sha2::Sha384::digest(b"console.log(1)"))
+        );
+        assert_eq!(manifest.integrity("js/app.js"), Some(want_sri.as_str()));
+
+        let app = static_router(StaticFiles::new(dir.path()).manifest(manifest.clone()));
+        let hashed = get(app.clone(), url.trim_start_matches("/static")).await;
+        assert_eq!(hashed.status(), StatusCode::OK);
+        assert_eq!(
+            hashed.headers()[header::CACHE_CONTROL],
+            HASHED_CACHE_CONTROL
+        );
+        assert_eq!(body_of(hashed).await, b"console.log(1)");
+        let plain = get(app, "/js/app.js").await;
+        assert_eq!(
+            plain.headers()[header::CACHE_CONTROL],
+            "public, max-age=3600"
+        );
+
+        let back = AssetManifest::from_json(&manifest.to_json()).unwrap();
+        assert_eq!(back, manifest);
+    }
+
+    /// `embed_static!` leaves hidden files out; embedded files get an
+    /// ETag, 304, ranges and 404s like files on disk.
+    #[tokio::test]
+    async fn embedded_files_serve_like_files_on_disk() {
+        static ASSETS: EmbeddedDir = crate::embed_static!("tests/fixtures/embed_static");
+        let names: Vec<&str> = ASSETS.files().iter().map(|(p, _)| *p).collect();
+        assert_eq!(names, ["app.js", "css/site.css"]);
+        let app = static_router(StaticFiles::embedded(ASSETS));
+
+        let ok = get(app.clone(), "/css/site.css").await;
+        assert_eq!(ok.status(), StatusCode::OK);
+        assert_eq!(
+            ok.headers()[header::CONTENT_TYPE],
+            "text/css; charset=utf-8"
+        );
+        let etag = ok.headers()[header::ETAG].clone();
+        assert_eq!(body_of(ok).await, b"body{margin:0}\n");
+
+        let req = Request::builder()
+            .uri("/css/site.css")
+            .header(header::IF_NONE_MATCH, etag)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::NOT_MODIFIED
+        );
+
+        let req = Request::builder()
+            .uri("/app.js")
+            .header(header::RANGE, "bytes=0-6")
+            .body(Body::empty())
+            .unwrap();
+        let part = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(part.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(body_of(part).await, b"console");
+
+        for missing in ["/.secret", "/css/../app.js", "/nope.js"] {
+            assert_eq!(
+                get(app.clone(), missing).await.status(),
+                StatusCode::NOT_FOUND,
+                "{missing}"
+            );
+        }
+
+        let manifest = AssetManifest::from_embedded(&ASSETS);
+        let app = static_router(StaticFiles::embedded(ASSETS).manifest(manifest.clone()));
+        let hashed = format!("/{}", manifest.get("app.js").unwrap().hashed);
+        let resp = get(app, &hashed).await;
+        assert_eq!(resp.headers()[header::CACHE_CONTROL], HASHED_CACHE_CONTROL);
+    }
+
+    #[cfg(feature = "_tera")]
+    #[test]
+    fn tera_functions_render_url_and_integrity() {
+        let m = AssetManifest::from_files([("app.js", &b"x"[..])]).prefix("/static");
+        let mut tera = tera::Tera::default();
+        m.register_tera(&mut tera);
+        tera.add_raw_template(
+            "t",
+            r#"{{ asset_url(name="app.js") }}|{{ asset_integrity(name="app.js") }}"#,
+        )
+        .unwrap();
+        let out = tera.render("t", &tera::Context::new()).unwrap();
+        assert_eq!(
+            out,
+            format!(
+                "{}|{}",
+                m.url("app.js").unwrap(),
+                m.integrity("app.js").unwrap()
+            )
+        );
+        tera.add_raw_template("bad", r#"{{ asset_url(name="nope.js") }}"#)
+            .unwrap();
+        assert!(tera.render("bad", &tera::Context::new()).is_err());
     }
 }

@@ -44,7 +44,7 @@ impl ScratchDb {
 
 impl Drop for ScratchDb {
     fn drop(&mut self) {
-        let (admin_url, name) = (self.admin_url.clone(), self.name.clone());
+        let (admin_url, name, url) = (self.admin_url.clone(), self.name.clone(), self.url.clone());
         // Own thread and runtime: this may run inside a test's runtime or its unwind.
         let dropped = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -52,6 +52,7 @@ impl Drop for ScratchDb {
                 .build()
                 .map_err(|e| e.to_string())?;
             rt.block_on(async {
+                let roles = tenant_roles(&url).await;
                 let admin = Pool::connect(&admin_url).await.map_err(|e| e.to_string())?;
                 let dialect = admin.dialect();
                 let force = if dialect.name() == "postgres" {
@@ -64,6 +65,11 @@ impl Drop for ScratchDb {
                     dialect.quote_ident(&name)
                 );
                 let res = rustango::sql::raw_execute_pool(&admin, &sql, Vec::new()).await;
+                // Roles are server-wide; once the database is gone nothing holds them.
+                for role in roles {
+                    let sql = format!("DROP ROLE IF EXISTS {}", dialect.quote_ident(&role));
+                    let _ = rustango::sql::raw_execute_pool(&admin, &sql, Vec::new()).await;
+                }
                 admin.close().await;
                 res.map(drop).map_err(|e| e.to_string())
             })
@@ -73,4 +79,26 @@ impl Drop for ScratchDb {
             eprintln!("could not drop scratch database {}: {e}", self.name);
         }
     }
+}
+
+/// The schema tenants' login roles with rights in the database at `url`.
+async fn tenant_roles(url: &str) -> Vec<String> {
+    #[cfg(feature = "postgres")]
+    if url.starts_with("postgres") {
+        let Ok(pool) = rustango::sql::sqlx::PgPool::connect(url).await else {
+            return Vec::new();
+        };
+        let roles = rustango::sql::sqlx::query_scalar::<_, String>(
+            "SELECT r.rolname::text FROM pg_roles r WHERE r.rolname LIKE 'rgo\\_t\\_%' \
+             AND EXISTS (SELECT 1 FROM pg_namespace n CROSS JOIN LATERAL aclexplode(n.nspacl) a \
+                         WHERE a.grantee = r.oid)",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default();
+        pool.close().await;
+        return roles;
+    }
+    let _ = url;
+    Vec::new()
 }

@@ -74,6 +74,10 @@ pub use vector::Vector;
 #[cfg(feature = "jobs")]
 pub(crate) use executor::in_any_block;
 pub(crate) use executor::in_block;
+#[cfg(feature = "jobs-postgres")]
+pub(crate) use executor::raw_insert_id;
+#[cfg(any(feature = "jobs-postgres", all(feature = "sse", feature = "postgres")))]
+pub(crate) use executor::raw_write;
 pub(crate) use executor::rolled_back;
 #[cfg(feature = "mysql")]
 pub use executor::row_to_json_my;

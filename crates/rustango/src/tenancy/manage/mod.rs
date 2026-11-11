@@ -265,7 +265,7 @@ where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
     #[cfg(feature = "postgres")]
-    crate::tenancy::refuse_registry_shadow(pools).await?;
+    crate::tenancy::boot_checks(pools).await?;
     let cmd = args.first().map_or("", String::as_str);
 
     match cmd {
@@ -338,6 +338,18 @@ where
                 })?;
             migrate_storage::migrate_tenant_storage_cmd(pg_pools, registry_url, &args[1..], writer)
                 .await
+        }
+        #[cfg(feature = "postgres")]
+        "ensure-tenant-roles" => {
+            let pg_pools = (pools as &dyn std::any::Any)
+                .downcast_ref::<TenantPools<sqlx::Postgres>>()
+                .ok_or_else(|| {
+                    TenancyError::Validation(
+                        "ensure-tenant-roles is for schema tenants, which need a Postgres registry"
+                            .into(),
+                    )
+                })?;
+            tenants::ensure_tenant_roles(pg_pools, &args[1..], writer).await
         }
         #[cfg(not(feature = "postgres"))]
         "migrate-tenant-storage" => Err(TenancyError::Validation(
@@ -873,6 +885,10 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(
         w,
         "  migrate-tenants      Apply tenant-scoped migrations to every active org."
+    )?;
+    writeln!(
+        w,
+        "  ensure-tenant-roles  Create or refresh each schema tenant's login role and grants."
     )?;
     writeln!(
         w,

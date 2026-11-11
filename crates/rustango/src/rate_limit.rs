@@ -24,12 +24,11 @@
 //!   `rate_limit_cache` module instead.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
-use axum::extract::{ConnectInfo, Request};
+use axum::extract::Request;
 use axum::http::{HeaderValue, Response};
 use axum::middleware::Next;
 use axum::Router;
@@ -66,32 +65,6 @@ pub(crate) fn warn_missing_discriminator(what: &str) {
     }
 }
 
-/// Warn once that a forwarding header arrived but no
-/// [`TrustedRealIp`] did, so every client behind that proxy shares
-/// one bucket. Either `RealIpLayer` is missing, it is mounted after
-/// the limiter, or no proxies were marked trusted.
-///
-/// [`TrustedRealIp`]: crate::real_ip::TrustedRealIp
-fn warn_forwarded_but_unresolved(headers: &axum::http::HeaderMap) {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    static WARNED: AtomicBool = AtomicBool::new(false);
-
-    let forwarded = headers.contains_key("x-forwarded-for")
-        || headers.contains_key("x-real-ip")
-        || headers.contains_key("forwarded");
-    if forwarded && !WARNED.swap(true, Ordering::Relaxed) {
-        tracing::warn!(
-            target: "rustango::rate_limit",
-            "per-IP rate limiting saw a forwarding header but no trusted client \
-             address, so it is keying on the connecting address and EVERY client \
-             behind that proxy shares ONE bucket. Mount `real_ip::RealIpLayer` \
-             ahead of the limiter (layers apply outermost-last, so add it after) \
-             AND name your proxies with `.trust_proxies([...])` — without that \
-             the header is only a claim and is deliberately ignored here.",
-        );
-    }
-}
-
 /// The client IP the limiters key on: the forwarded address if it
 /// came through a **trusted** proxy, otherwise the connecting socket.
 ///
@@ -110,27 +83,13 @@ fn warn_forwarded_but_unresolved(headers: &axum::http::HeaderMap) {
 /// [`RealIp`]: crate::real_ip::RealIp
 /// [`RealIpLayer::trust_proxies`]: crate::real_ip::RealIpLayer::trust_proxies
 pub(crate) fn client_ip_key(req: &Request<Body>) -> String {
-    client_ip(req.extensions(), req.headers()).map_or_else(
+    crate::real_ip::client_ip(req.extensions(), req.headers()).map_or_else(
         || {
             warn_missing_discriminator("IP (ConnectInfo missing)");
             "<no-ip>".to_owned()
         },
         ip_bucket,
     )
-}
-
-/// The client IP from request parts; `None` when no address is known.
-/// Every IP reader goes through here, so none trusts a raw header.
-pub(crate) fn client_ip(
-    extensions: &axum::http::Extensions,
-    headers: &axum::http::HeaderMap,
-) -> Option<std::net::IpAddr> {
-    if let Some(ip) = extensions.get::<crate::real_ip::TrustedRealIp>() {
-        return Some(ip.0);
-    }
-    let ci = extensions.get::<ConnectInfo<SocketAddr>>()?;
-    warn_forwarded_but_unresolved(headers);
-    Some(ci.ip())
 }
 
 /// The bucket key for one address: IPv4 as is, IPv6 by its /64, since
@@ -511,6 +470,8 @@ mod tests {
     }
 
     use super::*;
+    use axum::extract::ConnectInfo;
+    use std::net::SocketAddr;
 
     #[tokio::test]
     async fn first_n_requests_succeed_under_capacity() {

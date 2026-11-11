@@ -106,7 +106,7 @@ impl DistributedLock {
     #[cfg(feature = "tenancy")]
     #[deprecated(
         since = "0.64.0",
-        note = "use `CacheScope::for_tenant(cache, tenant).locks()`; removed in 0.66.0"
+        note = "use `CacheScope::for_tenant(cache, tenant).locks()`; removed in 0.67.0"
     )]
     #[must_use]
     pub fn for_tenant(self, tenant: &crate::tenancy::TenantSlug) -> Self {
@@ -116,7 +116,7 @@ impl DistributedLock {
     /// Scope lock names under any namespace: `lock:<namespace>:<name>`.
     #[deprecated(
         since = "0.64.0",
-        note = "put the namespace in the lock name, or use `CacheScope::locks()` per tenant; removed in 0.66.0"
+        note = "put the namespace in the lock name, or use `CacheScope::locks()` per tenant; removed in 0.67.0"
     )]
     #[must_use]
     pub fn scoped(self, namespace: impl AsRef<str>) -> Self {
@@ -138,7 +138,7 @@ impl DistributedLock {
         self.space.key(Area::Lock, &self.rest(name))
     }
 
-    /// The 0.63 key of a tenant lock. Remove in 0.65.0.
+    /// The 0.63 key of a tenant lock. Remove in 0.67.0.
     fn legacy_key_for(&self, name: &str) -> Option<String> {
         self.space.legacy_key(Area::Lock, &self.rest(name))
     }
@@ -163,7 +163,7 @@ impl DistributedLock {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_nanos())
         );
-        // Remove in 0.65.0: the 0.63 key first, so a pod still on 0.63 and
+        // Remove in 0.67.0: the 0.63 key first, so a pod still on 0.63 and
         // this one exclude each other during a rolling deploy.
         if let Some(old) = &legacy {
             if !matches!(self.cache.add(old, &token, Some(ttl)).await, Ok(true)) {
@@ -257,7 +257,7 @@ impl DistributedLock {
         if let Some(old) = window.checked_sub(2) {
             let old = format!("{name}@{old}");
             let _ = self.cache.delete(&self.key_for(&old)).await;
-            // Remove in 0.65.0.
+            // Remove in 0.67.0.
             if let Some(legacy) = self.legacy_key_for(&old) {
                 let _ = self.cache.delete(&legacy).await;
             }
@@ -311,7 +311,7 @@ impl Drop for ReleaseOnDrop {
 pub struct LockGuard {
     cache: BoxedCache,
     key: String,
-    /// The 0.63 key, held too. Remove in 0.65.0.
+    /// The 0.63 key, held too. Remove in 0.67.0.
     legacy: Option<String>,
     token: Arc<String>,
     released: Arc<std::sync::atomic::AtomicBool>,

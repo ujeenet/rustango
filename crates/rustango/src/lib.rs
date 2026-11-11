@@ -17,10 +17,10 @@
 //!
 //! ```toml
 //! [dependencies]
-//! rustango = "0.65"                                        # Postgres (the default backend)
+//! rustango = "0.66"                                        # Postgres (the default backend)
 //! # or pick another backend — see "Choosing a backend" below:
-//! rustango = { version = "0.65", default-features = false, features = ["sqlite", "batteries"] }
-//! rustango = { version = "0.65", default-features = false, features = ["mysql",  "batteries"] }
+//! rustango = { version = "0.66", default-features = false, features = ["sqlite", "batteries"] }
+//! rustango = { version = "0.66", default-features = false, features = ["mysql",  "batteries"] }
 //! ```
 //!
 //! `default = ["postgres", "batteries"]`. **`batteries`** is everything except
@@ -646,14 +646,14 @@ pub mod storage;
 
 /// Test client — fire HTTP requests against an `axum::Router` in tests
 /// without binding a real socket. See [`test_client::TestClient`].
-#[cfg(feature = "admin")]
+#[cfg(any(feature = "admin", feature = "test-client"))]
 pub mod test_client;
 
 /// Live HTTP server for tests. Binds an `axum::Router` to a random
 /// localhost port on a background task. Use it
 /// when in-process [`test_client::TestClient`] routing is not enough, for
 /// example with Selenium, websockets, or code that reads the host header.
-#[cfg(feature = "admin")]
+#[cfg(any(feature = "admin", feature = "test-client"))]
 pub mod test_server;
 
 /// Typed environment variable readers — `required` / `with_default` /
@@ -850,17 +850,18 @@ pub mod webhook_delivery;
     feature = "_http_layers",
     feature = "webhook-delivery",
     feature = "oauth2",
-    all(feature = "notifications", feature = "http-client")
+    feature = "http-client"
 ))]
 mod cidr;
 
-/// Checked outbound HTTP client for config-supplied URLs (#1716).
+/// Outbound HTTP that refuses private, loopback and cloud-metadata targets.
+/// See [`outbound::Egress`] and [`outbound::resolve_public`].
 #[cfg(any(
     feature = "webhook-delivery",
     feature = "oauth2",
-    all(feature = "notifications", feature = "http-client")
+    feature = "http-client"
 ))]
-pub(crate) mod outbound;
+pub mod outbound;
 
 /// Standardized API error responses. See [`api_errors::ApiError`].
 /// Needs only axum, so every HTTP surface can answer in this shape.
@@ -1160,9 +1161,10 @@ pub mod dates;
 #[cfg(feature = "_signing")]
 pub mod signing;
 
-/// The bearer credential and its 401 challenge.
-#[cfg(any(feature = "tenancy", feature = "admin", feature = "mcp"))]
-pub(crate) mod bearer;
+/// The `Authorization: Bearer` credential: [`bearer::token`] reads it the
+/// way every built-in token login does.
+#[cfg(feature = "_axum")]
+pub mod bearer;
 
 /// `Vary` header merging for the response layers.
 #[cfg(all(feature = "_axum", feature = "_tower"))]
@@ -1208,7 +1210,12 @@ pub mod password_hashers;
 /// `sign(secret, msg)` helper, shared by every layer that sets a signed
 /// cookie so the crypto lives in one place. See [`session::SessionSecret`].
 /// `csrf` too: its cookie reads `session::secure_cookies` (#1608).
-#[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
+#[cfg(any(
+    feature = "admin",
+    feature = "tenancy",
+    feature = "csrf",
+    feature = "sse"
+))]
 pub mod session;
 
 /// Graceful-shutdown signal handling — SIGINT **and** SIGTERM in one place,
@@ -1571,6 +1578,11 @@ pub mod prelude {
 /// const NONE: &[(&str, &str)] = rustango::embed_migrations!("./no_such_migrations_dir");
 /// ```
 pub use rustango_macros::embed_migrations;
+
+/// Compile a static directory into the binary; serve it with
+/// [`static_files::StaticFiles::embedded`].
+#[cfg(feature = "_http_layers")]
+pub use rustango_macros::embed_static;
 
 /// `Q!()` — compact filter syntax compile-time-resolved against
 /// typed columns. Each invocation expands to the equivalent typed-column

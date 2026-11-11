@@ -288,7 +288,7 @@ fn pick_tenant_scheme(setting: Option<String>, secure: bool, host: &str) -> Stri
 /// or [`TenancyError::Validation`] for malformed config.
 #[deprecated(
     since = "0.64.0",
-    note = "serves without the [security]/[server] layers; use `manage::Cli` or `server::Builder` (removed in 0.66.0)"
+    note = "serves without the [security]/[server] layers; use `manage::Cli` or `server::Builder` (removed in 0.67.0)"
 )]
 pub async fn run<DB: Database, W: Write + Send>(
     pools: Arc<TenantPools<DB>>,
@@ -302,7 +302,7 @@ where
     tracing::warn!(
         target: "rustango::server",
         "tenancy::server::run serves without the [security]/[server] layers and is \
-         removed in 0.66.0; serve through manage::Cli or server::Builder"
+         removed in 0.67.0; serve through manage::Cli or server::Builder"
     );
     if !no_operators_warn(&pools.registry_pool(), writer).await? {
         // No operator accounts — the user can still bring up the

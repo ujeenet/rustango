@@ -40,6 +40,13 @@ and unlocks the multi-tenant commands.
 > (or pre-v0.16 ones) still ship `src/bin/manage.rs`. Those use
 > `cargo run --bin manage -- <verb>`. Both forms accept the same verbs.
 
+Two hooks run only for `runserver`, after migrations and before the
+port is bound; an error stops the start. `.seed(|pool| ..)` inserts
+demo rows (it runs on every start, so make it idempotent), and
+`.before_serve(|pool| ..)` checks the app can serve, such as "the master
+key opens every tenant key". Both get the registry pool under
+`.tenancy()`, else the app's pool; `seed` runs first.
+
 Every command prints to stdout and exits with a non-zero code on
 validation or I/O errors. Run `cargo run -- --help` (or `<verb> --help`)
 for inline usage.
@@ -162,6 +169,7 @@ The two cache verbs need the `cache` feature; without it they are left out of `-
 | `test-tenant-connection` | Verify a tenant's database is reachable |
 | `reseal-tenant-secrets [--apply]` | Re-seal stored tenant URLs, server passwords, operator TOTP, SSO secrets and `Cast<EncryptedString>` columns with the current `RUSTANGO_SECRET_KEY`; a dry run without `--apply` |
 | `prewarm-pools` | Open tenant pools ahead of first request |
+| `ensure-tenant-roles` | Create or refresh each schema tenant's login role and grants |
 | `run-server` / `runserver` | Run the multi-tenant server |
 | `init` / `init-tenancy` / `wizard` / `menu` / `actions` | Setup and interactive entry points |
 
@@ -808,7 +816,7 @@ Prints the **Rustango** framework version.
 
 ```bash
 $ cargo run -- version
-rustango 0.65.2
+rustango 0.66.0
 ```
 
 ### `about`
@@ -820,7 +828,7 @@ variables. Drop this into support tickets when something's wrong.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.65.2
+  version:        0.66.0
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -1433,6 +1441,18 @@ recorded, which is what tells you *where* a failure happened.
 
 Tenants created from the CLI are recorded too, tagged `requested_by =
 cli`, so the history covers both surfaces.
+
+### `ensure-tenant-roles`
+
+Creates or refreshes the login role of every schema tenant and grants it its
+schema. Run it once after upgrading to 0.66.0, before traffic: otherwise each
+tenant's first request sets its role up. It needs `CREATEROLE` on the registry
+login and `RUSTANGO_TENANT_ROLE_SECRET`. See
+[schema mode](tenancy.md#schema-mode-postgres-only).
+
+```bash
+cargo run -- ensure-tenant-roles
+```
 
 ### `prewarm-pools`
 

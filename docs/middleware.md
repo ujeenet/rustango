@@ -139,6 +139,7 @@ to get the method.
 | **Security & access** | | |
 | Security headers (HSTS, XFO, CSP…) | `SecurityHeadersLayer` | `.security_headers(..)` |
 | CSRF (double-submit cookie) | `CsrfLayer` | `.layer(csrf::layer())` |
+| Server-side session cookie (+ session-bound CSRF) | `SessionLayer` | `.layer(SessionLayer::new(store))` / `.layer(SessionLayer::new(store).with_csrf(cfg))` |
 | CORS | `CorsLayer` | `.cors(..)` |
 | Host allow-list | `AllowedHostsLayer` | `.allowed_hosts(..)` |
 | IP allow/block | `IpFilterLayer` | `.ip_filter(..)` |
@@ -148,8 +149,8 @@ to get the method.
 | **Traffic & resilience** | | |
 | Rate limit (per-IP/global) | `RateLimitLayer` | `.rate_limit(..)` |
 | Distributed rate limit (cache-backed) | `CacheRateLimitLayer` | `.cache_rate_limit(..)` |
-| Request timeout | `RequestTimeoutLayer` | `.request_timeout(..)` |
-| Max body size | `BodyLimitLayer` | `.body_limit(..)` |
+| Request timeout (per route: `.route(..)`, `.exempt(..)`) | `RequestTimeoutLayer` | `.request_timeout(..)` |
+| Max body size (per route: `.route(..)`) | `BodyLimitLayer` | `.body_limit(..)` |
 | Maintenance mode (503) | `MaintenanceLayer` | `.maintenance(..)` |
 | Idempotency keys | `IdempotencyLayer` | `.idempotency(..)` |
 | Restrict HTTP methods | `MethodRestrictLayer` | `.require_get()` / `.require_post()` / `.require_safe()` / `.require_methods([..])` |
@@ -160,7 +161,7 @@ to get the method.
 | [Access log](logging.md#the-access-log) (PII-redacted) | `AccessLogLayer` | `.access_log(..)` |
 | `tracing` spans | `TracingLayer` | `.layer(..)` |
 | `Server-Timing` header | `ServerTimingLayer` | `.server_timing(..)` |
-| Real client IP (behind proxies) | `RealIpLayer` | `.real_ip(..)` |
+| Real client IP (behind proxies) | `RealIpLayer` | `.real_ip(..)`; read it with the `ClientIp` extractor |
 | Request signals (`request_started` / `request_finished`) | `RequestSignalsLayer` | `.layer(..)` |
 | **Content & response** | | |
 | gzip/br compression | `CompressionLayer` | `.compression(..)` |
@@ -353,6 +354,32 @@ Use `dev()` locally — HSTS would otherwise pin your browser to HTTPS for a yea
 on `localhost`. Build a CSP fluently with `CspBuilder` (`.default_src(..)`,
 `.script_src(..)`, …, `.build()`), and roll it out safely with
 `.csp_report_only(true)` + `.csp_report_uri("/csp-report")` before enforcing.
+
+### CSP for a WebAssembly app
+
+`CspBuilder::strict_wasm_app()` is a strict policy for a same-origin WASM app:
+`default-src 'none'`, `script-src 'self' 'wasm-unsafe-eval'` (WASM compiles,
+JS `eval` does not), no inline script or style, `blob:` images and media, and
+`require-trusted-types-for 'script'`. Widen it only where you need to:
+
+```rust
+use rustango::security_headers::CspBuilder;
+
+let csp = CspBuilder::strict_wasm_app()
+    // A storage bucket the client uploads to.
+    .add_source("connect-src", "https://bucket.example.com")
+    // Workers from `blob:` URLs, minted only by the `app-boot` Trusted Types policy.
+    .blob_workers("app-boot")
+    .build();
+```
+
+Use `blob_workers` only when the worker script is fetched with SRI and the
+policy admits that one blob. A page with an inline import map needs its hash:
+build the CSP per response with `.script_hash(&import_map)`, passing the map
+text your code embeds (never text parsed back out of the HTML, which injected
+markup could choose), and set it on that response. The layer keeps a CSP
+header the handler already set, so the static policy still covers every other
+response.
 
 ---
 

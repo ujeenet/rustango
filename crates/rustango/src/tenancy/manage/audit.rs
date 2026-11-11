@@ -118,7 +118,7 @@ where
             .ok_or_else(|| TenancyError::Validation(format!("tenant `{slug}` not found")))?;
         // One named tenant: a failure is the answer to what was asked,
         // so it propagates rather than being collected.
-        let scoped = pools.scoped_pool_dyn(&org).await?;
+        let scoped = pools.operator_pool_dyn(&org).await?.0;
         let deleted = rule.prune(&scoped).await?;
         writeln!(w, "  tenant={slug} deleted={deleted}")?;
         total_deleted += deleted;

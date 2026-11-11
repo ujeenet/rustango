@@ -1711,13 +1711,14 @@ async fn check_deploy_reads_a_schema_mode_tenant_in_its_schema() {
         .await
         .unwrap();
     let tenant = pools.scoped_pool_dyn(&org).await.unwrap();
-    rustango::testkit::create_tables_for::<rustango::tenancy::User>(&tenant)
+    let ddl = pools.ddl_pool(&org).await.unwrap();
+    rustango::testkit::create_tables_for::<rustango::tenancy::User>(&ddl)
         .await
         .unwrap();
-    rustango::testkit::create_tables_for::<SsoProvider>(&tenant)
+    rustango::testkit::create_tables_for::<SsoProvider>(&ddl)
         .await
         .unwrap();
-    rustango::sso::link::ensure_table(&tenant).await.unwrap();
+    rustango::sso::link::ensure_table(&ddl).await.unwrap();
     let mut user = rustango::tenancy::User {
         username: "ann".into(),
         email: Some("ann@example.com".into()),

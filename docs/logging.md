@@ -144,9 +144,11 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::passkey` | Passkey challenges refused by the cache |
 | `rustango::passwords` | Password-hash upgrades on login |
 | `rustango::rate_limit` | Rate limiting |
+| `rustango::real_ip` | Forwarded headers sent without trusted proxies |
 | `rustango::request_timeout` | Per-request timeout |
 | `rustango::scheduler` | Cron / scheduled tasks |
 | `rustango::server` | Server boot and shutdown |
+| `rustango::sessions` | Session store failures in `SessionLayer` |
 | `rustango::shutdown` | Signal handling and shutdown hooks |
 | `rustango::sql` | Query execution |
 | `rustango::sql::lock` | Row-lock clauses |

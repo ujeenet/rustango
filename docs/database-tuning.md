@@ -173,6 +173,9 @@ URL sets `cache=shared`.
 **PostgreSQL and MySQL** both enforce a server-side connection limit.
 Size your pools against that budget across all replicas, and remember
 that connection poolers such as PgBouncer change the arithmetic.
+PgBouncer keeps one server pool per user, and schema tenants log in as
+their own roles, so cap the total with `max_db_connections`, not
+`default_pool_size` alone.
 
 ## Connection options, which are a different thing
 

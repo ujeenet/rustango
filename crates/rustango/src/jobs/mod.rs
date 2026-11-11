@@ -159,10 +159,160 @@ impl JobId {
         }
     }
 
+    /// The row id and enqueue time [`Self::of_row`] packed; `None` for
+    /// an id another queue gave out.
+    #[cfg(feature = "jobs-postgres")]
+    pub(crate) fn row_key(&self) -> Option<(i64, Option<chrono::DateTime<chrono::Utc>>)> {
+        match self.0.split_once('-') {
+            None => Some((self.0.parse().ok()?, None)),
+            Some((id, micros)) => Some((
+                id.parse().ok()?,
+                Some(chrono::DateTime::from_timestamp_micros(
+                    micros.parse().ok()?,
+                )?),
+            )),
+        }
+    }
+
     /// The id as text, e.g. for an idempotency-key header.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// Back from [`JobId::as_str`], e.g. to [`JobQueue::cancel`] a stored id.
+impl std::str::FromStr for JobId {
+    type Err = std::convert::Infallible;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(s.into()))
+    }
+}
+
+impl From<String> for JobId {
+    fn from(s: String) -> Self {
+        Self(s.into())
+    }
+}
+
+// ------------------------------------------------------------------ Dispatch
+
+/// Keeps one job of a type with this key queued or running at a time;
+/// see [`Dispatch::unique`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UniqueKey(Arc<str>);
+
+impl UniqueKey {
+    /// The longest key, in characters (MySQL's indexed `VARCHAR`).
+    pub const MAX_CHARS: usize = 200;
+
+    /// # Errors
+    /// [`JobError::Queue`] for an empty key, one over [`Self::MAX_CHARS`], or
+    /// one with leading or trailing whitespace (MySQL ignores trailing spaces
+    /// when it compares, the other backends do not).
+    pub fn new(key: impl Into<String>) -> Result<Self, JobError> {
+        let key = key.into();
+        let chars = key.chars().count();
+        if chars == 0 || chars > Self::MAX_CHARS {
+            return Err(JobError::Queue(format!(
+                "a unique key needs 1 to {} characters, got {chars}",
+                Self::MAX_CHARS
+            )));
+        }
+        if key.trim() != key {
+            return Err(JobError::Queue(format!(
+                "a unique key may not start or end with whitespace: {key:?}"
+            )));
+        }
+        Ok(Self(key.into()))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// How [`JobQueue::enqueue`] queues a job: when it may run, and an
+/// optional [`UniqueKey`].
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct Dispatch {
+    run_at: Option<chrono::DateTime<chrono::Utc>>,
+    unique: Option<UniqueKey>,
+}
+
+impl Dispatch {
+    /// Run as soon as a worker is free.
+    #[must_use]
+    pub fn now() -> Self {
+        Self::default()
+    }
+
+    /// Run no earlier than `when`; a past time runs now.
+    #[must_use]
+    pub fn at(when: chrono::DateTime<chrono::Utc>) -> Self {
+        Self {
+            run_at: Some(when),
+            ..Self::default()
+        }
+    }
+
+    /// Run no earlier than `delay` from now.
+    #[must_use]
+    pub fn after(delay: Duration) -> Self {
+        let delay = chrono::Duration::from_std(cap_backoff(delay)).unwrap_or_default();
+        Self::at(chrono::Utc::now() + delay)
+    }
+
+    /// Skip the dispatch while a job of this type with `key` is queued
+    /// or running; [`Enqueued::Duplicate`] then names that job.
+    #[must_use]
+    pub fn unique(mut self, key: UniqueKey) -> Self {
+        self.unique = Some(key);
+        self
+    }
+
+    #[must_use]
+    pub fn run_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.run_at
+    }
+
+    #[must_use]
+    pub fn unique_key(&self) -> Option<&UniqueKey> {
+        self.unique.as_ref()
+    }
+}
+
+/// What [`JobQueue::enqueue`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Enqueued {
+    /// A new job, with its id.
+    Queued(JobId),
+    /// Its unique key was held: the id of the job that holds it.
+    Duplicate(JobId),
+}
+
+impl Enqueued {
+    /// The new job's id, or the holder's.
+    #[must_use]
+    pub fn id(&self) -> &JobId {
+        match self {
+            Self::Queued(id) | Self::Duplicate(id) => id,
+        }
+    }
+
+    #[must_use]
+    pub fn into_id(self) -> JobId {
+        match self {
+            Self::Queued(id) | Self::Duplicate(id) => id,
+        }
+    }
+
+    #[must_use]
+    pub fn is_duplicate(&self) -> bool {
+        matches!(self, Self::Duplicate(_))
     }
 }
 
@@ -261,6 +411,40 @@ pub trait JobQueue: Send + Sync + 'static {
     /// Enqueue a job for asynchronous execution.
     async fn dispatch<T: Job>(&self, payload: &T) -> Result<(), JobError>;
 
+    /// Enqueue with [`Dispatch`] options and return the job's id.
+    ///
+    /// Both built-in queues implement it. The default refuses, so a
+    /// custom queue keeps compiling.
+    async fn enqueue<T: Job>(&self, payload: &T, opts: Dispatch) -> Result<Enqueued, JobError> {
+        drop(opts);
+        let _ = payload;
+        Err(JobError::Queue(format!(
+            "this JobQueue does not implement enqueue (job `{}`)",
+            T::NAME
+        )))
+    }
+
+    /// Enqueue `payload` to run no earlier than `when`. Keep the id to
+    /// [`Self::cancel`] it.
+    async fn dispatch_at<T: Job>(
+        &self,
+        payload: &T,
+        when: chrono::DateTime<chrono::Utc>,
+    ) -> Result<JobId, JobError> {
+        self.enqueue(payload, Dispatch::at(when))
+            .await
+            .map(Enqueued::into_id)
+    }
+
+    /// Drop a job no worker has started, or one waiting on a retry:
+    /// `Ok(true)` when it was dropped, `Ok(false)` when it is running,
+    /// done or unknown. A running job is never stopped.
+    async fn cancel(&self, id: &JobId) -> Result<bool, JobError> {
+        Err(JobError::Queue(format!(
+            "this JobQueue does not implement cancel (job {id})"
+        )))
+    }
+
     /// Spawn worker tasks. Calling `start` twice is a no-op; `start`
     /// after [`Self::shutdown`] starts a fresh set of workers.
     async fn start(&self);
@@ -356,6 +540,113 @@ struct JobEnvelope {
     context: crate::task_context::TaskContext,
     /// A parked retry's due time; it survives a shutdown and restart.
     not_before: Option<tokio::time::Instant>,
+    unique: Option<UniqueKey>,
+}
+
+/// The jobs an in-memory queue holds, for `cancel` and unique keys.
+#[derive(Default)]
+struct Ledger {
+    live: HashMap<JobId, Live>,
+    unique: HashMap<(&'static str, UniqueKey), JobId>,
+}
+
+struct Live {
+    unique: Option<(&'static str, UniqueKey)>,
+    running: bool,
+    /// Enqueued in an `atomic` block that has not committed yet.
+    uncommitted: bool,
+}
+
+impl Ledger {
+    /// The job that holds `job`'s unique key, if another does.
+    fn holder(&self, job: &JobEnvelope) -> Option<JobId> {
+        let key = job.unique.clone()?;
+        self.unique.get(&(job.name, key)).cloned()
+    }
+
+    /// Track `job`, or name the job that holds its key. `uncommitted` holds
+    /// the key for a job that waits for its block's commit.
+    fn admit(&mut self, job: &JobEnvelope, uncommitted: bool) -> Result<(), JobId> {
+        if let Some(holder) = self.holder(job) {
+            return Err(holder);
+        }
+        let unique = job.unique.clone().map(|k| (job.name, k));
+        if let Some(key) = &unique {
+            self.unique.insert(key.clone(), job.id.clone());
+        }
+        let live = Live {
+            unique,
+            running: false,
+            uncommitted,
+        };
+        self.live.insert(job.id.clone(), live);
+        Ok(())
+    }
+
+    /// Its block committed: the job is queued now.
+    fn commit(&mut self, id: &JobId) {
+        if let Some(j) = self.live.get_mut(id) {
+            j.uncommitted = false;
+        }
+    }
+
+    /// Mark `id` running; `false` once it was cancelled.
+    fn start(&mut self, id: &JobId) -> bool {
+        self.live.get_mut(id).map(|j| j.running = true).is_some()
+    }
+
+    fn requeue(&mut self, id: &JobId) {
+        if let Some(j) = self.live.get_mut(id) {
+            j.running = false;
+        }
+    }
+
+    fn finish(&mut self, id: &JobId) {
+        if let Some(Live {
+            unique: Some(key), ..
+        }) = self.live.remove(id)
+        {
+            self.unique.remove(&key);
+        }
+    }
+
+    /// Drop `id` unless a worker runs it or its block has not committed.
+    fn cancel(&mut self, id: &JobId) -> bool {
+        if self.live.get(id).is_none_or(|j| j.running || j.uncommitted) {
+            return false;
+        }
+        self.finish(id);
+        true
+    }
+}
+
+type SharedLedger = Arc<std::sync::Mutex<Ledger>>;
+
+/// A key held for a job in an uncommitted block; dropped unfired (a
+/// rollback drops the block's `on_commit` hooks) it frees the key.
+struct Reservation {
+    ledger: SharedLedger,
+    id: Option<JobId>,
+}
+
+impl Reservation {
+    fn keep(mut self) -> JobId {
+        self.id.take().expect("kept once")
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if let Some(id) = self.id.take() {
+            lock(&self.ledger).finish(&id);
+        }
+    }
+}
+
+fn lock(ledger: &SharedLedger) -> std::sync::MutexGuard<'_, Ledger> {
+    ledger
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 // ------------------------------------------------------------------ Handler registry
@@ -603,6 +894,7 @@ pub struct InMemoryJobQueue {
     /// Backoff timers; `shutdown` fires them at once and joins them.
     retries: Arc<std::sync::Mutex<JoinSet<()>>>,
     shutdown_grace: Duration,
+    ledger: SharedLedger,
 }
 
 /// The job each worker is running, so an aborted one can be re-queued.
@@ -628,6 +920,7 @@ impl InMemoryJobQueue {
             pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             retries: Arc::default(),
             shutdown_grace: DEFAULT_SHUTDOWN_GRACE,
+            ledger: SharedLedger::default(),
         }
     }
 
@@ -715,9 +1008,19 @@ impl JobQueue for InMemoryJobQueue {
     }
 
     async fn dispatch<T: Job>(&self, payload: &T) -> Result<(), JobError> {
+        self.enqueue(payload, Dispatch::now()).await.map(drop)
+    }
+
+    /// Inside an `atomic` block the job waits for the commit; its unique
+    /// key is held from the enqueue, and freed by a rollback.
+    async fn enqueue<T: Job>(&self, payload: &T, opts: Dispatch) -> Result<Enqueued, JobError> {
         // Memory is the job's only copy, and only this process's workers read it.
         self.registry.lock().await.require(T::NAME)?;
         let value = serde_json::to_value(payload).map_err(|e| JobError::Queue(e.to_string()))?;
+        let not_before = match opts.run_at {
+            Some(at) => Some(instant_at(at)?),
+            None => None,
+        };
         let envelope = JobEnvelope {
             name: T::NAME,
             id: JobId(uuid::Uuid::new_v4().to_string().into()),
@@ -727,20 +1030,44 @@ impl JobQueue for InMemoryJobQueue {
             // Captured here, at the hand-off. A worker is spawned at
             // boot and has no caller to inherit from.
             context: crate::task_context::TaskContext::capture(),
-            not_before: None,
+            not_before,
+            unique: opts.unique,
         };
         // Inside an `atomic` block the job waits for the commit, as on
         // the DB queue, and a rollback drops it.
         if crate::sql::in_any_block() {
-            let (tx, pending) = (self.tx.clone(), self.pending.clone());
+            // The key is held from here, so a second enqueue sees it as on the DB queue.
+            if let Err(holder) = lock(&self.ledger).admit(&envelope, true) {
+                return Ok(Enqueued::Duplicate(holder));
+            }
+            let id = envelope.id.clone();
+            let reservation = Reservation {
+                ledger: self.ledger.clone(),
+                id: Some(id.clone()),
+            };
+            let (tx, pending, ledger) =
+                (self.tx.clone(), self.pending.clone(), self.ledger.clone());
             crate::sql::on_commit(move || {
+                let id = reservation.keep();
+                lock(&ledger).commit(&id);
                 if let Err(e) = enqueue(&tx, &pending, envelope) {
+                    lock(&ledger).finish(&id);
                     tracing::error!(error = %e, "job dispatched in a committed block was lost");
                 }
             });
-            return Ok(());
+            return Ok(Enqueued::Queued(id));
         }
-        enqueue(&self.tx, &self.pending, envelope)
+        submit(&self.tx, &self.pending, &self.ledger, envelope)
+    }
+
+    async fn cancel(&self, id: &JobId) -> Result<bool, JobError> {
+        let dropped = lock(&self.ledger).cancel(id);
+        if dropped {
+            // Its envelope is skipped when a worker reaches it.
+            self.pending
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(dropped)
     }
 
     async fn start(&self) {
@@ -762,6 +1089,7 @@ impl JobQueue for InMemoryJobQueue {
                 retries: self.retries.clone(),
                 stop: stop.clone(),
                 current: job,
+                ledger: self.ledger.clone(),
             };
             run.push(tokio::spawn(worker_loop(worker)));
         }
@@ -778,6 +1106,7 @@ impl JobQueue for InMemoryJobQueue {
             // start, with the run spent as on the DB queue.
             if let Some(mut job) = current[n].lock().unwrap().take() {
                 tracing::warn!(job = job.name, "job aborted at shutdown; re-queued");
+                lock(&self.ledger).requeue(&job.id);
                 job.attempt += 1;
                 let _ = self.tx.send(job);
             }
@@ -790,6 +1119,29 @@ impl JobQueue for InMemoryJobQueue {
     async fn pending_count(&self) -> usize {
         self.pending.load(std::sync::atomic::Ordering::SeqCst)
     }
+}
+
+/// `at` on the tokio clock; a past time is now.
+fn instant_at(at: chrono::DateTime<chrono::Utc>) -> Result<tokio::time::Instant, JobError> {
+    let wait = (at - chrono::Utc::now()).to_std().unwrap_or_default();
+    tokio::time::Instant::now()
+        .checked_add(wait)
+        .ok_or_else(|| JobError::Queue(format!("run time {at} is too far ahead")))
+}
+
+/// Track the job in the ledger and queue it, unless its key is held.
+fn submit(
+    tx: &mpsc::UnboundedSender<JobEnvelope>,
+    pending: &std::sync::atomic::AtomicUsize,
+    ledger: &SharedLedger,
+    envelope: JobEnvelope,
+) -> Result<Enqueued, JobError> {
+    let id = envelope.id.clone();
+    if let Err(holder) = lock(ledger).admit(&envelope, false) {
+        return Ok(Enqueued::Duplicate(holder));
+    }
+    enqueue(tx, pending, envelope).inspect_err(|_| lock(ledger).finish(&id))?;
+    Ok(Enqueued::Queued(id))
 }
 
 /// Count the job pending and queue it.
@@ -815,6 +1167,7 @@ struct InMemoryWorker {
     retries: Arc<std::sync::Mutex<JoinSet<()>>>,
     stop: StopSignal,
     current: CurrentJob,
+    ledger: SharedLedger,
 }
 
 async fn worker_loop(w: InMemoryWorker) {
@@ -827,6 +1180,7 @@ async fn worker_loop(w: InMemoryWorker) {
         retries,
         mut stop,
         current,
+        ledger,
     } = w;
     loop {
         // Stop wins over a ready job; `recv` is cancel-safe.
@@ -839,6 +1193,10 @@ async fn worker_loop(w: InMemoryWorker) {
             },
         };
 
+        // Cancelled: `cancel` already counted it done.
+        if !lock(&ledger).live.contains_key(&envelope.id) {
+            continue;
+        }
         // Before any await, so an abort from here on re-queues it.
         *current.lock().unwrap() = Some(envelope.clone());
         if let Some(until) = envelope
@@ -852,6 +1210,7 @@ async fn worker_loop(w: InMemoryWorker) {
         if attempts_spent(envelope.attempt, envelope.max_attempts) {
             // Aborted at shutdown on its last run: dead-letter, do not rerun.
             current.lock().unwrap().take();
+            lock(&ledger).finish(&envelope.id);
             pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             let error = "attempts spent by runs aborted at shutdown".to_owned();
             let attempts = envelope.attempt;
@@ -867,6 +1226,7 @@ async fn worker_loop(w: InMemoryWorker) {
 
         let Some(entry) = handler else {
             current.lock().unwrap().take();
+            lock(&ledger).finish(&envelope.id);
             pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             // Memory is its only copy: hand it to the dead-letter callback.
             let attempts = envelope.attempt;
@@ -875,6 +1235,11 @@ async fn worker_loop(w: InMemoryWorker) {
             continue;
         };
 
+        // Cancelled since the check above.
+        if !lock(&ledger).start(&envelope.id) {
+            current.lock().unwrap().take();
+            continue;
+        }
         let payload = envelope.payload.clone();
         let ctx = JobCtx::new(envelope.id.clone(), envelope.attempt + 1, stop.clone());
         // Run the handler inside the context the caller had at
@@ -890,6 +1255,7 @@ async fn worker_loop(w: InMemoryWorker) {
         let runs = envelope.attempt + 1;
         match ran.next(runs, envelope.max_attempts) {
             Next::Done => {
+                lock(&ledger).finish(&envelope.id);
                 pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             }
             Next::Retry {
@@ -897,6 +1263,7 @@ async fn worker_loop(w: InMemoryWorker) {
                 error,
             } => {
                 tracing::debug!(target: "rustango::jobs", job = envelope.name, attempt = runs, %error, "job failed; retrying");
+                lock(&ledger).requeue(&envelope.id);
                 let mut retry = envelope;
                 retry.attempt = runs;
                 // Still counted in `pending` while parked.
@@ -905,6 +1272,7 @@ async fn worker_loop(w: InMemoryWorker) {
             }
             Next::DeadLetter(error) => {
                 // Count it done first: an abort in the callback must not leak `pending`.
+                lock(&ledger).finish(&envelope.id);
                 pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                 dead_letter_job(&dead_letter, Some(&entry), envelope, runs, error).await;
             }
@@ -1900,6 +2268,116 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         q.shutdown().await;
+    }
+
+    /// A delayed job waits for its time, then runs.
+    #[tokio::test]
+    async fn a_delayed_job_waits_for_its_time() {
+        let _g = LIFECYCLE.lock().await;
+        MARKED.store(0, Ordering::SeqCst);
+        let q = InMemoryJobQueue::with_workers(1);
+        q.register::<Marker>().await;
+        q.start().await;
+        let queued = q
+            .enqueue(&Marker, Dispatch::after(Duration::from_millis(400)))
+            .await
+            .unwrap();
+        assert!(matches!(queued, Enqueued::Queued(_)));
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(MARKED.load(Ordering::SeqCst), 0, "ran before its time");
+        wait_until("the delayed run", || MARKED.load(Ordering::SeqCst) == 1).await;
+        q.shutdown().await;
+    }
+
+    /// A cancelled job never runs and leaves the pending count.
+    #[tokio::test]
+    async fn a_cancelled_job_never_runs() {
+        let _g = LIFECYCLE.lock().await;
+        MARKED.store(0, Ordering::SeqCst);
+        let q = InMemoryJobQueue::with_workers(1);
+        q.register::<Marker>().await;
+        q.start().await;
+        let when = chrono::Utc::now() + chrono::Duration::milliseconds(200);
+        let id = q.dispatch_at(&Marker, when).await.unwrap();
+        let stored: JobId = id.to_string().parse().unwrap();
+        assert!(q.cancel(&stored).await.unwrap());
+        assert!(!q.cancel(&id).await.unwrap(), "cancelled twice");
+        assert_eq!(q.pending_count().await, 0);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(MARKED.load(Ordering::SeqCst), 0, "a cancelled job ran");
+        q.shutdown().await;
+    }
+
+    /// A running job is not cancelled.
+    #[tokio::test]
+    async fn a_running_job_is_not_cancelled() {
+        let _g = LIFECYCLE.lock().await;
+        DRAIN_RUNS.store(0, Ordering::SeqCst);
+        DRAINED.store(0, Ordering::SeqCst);
+        let q = InMemoryJobQueue::with_workers(1);
+        q.register::<SlowOnce>().await;
+        q.start().await;
+        let id = q
+            .enqueue(&SlowOnce { ms: 300 }, Dispatch::now())
+            .await
+            .unwrap();
+        wait_until("the run to start", || {
+            DRAIN_RUNS.load(Ordering::SeqCst) == 1
+        })
+        .await;
+        assert!(!q.cancel(id.id()).await.unwrap());
+        wait_until("the run to finish", || DRAINED.load(Ordering::SeqCst) == 1).await;
+        q.shutdown().await;
+    }
+
+    /// A unique key holds while its job is queued, per job type; a
+    /// cancel frees it.
+    #[tokio::test]
+    async fn a_unique_key_holds_while_queued() {
+        let q = InMemoryJobQueue::with_workers(0);
+        q.register::<Increment>().await;
+        q.register::<Marker>().await;
+        let key = UniqueKey::new("k").unwrap();
+        let first = q
+            .enqueue(&Increment, Dispatch::now().unique(key.clone()))
+            .await
+            .unwrap();
+        let again = q
+            .enqueue(&Increment, Dispatch::now().unique(key.clone()))
+            .await
+            .unwrap();
+        assert_eq!(again, Enqueued::Duplicate(first.id().clone()));
+        let other = q
+            .enqueue(&Marker, Dispatch::now().unique(key.clone()))
+            .await
+            .unwrap();
+        assert!(!other.is_duplicate(), "another job type shares the key");
+        assert_eq!(q.pending_count().await, 2);
+        assert!(q.cancel(first.id()).await.unwrap());
+        let freed = q
+            .enqueue(&Increment, Dispatch::now().unique(key))
+            .await
+            .unwrap();
+        assert!(matches!(&freed, Enqueued::Queued(id) if id != first.id()));
+    }
+
+    #[test]
+    fn a_unique_key_has_bounds() {
+        assert!(UniqueKey::new("").is_err());
+        assert!(UniqueKey::new("é".repeat(UniqueKey::MAX_CHARS)).is_ok());
+        assert!(UniqueKey::new("a".repeat(UniqueKey::MAX_CHARS + 1)).is_err());
+    }
+
+    /// A row id parses back from its text; another queue's id does not.
+    #[cfg(feature = "jobs-postgres")]
+    #[test]
+    fn a_row_id_parses_back() {
+        let at = chrono::DateTime::from_timestamp_micros(1_700_000_000_123_456).unwrap();
+        let id: JobId = JobId::of_row(7, Some(at)).to_string().parse().unwrap();
+        assert_eq!(id.row_key(), Some((7, Some(at))));
+        assert_eq!(JobId::of_row(7, None).row_key(), Some((7, None)));
+        let uuid: JobId = uuid::Uuid::new_v4().to_string().parse().unwrap();
+        assert_eq!(uuid.row_key(), None);
     }
 
     /// `inmemory_from_settings` uses `concurrency` when it is set.
