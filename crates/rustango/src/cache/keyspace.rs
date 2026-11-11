@@ -115,7 +115,7 @@ impl KeySpace {
 
     /// The 0.63 key of `rest`, still used beside the new one so a pod on 0.63
     /// and one on this release never both run it (locks, idempotency) and see
-    /// each other's page invalidations. Remove in 0.65.0.
+    /// each other's page invalidations. Remove in 0.67.0.
     pub(crate) fn legacy_key(&self, area: Area, rest: &str) -> Option<String> {
         let ns = self.namespace()?;
         match area {

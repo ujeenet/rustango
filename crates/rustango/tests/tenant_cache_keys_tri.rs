@@ -191,7 +191,7 @@ async fn fill(app: &Router, pages: &CachePageLayer, t: &TenantSlug) {
 }
 
 /// The 0.63 page generation counter of `t`, bumped beside the new one.
-/// Remove in 0.65.0.
+/// Remove in 0.67.0.
 fn legacy_page_counter(key: &str, t: &TenantSlug) -> bool {
     key.starts_with("rustango.cache_page|#gen|") && key.ends_with(&format!("{}|", t.namespace()))
 }
@@ -221,7 +221,7 @@ async fn a_tenant_request_writes_only_tenant_keys(pool: &Pool) {
     for t in [acme(), acme2()] {
         fill(&app, &pages, &t).await;
         // The 0.63 lock and idempotency keys, written beside the new ones.
-        // Remove in 0.65.0.
+        // Remove in 0.67.0.
         let legacy_lock = format!("lock:{}", prefix(&t));
         let written = rec.take();
         assert!(!written.is_empty());
@@ -258,7 +258,7 @@ async fn purge_removes_one_tenant_only(pool: &Pool) {
         fill(&app, &pages, &t).await;
         for key in rec.take() {
             // The 0.63 idempotency copy and page counter have no tenant
-            // prefix, so the purge cannot reach them. Remove in 0.65.0.
+            // prefix, so the purge cannot reach them. Remove in 0.67.0.
             if key.starts_with("idem:") || legacy_page_counter(&key, &t) {
                 continue;
             }

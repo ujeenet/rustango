@@ -161,6 +161,7 @@ untouched.
 - `_http_layers` turns on axum's `matched-path` feature, which the route caps key on.
 - S3 and Azure failures with an HTTP status are now `StorageError::Status` instead of `Io`; the message is unchanged. Match `Status` (or call `http_status()`) where you matched `Io` for these.
 - `passkey::RegistrationOutcome` gains `user_verified` and is now `#[non_exhaustive]`: build it only through `verify_registration`.
+- The deprecated items and the old tenant lock / idempotency key fallbacks that 0.65.0 announced for removal in 0.66.0 stay one more release; they go in 0.67.0.
 
 ## 0.65.0
 

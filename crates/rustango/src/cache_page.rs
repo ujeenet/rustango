@@ -393,7 +393,7 @@ impl CachePageLayer {
             // A long TTL, not `None`: a backend may give `None` its short
             // default, and a counter that expired would bring older entries back.
             let now = self.cache.incr(&counter, 1, Some(GENERATION_TTL)).await?;
-            // Remove in 0.65.0: bump the 0.63 counter too, so pods still on 0.63
+            // Remove in 0.67.0: bump the 0.63 counter too, so pods still on 0.63
             // stop serving the page. Their own invalidations are not seen here.
             let rest = generation_rest(&self.key_prefix, &p.path, &p.host, &space);
             if let Some(old) = space.legacy_key(Area::Page, &rest) {

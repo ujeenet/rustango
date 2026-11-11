@@ -82,7 +82,7 @@ impl ScopedCache {
     #[cfg(feature = "tenancy")]
     #[deprecated(
         since = "0.64.0",
-        note = "use `CacheScope::for_tenant(inner, tenant).app()`; removed in 0.66.0"
+        note = "use `CacheScope::for_tenant(inner, tenant).app()`; removed in 0.67.0"
     )]
     #[must_use]
     pub fn for_tenant(inner: BoxedCache, tenant: &crate::tenancy::TenantSlug) -> Self {
