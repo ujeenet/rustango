@@ -440,8 +440,10 @@ impl ExecError {
         }
     }
 
-    /// A UNIQUE or primary-key violation, on any backend.
-    pub(crate) fn is_unique_violation(&self) -> bool {
+    /// A UNIQUE or primary-key violation, on any backend: answer 409
+    /// "already taken" on a sign-up instead of matching driver errors.
+    #[must_use]
+    pub fn is_unique_violation(&self) -> bool {
         self.refusal() == Some(Refusal::Unique)
     }
 

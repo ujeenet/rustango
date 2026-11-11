@@ -14,7 +14,7 @@ socket.
 > [glossary](glossary.md).
 
 > **Source:** `rustango::test_client` (`TestClient`, `TestResponse`) — needs
-> the `admin` feature, because it wraps an `axum::Router`. `rustango::test_db`
+> the `admin` or the small `test-client` feature, because it wraps an `axum::Router`. `rustango::test_db`
 > (`with_rollback`) is ungated. `rustango::test_assertions` is always compiled,
 > but its response helpers (`assert_status_2xx`, `assert_redirects`,
 > `assert_cookie_set`, …) need an HTTP feature such as `admin` or `manage`.

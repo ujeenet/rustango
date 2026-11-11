@@ -145,8 +145,8 @@ pub async fn login(
     let username = normalize(&body.username);
 
     // Before any lookup: 429 once this IP (or everyone) failed too often.
-    // `Sso(name)`: its own total limit, a per-IP limit shared with SSO sign-ins, no account lock.
-    let scope = LoginScope::Sso("blog-api".to_owned());
+    // `App(name)`: its own total limit, the per-IP limit of password logins, and the account lock.
+    let scope = LoginScope::App("blog-api".to_owned());
     let attempt = login_throttle::shared()
         .begin(&scope, &ip, &username)
         .await

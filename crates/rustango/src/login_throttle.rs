@@ -132,6 +132,10 @@ pub enum LoginScope {
     /// share it) or `app/<tenant>` (OAuth2 router). Its own per-IP bucket, so refused SSO sign-ins never slow a password login.
     /// No account lock.
     Sso(String),
+    /// A password login of the app's own, such as a JSON sign-in on a
+    /// single-database app, by a name of your choice. Per-IP and global
+    /// limits plus the account lock. A tenancy app uses `Tenant` instead.
+    App(String),
 }
 
 impl LoginScope {
@@ -156,6 +160,7 @@ impl LoginScope {
             #[cfg(feature = "tenancy")]
             Self::TenantAgent(t) => format!("tenant-agent:{}", t.namespace()),
             Self::Sso(on) => format!("sso:{on}"),
+            Self::App(name) => format!("app:{name}"),
         }
     }
 
@@ -1415,6 +1420,32 @@ mod tests {
 
     fn ip(s: &str) -> ClientIp {
         ClientIp(Some(s.to_owned()))
+    }
+
+    /// An app login locks the account after the allowed failures; an
+    /// SSO callback of the same name does not.
+    #[tokio::test]
+    async fn app_logins_lock_accounts_and_sso_does_not() {
+        let t = LoginThrottle::new(LoginLimits {
+            ip_limit: 1000,
+            ..LoginLimits::default()
+        });
+        let app = LoginScope::App("t-app-lock".into());
+        let sso = LoginScope::Sso("t-app-lock".into());
+        assert_ne!(app.key(), sso.key());
+        for (n, (scope, locks)) in [(app, true), (sso, false)].into_iter().enumerate() {
+            for i in 0..crate::account_lockout::DEFAULT_MAX_ATTEMPTS {
+                t.begin(&scope, &ip(&format!("10.61.{n}.{i}")), "app-victim")
+                    .await
+                    .expect("refused before the lock")
+                    .failed()
+                    .await;
+            }
+            let r = t
+                .begin(&scope, &ip(&format!("10.62.{n}.1")), "app-victim")
+                .await;
+            assert_eq!(r.is_err(), locks, "{scope:?}");
+        }
     }
 
     #[cfg(feature = "tenancy")]

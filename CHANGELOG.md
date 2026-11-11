@@ -4,6 +4,20 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added
+
+- `static_files::AssetManifest`: content-hashed names and SRI hashes for every static file, with `asset_url` / `asset_integrity` Tera functions; `StaticFiles::manifest` serves the hashed names `immutable`.
+- `embed_static!("dir")` and `StaticFiles::embedded`: static files compiled into the binary, with ETag, 304 and ranges.
+- `CspBuilder::strict_wasm_app()` preset, plus `add_source`, `blob_workers(policy)`, `script_hash`, `import_map_hash` and `security_headers::csp_hash` for per-response inline script hashes.
+- Small public features `static-files`, `security-headers` and `test-client`, so apps without `admin` can use them.
+- `Cli::before_serve(|pool| ..)`: a check that runs only before serving, after migrations and `seed`; its error stops the start.
+- Passkeys: `RegistrationOptions` / `AuthenticationOptions` with `UserVerification` and the PRF extension; `require(UserVerification::Required)` on both outcomes and `PasskeyError::UserNotVerified`.
+- `LoginScope::App(name)` for an app's own password login (with the account lock), `#[viewset(filter_backend = ..)]`, and public `bearer::token` and `ExecError::is_unique_violation`.
+
+### Fixed
+
+- `#[derive(Model)]` documents its typed column constants, so `#![deny(missing_docs)]` apps build.
+
 ## [0.65.2] — 2026-11-09
 
 ### Documentation

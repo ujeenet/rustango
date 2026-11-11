@@ -646,14 +646,14 @@ pub mod storage;
 
 /// Test client — fire HTTP requests against an `axum::Router` in tests
 /// without binding a real socket. See [`test_client::TestClient`].
-#[cfg(feature = "admin")]
+#[cfg(any(feature = "admin", feature = "test-client"))]
 pub mod test_client;
 
 /// Live HTTP server for tests. Binds an `axum::Router` to a random
 /// localhost port on a background task. Use it
 /// when in-process [`test_client::TestClient`] routing is not enough, for
 /// example with Selenium, websockets, or code that reads the host header.
-#[cfg(feature = "admin")]
+#[cfg(any(feature = "admin", feature = "test-client"))]
 pub mod test_server;
 
 /// Typed environment variable readers — `required` / `with_default` /
@@ -1160,9 +1160,10 @@ pub mod dates;
 #[cfg(feature = "_signing")]
 pub mod signing;
 
-/// The bearer credential and its 401 challenge.
-#[cfg(any(feature = "tenancy", feature = "admin", feature = "mcp"))]
-pub(crate) mod bearer;
+/// The `Authorization: Bearer` credential: [`bearer::token`] reads it the
+/// way every built-in token login does.
+#[cfg(feature = "_axum")]
+pub mod bearer;
 
 /// `Vary` header merging for the response layers.
 #[cfg(all(feature = "_axum", feature = "_tower"))]
@@ -1571,6 +1572,11 @@ pub mod prelude {
 /// const NONE: &[(&str, &str)] = rustango::embed_migrations!("./no_such_migrations_dir");
 /// ```
 pub use rustango_macros::embed_migrations;
+
+/// Compile a static directory into the binary; serve it with
+/// [`static_files::StaticFiles::embedded`].
+#[cfg(feature = "_http_layers")]
+pub use rustango_macros::embed_static;
 
 /// `Q!()` — compact filter syntax compile-time-resolved against
 /// typed columns. Each invocation expands to the equivalent typed-column

@@ -141,6 +141,13 @@ _http_layers  = [
     "dep:tokio-util", "tokio/fs", "tokio/io-util", "dep:sha2",
 ]
 
+# Small public HTTP features for apps without `admin` (an API plus a WASM
+# client, say): `rustango::static_files`, `rustango::security_headers`, and
+# `rustango::test_client` / `test_server` for tests.
+static-files     = ["_http_layers"]
+security-headers = ["_http_layers"]
+test-client      = ["_http_layers", "csrf"]
+
 # Layered TOML config (`rustango::config`). Loads `config/default.toml`
 # → `config/{env}.toml` → env-var overrides. Slice 8.3.
 # `signals`: `test_settings` fires `setting_changed` (#1739).

@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+- `passkey::RegistrationOutcome` gains `user_verified` and is now `#[non_exhaustive]`: build it only through `verify_registration`.
+
 ## 0.65.0
 
 - The deprecated items and the old tenant lock / idempotency key fallback that 0.64.0 announced for removal in 0.65.0 are still here; they go in 0.66.0. Deploy 0.64 or later everywhere before 0.66.0.

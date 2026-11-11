@@ -354,6 +354,31 @@ on `localhost`. Build a CSP fluently with `CspBuilder` (`.default_src(..)`,
 `.script_src(..)`, …, `.build()`), and roll it out safely with
 `.csp_report_only(true)` + `.csp_report_uri("/csp-report")` before enforcing.
 
+### CSP for a WebAssembly app
+
+`CspBuilder::strict_wasm_app()` is a strict policy for a same-origin WASM app:
+`default-src 'none'`, `script-src 'self' 'wasm-unsafe-eval'` (WASM compiles,
+JS `eval` does not), no inline script or style, `blob:` images and media, and
+`require-trusted-types-for 'script'`. Widen it only where you need to:
+
+```rust
+use rustango::security_headers::CspBuilder;
+
+let csp = CspBuilder::strict_wasm_app()
+    // A storage bucket the client uploads to.
+    .add_source("connect-src", "https://bucket.example.com")
+    // Workers from `blob:` URLs, minted only by the `app-boot` Trusted Types policy.
+    .blob_workers("app-boot")
+    .build();
+```
+
+Use `blob_workers` only when the worker script is fetched with SRI and the
+policy admits that one blob. A page with an inline import map needs its hash:
+build the CSP per response with `.import_map_hash(&html)` (or
+`.script_hash(text)` for any inline script) and set it on that response. The
+layer keeps a CSP header the handler already set, so the static policy still
+covers every other response.
+
 ---
 
 ## CSRF protection
