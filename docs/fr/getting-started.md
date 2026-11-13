@@ -206,9 +206,11 @@ myblog/
 ├── Cargo.toml                  # rustango + axum + sqlx + tokio
 ├── .env.example                # template for DATABASE_URL etc.
 ├── .gitignore
+├── .dockerignore
 ├── docker-compose.yml          # Postgres in a container
 ├── Dockerfile                  # release image; Dockerfile.dev is the dev one
 ├── README.md                   # project-specific
+├── rust-toolchain.toml         # compile avec la chaîne stable
 ├── config/                     # tiered settings (default + dev/staging/prod)
 ├── migrations/                 # empty — `cargo run -- makemigrations` populates
 ├── system/migrations/          # the framework's own tables
@@ -278,8 +280,11 @@ Une valeur qui n'est pas 32 octets de base64 ne peut pas être utilisée. Hors d
 ## Étape 4 : démarrer la base de données
 
 > **Vous utilisez SQLite ?** Passez cette étape — il n'y a aucun serveur à
-> démarrer. Vérifiez que `.env` contient `DATABASE_URL=sqlite://myblog_dev.db?mode=rwc`
-> et ajoutez `--no-default-features --features sqlite` à chaque `cargo run` ci-dessous.
+> démarrer. Un projet créé avec `--backend sqlite` est prêt tel quel : son `.env`
+> pointe vers un fichier de base de données et SQLite est la feature par défaut.
+> Si vous avez plutôt basculé un projet Postgres vers SQLite, mettez
+> `DATABASE_URL=sqlite://myblog_dev.db?mode=rwc` dans `.env` et ajoutez
+> `--no-default-features --features sqlite` à chaque `cargo run` ci-dessous.
 >
 > **Vous utilisez un Postgres natif ?** Il tourne déjà comme service ; vérifiez
 > simplement que `psql "$DATABASE_URL" -c "SELECT version();"` aboutit, puis
@@ -449,6 +454,8 @@ Vérifiez que la table existe :
 psql "$DATABASE_URL" -c "\d posts"
 ```
 
+Avec SQLite, ouvrez plutôt le fichier de la base : `sqlite3 myblog_dev.db ".schema posts"`.
+
 ---
 
 ## Étape 10 : essayer l'ORM
@@ -460,7 +467,7 @@ Modifiez temporairement `src/main.rs` pour exécuter un rapide test de création
 ```rust
 use myblog::blog::models::Post;
 use rustango::sql::{FetcherPool, Pool};
-use rustango::{Auto, Model};
+use rustango::Auto;
 
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -543,7 +550,15 @@ pub fn admin_router(pool: Pool, settings: &Settings) -> Result<Router, SessionSe
 use myblog::urls;
 
 #[rustango::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> std::process::ExitCode {
+    if let Err(e) = run().await {
+        eprintln!("Error: {e}");
+        return std::process::ExitCode::FAILURE;
+    }
+    std::process::ExitCode::SUCCESS
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
     let loaded = rustango::config::Settings::load_from_env();
     let settings = loaded.as_ref().cloned().unwrap_or_default();
@@ -566,7 +581,7 @@ Créez le compte avec lequel vous vous connecterez (le mot de passe vous est dem
 cargo run -- create-admin alice --superuser
 ```
 
-`Cli::new()...run()` est le même dispatcheur unifié généré par le squelette — il continue de servir chaque `cargo run -- <verb>` ; vous n'avez fait qu'enrichir le routeur qu'il sert au moment de `runserver`.
+`main` se contente d'afficher une erreur et de fixer le code de sortie ; le travail se fait dans `run()`, donc les étapes suivantes modifient la chaîne `Cli` à l'intérieur de `run()`. `Cli::new()...run()` est le même dispatcheur unifié généré par le squelette — il continue de servir chaque `cargo run -- <verb>` ; vous n'avez fait qu'enrichir le routeur qu'il sert au moment de `runserver`.
 
 Exécutez-le :
 
@@ -692,14 +707,19 @@ Branchez le serializer dans le ViewSet avec l'attribut `serializer` — les rép
 ```rust
 #[derive(ViewSet)]
 #[viewset(
-    model = Post,
-    fields = "id, title, body, author_id, published_at",
-    serializer = crate::post_serializer::PostSerializer,
-    ordering = "-published_at",
+    model         = Post,
+    fields        = "id, title, body, author_id, published_at",
+    serializer    = crate::post_serializer::PostSerializer,
+    filter_fields = "author_id, status",
+    search_fields = "title, body",
+    ordering      = "-published_at",
+    page_size     = 20,
     read_only,
 )]
 pub struct PostViewSet;
 ```
+
+Gardez `filter_fields`, `search_fields` et `page_size` de l'étape 12. Si vous en retirez un, son paramètre de requête est ignoré sans erreur : `?search=zzzz` renverrait alors tous les articles.
 
 Ceci fonctionne à l'identique sur PostgreSQL, MySQL et SQLite. Les redéfinitions `method` / `read_only` / `source` / `write_only` s'appliquent toutes à la réponse, et **les corps de requête sont eux aussi validés via le serializer** : `create` / `update` exécutent sa `validate()` (par champ et inter-champs), renvoyant un `422` (`validation_failed`) avec une liste de messages par champ dans `details` (`{field: [messages]}`) en cas d'échec, et les champs en lecture seule / calculés qu'un client tenterait de poster sont ignorés. (Remarque : les champs de serializer `nested` / `many` nécessitent que les lignes liées soient chargées via `select_related` ; sinon ils s'affichent avec leur valeur par défaut.) Voir le [guide des ViewSets](viewsets.md) pour le comportement complet en entrée et en sortie.
 
@@ -1178,6 +1198,11 @@ curl http://localhost:8080/api/posts
 
 Un mauvais mot de passe, ou un nom d'utilisateur qui n'existe pas, donne le même `401 {"error":"unauthorized","message":"invalid username or password",...}`. Au bout de 15 minutes, le jeton expire et les écritures répondent de nouveau `401` : reconnectez-vous.
 
+Deux choses que vous remarquerez peut-être en essayant :
+
+- **L'article de l'étape 10 appartient à votre premier compte.** Il a été enregistré avec `author_id: 1`, et le premier compte créé reçoit aussi l'id `1`, donc cet utilisateur peut le modifier. Un deuxième compte reçoit `404` s'il essaie de modifier cet article ou tout autre article qu'il n'a pas écrit.
+- **Une ligne `WARN` à chaque connexion** indique que les limites de connexion sont comptées dans la mémoire du processus. C'est correct pour un seul serveur. Avec plusieurs serveurs derrière un répartiteur de charge, chacun compte de son côté ; le message indique alors le stockage partagé à installer.
+
 > **Bonnes pratiques dès le départ**
 >
 > - **Secret depuis l'environnement.** `JWT_SECRET` vient de `.env` ou de l'environnement du serveur, jamais du code ni de git. Utilisez 32 octets aléatoires ou plus (`openssl rand -base64 32`) et une clé différente par environnement.
@@ -1289,6 +1314,15 @@ Exécutez les tests :
 cargo test --test post_smoke
 ```
 
+Ces tests utilisent la base de `DATABASE_URL`, c'est-à-dire votre base de développement, et tout ce qu'un test écrit y reste. Avant d'ajouter des tests qui écrivent, donnez-leur leur propre base. `dotenvy` ne remplace jamais une variable déjà définie, donc celle de la ligne de commande l'emporte sur `.env` :
+
+```bash
+DATABASE_URL="sqlite://./myblog_test.db?mode=rwc" cargo run -- migrate
+DATABASE_URL="sqlite://./myblog_test.db?mode=rwc" cargo test
+```
+
+Avec Postgres, créez une seconde base (`createdb myblog_test -O rustango`) et utilisez son URL de la même façon.
+
 ---
 
 ## Étape 17 : exécuter la vérification système
@@ -1312,13 +1346,26 @@ running rustango system check (deploy mode)...
   [warning] DATABASE_URL points at localhost / 127.0.0.1 — verify this is intended in production (…)
 ```
 
-(Le nombre exact de modèles/migrations et les notes supplémentaires dépendent de votre projet et de ses features.) Ces deux avertissements sont ceux attendus en environnement de développement. Dans une configuration de production — `RUSTANGO_ENV=prod` et un `DATABASE_URL` de base de données géré — ils disparaissent et vous verrez `all checks passed`. Corrigez tout avertissement ou erreur restant avant de déployer en production.
+(Le nombre exact de modèles/migrations et les notes supplémentaires dépendent de votre projet et de ses features.) Ces deux avertissements sont ceux attendus en environnement de développement. Dans une configuration de production — `RUSTANGO_ENV=prod` et un `DATABASE_URL` de base de données géré — ils disparaissent, et le niveau prod ajoute deux vérifications à lui, que l'étape 18 règle. Corrigez tout avertissement ou erreur restant avant de déployer en production.
 
 ---
 
 ## Étape 18 : déployer en production
 
 La façon de déployer dépend de votre plateforme (Fly, Railway, Kubernetes, ECS nu, et ainsi de suite). Les étapes côté framework sont les mêmes partout ; l'option `--release` construit un binaire optimisé :
+
+Avant le premier déploiement, réglez deux choses dans `config/prod_settings.toml`. Le fichier a déjà une section `[security]` ; ajoutez-y `allowed_hosts`, puis ajoutez une section `[mail]` :
+
+```toml
+[security]
+# … les lignes déjà présentes restent …
+allowed_hosts = ["myblog.example.com"]   # les noms d'hôte auxquels votre site répond
+
+[mail]
+backend = "null"   # pas encore d'e-mails ; pour SMTP, voir email.md
+```
+
+Sans `allowed_hosts`, le serveur répond à n'importe quel en-tête `Host`. Sans backend de mail, les e-mails vont dans la console, ce qui, en production, imprime les liens de réinitialisation de mot de passe dans les journaux. Avec les deux, `check --deploy` sur le niveau prod se termine par `all checks passed`.
 
 ```bash
 # 1. Set production env
@@ -1349,6 +1396,8 @@ $bytes = New-Object byte[] 32
 $env:RUSTANGO_SESSION_SECRET = [Convert]::ToBase64String($bytes)
 cargo run --release -- migrate
 ```
+
+Si un modèle a un champ chiffré (`EncryptedString`), définissez aussi `RUSTANGO_SECRET_KEY` avec 32 octets aléatoires ou plus (`openssl rand -base64 48`) et sauvegardez-la : sans elle le serveur refuse de démarrer, et sans la même clé les valeurs stockées ne peuvent pas être lues. Le blog de ce guide n'a pas de tel champ, il tourne donc sans.
 
 > **Vérifiez d'abord vos routes d'écriture.** Un ViewSet ou une vue est-il encore en `allow_anonymous` sans couche d'auth devant ? Alors n'importe qui sur internet peut modifier ces données. Passez-le en `read_only` ou protégez-le comme à l'[étape 14e](#14e-protéger-les-écritures-des-articles).
 
