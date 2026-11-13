@@ -16,6 +16,7 @@ One `#[derive(Model)]` is the whole contract — from it Rustango emits typed qu
 📚 **Docs:** [rustango.com](https://rustango.com) · [in-repo guides](https://github.com/ujeenet/rustango/tree/main/docs/) · [API reference](https://docs.rs/rustango)
 🌍 **Also in:** [Deutsch](https://github.com/ujeenet/rustango/tree/main/docs/de/) · [Español](https://github.com/ujeenet/rustango/tree/main/docs/es/) · [Français](https://github.com/ujeenet/rustango/tree/main/docs/fr/) — every published guide, not a subset.
 🍳 **Cookbook:** [`cookbook_blog/COOKBOOK.md`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/cookbook_blog/COOKBOOK.md) — a runnable, test-backed recipe for every feature below.
+🧱 **Rustango CMS:** [cms.rustango.com](https://cms.rustango.com) — the page-tree content management system built on Rustango: an editor-friendly admin with live preview, typed page types and a headless API ([GitHub](https://github.com/ujeenet/rustango-cms) · [crates.io](https://crates.io/crates/rustango-cms)).
 
 ---
 
