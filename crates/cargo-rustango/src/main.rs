@@ -992,6 +992,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn closing_note_links_framework_and_cms() {
+        let note = templates::STAR_NOTE;
+        assert!(
+            note.contains("https://github.com/ujeenet/rustango\n"),
+            "{note}"
+        );
+        assert!(
+            note.contains("https://github.com/ujeenet/rustango-cms"),
+            "{note}"
+        );
+        assert!(note.contains("star"), "{note}");
+    }
+
+    #[test]
     fn mm_version_strips_patch() {
         let v = mm_version();
         // Must look like "MAJOR.MINOR" — no trailing ".PATCH" component.

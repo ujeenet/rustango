@@ -695,9 +695,12 @@ fn host_steps(template: Template, backend: Backend) -> String {
         .collect()
 }
 
-/// The closing line `cargo rustango new` prints after the next steps.
-pub const STAR_NOTE: &str =
-    "If rustango helps you, please star it on GitHub: https://github.com/ujeenet/rustango";
+/// The closing lines `cargo rustango new` prints after the next steps:
+/// the framework's and the CMS's repositories, and a request for a star.
+pub const STAR_NOTE: &str = "Rustango and Rustango-CMS (a CMS built on it):
+  https://github.com/ujeenet/rustango
+  https://github.com/ujeenet/rustango-cms
+If they help you, please star both repositories on GitHub.";
 
 /// What `cargo rustango new` prints after writing the project.
 pub fn next_steps(name: &str, template: Template, backend: Backend) -> String {
