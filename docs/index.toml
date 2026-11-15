@@ -15,7 +15,7 @@ version = "0.66"
 [[section]]
 title = "Getting started"
 slug = "getting-started"
-pages = ["getting-started.md", "common-tasks.md", "scaffolding.md", "glossary.md"]
+pages = ["getting-started.md", "why-rustango.md", "common-tasks.md", "scaffolding.md", "glossary.md"]
 
 [[section]]
 title = "Guides"
