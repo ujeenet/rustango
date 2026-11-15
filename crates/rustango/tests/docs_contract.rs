@@ -77,6 +77,8 @@ const UNBACKED: &[(&str, usize)] = &[
     ("query-method.md", 4),
     ("sso.md", 2),
     ("operator-console.md", 1),
+    // Prose and tables only: the case for Rustango, with no Rust examples to back.
+    ("why-rustango.md", 0),
     // `scaffolding.md` came off this list in #1421, which holds its
     // `--features` table to what `cargo rustango new --help` prints.
     ("benchmarks.md", 0),
