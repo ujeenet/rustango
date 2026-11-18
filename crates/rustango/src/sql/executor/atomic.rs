@@ -433,12 +433,24 @@ pub(crate) enum Stmt {
 /// lock, so a second statement or a [`TxGuard`] meanwhile is refused. A
 /// write's savepoint, dropped unreleased, rolls back on the next use.
 pub(crate) struct Joined {
-    /// `None` once a release hands it to its background task.
-    guard: Option<OwnedMutexGuard<TxState>>,
+    guard: OwnedMutexGuard<TxState>,
     slot: Arc<Slot>,
-    /// The write's savepoint depth.
-    savepoint: Option<usize>,
-    released: bool,
+    phase: Phase,
+}
+
+/// Where a joined write's savepoint is, so a drop at any await leaves the
+/// block's state right without a background task.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// A plain statement, or a write done with its savepoint.
+    Done,
+    /// SAVEPOINT sent: if it landed, the orphan nests harmlessly and goes
+    /// with the next release or the commit; nothing to undo yet.
+    Opening(usize),
+    /// The savepoint is open: a drop rolls back to it on the next use.
+    Open(usize),
+    /// RELEASE sent: the write is kept either way.
+    Releasing(usize),
 }
 
 /// `stmt`'s share of the [`atomic`] block on `pool`; `None` outside one.
@@ -459,41 +471,36 @@ impl Joined {
         if guard.depth != block.depth {
             return Err(ExecError::NestedAtomic);
         }
-        if stmt == Stmt::Plain {
-            slot.guards.fetch_add(1, Ordering::SeqCst);
-            return Ok(Self {
-                guard: Some(guard),
-                slot,
-                savepoint: None,
-                released: false,
-            });
-        }
-        let depth = block.depth + 1;
-        let guard = open_savepoint(&slot, guard, depth).await?;
         slot.guards.fetch_add(1, Ordering::SeqCst);
-        Ok(Self {
-            guard: Some(guard),
+        let mut j = Self {
+            guard,
             slot,
-            savepoint: Some(depth),
-            released: false,
-        })
-    }
-
-    fn state(&mut self) -> &mut TxState {
-        self.guard
-            .as_mut()
-            .expect("joined statement holds the lock")
+            phase: Phase::Done,
+        };
+        if stmt == Stmt::Write {
+            let depth = block.depth + 1;
+            j.phase = Phase::Opening(depth);
+            j.guard.savepoint("SAVEPOINT", depth).await?;
+            j.guard.depth = depth;
+            j.phase = Phase::Open(depth);
+        }
+        Ok(j)
     }
 
     /// End the statement with its result `r`: record an error that ended the
     /// transaction, else release the write's savepoint. A failed write's
     /// savepoint rolls back on the block's next use.
-    pub(crate) async fn finish<T>(mut self, r: Result<T, ExecError>) -> Result<T, ExecError> {
+    pub(crate) async fn finish<T>(self, r: Result<T, ExecError>) -> Result<T, ExecError> {
         let r = Gate(Some(Arc::clone(&self.slot))).check(r);
         if let Err(ExecError::Driver(sqlx::Error::Database(_))) = &r {
             // No savepoint to undo it: PG has aborted the whole block.
-            let state = self.state();
-            if state.unguarded() && state.tx().dialect().name() == "postgres" {
+            if self.guard.unguarded()
+                && self
+                    .guard
+                    .tx
+                    .as_ref()
+                    .is_some_and(|t| t.dialect().name() == "postgres")
+            {
                 self.slot.fatal.store(true, Ordering::SeqCst);
             }
         }
@@ -502,62 +509,26 @@ impl Joined {
         Ok(v)
     }
 
-    /// Keep the statement's writes: release its savepoint. The RELEASE
-    /// finishes even if this future is dropped.
+    /// Keep the statement's writes: release its savepoint.
     pub(crate) async fn release(mut self) -> Result<(), ExecError> {
-        self.released = true;
-        let Some(depth) = self.savepoint else {
+        let Phase::Open(depth) = self.phase else {
             return Ok(());
         };
-        let guard = self.guard.take().expect("joined statement holds the lock");
-        let _claim = Claim::new(&self.slot);
-        in_background(async move {
-            let mut g = guard;
-            g.savepoint("RELEASE SAVEPOINT", depth).await?;
-            g.left(depth);
-            Ok(())
-        })
-        .await
+        self.phase = Phase::Releasing(depth);
+        self.guard.savepoint("RELEASE SAVEPOINT", depth).await?;
+        self.guard.left(depth);
+        self.phase = Phase::Done;
+        Ok(())
     }
-}
-
-/// Open savepoint `depth` on `guard` in the background, so a dropped
-/// caller cannot cut it off halfway; a caller dropped meanwhile leaves it
-/// to be rolled back on the next use.
-async fn open_savepoint(
-    slot: &Arc<Slot>,
-    guard: OwnedMutexGuard<TxState>,
-    depth: usize,
-) -> Result<OwnedMutexGuard<TxState>, ExecError> {
-    let opening = Arc::new(Opening::default());
-    let mut armed = OpenSavepoint {
-        slot: Arc::clone(slot),
-        depth,
-        opening: Arc::clone(&opening),
-        ending: false,
-    };
-    let task_slot = Arc::clone(slot);
-    let _claim = Claim::new(slot);
-    let opened = in_background(async move {
-        let mut g = guard;
-        g.savepoint("SAVEPOINT", depth).await?;
-        g.depth = depth;
-        opening.opened.store(true, Ordering::SeqCst);
-        if opening.abandoned.load(Ordering::SeqCst) {
-            mark_cancelled(&task_slot, depth);
-        }
-        Ok(g)
-    })
-    .await;
-    // From here the caller owns the savepoint; a refused open marks nothing.
-    armed.ending = true;
-    opened
 }
 
 impl Drop for Joined {
     fn drop(&mut self) {
-        if let (false, Some(depth)) = (self.released, self.savepoint) {
-            mark_cancelled(&self.slot, depth);
+        match self.phase {
+            Phase::Open(depth) => mark_cancelled(&self.slot, depth),
+            // Kept whether or not the RELEASE ran; a failed one poisoned the block.
+            Phase::Releasing(depth) => self.guard.left(depth),
+            Phase::Done | Phase::Opening(_) => {}
         }
         self.slot.guards.fetch_sub(1, Ordering::SeqCst);
     }
@@ -566,16 +537,13 @@ impl Drop for Joined {
 impl std::ops::Deref for Joined {
     type Target = PoolTx<'static>;
     fn deref(&self) -> &PoolTx<'static> {
-        self.guard
-            .as_ref()
-            .and_then(|g| g.tx.as_ref())
-            .expect("atomic transaction is open")
+        self.guard.tx.as_ref().expect("atomic transaction is open")
     }
 }
 
 impl std::ops::DerefMut for Joined {
     fn deref_mut(&mut self) -> &mut PoolTx<'static> {
-        self.state().tx()
+        self.guard.tx()
     }
 }
 
