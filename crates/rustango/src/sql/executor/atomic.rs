@@ -813,7 +813,141 @@ where
         Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
     >,
 {
-    run(pool, End::Commit, Begin::Immediate, f).await
+    atomic_with(pool, AtomicOptions::new(), f).await
+}
+
+/// [`atomic`] with an isolation level or transaction settings, applied when
+/// the outermost block begins:
+///
+/// ```no_run
+/// # async fn demo(pool: &rustango::sql::Pool) -> Result<(), rustango::sql::ExecError> {
+/// use rustango::sql::{atomic_with, AtomicOptions, Isolation, TxSetting};
+/// let opts = AtomicOptions::new()
+///     .isolation(Isolation::Serializable)
+///     .setting(TxSetting::new("app.account_id", "42")?);
+/// atomic_with(pool, opts, |_tx| Box::pin(async move { Ok(()) })).await
+/// # }
+/// ```
+///
+/// PG begins `BEGIN ISOLATION LEVEL …` and sets each setting with
+/// `set_config(name, value, true)`, gone at the end of the block. MySQL sets
+/// the level for this transaction only. SQLite is always serializable, so
+/// any level is accepted. Settings are PG-only. A block with neither sends
+/// what [`atomic`] sends.
+///
+/// # Errors
+/// As [`atomic`]; settings on MySQL or SQLite are
+/// [`SqlError::OperatorNotSupportedInDialect`](crate::sql::SqlError::OperatorNotSupportedInDialect),
+/// and options on a nested block (it cannot change them) [`ExecError::InAtomic`].
+pub async fn atomic_with<F, T>(pool: &Pool, opts: AtomicOptions, f: F) -> Result<T, ExecError>
+where
+    F: for<'tx> FnOnce(
+        &'tx AtomicTx,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
+    >,
+{
+    run(pool, End::Commit, opts, f).await
+}
+
+/// How [`atomic_with`] begins a block. Built with its methods; the default
+/// is what [`atomic`] does.
+#[derive(Debug, Clone)]
+#[must_use]
+pub struct AtomicOptions {
+    isolation: Option<Isolation>,
+    settings: Vec<TxSetting>,
+    begin: Begin,
+}
+
+impl Default for AtomicOptions {
+    fn default() -> Self {
+        Self {
+            isolation: None,
+            settings: Vec::new(),
+            begin: Begin::Immediate,
+        }
+    }
+}
+
+impl AtomicOptions {
+    /// The options [`atomic`] uses.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The outermost transaction's isolation level.
+    pub fn isolation(mut self, level: Isolation) -> Self {
+        self.isolation = Some(level);
+        self
+    }
+
+    /// A PG setting for the block's transaction only.
+    pub fn setting(mut self, setting: TxSetting) -> Self {
+        self.settings.push(setting);
+        self
+    }
+
+    /// SQLite begins with `BEGIN IMMEDIATE`. The default; no effect elsewhere.
+    pub fn immediate(mut self) -> Self {
+        self.begin = Begin::Immediate;
+        self
+    }
+
+    fn changes_the_begin(&self) -> bool {
+        self.isolation.is_some() || !self.settings.is_empty()
+    }
+}
+
+/// A transaction isolation level for [`AtomicOptions::isolation`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Isolation {
+    ReadCommitted,
+    RepeatableRead,
+    Serializable,
+}
+
+impl Isolation {
+    #[cfg(any(feature = "postgres", feature = "mysql"))]
+    fn sql(self) -> &'static str {
+        match self {
+            Self::ReadCommitted => "READ COMMITTED",
+            Self::RepeatableRead => "REPEATABLE READ",
+            Self::Serializable => "SERIALIZABLE",
+        }
+    }
+}
+
+/// A PG setting set for one transaction, such as `app.account_id` for row
+/// security policies. Only a custom `prefix.name` is accepted, so
+/// `search_path`, `role` and the server's own settings cannot be changed.
+#[derive(Debug, Clone)]
+pub struct TxSetting {
+    name: String,
+    value: String,
+}
+
+impl TxSetting {
+    /// `name = value` for the block's transaction. The value is bound.
+    ///
+    /// # Errors
+    /// [`ExecError::InvalidTxSetting`] unless `name` is `prefix.name` of
+    /// plain identifiers.
+    pub fn new(name: &str, value: impl Into<String>) -> Result<Self, ExecError> {
+        let plain = name.split_once('.').is_some_and(|(prefix, rest)| {
+            crate::core::is_plain_identifier(prefix) && crate::core::is_plain_identifier(rest)
+        });
+        if !plain {
+            return Err(ExecError::InvalidTxSetting {
+                name: name.to_owned(),
+            });
+        }
+        Ok(Self {
+            name: name.to_owned(),
+            value: value.into(),
+        })
+    }
 }
 
 /// [`atomic`]: its top-level SQLite block starts with `BEGIN IMMEDIATE`,
@@ -834,11 +968,11 @@ where
         Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
     >,
 {
-    run(pool, End::Commit, Begin::Immediate, f).await
+    atomic_with(pool, AtomicOptions::new().immediate(), f).await
 }
 
 /// How a top-level SQLite block begins.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Begin {
     Deferred,
     Immediate,
@@ -862,10 +996,14 @@ where
         Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
     >,
 {
-    run(pool, End::Rollback, Begin::Deferred, f).await
+    let opts = AtomicOptions {
+        begin: Begin::Deferred,
+        ..AtomicOptions::new()
+    };
+    run(pool, End::Rollback, opts, f).await
 }
 
-async fn run<F, T>(pool: &Pool, end: End, begin: Begin, f: F) -> Result<T, ExecError>
+async fn run<F, T>(pool: &Pool, end: End, opts: AtomicOptions, f: F) -> Result<T, ExecError>
 where
     F: for<'tx> FnOnce(
         &'tx AtomicTx,
@@ -878,9 +1016,67 @@ where
     let same_pool = std::iter::successors(enclosing.clone(), |b| b.enclosing.clone())
         .find(|b| b.pool.same(&id));
     match same_pool {
+        // PG keeps a nested `set_config` past RELEASE; levels are refused.
+        Some(_) if opts.changes_the_begin() => Err(ExecError::InAtomic {
+            op: "an isolation level or setting",
+            reason: "it applies only when the outermost block begins",
+        }),
         Some(parent) => nested(parent, enclosing, end, f).await,
-        None => outermost(pool, id, enclosing, end, begin, f).await,
+        None => outermost(pool, id, enclosing, end, &opts, f).await,
     }
+}
+
+/// Begin the outermost block's transaction as `opts` say. Without a level or
+/// settings it sends what it always did.
+async fn begin_block(
+    pool: &Pool,
+    opts: &AtomicOptions,
+    top: bool,
+) -> Result<PoolTx<'static>, ExecError> {
+    if !opts.settings.is_empty() && pool.dialect().name() != "postgres" {
+        return Err(ExecError::Sql(
+            crate::sql::SqlError::OperatorNotSupportedInDialect {
+                op: "transaction settings",
+                dialect: pool.dialect().name(),
+            },
+        ));
+    }
+    let mut tx = match (pool, opts.isolation) {
+        #[cfg(feature = "postgres")]
+        (Pool::Postgres(pg), Some(level)) => PoolTx::new(
+            super::TxConn::Postgres(
+                pg.begin_with(format!("BEGIN ISOLATION LEVEL {}", level.sql()))
+                    .await?,
+            ),
+            PoolId::of(pool),
+        ),
+        // One statement, so a cancel cannot leave the level for the next borrower.
+        #[cfg(feature = "mysql")]
+        (Pool::Mysql(my), Some(level)) => PoolTx::new(
+            super::TxConn::Mysql(
+                my.begin_with(format!(
+                    "SET TRANSACTION ISOLATION LEVEL {}; START TRANSACTION",
+                    level.sql()
+                ))
+                .await?,
+            ),
+            PoolId::of(pool),
+        ),
+        // SQLite is always serializable.
+        _ if opts.begin == Begin::Immediate && top => write_transaction(pool).await?,
+        _ => transaction_pool(pool).await?,
+    };
+    for s in &opts.settings {
+        let d = tx.dialect();
+        let sql = format!(
+            "SELECT set_config({}, {}, true)",
+            d.placeholder(1),
+            d.placeholder(2)
+        );
+        let binds = vec![s.name.clone().into(), s.value.clone().into()];
+        super::raw_execute_tx(&mut tx, &sql, binds).await?;
+    }
+    Ok(tx)
 }
 
 async fn outermost<F, T>(
@@ -888,7 +1084,7 @@ async fn outermost<F, T>(
     id: PoolId,
     enclosing: Option<Arc<Block>>,
     end: End,
-    begin: Begin,
+    opts: &AtomicOptions,
     f: F,
 ) -> Result<T, ExecError>
 where
@@ -899,11 +1095,7 @@ where
     >,
 {
     let fatal = Arc::new(AtomicBool::new(false));
-    let mut tx = if begin == Begin::Immediate && enclosing.is_none() {
-        write_transaction(pool).await?
-    } else {
-        transaction_pool(pool).await?
-    };
+    let mut tx = begin_block(pool, opts, enclosing.is_none()).await?;
     let hook = Arc::clone(&fatal);
     tx.on_sqlite_rollback(move || hook.store(true, Ordering::SeqCst))
         .await?;

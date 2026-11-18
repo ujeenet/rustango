@@ -65,3 +65,13 @@ pub use inventory;
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
+
+/// An ASCII identifier: a letter or `_`, then letters, digits or `_`.
+pub(crate) fn is_plain_identifier(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && (bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+}

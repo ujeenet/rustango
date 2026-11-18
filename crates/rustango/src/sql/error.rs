@@ -315,6 +315,11 @@ pub enum ExecError {
     #[error("the server ended the atomic transaction early; some writes may be committed")]
     AtomicEndedEarly,
 
+    /// A [`TxSetting`](crate::sql::TxSetting) name that is not a custom
+    /// `prefix.name` of plain identifiers.
+    #[error("transaction setting `{name}` must be a custom `prefix.name`")]
+    InvalidTxSetting { name: String },
+
     /// Refused inside an `atomic` block on the same pool: it would take a
     /// second connection, or end the block's transaction.
     #[error("{op} is refused inside an atomic block on its pool: {reason}")]

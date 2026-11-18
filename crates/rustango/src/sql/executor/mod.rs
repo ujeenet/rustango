@@ -913,7 +913,10 @@ pub(crate) use atomic::detached;
 #[cfg(feature = "jobs")]
 pub(crate) use atomic::in_any_block;
 pub(crate) use atomic::rolled_back;
-pub use atomic::{atomic, atomic_immediate, on_commit, on_commit_pending, AtomicTx, TxGuard};
+pub use atomic::{
+    atomic, atomic_immediate, atomic_with, on_commit, on_commit_pending, AtomicOptions, AtomicTx,
+    Isolation, TxGuard, TxSetting,
+};
 pub(crate) use atomic::{caught, in_block};
 
 // `&Pool` dispatch. The `_pool` functions below take a [`Pool`],

@@ -3026,12 +3026,7 @@ fn is_valid_type_name(name: &str) -> bool {
 /// A Rust identifier — any case. Used by `make:test`, whose output is a file of
 /// `#[test] fn`s rather than a type.
 fn is_valid_identifier(name: &str) -> bool {
-    let bytes = name.as_bytes();
-    !bytes.is_empty()
-        && (bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
-        && bytes
-            .iter()
-            .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+    crate::core::is_plain_identifier(name)
 }
 
 fn pascal_to_snake(s: &str) -> String {

@@ -1656,6 +1656,7 @@ jobs:
           binary(=atomic_joined_reads_tri) |
           binary(=atomic_sites_tri) |
           binary(=on_commit_tri) |
+          binary(=atomic_options_tri) |
           binary(=get_or_create_atomic_tri) |
           binary(=regex_tri) |
           binary(=testkit_matrix_forms_tri) |
