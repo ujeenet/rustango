@@ -6,10 +6,10 @@
 //! closure.
 
 use super::{
-    atomic, ExecError, FetcherPool, FetcherTx, LoadRelated, MaybeMyFromRow, MaybeMyLoadRelated,
-    MaybePgFromRow, MaybeSqliteFromRow, MaybeSqliteLoadRelated, PoolTx,
+    atomic, select_rows_tx_with_related, ExecError, FetcherPool, LoadRelated, MaybeMyFromRow,
+    MaybeMyLoadRelated, MaybePgFromRow, MaybeSqliteFromRow, MaybeSqliteLoadRelated, PoolTx,
 };
-use crate::core::Model;
+use crate::core::{Model, SelectQuery};
 use crate::sql::Pool;
 
 /// v0.45 — `get_or_create`. Runs the queryset; if it
@@ -123,9 +123,13 @@ where
         Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'a>,
     >,
 {
-    match at_most_one(qs.clone().fetch_tx(tx).await?, "get_or_create")? {
+    let select = qs.compile()?;
+    match at_most_one(
+        select_rows_tx_with_related(tx, &select).await?,
+        "get_or_create",
+    )? {
         Some(row) => Ok((row, false)),
-        None => create_or_winner_tx(qs, create_fn, tx, "get_or_create", true).await,
+        None => create_or_winner_tx(select, create_fn, tx, "get_or_create", true).await,
     }
 }
 
@@ -135,7 +139,7 @@ where
 ///
 /// # Errors
 /// As [`update_or_create`].
-pub async fn update_or_create_on<'t, T, UF, CF>(
+pub async fn update_or_create_tx<'t, T, UF, CF>(
     qs: crate::query::QuerySet<T>,
     update_fn: UF,
     create_fn: CF,
@@ -163,12 +167,16 @@ where
         Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'a>,
     >,
 {
-    let existing = match at_most_one(qs.clone().fetch_tx(tx).await?, "update_or_create")? {
+    let select = qs.compile()?;
+    let found = select_rows_tx_with_related(tx, &select).await?;
+    let existing = match at_most_one(found, "update_or_create")? {
         Some(row) => row,
-        None => match create_or_winner_tx(qs, create_fn, tx, "update_or_create", false).await? {
-            (row, true) => return Ok((row, true)),
-            (row, false) => row,
-        },
+        None => {
+            match create_or_winner_tx(select, create_fn, tx, "update_or_create", false).await? {
+                (row, true) => return Ok((row, true)),
+                (row, false) => row,
+            }
+        }
     };
     Ok((update_fn(tx, existing).await?, false))
 }
@@ -176,7 +184,7 @@ where
 /// `create_fn` in a savepoint of `tx`; on a unique violation, the row a
 /// concurrent writer inserted first, with `(row, created)`.
 async fn create_or_winner_tx<'t, T, F>(
-    qs: crate::query::QuerySet<T>,
+    select: SelectQuery,
     create_fn: F,
     tx: &mut PoolTx<'t>,
     op: &'static str,
@@ -198,7 +206,8 @@ where
         Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'a>,
     >,
 {
-    let point = tx.dialect().quote_ident("rustango_create");
+    // Its own name: a nested call on the same transaction must not replace it (MySQL).
+    let point = tx.next_savepoint("rustango_create");
     tx.execute_unprepared(&format!("SAVEPOINT {point}")).await?;
     let err = match create_fn(tx).await {
         Ok(row) => {
@@ -208,30 +217,29 @@ where
         }
         Err(e) => e,
     };
-    tx.execute_unprepared(&format!("ROLLBACK TO SAVEPOINT {point}"))
-        .await?;
-    tx.execute_unprepared(&format!("RELEASE SAVEPOINT {point}"))
-        .await?;
-    if !err.is_unique_violation() {
+    let undo = format!("ROLLBACK TO SAVEPOINT {point}; RELEASE SAVEPOINT {point}");
+    // A deadlock or lost connection may have ended the whole transaction:
+    // `create_fn`'s error says why, not the failed rollback.
+    if tx.execute_unprepared(&undo).await.is_err() || !err.is_unique_violation() {
         return Err(err);
     }
-    let qs = winner_read(qs, tx.dialect(), share);
-    let row = at_most_one(qs.fetch_tx(tx).await?, op)?.ok_or(err)?;
+    let select = winner_read(select, tx.dialect(), share);
+    let row = at_most_one(select_rows_tx_with_related(tx, &select).await?, op)?.ok_or(err)?;
     Ok((row, false))
 }
 
 /// The re-read after a lost race: MySQL's repeatable-read snapshot predates
-/// the winner's row, so it reads with a lock (`share`, else for update).
-fn winner_read<T: Model>(
-    qs: crate::query::QuerySet<T>,
-    dialect: &dyn super::Dialect,
-    share: bool,
-) -> crate::query::QuerySet<T> {
-    if dialect.name() == "mysql" {
-        qs.lock_rows_unless_set(share)
-    } else {
-        qs
+/// the winner's row, so it reads with a lock (`share`, else for update). A
+/// lock the caller set is kept.
+fn winner_read(mut select: SelectQuery, dialect: &dyn super::Dialect, share: bool) -> SelectQuery {
+    if dialect.name() == "mysql" && select.lock_mode.is_none() {
+        let mut lock = crate::core::LockMode::default();
+        lock.share = share;
+        lock.of = vec![select.model.table];
+        lock.silent_on_sqlite = true;
+        select.lock_mode = Some(lock);
     }
+    select
 }
 
 /// Run `create_fn`, in a savepoint of the `atomic` block on `pool` if
@@ -302,12 +310,15 @@ where
     }
     // Only a block's re-read joins a snapshot. `update_or_create` takes the
     // update lock at once, so two losers cannot deadlock upgrading.
-    let qs = if atomic::in_block(pool) {
-        winner_read(qs, pool.dialect(), share)
-    } else {
-        qs
-    };
-    fetch_at_most_one(qs, op, pool).await?.ok_or(err)
+    let mut select = qs.compile()?;
+    if atomic::in_block(pool) {
+        select = winner_read(select, pool.dialect(), share);
+    }
+    at_most_one(
+        super::select_rows_pool_with_related(pool, &select).await?,
+        op,
+    )?
+    .ok_or(err)
 }
 
 /// v0.45 — `update_or_create`. Runs the queryset; if

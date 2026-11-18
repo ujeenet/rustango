@@ -92,6 +92,7 @@ pub(crate) use executor::{
     inserted_pk, rows_per_batch, run_delete_statements_tx, truncate_refusal, truncate_tx, write_tx,
 };
 pub(crate) use executor::{caught, in_block, refuse_ddl_in_block, Ddl};
+#[allow(deprecated)]
 pub use executor::{
     AtomicOptions, AtomicTx, CounterPool, ExistsPool, ExplainFormat, ExplainOptions, FetcherPool,
     FetcherTx, FkPkAccess, FlatScalar, HasPkValue, InsertReturningPool, Isolation, LoadRelated,
@@ -109,7 +110,7 @@ pub use executor::{
     raw_execute_pool, raw_execute_tx, raw_query_pool, raw_query_tx, run_ddl_idempotent,
     select_one_row_as_json, select_one_row_pool, select_rows_as_json, select_rows_pool,
     select_rows_pool_with_related, select_rows_tx_with_related, transaction_pool, try_get_flat,
-    try_get_flat_my, try_get_flat_sqlite, update_or_create, update_or_create_on, update_pool,
+    try_get_flat_my, try_get_flat_sqlite, update_or_create, update_or_create_tx, update_pool,
     update_tx, write_transaction,
 };
 // For the framework modules that open joined writes or read through the executor.

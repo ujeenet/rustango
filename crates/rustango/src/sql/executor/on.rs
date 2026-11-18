@@ -720,6 +720,9 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolConn {
         Self: 'e,
     {
         Box::pin(async move {
+            if let [stmt] = stmts.as_slice() {
+                return super::write_on(self, &stmt.sql, stmt.params.clone()).await;
+            }
             let mut tx = self.begin().await?;
             let n = super::execute_batches_tx(&mut tx, stmts).await?;
             tx.commit().await?;
@@ -1015,6 +1018,9 @@ macro_rules! database_conn_executor {
                 Self: 'e,
             {
                 Box::pin(async move {
+                    if let [stmt] = stmts.as_slice() {
+                        return super::write_on(self, &stmt.sql, stmt.params.clone()).await;
+                    }
                     let pool = self.pool_id().clone();
                     let mut tx = PoolTx::begin_on(&mut ***self, &pool).await?;
                     let n = super::execute_batches_tx(&mut tx, stmts).await?;

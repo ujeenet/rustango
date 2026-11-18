@@ -133,8 +133,9 @@ async fn setting_names_are_checked(pool: &Pool) {
         "app",
         "app.",
         ".x",
+        "app..x",
         "app.x; DROP",
-        "app.x.y",
+        "app.1x",
         "transaction_isolation",
     ] {
         assert!(
@@ -146,9 +147,13 @@ async fn setting_names_are_checked(pool: &Pool) {
         );
     }
     assert!(TxSetting::new("app.account_id", "v").is_ok());
+    assert!(
+        TxSetting::new("app.tenant.id", "v").is_ok(),
+        "more dots are fine"
+    );
 }
 
-/// A nested block cannot change the level or settings; `immediate` is a
+/// A nested block cannot change the level or settings; without them it is a
 /// plain savepoint.
 async fn nested_options_are_refused(pool: &Pool) {
     let q = pool.clone();
@@ -160,7 +165,7 @@ async fn nested_options_are_refused(pool: &Pool) {
             matches!(nested, Err(ExecError::InAtomic { .. })),
             "got {nested:?}"
         );
-        let opts = AtomicOptions::new().immediate();
+        let opts = AtomicOptions::new();
         atomic_with(&r, opts, |_sp| Box::pin(async move { Ok(()) })).await?;
         Ok(())
     })

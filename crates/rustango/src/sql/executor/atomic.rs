@@ -851,7 +851,9 @@ where
 }
 
 /// Whether the running task is inside an [`atomic`] block on `pool`, so
-/// ORM calls given `pool` run on its transaction.
+/// ORM calls given `pool` run on its transaction. Also `true` for a block
+/// that failed or ended early: calls there return
+/// [`ExecError::AtomicAborted`] or [`ExecError::AtomicEndedEarly`].
 #[must_use]
 pub fn in_atomic(pool: &Pool) -> bool {
     in_block(pool)
@@ -895,12 +897,6 @@ impl AtomicOptions {
         self
     }
 
-    /// SQLite begins with `BEGIN IMMEDIATE`. The default; no effect elsewhere.
-    pub fn immediate(mut self) -> Self {
-        self.begin = Begin::Immediate;
-        self
-    }
-
     fn changes_the_begin(&self) -> bool {
         self.isolation.is_some() || !self.settings.is_empty()
     }
@@ -927,8 +923,9 @@ impl Isolation {
 }
 
 /// A PG setting set for one transaction, such as `app.account_id` for row
-/// security policies. Only a custom `prefix.name` is accepted, so
-/// `search_path`, `role` and the server's own settings cannot be changed.
+/// security policies. The name must be dotted (`prefix.name`, more dots
+/// allowed), every part a plain identifier: that excludes the server's
+/// undotted settings such as `search_path` and `role`, not extension ones.
 #[derive(Debug, Clone)]
 pub struct TxSetting {
     name: String,
@@ -939,12 +936,10 @@ impl TxSetting {
     /// `name = value` for the block's transaction. The value is bound.
     ///
     /// # Errors
-    /// [`ExecError::InvalidTxSetting`] unless `name` is `prefix.name` of
-    /// plain identifiers.
+    /// [`ExecError::InvalidTxSetting`] unless `name` is dotted with every
+    /// part a plain identifier.
     pub fn new(name: &str, value: impl Into<String>) -> Result<Self, ExecError> {
-        let plain = name.split_once('.').is_some_and(|(prefix, rest)| {
-            crate::core::is_plain_identifier(prefix) && crate::core::is_plain_identifier(rest)
-        });
+        let plain = name.contains('.') && name.split('.').all(crate::core::is_plain_identifier);
         if !plain {
             return Err(ExecError::InvalidTxSetting {
                 name: name.to_owned(),
@@ -957,16 +952,14 @@ impl TxSetting {
     }
 }
 
-/// [`atomic`]: its top-level SQLite block starts with `BEGIN IMMEDIATE`,
-/// as [`write_transaction`] does, which `atomic` now does too.
-///
-/// Inside a block on the same pool it is a savepoint, like [`atomic`];
-/// inside another pool's block it begins deferred, as that pool may hold
-/// the file's lock. Writes that bypass the block (a spawned task) wait for
-/// its lock.
+/// [`atomic`], which now begins SQLite blocks with `BEGIN IMMEDIATE` too.
 ///
 /// # Errors
 /// As [`atomic`].
+#[deprecated(
+    since = "0.67.0",
+    note = "use `atomic`: it begins SQLite blocks with `BEGIN IMMEDIATE` now"
+)]
 pub async fn atomic_immediate<F, T>(pool: &Pool, f: F) -> Result<T, ExecError>
 where
     F: for<'tx> FnOnce(
@@ -975,7 +968,7 @@ where
         Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
     >,
 {
-    atomic_with(pool, AtomicOptions::new().immediate(), f).await
+    atomic_with(pool, AtomicOptions::new(), f).await
 }
 
 /// How a top-level SQLite block begins.

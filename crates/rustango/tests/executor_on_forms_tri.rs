@@ -86,15 +86,103 @@ async fn date_buckets_read_on_the_transaction(pool: &Pool) {
     let days = fetch_dates_on(&mut tx, Item::objects().dates("at", DateKind::Day))
         .await
         .unwrap();
-    assert_eq!(days.len(), 2);
+    let day = |d| chrono::NaiveDate::from_ymd_opt(2023, 11, d).unwrap();
+    assert_eq!(days, vec![day(15), day(16)]);
     let stamps = fetch_datetimes_on(
         &mut tx,
         Item::objects().datetimes("at", rustango::query::DateTimeKind::Hour),
     )
     .await
     .unwrap();
-    assert_eq!(stamps.len(), 2);
+    let hour = |d| day(d).and_hms_opt(22, 0, 0).unwrap().and_utc();
+    assert_eq!(stamps, vec![hour(15), hour(16)]);
     tx.rollback().await.unwrap();
+}
+
+/// `UPDATE eof_item SET n = <n> WHERE id = <id>` in the pool's dialect.
+fn set_n(pool: &Pool, id: i64, n: SqlValue) -> rustango::sql::CompiledStatement {
+    let d = pool.dialect();
+    rustango::sql::CompiledStatement {
+        sql: format!(
+            "UPDATE eof_item SET n = {} WHERE id = {}",
+            d.placeholder(1),
+            d.placeholder(2)
+        ),
+        params: vec![n, SqlValue::I64(id)],
+    }
+}
+
+/// Several batches run all or none on a pool and a held connection, and in
+/// the given transaction.
+async fn batches_run_all_or_none(pool: &Pool) {
+    use rustango::sql::SqlExecutor as _;
+    for id in [1, 2] {
+        item(id, "x").insert(pool).await.unwrap();
+    }
+    // The second batch fails (NOT NULL), so the first must not stay.
+    let failing = || {
+        vec![
+            set_n(pool, 1, SqlValue::I64(7)),
+            set_n(pool, 2, SqlValue::Null),
+        ]
+    };
+    assert!(pool.run_batches(failing()).await.is_err());
+    let mut conn = pool.acquire().await.unwrap();
+    assert!((&mut conn).run_batches(failing()).await.is_err());
+    drop(conn);
+    assert_eq!(
+        rows(pool).await[0].2,
+        0,
+        "a failed batch kept the first one"
+    );
+    let ok = || {
+        vec![
+            set_n(pool, 1, SqlValue::I64(7)),
+            set_n(pool, 2, SqlValue::I64(8)),
+        ]
+    };
+    assert_eq!(pool.run_batches(ok()).await.unwrap(), 2);
+    let mut tx = transaction_pool(pool).await.unwrap();
+    let more = vec![
+        set_n(pool, 1, SqlValue::I64(9)),
+        set_n(pool, 2, SqlValue::I64(9)),
+    ];
+    assert_eq!((&mut tx).run_batches(more).await.unwrap(), 2);
+    tx.rollback().await.unwrap();
+    let ns: Vec<i64> = rows(pool).await.into_iter().map(|r| r.2).collect();
+    assert_eq!(
+        ns,
+        vec![7, 8],
+        "the transaction's batches rolled back with it"
+    );
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "eof_audited", audit(track = "label"))]
+#[allow(dead_code)]
+pub struct Audited {
+    #[rustango(primary_key)]
+    pub id: i64,
+    #[rustango(max_length = 20)]
+    pub label: String,
+}
+
+/// The `_on` upserts cannot audit, so an audited model is refused.
+async fn audited_upserts_are_refused(pool: &Pool) {
+    let row = Audited {
+        id: 1,
+        label: "a".into(),
+    };
+    let up = Audited::bulk_upsert_on(&[row.clone()], &["id"], &["label"], pool).await;
+    assert!(
+        matches!(up, Err(rustango::sql::ExecError::AuditUnsupported { .. })),
+        "got {up:?}"
+    );
+    let ig = Audited::bulk_insert_or_ignore_on(&[row], pool).await;
+    assert!(
+        matches!(ig, Err(rustango::sql::ExecError::AuditUnsupported { .. })),
+        "got {ig:?}"
+    );
 }
 
 tri_dialect_test! {
@@ -102,5 +190,7 @@ tri_dialect_test! {
     scenarios: [
         writes_run_on_the_transaction,
         date_buckets_read_on_the_transaction,
+        batches_run_all_or_none,
+        audited_upserts_are_refused,
     ],
 }

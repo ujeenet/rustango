@@ -336,6 +336,7 @@ async fn winner(other: &Pool) {
 /// no race to lose there.
 async fn get_or_create_tx_lost_race_returns_the_winner(pool: &Pool) {
     if sqlite(pool) {
+        eprintln!("skipped on SQLite: one writer at a time, so the insert race cannot be lost");
         return;
     }
     let other = other_pool(pool).await;
@@ -370,14 +371,15 @@ async fn get_or_create_tx_lost_race_returns_the_winner(pool: &Pool) {
     assert_eq!(ids(pool).await, vec![5, 6]);
 }
 
-/// `update_or_create_on` that loses the race updates the winner's row.
-async fn update_or_create_on_lost_race_updates_the_winner(pool: &Pool) {
+/// `update_or_create_tx` that loses the race updates the winner's row.
+async fn update_or_create_tx_lost_race_updates_the_winner(pool: &Pool) {
     if sqlite(pool) {
+        eprintln!("skipped on SQLite: one writer at a time, so the insert race cannot be lost");
         return;
     }
     let other = other_pool(pool).await;
     let mut tx = rustango::sql::transaction_pool(pool).await.unwrap();
-    let (row, created) = rustango::sql::update_or_create_on(
+    let (row, created) = rustango::sql::update_or_create_tx(
         Note::objects().filter("id", 5_i64),
         |tx, mut row| {
             Box::pin(async move {
@@ -408,6 +410,112 @@ async fn update_or_create_on_lost_race_updates_the_winner(pool: &Pool) {
     assert_eq!(rows[0].label, "updated");
 }
 
+/// A `get_or_create_tx` inside another's `create_fn` gets its own
+/// savepoint: on MySQL a shared name would be replaced and released early.
+async fn nested_get_or_create_tx_keeps_both_savepoints(pool: &Pool) {
+    let mut tx = rustango::sql::transaction_pool(pool).await.unwrap();
+    let (_, created) = rustango::sql::get_or_create_tx(
+        Note::objects().filter("id", 5_i64),
+        |tx| {
+            Box::pin(async move {
+                let (_, inner) = rustango::sql::get_or_create_tx(
+                    Note::objects().filter("id", 7_i64),
+                    |tx| {
+                        Box::pin(async move {
+                            let row = Note {
+                                id: 7,
+                                label: "parent".into(),
+                            };
+                            row.insert_tx(tx).await?;
+                            Ok(row)
+                        })
+                    },
+                    tx,
+                )
+                .await?;
+                assert!(inner);
+                let row = Note {
+                    id: 5,
+                    label: "child".into(),
+                };
+                row.insert_tx(tx).await?;
+                Ok(row)
+            })
+        },
+        &mut tx,
+    )
+    .await
+    .expect("both savepoints release");
+    tx.commit().await.unwrap();
+    assert!(created);
+    assert_eq!(ids(pool).await, vec![5, 7]);
+}
+
+/// When the whole transaction is gone by the time `create_fn` fails (a
+/// deadlock, a lost connection), its own error comes back, not the
+/// failed rollback's.
+async fn create_error_wins_over_a_failed_rollback(pool: &Pool) {
+    let mut tx = rustango::sql::transaction_pool(pool).await.unwrap();
+    let res = rustango::sql::get_or_create_tx(
+        Note::objects().filter("id", 5_i64),
+        |tx| {
+            Box::pin(async move {
+                // Stands in for the server rolling the transaction back.
+                rustango::sql::raw_execute_tx(tx, "ROLLBACK", vec![]).await?;
+                Err::<Note, _>(ExecError::Sql(rustango::sql::SqlError::EmptyInList))
+            })
+        },
+        &mut tx,
+    )
+    .await;
+    assert!(
+        matches!(
+            res,
+            Err(ExecError::Sql(rustango::sql::SqlError::EmptyInList))
+        ),
+        "got {res:?}"
+    );
+}
+
+/// PG repeatable read: no read sees the winner's row, so the unique
+/// violation is returned, as documented.
+async fn pg_repeatable_read_returns_the_unique_violation(pool: &Pool) {
+    if pool.dialect().name() != "postgres" {
+        eprintln!("skipped: the repeatable-read rule is PG's");
+        return;
+    }
+    let other = other_pool(pool).await;
+    let mut tx = rustango::sql::transaction_pool(pool).await.unwrap();
+    rustango::sql::raw_execute_tx(
+        &mut tx,
+        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+        vec![],
+    )
+    .await
+    .unwrap();
+    let res = rustango::sql::get_or_create_tx(
+        Note::objects().filter("id", 5_i64),
+        |tx| {
+            Box::pin(async move {
+                winner(&other).await;
+                let row = Note {
+                    id: 5,
+                    label: "mine".into(),
+                };
+                row.insert_tx(tx).await?;
+                Ok(row)
+            })
+        },
+        &mut tx,
+    )
+    .await;
+    assert!(
+        res.as_ref().is_err_and(ExecError::is_unique_violation),
+        "got {:?}",
+        res.map(|(r, c)| (r.label, c))
+    );
+}
+
 tri_dialect_test! {
     model: Note,
     sqlite: file,
@@ -419,6 +527,9 @@ tri_dialect_test! {
         refused_with_the_guard_held,
         cancelled_create_rolls_back,
         get_or_create_tx_lost_race_returns_the_winner,
-        update_or_create_on_lost_race_updates_the_winner,
+        update_or_create_tx_lost_race_updates_the_winner,
+        nested_get_or_create_tx_keeps_both_savepoints,
+        create_error_wins_over_a_failed_rollback,
+        pg_repeatable_read_returns_the_unique_violation,
     ],
 }

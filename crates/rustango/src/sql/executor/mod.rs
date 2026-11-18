@@ -913,6 +913,7 @@ pub(crate) use atomic::detached;
 #[cfg(feature = "jobs")]
 pub(crate) use atomic::in_any_block;
 pub(crate) use atomic::rolled_back;
+#[allow(deprecated)]
 pub use atomic::{
     atomic, atomic_immediate, atomic_with, in_atomic, on_commit, on_commit_pending, AtomicOptions,
     AtomicTx, Isolation, TxGuard, TxSetting,
@@ -3361,7 +3362,7 @@ where
 }
 
 mod get_or_create;
-pub use get_or_create::{get_or_create, get_or_create_tx, update_or_create, update_or_create_on};
+pub use get_or_create::{get_or_create, get_or_create_tx, update_or_create, update_or_create_tx};
 
 /// Give the queryset a deterministic order before taking one row.
 /// An existing `order_by` is kept, or flipped when `reverse`;

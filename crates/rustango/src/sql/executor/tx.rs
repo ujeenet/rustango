@@ -30,6 +30,8 @@ use crate::sql::{Pool, PoolId};
 pub struct PoolTx<'a> {
     pub(crate) conn: TxConn<'a>,
     pool: PoolId,
+    /// Savepoints [`Self::next_savepoint`] has named so far.
+    savepoints: usize,
 }
 
 /// A driver connection a [`PoolTx`] can begin on.
@@ -79,7 +81,18 @@ pub enum TxConn<'a> {
 impl<'a> PoolTx<'a> {
     /// `conn` opened on `pool`.
     pub(crate) fn new(conn: TxConn<'a>, pool: PoolId) -> Self {
-        Self { conn, pool }
+        Self {
+            conn,
+            pool,
+            savepoints: 0,
+        }
+    }
+
+    /// A quoted savepoint name no earlier call on this transaction used.
+    pub(crate) fn next_savepoint(&mut self, prefix: &str) -> String {
+        self.savepoints += 1;
+        self.dialect()
+            .quote_ident(&format!("{prefix}_{}", self.savepoints))
     }
 
     /// Begin on `conn`, a connection checked out of `pool`.
