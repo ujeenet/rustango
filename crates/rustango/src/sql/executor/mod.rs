@@ -903,7 +903,8 @@ pub use tx::{transaction_pool, write_transaction, PoolTx, TxConn};
 
 // One executor for every `_on` method.
 mod on;
-use on::{on_pool, pool_exec, pool_rows, RowRef};
+pub(crate) use on::RowRef;
+use on::{on_pool, pool_exec, pool_rows};
 pub use on::{write_tx, PoolConn, PooledConn, SqlExecutor, WriteTx};
 
 mod atomic;
@@ -911,9 +912,9 @@ mod atomic;
 pub(crate) use atomic::detached;
 #[cfg(feature = "jobs")]
 pub(crate) use atomic::in_any_block;
-pub(crate) use atomic::in_block;
 pub(crate) use atomic::rolled_back;
 pub use atomic::{atomic, atomic_immediate, on_commit, on_commit_pending, AtomicTx, TxGuard};
+pub(crate) use atomic::{caught, in_block};
 
 // `&Pool` dispatch. The `_pool` functions below take a [`Pool`],
 // compile SQL through `pool.dialect()` and run it on the matching
@@ -1713,7 +1714,7 @@ pub async fn raw_execute_pool(
     binds: Vec<SqlValue>,
 ) -> Result<u64, ExecError> {
     crate::sql::refuse_unbindable_values(pool.dialect(), &binds)?;
-    pool_exec(pool, atomic::Stmt::Raw, sql, binds).await
+    pool_exec(pool, atomic::Stmt::Plain, sql, binds).await
 }
 
 /// [`raw_execute_pool`] inside an open [`PoolTx`], so several writes
@@ -1782,7 +1783,9 @@ pub async fn run_ddl_idempotent(pool: &Pool, ddl: &str) -> Result<(), sqlx::Erro
     refuse_ddl_in_block(pool, Ddl::Transactional)
         .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
     for stmt in ddl.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-        match pool_exec(pool, atomic::Stmt::Raw, stmt, Vec::new()).await {
+        // A caught "already exists" must not abort the block on PG.
+        let run = pool_exec(pool, atomic::Stmt::Plain, stmt, Vec::new());
+        match atomic::caught(pool, run).await {
             Ok(_) => {}
             Err(crate::sql::ExecError::Driver(err)) => {
                 // Two ways a re-run can fail with the job already done:
@@ -1816,7 +1819,7 @@ pub(crate) async fn execute_unprepared_pool(pool: &Pool, sql: &str) -> Result<()
     crate::test_assertions::query_counter::bump();
     on_pool!(
         pool,
-        atomic::Stmt::Raw,
+        atomic::Stmt::Plain,
         |tx| Ok(tx.execute_unprepared(sql).await?),
         Ok(match pool {
             #[cfg(feature = "postgres")]
@@ -2477,7 +2480,7 @@ where
 {
     crate::sql::refuse_unbindable_values(pool.dialect(), &binds)?;
     crate::test_assertions::query_counter::bump();
-    pool_rows(pool, atomic::Stmt::Raw, sql, binds, from_row::<T>).await
+    pool_rows(pool, atomic::Stmt::Plain, sql, binds, from_row::<T>).await
 }
 
 /// [`raw_query_pool`] inside an open [`PoolTx`], for reads that must

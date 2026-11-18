@@ -109,9 +109,13 @@ pub(crate) use executor::{
     bulk_insert_pks_tx, compile_bulk_update_batches, count_rows_on, execute_batches_tx,
     execute_unprepared_pool, fetch_in_chunks, fetch_select_in_chunks, fetch_values_list_on,
     inserted_pk, rows_per_batch, run_delete_statements_tx, truncate_refusal, truncate_tx, write_tx,
-    WriteTx,
 };
-pub(crate) use executor::{in_block, refuse_ddl_in_block, Ddl};
+pub(crate) use executor::{caught, in_block, refuse_ddl_in_block, Ddl};
+// For the framework modules that open joined writes or read through the executor.
+#[allow(unused_imports)]
+pub(crate) use executor::WriteTx;
+#[cfg(feature = "tenancy")]
+pub(crate) use executor::{run_on, RowRef};
 #[cfg(feature = "admin")]
 pub(crate) use executor::{select_one_row_as_json_tx, select_rows_as_json_tx};
 pub(crate) use executor::{select_rows_as_json_with, CellDecode, OnBadCell};

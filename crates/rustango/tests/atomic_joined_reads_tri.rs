@@ -123,8 +123,10 @@ async fn read_sees_uncommitted_write(pool: &Pool) {
     assert_eq!(seen, (vec![1, 2], 2, true, Some(1), 2, 2));
 }
 
-/// A failed read does not abort the block: on PG it runs in a savepoint.
-async fn caught_failed_read_leaves_block_usable(pool: &Pool) {
+/// A failed read is one plain statement: on PG it aborts the block, which
+/// then refuses every statement; MySQL and SQLite undo only the read. A
+/// nested block around the read keeps the outer one going everywhere.
+async fn failed_read_aborts_the_block_on_pg(pool: &Pool) {
     seed(pool, &[5], "n").await;
     let p = one_conn(pool).await;
     let q = p.clone();
@@ -140,8 +142,17 @@ async fn caught_failed_read_leaves_block_usable(pool: &Pool) {
             .await
             .unwrap();
     }
-    within(rustango::atomic!(&p, |tx| {
+    let pg = dialect(pool) == "postgres";
+    let res: Result<(), ExecError> = within(rustango::atomic!(&p, |tx| {
         put(tx, 1).await?;
+        // Inside a nested block the failure stays there.
+        let r = q.clone();
+        let nested: Result<Vec<(i64,)>, ExecError> = rustango::atomic!(&r, |_sp| {
+            raw_query_pool("SELECT id FROM ajr_missing", vec![], &r).await
+        })
+        .await;
+        assert!(nested.is_err());
+        put(tx, 2).await?;
         if locks {
             let busy = Note::objects()
                 .filter("id", 5_i64)
@@ -154,14 +165,50 @@ async fn caught_failed_read_leaves_block_usable(pool: &Pool) {
         let missing: Result<Vec<(i64,)>, _> =
             raw_query_pool("SELECT id FROM ajr_missing", vec![], &q).await;
         assert!(missing.is_err());
-        put(tx, 2).await?;
-        note(3, "n").insert(&q).await?;
+        let next = put(tx, 3).await;
+        if pg {
+            assert!(
+                matches!(next, Err(ExecError::AtomicAborted)),
+                "got {next:?}"
+            );
+            return Ok(());
+        }
+        next?;
+        note(4, "n").insert(&q).await?;
+        Ok(())
+    }))
+    .await;
+    held.rollback().await.unwrap();
+    if pg {
+        assert!(matches!(res, Err(ExecError::AtomicAborted)), "got {res:?}");
+        assert_eq!(ids(pool).await, vec![5], "nothing committed");
+    } else {
+        res.expect("MySQL and SQLite undo only the failed read");
+        assert_eq!(ids(pool).await, vec![1, 2, 3, 4, 5]);
+    }
+}
+
+/// Joined writes dropped at any point, savepoint and RELEASE included,
+/// leave the block usable.
+async fn cancelled_joined_writes_leave_the_block_usable(pool: &Pool) {
+    if dialect(pool) == "mysql" {
+        return; // sqlx-mysql cannot recover a connection whose statement was dropped mid-reply.
+    }
+    let p = one_conn(pool).await;
+    let q = p.clone();
+    within(rustango::atomic!(&p, |tx| {
+        for i in 0..150_i64 {
+            let row = note(100 + i, "c");
+            let wait = Duration::from_micros(15 * u64::try_from(i).unwrap());
+            let _ = tokio::time::timeout(wait, row.insert(&q)).await;
+        }
+        put(tx, 1).await?;
+        Note::objects().count(&q).await?;
         Ok(())
     }))
     .await
-    .expect("the block survives its failed reads");
-    held.rollback().await.unwrap();
-    assert_eq!(ids(pool).await, vec![1, 2, 3, 5]);
+    .expect("the block stays usable");
+    assert!(ids(pool).await.contains(&1));
 }
 
 /// Two reads at once on one block: one runs, the other is refused.
@@ -215,19 +262,15 @@ async fn in_memory_sqlite_read_after_write_does_not_hang(pool: &Pool) {
     assert_eq!(n, 1);
 }
 
-/// A raw `COMMIT` ends the block early; later statements are refused.
+/// A raw `COMMIT` is found at the outermost commit; the statements after it
+/// ran in autocommit.
 async fn raw_commit_ends_the_block_early(pool: &Pool) {
     let p = one_conn(pool).await;
     let q = p.clone();
     let res: Result<(), ExecError> = within(rustango::atomic!(&p, |tx| {
         put(tx, 1).await?;
-        let r = raw_execute_pool(&q, "COMMIT", vec![]).await;
-        assert!(matches!(r, Err(ExecError::AtomicEndedEarly)), "got {r:?}");
-        let after = put(tx, 2).await;
-        assert!(
-            matches!(after, Err(ExecError::AtomicEndedEarly)),
-            "got {after:?}"
-        );
+        raw_execute_pool(&q, "COMMIT", vec![]).await?;
+        put(tx, 2).await?;
         Ok(())
     }))
     .await;
@@ -235,7 +278,7 @@ async fn raw_commit_ends_the_block_early(pool: &Pool) {
         matches!(res, Err(ExecError::AtomicEndedEarly)),
         "got {res:?}"
     );
-    assert_eq!(ids(pool).await, vec![1], "the COMMIT kept the first row");
+    assert_eq!(ids(pool).await, vec![1, 2], "both rows are committed");
 }
 
 /// MySQL commits on DDL, so DDL through the pool is refused in a block. On
@@ -250,6 +293,12 @@ async fn mysql_ddl_via_pool_is_refused(pool: &Pool) {
         put(tx, 1).await?;
         let r = run_ddl_idempotent(&q, "CREATE TABLE ajr_ddl_probe (id INT)").await;
         *ddl.lock().unwrap() = r.err().map(|e| e.to_string());
+        // PG: a re-run's caught "already exists" must not abort the block.
+        if q.dialect().name() == "postgres" {
+            run_ddl_idempotent(&q, "CREATE TABLE ajr_ddl_probe (id INT)")
+                .await
+                .expect("idempotent re-run");
+        }
         put(tx, 2).await?;
         Err(bail())
     }))
@@ -258,7 +307,10 @@ async fn mysql_ddl_via_pool_is_refused(pool: &Pool) {
     let created: Result<Vec<(i64,)>, _> =
         raw_query_pool("SELECT id FROM ajr_ddl_probe", vec![], pool).await;
     rustango::testkit::matrix::drop_table(pool, "ajr_ddl_probe").await;
-    assert!(res.is_err());
+    assert!(
+        matches!(res, Err(ExecError::Sql(SqlError::EmptyInList))),
+        "the block failed early: {res:?}"
+    );
     if dialect(pool) == "mysql" {
         let err = ddl_err.expect("MySQL DDL in a block is refused");
         assert!(err.contains("refused inside an atomic block"), "got {err}");
@@ -291,7 +343,7 @@ async fn mysql_schema_helpers_are_refused(pool: &Pool) {
     assert_eq!(ids(pool).await, vec![1]);
 }
 
-/// Statements no transaction can hold fail without aborting the block.
+/// Statements no transaction can hold are refused by the server.
 async fn non_transactional_statements_are_refused(pool: &Pool) {
     let sql = match dialect(pool) {
         "postgres" => "CREATE INDEX CONCURRENTLY ajr_label_idx ON ajr_note (label)",
@@ -300,16 +352,22 @@ async fn non_transactional_statements_are_refused(pool: &Pool) {
     };
     let p = one_conn(pool).await;
     let q = p.clone();
-    within(rustango::atomic!(&p, |tx| {
+    let res: Result<(), ExecError> = within(rustango::atomic!(&p, |tx| {
         put(tx, 1).await?;
         let r = raw_execute_pool(&q, sql, vec![]).await;
         assert!(matches!(r, Err(ExecError::Driver(_))), "got {r:?}");
         put(tx, 2).await?;
         Ok(())
     }))
-    .await
-    .expect("the block survives the refused statement");
-    assert_eq!(ids(pool).await, vec![1, 2]);
+    .await;
+    // PG aborts the block on the failed statement; SQLite undoes only it.
+    if dialect(pool) == "postgres" {
+        assert!(matches!(res, Err(ExecError::AtomicAborted)), "got {res:?}");
+        assert_eq!(ids(pool).await, Vec::<i64>::new());
+    } else {
+        res.expect("the block survives the refused statement");
+        assert_eq!(ids(pool).await, vec![1, 2]);
+    }
 }
 
 /// Rows the loop moves out of the filter must not shift the next chunk.
@@ -356,7 +414,8 @@ tri_dialect_test! {
     model: Note,
     scenarios: [
         read_sees_uncommitted_write,
-        caught_failed_read_leaves_block_usable,
+        failed_read_aborts_the_block_on_pg,
+        cancelled_joined_writes_leave_the_block_usable,
         concurrent_reads_are_refused,
         read_with_guard_held_is_refused,
         in_memory_sqlite_read_after_write_does_not_hang,

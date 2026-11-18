@@ -736,12 +736,11 @@ async fn mysql_ddl_implicit_commit_is_reported(pool: &Pool) {
         matches!(res, Err(ExecError::AtomicEndedEarly)),
         "got {res:?}"
     );
-    // The same DDL as raw SQL on the pool: it joins the block, and the
-    // check after it reports the commit at once.
+    // The same DDL as raw SQL on the pool joins the block; the commit
+    // check at its end finds the implicit commit.
     let res: Result<(), ExecError> = within(rustango::atomic!(&p, |tx| {
         put(tx, 2).await?;
-        let r = raw_execute_pool(&q, "CREATE TABLE asp_ddl_probe (id INT)", vec![]).await;
-        assert!(matches!(r, Err(ExecError::AtomicEndedEarly)), "got {r:?}");
+        raw_execute_pool(&q, "CREATE TABLE asp_ddl_probe (id INT)", vec![]).await?;
         Ok(())
     }))
     .await;

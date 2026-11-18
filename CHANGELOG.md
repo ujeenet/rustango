@@ -10,8 +10,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Changed
 
-- **Breaking:** inside `atomic(&pool, ..)`, reads, raw SQL and DDL given the same `&Pool` run on the block's transaction, as writes already did: they see its uncommitted rows, and a failed one (on PG in a savepoint) leaves the block usable. Two statements at once on one block, or one while its `TxGuard` is held, return `NestedAtomic`.
-- Raw SQL that commits or ends the block (`COMMIT`, a MySQL implicit commit) returns `AtomicEndedEarly` at once. DDL through `run_ddl_idempotent` in a MySQL block, and a non-atomic migration in any block return `InAtomic`.
+- **Breaking:** inside `atomic(&pool, ..)`, reads, raw SQL and DDL given the same `&Pool` run on the block's transaction, as writes already did: they see its uncommitted rows. They cost one statement each; on PG a failed one aborts the block (`AtomicAborted`). Two statements at once on one block, or one while its `TxGuard` is held, return `NestedAtomic`.
+- Raw SQL that commits or ends the block (`COMMIT`, a MySQL implicit commit) makes the block return `AtomicEndedEarly`. DDL through `run_ddl_idempotent` in a MySQL block, and a non-atomic migration in any block return `InAtomic`.
 - SQLite: `atomic` begins the outermost block with `BEGIN IMMEDIATE`, like `atomic_immediate`.
 - Framework writes that opened their own transaction join a caller's `atomic` block on the same pool and roll back with it: audit `emit_one` / `emit_many`, `truncate`, fixtures, ViewSet and admin writes, media, and SSO sign-up and invites. Tenancy registry changes and the database cache still commit on their own.
 - `iterator()` inside a block pages by primary key, so rows the loop updates out of the filter are not skipped; it must be ordered by the primary key there. `get_or_create` / `update_or_create` re-read a lost race with a locking read inside a MySQL block.

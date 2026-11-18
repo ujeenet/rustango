@@ -161,9 +161,42 @@ async fn cache_survives_the_callers_rollback(pool: &Pool) {
     assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
 }
 
+/// Permission checks read through the block, so in-memory SQLite does not
+/// wait on the block's own lock.
+async fn permission_reads_join_the_block(pool: &Pool) {
+    use rustango::tenancy::permissions::{create_role_pool, has_perm_pool, user_roles_qs_pool};
+    let q = pool.clone();
+    let block = rustango::atomic!(pool, |_tx| {
+        // Writes into the tables the checks read: in-memory SQLite locks them.
+        let mut user = rustango::tenancy::User {
+            id: Auto::Unset,
+            username: "asite-perm".into(),
+            password_hash: "x".into(),
+            email: None,
+            is_superuser: false,
+            active: true,
+            created_at: chrono::Utc::now(),
+            data: serde_json::json!({}),
+            password_changed_at: None,
+            sessions_revoked_at: None,
+        };
+        user.insert(&q).await?;
+        let uid = *user.id.get().unwrap();
+        create_role_pool("asite-role", "", &q).await.expect("role");
+        assert!(!has_perm_pool(uid, "asite.view", &q).await.unwrap());
+        assert!(user_roles_qs_pool(uid, &q).await.unwrap().is_empty());
+        Err::<(), _>(bail())
+    });
+    let res = tokio::time::timeout(std::time::Duration::from_secs(10), block)
+        .await
+        .expect("a permission read waited for a second connection");
+    assert!(res.is_err());
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        permission_reads_join_the_block,
         fixtures_roll_back_with_the_callers_block,
         registry_survives_the_callers_rollback,
         cache_survives_the_callers_rollback,

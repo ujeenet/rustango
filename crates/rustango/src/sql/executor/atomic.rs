@@ -62,6 +62,8 @@ struct TxState {
     ended: bool,
     /// [`RetryPoint`]s opened so far, so each gets its own name.
     retry_points: usize,
+    /// Open [`RetryPoint`]s: number and depth.
+    points: Vec<(usize, usize)>,
 }
 
 impl TxState {
@@ -87,8 +89,24 @@ impl TxState {
     async fn rollback_to(&mut self, depth: usize) -> Result<(), ExecError> {
         self.savepoint("ROLLBACK TO SAVEPOINT", depth).await?;
         self.savepoint("RELEASE SAVEPOINT", depth).await?;
-        self.depth = depth - 1;
+        self.left(depth);
         Ok(())
+    }
+
+    /// Savepoint `depth` is gone: the retry points inside it went with it.
+    fn left(&mut self, depth: usize) {
+        self.depth = depth - 1;
+        self.points.retain(|&(_, d)| d < depth);
+    }
+
+    /// Retry point `n` is gone, and every point opened after it.
+    fn point_gone(&mut self, n: usize) {
+        self.points.retain(|&(m, _)| m < n);
+    }
+
+    /// No savepoint could undo a failed statement now: PG aborts the block.
+    fn unguarded(&self) -> bool {
+        self.depth == 0 && self.points.is_empty()
     }
 
     /// Poison the transaction if the server already ended it.
@@ -139,6 +157,7 @@ impl TxState {
             let name = retry_point_name(n);
             self.named_savepoint("ROLLBACK TO SAVEPOINT", &name).await?;
             self.named_savepoint("RELEASE SAVEPOINT", &name).await?;
+            self.point_gone(n);
         }
         Ok(())
     }
@@ -400,27 +419,24 @@ pub(crate) fn in_block(pool: &Pool) -> bool {
     block_on(pool).is_some()
 }
 
-/// What a statement joining a block may do to its transaction.
+/// How a statement joins a block.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Stmt {
-    /// An ORM read.
-    Read,
-    /// An ORM write.
+    /// A read or raw SQL: one statement, no savepoint. On PG its failure
+    /// aborts the block.
+    Plain,
+    /// An ORM write: in a savepoint, so a failed one leaves the block usable.
     Write,
-    /// Raw SQL or DDL: may also commit or end the transaction.
-    Raw,
 }
 
 /// One statement's share of the open block on its pool. Holds the block's
-/// lock, so a second statement or a [`TxGuard`] meanwhile is refused.
-/// Writes, raw SQL and every PG statement run in a savepoint, so a failed
-/// one does not abort the block; dropped unfinished, it rolls back on the
-/// next use.
+/// lock, so a second statement or a [`TxGuard`] meanwhile is refused. A
+/// write's savepoint, dropped unreleased, rolls back on the next use.
 pub(crate) struct Joined {
-    guard: OwnedMutexGuard<TxState>,
+    /// `None` once a release hands it to its background task.
+    guard: Option<OwnedMutexGuard<TxState>>,
     slot: Arc<Slot>,
-    stmt: Stmt,
-    /// The savepoint's depth; `None` for a MySQL / SQLite read.
+    /// The write's savepoint depth.
     savepoint: Option<usize>,
     released: bool,
 }
@@ -443,42 +459,42 @@ impl Joined {
         if guard.depth != block.depth {
             return Err(ExecError::NestedAtomic);
         }
-        slot.guards.fetch_add(1, Ordering::SeqCst);
-        // PG aborts the whole transaction on any failed statement.
-        let pg = guard
-            .tx
-            .as_ref()
-            .is_some_and(|t| t.dialect().name() == "postgres");
-        let mut j = Self {
-            guard,
-            slot,
-            stmt,
-            savepoint: None,
-            released: false,
-        };
-        if stmt != Stmt::Read || pg {
-            let depth = block.depth + 1;
-            j.guard.savepoint("SAVEPOINT", depth).await?;
-            // Set only once it exists, so a cancel mid-open rolls nothing back.
-            j.guard.depth = depth;
-            j.savepoint = Some(depth);
+        if stmt == Stmt::Plain {
+            slot.guards.fetch_add(1, Ordering::SeqCst);
+            return Ok(Self {
+                guard: Some(guard),
+                slot,
+                savepoint: None,
+                released: false,
+            });
         }
-        Ok(j)
+        let depth = block.depth + 1;
+        let guard = open_savepoint(&slot, guard, depth).await?;
+        slot.guards.fetch_add(1, Ordering::SeqCst);
+        Ok(Self {
+            guard: Some(guard),
+            slot,
+            savepoint: Some(depth),
+            released: false,
+        })
+    }
+
+    fn state(&mut self) -> &mut TxState {
+        self.guard
+            .as_mut()
+            .expect("joined statement holds the lock")
     }
 
     /// End the statement with its result `r`: record an error that ended the
-    /// transaction, refuse raw SQL that ended it, else release the savepoint.
-    /// A failed statement's savepoint rolls back on the block's next use.
+    /// transaction, else release the write's savepoint. A failed write's
+    /// savepoint rolls back on the block's next use.
     pub(crate) async fn finish<T>(mut self, r: Result<T, ExecError>) -> Result<T, ExecError> {
         let r = Gate(Some(Arc::clone(&self.slot))).check(r);
-        if self.stmt == Stmt::Raw {
-            let status = self.guard.tx().status().await;
-            if status == TxStatus::Ended && !self.slot.fatal.load(Ordering::SeqCst) {
-                // A COMMIT or an implicit commit: nothing left to roll back.
-                self.guard.poisoned = true;
-                self.guard.ended = true;
-                self.released = true;
-                return Err(ExecError::AtomicEndedEarly);
+        if let Err(ExecError::Driver(sqlx::Error::Database(_))) = &r {
+            // No savepoint to undo it: PG has aborted the whole block.
+            let state = self.state();
+            if state.unguarded() && state.tx().dialect().name() == "postgres" {
+                self.slot.fatal.store(true, Ordering::SeqCst);
             }
         }
         let v = r?;
@@ -486,15 +502,56 @@ impl Joined {
         Ok(v)
     }
 
-    /// Keep the statement's writes: release its savepoint.
+    /// Keep the statement's writes: release its savepoint. The RELEASE
+    /// finishes even if this future is dropped.
     pub(crate) async fn release(mut self) -> Result<(), ExecError> {
-        if let Some(depth) = self.savepoint {
-            self.guard.savepoint("RELEASE SAVEPOINT", depth).await?;
-            self.guard.depth = depth - 1;
-        }
         self.released = true;
-        Ok(())
+        let Some(depth) = self.savepoint else {
+            return Ok(());
+        };
+        let guard = self.guard.take().expect("joined statement holds the lock");
+        let _claim = Claim::new(&self.slot);
+        in_background(async move {
+            let mut g = guard;
+            g.savepoint("RELEASE SAVEPOINT", depth).await?;
+            g.left(depth);
+            Ok(())
+        })
+        .await
     }
+}
+
+/// Open savepoint `depth` on `guard` in the background, so a dropped
+/// caller cannot cut it off halfway; a caller dropped meanwhile leaves it
+/// to be rolled back on the next use.
+async fn open_savepoint(
+    slot: &Arc<Slot>,
+    guard: OwnedMutexGuard<TxState>,
+    depth: usize,
+) -> Result<OwnedMutexGuard<TxState>, ExecError> {
+    let opening = Arc::new(Opening::default());
+    let mut armed = OpenSavepoint {
+        slot: Arc::clone(slot),
+        depth,
+        opening: Arc::clone(&opening),
+        ending: false,
+    };
+    let task_slot = Arc::clone(slot);
+    let _claim = Claim::new(slot);
+    let opened = in_background(async move {
+        let mut g = guard;
+        g.savepoint("SAVEPOINT", depth).await?;
+        g.depth = depth;
+        opening.opened.store(true, Ordering::SeqCst);
+        if opening.abandoned.load(Ordering::SeqCst) {
+            mark_cancelled(&task_slot, depth);
+        }
+        Ok(g)
+    })
+    .await;
+    // From here the caller owns the savepoint; a refused open marks nothing.
+    armed.ending = true;
+    opened
 }
 
 impl Drop for Joined {
@@ -509,13 +566,16 @@ impl Drop for Joined {
 impl std::ops::Deref for Joined {
     type Target = PoolTx<'static>;
     fn deref(&self) -> &PoolTx<'static> {
-        self.guard.tx.as_ref().expect("atomic transaction is open")
+        self.guard
+            .as_ref()
+            .and_then(|g| g.tx.as_ref())
+            .expect("atomic transaction is open")
     }
 }
 
 impl std::ops::DerefMut for Joined {
     fn deref_mut(&mut self) -> &mut PoolTx<'static> {
-        self.guard.tx()
+        self.state().tx()
     }
 }
 
@@ -541,6 +601,21 @@ pub(crate) async fn retry_point(pool: &Pool) -> Result<Option<RetryPoint>, ExecE
         Some(block) => RetryPoint::open(&block).await,
         None => Ok(None),
     }
+}
+
+/// Run `step` in a savepoint of the block on `pool`, if any, for a caller
+/// that catches its error and goes on: a failure then undoes only the step,
+/// so PG does not abort the block. The step's own error wins.
+pub(crate) async fn caught<T>(
+    pool: &Pool,
+    step: impl Future<Output = Result<T, ExecError>>,
+) -> Result<T, ExecError> {
+    let Some(point) = retry_point(pool).await? else {
+        return step.await;
+    };
+    let r = step.await;
+    let ended = point.end(r.is_ok()).await;
+    r.and_then(|v| ended.map(|()| v))
 }
 
 fn retry_point_name(n: usize) -> String {
@@ -570,9 +645,19 @@ impl RetryPoint {
         // Its own name: a nested retry point must not replace it (MySQL).
         guard.retry_points += 1;
         let n = guard.retry_points;
-        guard
-            .named_savepoint("SAVEPOINT", &retry_point_name(n))
-            .await?;
+        // Finished even if the caller is dropped; an orphan is released
+        // with its enclosing savepoint or the commit.
+        let claim = Claim::new(&slot);
+        let depth = block.depth;
+        let opened = in_background(async move {
+            let mut g = guard;
+            g.named_savepoint("SAVEPOINT", &retry_point_name(n)).await?;
+            g.points.push((n, depth));
+            Ok(())
+        })
+        .await;
+        drop(claim);
+        opened?;
         Ok(Some(Self {
             slot,
             depth: block.depth,
@@ -584,7 +669,7 @@ impl RetryPoint {
     /// Keep the step's writes, or roll them back.
     pub(crate) async fn end(mut self, keep: bool) -> Result<(), ExecError> {
         // Settles the step's cancelled savepoints first.
-        let mut guard = match acquire(&self.slot).await {
+        let guard = match acquire(&self.slot).await {
             Ok(g) => g,
             // A guard is live: a kept point stays open and commits with the
             // block; a rollback is left to the next settle (`Drop`).
@@ -598,15 +683,21 @@ impl RetryPoint {
             self.done = keep;
             return Ok(());
         }
-        let name = retry_point_name(self.n);
-        if !keep {
-            guard
-                .named_savepoint("ROLLBACK TO SAVEPOINT", &name)
-                .await?;
-        }
-        guard.named_savepoint("RELEASE SAVEPOINT", &name).await?;
+        let (n, name) = (self.n, retry_point_name(self.n));
+        // Finished in the background even if the caller is dropped, so a
+        // later settle never rolls back to a released point.
         self.done = true;
-        Ok(())
+        let _claim = Claim::new(&self.slot);
+        in_background(async move {
+            let mut g = guard;
+            if !keep {
+                g.named_savepoint("ROLLBACK TO SAVEPOINT", &name).await?;
+            }
+            g.named_savepoint("RELEASE SAVEPOINT", &name).await?;
+            g.point_gone(n);
+            Ok(())
+        })
+        .await
     }
 }
 
@@ -686,9 +777,11 @@ pub(crate) fn in_any_block() -> bool {
 ///
 /// **ORM calls on the pool** (reads, writes, raw SQL and DDL given the same
 /// `&Pool`) run on the block's transaction, so they see its uncommitted rows
-/// and its rollback undoes them. Writes, raw SQL and every PG statement run
-/// in a savepoint, so a failed one (a caught `nowait` read, an ignored
-/// duplicate) leaves the block usable. One statement at a time: with a
+/// and its rollback undoes them. ORM writes run in a savepoint, so a failed
+/// one (an ignored duplicate) leaves the block usable. Reads and raw SQL are
+/// one plain statement: on PG a failed one (a caught `nowait` read) aborts the
+/// block, and later statements and `atomic` return [`ExecError::AtomicAborted`];
+/// wrap such a step in a nested `atomic` to keep going. One statement at a time: with a
 /// [`TxGuard`] held, or two statements at once (`join!`), they return
 /// [`ExecError::NestedAtomic`]. MySQL and SQLite reads see one snapshot for
 /// the whole block. DDL on MySQL returns [`ExecError::InAtomic`].
@@ -699,8 +792,9 @@ pub(crate) fn in_any_block() -> bool {
 /// write lock from `BEGIN`, so their writes wait `busy_timeout` and then fail
 /// with `SQLITE_BUSY` (file databases too); in-memory ones wait forever.
 ///
-/// **Raw SQL** is checked after each statement: a `COMMIT`, `ROLLBACK` or
-/// implicit commit in it returns [`ExecError::AtomicEndedEarly`].
+/// **Raw SQL** that ends the transaction (`COMMIT`, `ROLLBACK`, an implicit
+/// commit) is found at the outermost commit, which then returns
+/// [`ExecError::AtomicEndedEarly`]; statements after it ran in autocommit.
 ///
 /// **Server-ended transactions:** after a statement error that ends the
 /// whole transaction (MySQL deadlock 1213 / timeout 1205, SQLite automatic
@@ -726,8 +820,10 @@ pub(crate) fn in_any_block() -> bool {
 /// read-then-write block waits for the write lock instead of failing with
 /// `SQLITE_BUSY`; other writers wait for the block.
 ///
-/// **Costs:** past 64 open savepoints in one transaction PostgreSQL
-/// spills its subtransaction cache, so avoid nesting in hot loops. On
+/// **Costs:** a read or raw statement costs one round trip; an ORM write
+/// three (its savepoint). Past 64 subtransactions in one transaction
+/// PostgreSQL spills its subtransaction cache, and every ORM write in a block
+/// is one, so keep blocks with many writes or nested blocks short. On
 /// MySQL a deadlock inside a nested block rolls back the whole outer
 /// transaction.
 ///
@@ -849,6 +945,7 @@ where
         poisoned: false,
         ended: false,
         retry_points: 0,
+        points: Vec::new(),
     }));
     // The `PoolTx` never moves inside `state`, so its address identifies it.
     let tx_key = state
@@ -1002,7 +1099,7 @@ where
         }
         if release {
             g.savepoint("RELEASE SAVEPOINT", depth).await?;
-            g.depth = depth - 1;
+            g.left(depth);
             let callbacks = block.take_callbacks();
             parent
                 .callbacks

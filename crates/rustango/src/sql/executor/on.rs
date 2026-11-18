@@ -472,7 +472,7 @@ impl<'c> SqlExecutor<'c> for &'c Pool {
         U: Send + 'e,
         F: FnMut(RowRef<'_>) -> Result<U, sqlx::Error> + Send + 'e,
     {
-        pool_rows(self, Stmt::Read, sql, params, decode)
+        pool_rows(self, Stmt::Plain, sql, params, decode)
     }
 
     fn execute_rows<'e, 'q: 'e>(
