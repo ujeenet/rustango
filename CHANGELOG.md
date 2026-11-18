@@ -11,6 +11,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `sql::in_atomic(&pool)`: whether ORM calls on `pool` run in an open `atomic` block.
 - `_on` forms for an open transaction or connection: `sql::bulk_update_on`, `fetch_dates_on`, `fetch_datetimes_on`, `model_shortcuts::increment_one_on`, and the derived `Model::bulk_upsert_on` / `bulk_insert_or_ignore_on`.
 - `ExecError::InAtomic`: an operation refused inside an `atomic` block on its pool. `LockMode::share` for a shared row lock (`FOR SHARE` / `LOCK IN SHARE MODE`).
+- `access::RouteAccess`: who may read a router that serves no model: `allow_anonymous()`, or with `tenancy` `superuser()`.
 
 ### Changed
 
@@ -19,6 +20,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - SQLite: `atomic` begins the outermost block with `BEGIN IMMEDIATE`, so `atomic_immediate` is deprecated.
 - Framework writes that opened their own transaction join a caller's `atomic` block on the same pool and roll back with it: audit `emit_one` / `emit_many`, `truncate`, fixtures, ViewSet and admin writes, media, and SSO sign-up and invites. Tenancy registry changes and the database cache still commit on their own.
 - `iterator()` inside a block pages by primary key, so rows the loop updates out of the filter are not skipped; it must be ordered by the primary key there. `get_or_create` / `update_or_create` re-read a lost race with a locking read inside a MySQL block.
+- **Breaking:** `debug_panel::debug_router` and `metrics::metrics_router` take a `RouteAccess`, so they cannot be mounted without saying who may read them.
 
 ### Fixed
 

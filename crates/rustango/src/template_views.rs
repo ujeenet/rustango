@@ -470,7 +470,6 @@ async fn gate_request(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    use crate::access::Outcome;
     let read = matches!(
         *req.method(),
         axum::http::Method::GET | axum::http::Method::HEAD
@@ -488,18 +487,11 @@ async fn gate_request(
         Ok(o) => o,
         Err(resp) => return resp,
     };
-    match outcome {
-        Outcome::Allow => {
+    match outcome.refusal() {
+        Some(resp) => resp,
+        None => {
             next.run(axum::extract::Request::from_parts(parts, body))
                 .await
-        }
-        Outcome::Unauthenticated => {
-            (StatusCode::UNAUTHORIZED, "authentication required").into_response()
-        }
-        Outcome::Forbidden => (StatusCode::FORBIDDEN, "permission denied").into_response(),
-        Outcome::Unavailable(e) => {
-            tracing::error!(target: "rustango::template_views", error = %e, "permission read failed");
-            (StatusCode::SERVICE_UNAVAILABLE, "service unavailable").into_response()
         }
     }
 }
