@@ -1,4 +1,4 @@
-//! A port of the mailbox check `lettre` 0.11 runs (`Mailbox::from_str`):
+//! A port of the mailbox check `lettre` 0.11.24 runs (`Mailbox::from_str`):
 //! its RFC 2822 parser, then the `email_address` local-part and domain
 //! rules, with the IDNA retry. Lets the mail doubles refuse what
 //! `SmtpMailer` refuses in builds without `email-smtp`.
@@ -116,9 +116,14 @@ fn name_addr(s: &str) -> Parsed<'_, (String, String)> {
     Some((addr, skip_fws(rest.strip_prefix('>')?)))
 }
 
-/// `local-part "@" domain`; lettre's domain is a dot-atom only.
+/// `local-part "@" domain`; lettre's domain is a dot-atom only. A quoted
+/// local part is kept as written, quotes included, as `Address` reads it.
 fn addr_spec(s: &str) -> Parsed<'_, (String, String)> {
-    let (user, rest) = dot_atom(s).or_else(|| quoted_string(s))?;
+    let (user, rest) = dot_atom(s).or_else(|| {
+        let t = skip_fws(s);
+        let (_, rest) = quoted_string(t)?;
+        Some((t[..t.len() - rest.len()].to_owned(), rest))
+    })?;
     let (domain, rest) = dot_atom(rest.strip_prefix('@')?)?;
     Some(((user, domain), rest))
 }
@@ -141,8 +146,14 @@ fn is_atom(s: &str) -> bool {
     !s.is_empty() && s.chars().all(is_atext)
 }
 
+/// White space or a control character outside ASCII: lettre refuses them in
+/// an address, which `email_address` stops doing after 0.2.9.
+fn is_non_ascii_space_or_control(c: char) -> bool {
+    !c.is_ascii() && (c.is_whitespace() || c.is_control())
+}
+
 fn valid_user(user: &str) -> bool {
-    if user.is_empty() || user.len() > 64 {
+    if user.is_empty() || user.len() > 64 || user.contains(is_non_ascii_space_or_control) {
         return false;
     }
     if user.len() > 2 && user.starts_with('"') && user.ends_with('"') {
@@ -176,8 +187,9 @@ fn is_qcontent(s: &str) -> bool {
 }
 
 fn valid_domain(domain: &str) -> bool {
-    valid_ascii_domain(domain)
-        || idna::domain_to_ascii(domain).is_ok_and(|ascii| valid_ascii_domain(&ascii))
+    !domain.contains(is_non_ascii_space_or_control)
+        && (valid_ascii_domain(domain)
+            || idna::domain_to_ascii(domain).is_ok_and(|ascii| valid_ascii_domain(&ascii)))
 }
 
 fn valid_ascii_domain(domain: &str) -> bool {
