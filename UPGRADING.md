@@ -150,6 +150,13 @@ untouched.
 
 ## Unreleased
 
+- Inside `atomic(&pool, ..)`, `&pool` reads, raw SQL and DDL now run on the block's transaction: they see its uncommitted rows, and on MySQL and SQLite one snapshot for the whole block. Drop the `TxGuard` before such a call and do not `join!` two of them, or they return `NestedAtomic`. Code that relied on a read seeing only committed data must move it outside the block.
+- In a block, DDL through `run_ddl_idempotent` (and the `ensure_table` helpers) on MySQL and non-atomic migrations return `ExecError::InAtomic`: run them before or after the block. Raw SQL that commits returns `AtomicEndedEarly`.
+- `iterator()` inside a block must be ordered by the primary key, or not ordered; another order returns `InAtomic`.
+- SQLite `atomic` takes the write lock at `BEGIN`: other writers wait for the whole block, so keep blocks short.
+- Serialization failures inside a block differ per backend: PG 40001, MySQL 1213/1205 (which end the block), SQLite `SQLITE_BUSY`.
+- `ExecError` gains `InAtomic`: map it where you turn errors into responses.
+
 - Schema tenants now log in as their own roles. Before deploying: `ALTER ROLE <registry login> CREATEROLE`, set `RUSTANGO_TENANT_ROLE_SECRET` (same base64 key on every process; required on the prod tier), let these roles through `pg_hba.conf` (and PgBouncer `auth_query`), then run `ensure-tenant-roles`. Tenant code can no longer read registry tables or other schemas through a tenant pool, nor create anything through it (tables, triggers, functions, temp tables) or truncate: run DDL in migrations, or at runtime through `pools.ddl_pool(&org)` (for example `DatabaseJobQueue::ensure_table_pool`); manage verbs use the registry login. The registry login revokes TEMP on the database and CREATE on its schemas from PUBLIC; on Postgres 14 and older, where `public` belongs to the superuser, run `REVOKE CREATE ON SCHEMA public FROM PUBLIC` as the owner or boot refuses, and give other roles that need temp tables their own `GRANT TEMPORARY`. `max_cached_scoped_pools = 0` is refused with roles on. Behind PgBouncer each tenant role gets its own server pool: cap `max_db_connections`. To rotate the secret, keep the old value in `RUSTANGO_TENANT_ROLE_SECRET_PREVIOUS` until `ensure-tenant-roles` has run. To keep the old shared login, set `TenantPoolsConfig::schema_tenant_roles = false`.
 - `TenantPoolsConfig` has a new public field, `schema_tenant_roles`: a struct literal without `..Default::default()` needs it.
 - The `sessions` feature now depends on axum (for `SessionLayer`). Under tenancy, mount `SessionLayer` inside the tenant router, or call `.allow_global()` where no tenant context exists; otherwise those requests get 503.

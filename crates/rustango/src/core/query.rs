@@ -892,6 +892,11 @@ pub struct LockMode {
     /// aliases; an empty vec emits no `OF` clause. MySQL supports it
     /// since 8.0.1; on SQLite it does nothing.
     pub of: Vec<&'static str>,
+    /// PG / MySQL: a shared lock (`FOR SHARE` / `LOCK IN SHARE MODE`)
+    /// instead of `FOR UPDATE`. In a repeatable-read transaction it reads
+    /// the latest committed row, not the snapshot. `of` applies on PG only;
+    /// `no_key`, `skip_locked` and `nowait` are ignored.
+    pub share: bool,
     /// Do not log the `tracing::warn!` the writer emits when this
     /// `LockMode` reaches a SQLite query. SQLite has no row-level
     /// lock syntax, so the clause is dropped and the warning says so.

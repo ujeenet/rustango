@@ -1473,23 +1473,36 @@ fn write_lock_clause(b: &mut Sql<'_>, lock: &crate::core::LockMode) {
         }
         return;
     }
+    let of = |b: &mut Sql<'_>| {
+        if !lock.of.is_empty() {
+            b.sql.push_str(" OF ");
+            let mut first = true;
+            for t in &lock.of {
+                if !first {
+                    b.sql.push_str(", ");
+                }
+                first = false;
+                b.d.push_quoted_ident(&mut b.sql, t);
+            }
+        }
+    };
+    if lock.share {
+        if let Some(suffix) = b.d.share_lock_suffix() {
+            b.sql.push_str(suffix);
+        }
+        // MySQL's `LOCK IN SHARE MODE` takes no `OF`.
+        if b.d.name() == "postgres" {
+            of(b);
+        }
+        return;
+    }
     b.sql.push_str(" FOR ");
     if lock.no_key && b.d.name() == "postgres" {
         b.sql.push_str("NO KEY UPDATE");
     } else {
         b.sql.push_str("UPDATE");
     }
-    if !lock.of.is_empty() {
-        b.sql.push_str(" OF ");
-        let mut first = true;
-        for t in &lock.of {
-            if !first {
-                b.sql.push_str(", ");
-            }
-            first = false;
-            b.d.push_quoted_ident(&mut b.sql, t);
-        }
-    }
+    of(b);
     if lock.skip_locked {
         b.sql.push_str(" SKIP LOCKED");
     } else if lock.nowait {

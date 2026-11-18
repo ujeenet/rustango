@@ -23,8 +23,9 @@ use crate::sql::Pool;
 /// INSERT. When `create_fn` fails on a UNIQUE or primary-key violation,
 /// the query runs again and the row it now finds is returned, so a
 /// UNIQUE constraint over the filtered columns makes concurrent callers safe.
-/// Inside an [`atomic`](super::atomic) block on `pool`, `create_fn` runs in a
-/// savepoint: its writes roll back when it fails and the block stays usable.
+/// Inside an [`atomic`](super::atomic) block on `pool`, the reads join the
+/// block and `create_fn` runs in a savepoint: its writes roll back when it
+/// fails and the block stays usable. Do not hold the block's guard across it.
 ///
 /// The closure receives an **owned** `Pool` (cheap to clone — it's
 /// an `Arc` internally). That sidesteps Rust's async-closure
@@ -195,6 +196,13 @@ where
     if !err.is_unique_violation() {
         return Err(err);
     }
+    // In a block the read joins its transaction: a locking read sees the
+    // winner's row past a repeatable-read snapshot (MySQL, PG RR).
+    let qs = if atomic::in_block(pool) {
+        qs.select_for_share()
+    } else {
+        qs
+    };
     fetch_at_most_one(qs, op, pool).await?.ok_or(err)
 }
 

@@ -4,7 +4,7 @@
 use futures_util::future::BoxFuture;
 use futures_util::stream::{BoxStream, TryStreamExt as _};
 
-use super::atomic::{self, Gate};
+use super::atomic::{self, Gate, Stmt};
 use super::{Dialect, ExecError, InsertReturningPool, PoolTx, TxConn};
 use crate::core::{BulkInsertQuery, InsertQuery, SqlValue};
 use crate::sql::{DeletePlan, Pool};
@@ -128,7 +128,7 @@ pub enum RowRef<'r> {
 async fn drain<R, U>(
     mut rows: BoxStream<'_, Result<R, sqlx::Error>>,
     mut decode: impl FnMut(&R) -> Result<U, sqlx::Error>,
-) -> Result<Vec<U>, sqlx::Error> {
+) -> Result<Vec<U>, ExecError> {
     let mut out = Vec::new();
     while let Some(row) = rows.try_next().await? {
         out.push(decode(&row)?);
@@ -167,7 +167,7 @@ pub trait SqlExecutor<'c>: sealed::Sealed<'c> + Send + Sized {
         sql: &'q str,
         params: Vec<SqlValue>,
         decode: F,
-    ) -> BoxFuture<'e, Result<Vec<U>, sqlx::Error>>
+    ) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
     where
         'c: 'e,
         U: Send + 'e,
@@ -261,7 +261,7 @@ fn pg_rows<'c: 'e, 'e, 'q: 'e, E, U, F>(
     sql: &'q str,
     params: Vec<SqlValue>,
     mut decode: F,
-) -> BoxFuture<'e, Result<Vec<U>, sqlx::Error>>
+) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
 where
     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
     U: Send + 'e,
@@ -277,7 +277,7 @@ fn my_rows<'c: 'e, 'e, 'q: 'e, E, U, F>(
     sql: &'q str,
     params: Vec<SqlValue>,
     mut decode: F,
-) -> BoxFuture<'e, Result<Vec<U>, sqlx::Error>>
+) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
 where
     E: sqlx::Executor<'c, Database = sqlx::MySql>,
     U: Send + 'e,
@@ -297,7 +297,7 @@ fn sq_rows<'c: 'e, 'e, 'q: 'e, E, U, F>(
     sql: &'q str,
     params: Vec<SqlValue>,
     mut decode: F,
-) -> BoxFuture<'e, Result<Vec<U>, sqlx::Error>>
+) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
 where
     E: sqlx::Executor<'c, Database = sqlx::Sqlite>,
     U: Send + 'e,
@@ -388,6 +388,71 @@ macro_rules! fetch_rows_or_count {
     };
 }
 
+/// Run one `$stmt` on `$pool`: `$joined`, with `$tx` the open `atomic`
+/// block's transaction, if there is one, else `$alone`. Every `&Pool`
+/// statement joins a block through here, so all get the same savepoint,
+/// gate and one-statement-at-a-time rules ([`atomic::Joined`]).
+macro_rules! on_pool {
+    ($pool:expr, $stmt:expr, |$tx:ident| $joined:expr, $alone:expr $(,)?) => {
+        match $crate::sql::executor::atomic::join($pool, $stmt).await {
+            Some(joined) => {
+                let mut joined = joined?;
+                let r = {
+                    let $tx: &mut $crate::sql::PoolTx<'static> = &mut joined;
+                    $joined
+                };
+                joined.finish(r).await
+            }
+            None => $alone,
+        }
+    };
+}
+pub(super) use on_pool;
+
+/// Rows of one `stmt` on `pool`, on its open `atomic` block if any.
+pub(super) fn pool_rows<'e, U, F>(
+    pool: &'e Pool,
+    stmt: Stmt,
+    sql: &'e str,
+    params: Vec<SqlValue>,
+    decode: F,
+) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
+where
+    U: Send + 'e,
+    F: FnMut(RowRef<'_>) -> Result<U, sqlx::Error> + Send + 'e,
+{
+    Box::pin(async move {
+        on_pool!(
+            pool,
+            stmt,
+            |tx| tx.fetch_rows(sql, params, decode).await,
+            match pool {
+                #[cfg(feature = "postgres")]
+                Pool::Postgres(p) => pg_rows(p, sql, params, decode).await,
+                #[cfg(feature = "mysql")]
+                Pool::Mysql(p) => my_rows(p, sql, params, decode).await,
+                #[cfg(feature = "sqlite")]
+                Pool::Sqlite(p) => sq_rows(p, sql, params, decode).await,
+            }
+        )
+    })
+}
+
+/// Rows affected by one `stmt` on `pool`, on its open `atomic` block if any.
+pub(super) async fn pool_exec(
+    pool: &Pool,
+    stmt: Stmt,
+    sql: &str,
+    params: Vec<SqlValue>,
+) -> Result<u64, ExecError> {
+    on_pool!(
+        pool,
+        stmt,
+        |tx| super::execute_tx(tx, sql, params).await,
+        super::execute_pool(pool, sql, params).await
+    )
+}
+
 impl<'c> sealed::Sealed<'c> for &'c Pool {}
 impl<'c> SqlExecutor<'c> for &'c Pool {
     fn dialect(&self) -> &'static dyn Dialect {
@@ -401,20 +466,13 @@ impl<'c> SqlExecutor<'c> for &'c Pool {
         sql: &'q str,
         params: Vec<SqlValue>,
         decode: F,
-    ) -> BoxFuture<'e, Result<Vec<U>, sqlx::Error>>
+    ) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
     where
         'c: 'e,
         U: Send + 'e,
         F: FnMut(RowRef<'_>) -> Result<U, sqlx::Error> + Send + 'e,
     {
-        match self {
-            #[cfg(feature = "postgres")]
-            Pool::Postgres(p) => pg_rows(p, sql, params, decode),
-            #[cfg(feature = "mysql")]
-            Pool::Mysql(p) => my_rows(p, sql, params, decode),
-            #[cfg(feature = "sqlite")]
-            Pool::Sqlite(p) => sq_rows(p, sql, params, decode),
-        }
+        pool_rows(self, Stmt::Read, sql, params, decode)
     }
 
     fn execute_rows<'e, 'q: 'e>(
@@ -425,8 +483,7 @@ impl<'c> SqlExecutor<'c> for &'c Pool {
     where
         'c: 'e,
     {
-        // Joins an open `atomic` block on this pool.
-        Box::pin(super::write_pool(self, sql, params))
+        Box::pin(pool_exec(self, Stmt::Write, sql, params))
     }
 
     fn runs_plans(&self) -> bool {
@@ -462,11 +519,70 @@ impl<'c> SqlExecutor<'c> for &'c Pool {
         Self: 'e,
     {
         Box::pin(async move {
-            let mut tx = super::write_tx(self).await?;
+            let mut tx = write_tx(self).await?;
             let rows = super::bulk_insert_rows_tx(&mut tx, std::borrow::Cow::Owned(query)).await?;
             tx.commit().await?;
             Ok(rows)
         })
+    }
+}
+
+/// The transaction a multi-statement ORM write runs in: its own, or a
+/// savepoint of the open [`atomic`](super::atomic()) block on the same pool.
+#[doc(hidden)]
+pub struct WriteTx(WriteTxConn);
+
+enum WriteTxConn {
+    Own(PoolTx<'static>),
+    Joined(atomic::Joined),
+}
+
+/// Begin a write on `pool`: a savepoint inside an [`atomic`](super::atomic())
+/// block on it, else [`write_transaction`](super::write_transaction).
+/// Finish with [`WriteTx::commit`].
+///
+/// # Errors
+/// Driver errors from `BEGIN` / `SAVEPOINT`; [`ExecError::NestedAtomic`]
+/// while the block's guard is held.
+#[doc(hidden)]
+pub async fn write_tx(pool: &Pool) -> Result<WriteTx, ExecError> {
+    match atomic::join(pool, Stmt::Write).await {
+        Some(w) => Ok(WriteTx(WriteTxConn::Joined(w?))),
+        None => Ok(WriteTx(WriteTxConn::Own(
+            super::write_transaction(pool).await?,
+        ))),
+    }
+}
+
+impl WriteTx {
+    /// Commit, or release the block's savepoint (the block commits it).
+    ///
+    /// # Errors
+    /// Driver errors from `COMMIT` / `RELEASE SAVEPOINT`.
+    pub async fn commit(self) -> Result<(), ExecError> {
+        match self.0 {
+            WriteTxConn::Own(tx) => Ok(tx.commit().await?),
+            WriteTxConn::Joined(w) => w.release().await,
+        }
+    }
+}
+
+impl std::ops::Deref for WriteTx {
+    type Target = PoolTx<'static>;
+    fn deref(&self) -> &PoolTx<'static> {
+        match &self.0 {
+            WriteTxConn::Own(tx) => tx,
+            WriteTxConn::Joined(w) => w,
+        }
+    }
+}
+
+impl std::ops::DerefMut for WriteTx {
+    fn deref_mut(&mut self) -> &mut PoolTx<'static> {
+        match &mut self.0 {
+            WriteTxConn::Own(tx) => tx,
+            WriteTxConn::Joined(w) => w,
+        }
     }
 }
 
@@ -483,7 +599,7 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolConn {
         sql: &'q str,
         params: Vec<SqlValue>,
         decode: F,
-    ) -> BoxFuture<'e, Result<Vec<U>, sqlx::Error>>
+    ) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
     where
         'c: 'e,
         U: Send + 'e,
@@ -584,7 +700,7 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolTx<'_> {
         sql: &'q str,
         params: Vec<SqlValue>,
         decode: F,
-    ) -> BoxFuture<'e, Result<Vec<U>, sqlx::Error>>
+    ) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
     where
         'c: 'e,
         U: Send + 'e,
@@ -670,7 +786,7 @@ impl<'c, E: sqlx::Executor<'c, Database = sqlx::Postgres>> SqlExecutor<'c> for E
         sql: &'q str,
         params: Vec<SqlValue>,
         decode: F,
-    ) -> BoxFuture<'e, Result<Vec<U>, sqlx::Error>>
+    ) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
     where
         'c: 'e,
         U: Send + 'e,
@@ -764,7 +880,7 @@ macro_rules! database_conn_executor {
                 sql: &'q str,
                 params: Vec<SqlValue>,
                 decode: F,
-            ) -> BoxFuture<'e, Result<Vec<U>, sqlx::Error>>
+            ) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
             where
                 'c: 'e,
                 U: Send + 'e,

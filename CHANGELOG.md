@@ -4,6 +4,21 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added
+
+- `ExecError::InAtomic`: an operation refused inside an `atomic` block on its pool. `LockMode::share` for a shared row lock (`FOR SHARE` / `LOCK IN SHARE MODE`).
+
+### Changed
+
+- **Breaking:** inside `atomic(&pool, ..)`, reads, raw SQL and DDL given the same `&Pool` run on the block's transaction, as writes already did: they see its uncommitted rows, and a failed one (on PG in a savepoint) leaves the block usable. Two statements at once on one block, or one while its `TxGuard` is held, return `NestedAtomic`.
+- Raw SQL that commits or ends the block (`COMMIT`, a MySQL implicit commit) returns `AtomicEndedEarly` at once. DDL through `run_ddl_idempotent` in a MySQL block, and a non-atomic migration in any block return `InAtomic`.
+- SQLite: `atomic` begins the outermost block with `BEGIN IMMEDIATE`, like `atomic_immediate`.
+- `iterator()` inside a block pages by primary key, so rows the loop updates out of the filter are not skipped; it must be ordered by the primary key there. `get_or_create` / `update_or_create` re-read a lost race with a shared lock inside a block.
+
+### Fixed
+
+- In-memory SQLite: a read after a write inside `atomic` no longer hangs.
+
 ## [0.66.0] — 2026-11-11
 
 ### Added

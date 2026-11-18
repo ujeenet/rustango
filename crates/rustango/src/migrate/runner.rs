@@ -4331,6 +4331,7 @@ async fn apply_nonatomic_pool(
     before: &SchemaSnapshot,
     ledger: &str,
 ) -> Result<(), MigrateError> {
+    crate::sql::refuse_ddl_in_block(pool, crate::sql::Ddl::NonTransactional)?;
     let callbacks = Callbacks::resolve(&mig.forward)?;
     tracing::info!(migration = %mig.name, "applying (non-atomic, _pool)");
     let schema = super::ensure::creation_schema(pool).await?;
@@ -5056,6 +5057,7 @@ async fn unapply_nonatomic_pool(
     snapshot: &SchemaSnapshot,
     ledger: &str,
 ) -> Result<(), MigrateError> {
+    crate::sql::refuse_ddl_in_block(pool, crate::sql::Ddl::NonTransactional)?;
     let callbacks = Callbacks::resolve(inverted)?;
     tracing::info!(migration = %target.name, "unapplying (non-atomic, _pool)");
     let schema = super::ensure::creation_schema(pool).await?;

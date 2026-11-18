@@ -7,10 +7,10 @@ use std::collections::VecDeque;
 use std::marker::PhantomData;
 
 use super::{
-    select_rows_pool_with_related, ExecError, LoadRelated, MaybeMyFromRow, MaybeMyLoadRelated,
-    MaybePgFromRow, MaybeSqliteFromRow, MaybeSqliteLoadRelated,
+    select_rows_keyed_on, select_rows_pool_with_related, ExecError, LoadRelated, MaybeMyFromRow,
+    MaybeMyLoadRelated, MaybePgFromRow, MaybeSqliteFromRow, MaybeSqliteLoadRelated,
 };
-use crate::core::Model;
+use crate::core::{Filter, Model, NullsOrder, Op, OrderItem, SelectQuery, SqlValue};
 use crate::sql::Pool;
 
 /// Chunked async iterator over a compiled query. Issue #23.
@@ -57,6 +57,8 @@ pub struct ChunkedIter<T> {
     /// Cumulative row count yielded so far (across both `next_chunk`
     /// and `next_row` paths). Used for [`Self::rows_seen`].
     pub(super) seen: i64,
+    /// Primary key of the last row read by keyset, inside an `atomic` block.
+    pub(super) last_key: Option<SqlValue>,
     pub(super) _model: PhantomData<fn() -> T>,
 }
 
@@ -145,16 +147,20 @@ where
             self.exhausted = true;
             return Ok(None);
         }
-        let mut q = self.query.clone();
-        // A set operation's window is on the merged result, not its head.
-        let (limit, offset) = if q.compound.is_empty() {
-            (&mut q.limit, &mut q.offset)
+        let rows = if super::in_block(pool) {
+            self.keyset_chunk(pool, size).await?
         } else {
-            (&mut q.compound_limit, &mut q.compound_offset)
+            let mut q = self.query.clone();
+            // A set operation's window is on the merged result, not its head.
+            let (limit, offset) = if q.compound.is_empty() {
+                (&mut q.limit, &mut q.offset)
+            } else {
+                (&mut q.compound_limit, &mut q.compound_offset)
+            };
+            *limit = Some(size);
+            *offset = Some(self.offset);
+            select_rows_pool_with_related::<T>(pool, &q).await?
         };
-        *limit = Some(size);
-        *offset = Some(self.offset);
-        let rows = select_rows_pool_with_related::<T>(pool, &q).await?;
         let n = rows.len() as i64;
         if rows.is_empty() {
             self.exhausted = true;
@@ -165,6 +171,50 @@ where
         }
         self.offset += n;
         Ok(Some(rows))
+    }
+
+    /// The next `size` rows after the last key read, by primary key. Inside
+    /// a block the loop's own writes are visible, so an OFFSET would skip
+    /// rows it moved out of the filter.
+    async fn keyset_chunk(&mut self, pool: &Pool, size: i64) -> Result<Vec<T>, ExecError> {
+        let refused = ExecError::InAtomic {
+            op: "`iterator()` not ordered by the primary key",
+            reason: "rows the loop changes could be skipped; order by the primary key only",
+        };
+        let mut q: SelectQuery = self.query.clone();
+        let Some(pk) = q.model.primary_key().filter(|_| q.compound.is_empty()) else {
+            return Err(refused);
+        };
+        let desc = match q.order_by.as_slice() {
+            [] => false,
+            [OrderItem::Column {
+                column,
+                desc,
+                nulls: NullsOrder::Default,
+            }] if *column == pk.column => *desc,
+            _ => return Err(refused),
+        };
+        q.order_by = vec![OrderItem::Column {
+            column: pk.column,
+            desc,
+            nulls: NullsOrder::Default,
+        }];
+        q.limit = Some(size);
+        match self.last_key.clone() {
+            // The queryset's own offset applies before the first key.
+            None => q.offset = Some(self.offset),
+            Some(key) => {
+                q.offset = None;
+                let op = if desc { Op::Lt } else { Op::Gt };
+                q.where_clause
+                    .push_and(Filter::new(pk.column, op, key).into());
+            }
+        }
+        let rows = select_rows_keyed_on::<T, _>(pool, &q, (pk.column, Some(pk.ty))).await?;
+        if let Some((key, _)) = rows.last() {
+            self.last_key = Some(key.clone());
+        }
+        Ok(rows.into_iter().map(|(_, row)| row).collect())
     }
 
     /// Cumulative count of rows yielded so far across both

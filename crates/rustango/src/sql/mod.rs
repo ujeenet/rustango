@@ -71,9 +71,10 @@ pub use server::{
 };
 pub use vector::Vector;
 // Always-on: tri-dialect entry points + traits that don't pin on PG.
+#[cfg(feature = "cache")]
+pub(crate) use executor::detached;
 #[cfg(feature = "jobs")]
 pub(crate) use executor::in_any_block;
-pub(crate) use executor::in_block;
 #[cfg(feature = "jobs-postgres")]
 pub(crate) use executor::raw_insert_id;
 #[cfg(any(feature = "jobs-postgres", all(feature = "sse", feature = "postgres")))]
@@ -109,6 +110,7 @@ pub(crate) use executor::{
     execute_unprepared_pool, fetch_in_chunks, fetch_select_in_chunks, fetch_values_list_on,
     inserted_pk, rows_per_batch, run_delete_statements_tx, truncate_refusal, truncate_tx, write_tx,
 };
+pub(crate) use executor::{in_block, refuse_ddl_in_block, Ddl};
 #[cfg(feature = "admin")]
 pub(crate) use executor::{select_one_row_as_json_tx, select_rows_as_json_tx};
 pub(crate) use executor::{select_rows_as_json_with, CellDecode, OnBadCell};

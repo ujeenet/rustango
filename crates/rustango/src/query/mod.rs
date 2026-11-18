@@ -364,6 +364,19 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
+    /// A shared lock on this model's rows only, so a repeatable-read
+    /// transaction reads the latest committed row.
+    #[must_use]
+    pub(crate) fn select_for_share(mut self) -> Self {
+        self.lock_mode = Some(crate::core::LockMode {
+            share: true,
+            of: vec![T::SCHEMA.table],
+            silent_on_sqlite: true,
+            ..crate::core::LockMode::default()
+        });
+        self
+    }
+
     /// Eloquent `Builder::lockForUpdate()`. Alias of
     /// [`Self::select_for_update`], with the same rules.
     #[must_use]
