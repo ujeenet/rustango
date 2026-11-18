@@ -1794,7 +1794,9 @@ pub async fn raw_execute_tx(
 ///
 /// # Errors
 /// The driver's [`sqlx::Error`], except for the already-exists cases.
-/// Non-driver `ExecError` variants map to `sqlx::Error::Protocol`.
+/// Non-driver `ExecError` variants map to `sqlx::Error::Protocol`. Inside an
+/// [`atomic`] block on a MySQL pool that is the [`ExecError::InAtomic`] refusal:
+/// MySQL would commit the block on DDL.
 pub async fn run_ddl_idempotent(pool: &Pool, ddl: &str) -> Result<(), sqlx::Error> {
     refuse_ddl_in_block(pool, Ddl::Transactional)
         .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;

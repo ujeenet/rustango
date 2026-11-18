@@ -26,8 +26,9 @@ use crate::sql::Pool;
 /// Inside an [`atomic`](super::atomic) block on `pool`, the reads join the
 /// block and `create_fn` runs in a savepoint: its writes roll back when it
 /// fails and the block stays usable. Do not hold the block's guard across it.
-/// In a PG repeatable-read or serializable block a lost race returns the
-/// unique violation: no read sees the winner's row there.
+/// In a PG repeatable-read block a lost race returns the unique violation,
+/// and in a serializable one a serialization failure (40001): no read sees
+/// the winner's row there.
 ///
 /// The closure receives an **owned** `Pool` (cheap to clone — it's
 /// an `Arc` internally). That sidesteps Rust's async-closure
@@ -86,8 +87,9 @@ where
 /// [`get_or_create`] inside an open transaction: the read and `create_fn`
 /// both run on `tx`. `create_fn` runs in a savepoint: when it loses an
 /// insert race (a unique violation) it is rolled back and the winner's row
-/// read instead, so `tx` stays usable. In a PG repeatable-read or
-/// serializable transaction the unique violation is returned instead.
+/// read instead, so `tx` stays usable. A PG repeatable-read transaction
+/// returns the unique violation instead, a serializable one a
+/// serialization failure (40001).
 ///
 /// ```ignore
 /// let (post, created) = rustango::sql::get_or_create_tx(
@@ -135,7 +137,8 @@ where
 
 /// [`update_or_create`] inside an open transaction: the read, `update_fn`
 /// and `create_fn` all run on `tx`. A lost insert race updates the winner's
-/// row, as in [`get_or_create_tx`].
+/// row, as in [`get_or_create_tx`], with the same PG repeatable-read and
+/// serializable errors.
 ///
 /// # Errors
 /// As [`update_or_create`].

@@ -769,7 +769,8 @@ pub(crate) fn in_any_block() -> bool {
 /// wrap such a step in a nested `atomic` to keep going. One statement at a time: with a
 /// [`TxGuard`] held, or two statements at once (`join!`), they return
 /// [`ExecError::NestedAtomic`]. MySQL and SQLite reads see one snapshot for
-/// the whole block. DDL on MySQL returns [`ExecError::InAtomic`].
+/// the whole block. On MySQL, [`run_ddl_idempotent`](crate::sql::run_ddl_idempotent)
+/// refuses DDL with an `sqlx::Error::Protocol`; raw DDL commits the block.
 ///
 /// **Separate connections** ([`Pool::acquire`], `Tenant::conn`, the cache,
 /// the job claim, tenancy registry changes) run outside the block's transaction: they do not see its
@@ -1055,7 +1056,7 @@ async fn begin_block(
     if !opts.settings.is_empty() && pool.dialect().name() != "postgres" {
         return Err(ExecError::Sql(
             crate::sql::SqlError::OperatorNotSupportedInDialect {
-                op: "transaction settings",
+                op: "set_config",
                 dialect: pool.dialect().name(),
             },
         ));

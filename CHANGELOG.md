@@ -15,7 +15,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Changed
 
 - **Breaking:** inside `atomic(&pool, ..)`, reads, raw SQL and DDL given the same `&Pool` run on the block's transaction, as writes already did: they see its uncommitted rows. They cost one statement each; on PG a failed one aborts the block (`AtomicAborted`). Two statements at once on one block, or one while its `TxGuard` is held, return `NestedAtomic`.
-- Raw SQL that commits or ends the block (`COMMIT`, a MySQL implicit commit) makes the block return `AtomicEndedEarly`. DDL through `run_ddl_idempotent` in a MySQL block, and a non-atomic migration in any block return `InAtomic`.
+- Raw SQL that commits or ends the block (`COMMIT`, a MySQL implicit commit) makes the block return `AtomicEndedEarly`. `run_ddl_idempotent` in a MySQL block returns an `sqlx::Error::Protocol` with the refusal; a non-atomic migration in any block returns `InAtomic`.
 - SQLite: `atomic` begins the outermost block with `BEGIN IMMEDIATE`, so `atomic_immediate` is deprecated.
 - Framework writes that opened their own transaction join a caller's `atomic` block on the same pool and roll back with it: audit `emit_one` / `emit_many`, `truncate`, fixtures, ViewSet and admin writes, media, and SSO sign-up and invites. Tenancy registry changes and the database cache still commit on their own.
 - `iterator()` inside a block pages by primary key, so rows the loop updates out of the filter are not skipped; it must be ordered by the primary key there. `get_or_create` / `update_or_create` re-read a lost race with a locking read inside a MySQL block.
@@ -24,6 +24,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 - In-memory SQLite: a read after a write inside `atomic` no longer hangs.
 - `get_or_create_tx` that loses an insert race returns the winner's row and leaves the transaction usable, instead of the unique violation.
+- `atomic_with` with settings on MySQL or SQLite names `set_config` in its error, not "operator `transaction settings`".
+
+### Documentation
+
+- New Transactions guide (all four languages): what joins an `atomic` block, savepoints, `on_commit`, failures per backend, SQLite `BEGIN IMMEDIATE`, `atomic_with`, races, the `_on` forms, DDL, iterators and cancellation. The ORM guide no longer points SQLite users to `atomic_immediate`.
 
 ## [0.66.0] — 2026-11-11
 

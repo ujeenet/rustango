@@ -282,7 +282,7 @@ tx.commit().await?;
 |---|---|
 | PostgreSQL | Volle Unterstützung — jedes Flag emittiert seine native Syntax. |
 | MySQL 8.0.1+ | Unterstützt alles außer `NO KEY` — dieses Flag fällt auf schlichtes `FOR UPDATE` zurück (die strengere Sperre). |
-| SQLite | Keine Syntax für Sperren auf Zeilenebene; der Writer emittiert keine Klausel. Öffne die Transaktion mit `rustango::sql::write_transaction(&pool)`: Sie nimmt die Schreibsperre der Datenbank beim `BEGIN`, sodass ein zweiter Worker wartet und dann die beanspruchte Zeile sieht. Eine `transaction_pool`-Transaktion sperrt nichts, bis sie schreibt, und der zweite Schreiber scheitert mit `SQLITE_BUSY`. Für einen `atomic`-Block nimm `rustango::sql::atomic_immediate(&pool, …)`: Sein oberster SQLite-Block startet mit `BEGIN IMMEDIATE`; auf PG und MySQL ist es schlichtes `atomic`. |
+| SQLite | Keine Syntax für Sperren auf Zeilenebene; der Writer emittiert keine Klausel. Öffne die Transaktion mit `rustango::sql::write_transaction(&pool)`: Sie nimmt die Schreibsperre der Datenbank beim `BEGIN`, sodass ein zweiter Worker wartet und dann die beanspruchte Zeile sieht. Eine `transaction_pool`-Transaktion sperrt nichts, bis sie schreibt, und der zweite Schreiber scheitert mit `SQLITE_BUSY`. Ein `atomic`-Block tut dasselbe: Sein äußerster SQLite-Block startet mit `BEGIN IMMEDIATE`. |
 
 **Muss innerhalb einer Transaktion laufen.** `FOR UPDATE` außerhalb einer Transaktion ist auf PostgreSQL eine No-op (die implizite Ein-Statement-Transaktion gibt die Sperre sofort frei) und auf MySQL ein Fehler. Öffne sie mit `rustango::sql::write_transaction(&pool)` und lies mit `.fetch_on(&mut tx)`; das läuft auf jedem Backend.
 
@@ -363,7 +363,7 @@ while let Some(post) = iter.next_row(&pool).await? {
 
 Sowohl `.rows_seen()` (kumulierter Zähler) als auch `.is_exhausted()` (Post-Drain-Flag) sind für Fortschrittsmeldung und Terminierungsprüfungen verfügbar.
 
-**Gefahr bei gleichzeitigem Schreiben.** Jeder Chunk ist eine separate Abfrage, sodass zwischen Chunks eingefügte/gelöschte Zeilen übersprungen oder dupliziert werden können (das klassische "Windowing"-Problem der OFFSET-Paginierung). Für nur-lesbare / nur-anfügende Tabellen — den typischen Export-Anwendungsfall — ist das kein Thema. Für Tabellen, die gleichzeitig beschrieben werden, brauchst du eine Snapshot-Isolation-Transaktion, damit jeder Chunk dieselbe Sicht sieht. **`ChunkedIter` nimmt `&Pool`, nicht `&mut Transaction`, sodass die Chunker-API nicht direkt innerhalb der Transaktion verwendet werden kann** — rolle stattdessen den gechunkten SELECT gegen die Transaktion von Hand aus:
+**Gefahr bei gleichzeitigem Schreiben.** Jeder Chunk ist eine separate Abfrage, sodass zwischen Chunks eingefügte/gelöschte Zeilen übersprungen oder dupliziert werden können (das klassische "Windowing"-Problem der OFFSET-Paginierung). Für nur-lesbare / nur-anfügende Tabellen — den typischen Export-Anwendungsfall — ist das kein Thema. Für Tabellen, die gleichzeitig beschrieben werden, führe die Schleife in einem `atomic`-Block auf demselben Pool aus: Jeder Chunk läuft dann auf der Transaktion des Blocks und blättert nach Primärschlüssel (siehe unten). Mit einem `transaction_pool`-Handle, das `ChunkedIter` nicht annimmt, rolle den gechunkten SELECT gegen die Transaktion von Hand aus:
 
 ```rust
 let mut tx = rustango::sql::transaction_pool(&pool).await?;
@@ -389,7 +389,9 @@ loop {
 tx.commit().await?;
 ```
 
-**`select_for_update()` propagiert nicht über Chunks hinweg.** Zeilensperren, die von `.select_for_update()` gehalten werden, werden am Ende der impliziten Transaktion jedes Chunks freigegeben. Es gibt keine chunker-förmige Lösung: der `.iterator()`-Builder nimmt `&Pool`, die sperrenden Varianten brauchen ein `&mut Transaction`, und die beiden komponieren nicht. Für ein gesperrtes Leeren hast du zwei Wege, jeder mit einem Kompromiss:
+**In einem `atomic`-Block.** Mit dem Pool des Blocks läuft jeder Chunk auf der Transaktion des Blocks: Er sieht die Schreibvorgänge des Blocks, behält die Zeilensperren von `.select_for_update()` bis zum Commit und blättert nach Primärschlüssel (`WHERE pk > last`) statt mit `OFFSET`, sodass Zeilen, die die Schleife aus dem Filter schiebt, nicht übersprungen werden. Das Queryset muss nach dem Primärschlüssel sortiert sein (in beide Richtungen) oder gar nicht, den Primärschlüssel auswählen und darf keine Mengenoperation sein; sonst liefert `next_chunk` `ExecError::InAtomic`. Siehe [Transaktionen](transactions.md#iterieren-in-einem-block).
+
+**Außerhalb eines Blocks propagiert `select_for_update()` nicht über Chunks hinweg.** Zeilensperren werden am Ende der impliziten Transaktion jedes Chunks freigegeben. Für ein gesperrtes Leeren auf einem `transaction_pool`-Handle hast du zwei Wege, jeder mit einem Kompromiss:
 
 - **Ganzes-Ergebnis `.fetch_on(&mut tx)`** — ein einziger Roundtrip, volles `Vec<T>` im Speicher. In Ordnung, wenn das Ergebnis passt.
 - **Handgerolltes LIMIT/OFFSET innerhalb der Transaktion** — dieselbe Form wie das Snapshot-Isolation-Snippet oben; Chunks bleiben gestreamt, aber du bist außerhalb der `ChunkedIter`-API.
@@ -1486,6 +1488,8 @@ tx.commit().await?;
 ```
 
 Verwirf die `tx`, ohne `commit()` aufzurufen (z. B. bei einem frühen `?`-Return), und die Transaktion rollt zurück. Für einen Nach-Commit-Hook ist der Scope `rustango::sql::atomic(&pool, |tx| Box::pin(async move { … }))`, der bei `Ok` automatisch committet und bei `Err` zurückrollt — der Hook selbst ist `rustango::sql::on_commit(|| { … })` und wird **innerhalb** dieser Closure aufgerufen. `atomic` leert die Queue, nachdem der Commit durch ist; ein `on_commit` außerhalb eines `atomic`-Scopes paniert, statt den Callback zu verwerfen. In der Closure ist `tx` ein `AtomicTx`: sperre ihn pro Statement, `insert_tx(&mut *tx.lock().await?, &q)`. Ein verschachteltes `atomic(&pool, …)` auf demselben Pool läuft als Savepoint auf derselben Verbindung, und seine Hooks warten auf den äußersten Commit. Verschachtelung gilt pro Pool-Objekt: reiche den Pool des Requests weiter. Zwei verschachtelte Blöcke gleichzeitig (`join!`) oder ein über den Aufruf gehaltener `TxGuard` liefern `ExecError::NestedAtomic`; ein fehlgeschlagener Savepoint rollt alles mit `ExecError::AtomicAborted` zurück. Ein mit `tokio::spawn` gestarteter Task erbt den Block nicht.
+
+Der Leitfaden [Transaktionen](transactions.md) behandelt `atomic` vollständig: was einem Block beitritt, Fehler je Backend, Isolationsstufen und Einstellungen (`atomic_with`), Wettläufe bei `get_or_create_tx`, die `_on`-Formen, DDL und Abbruch.
 
 ---
 
