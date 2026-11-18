@@ -25,7 +25,10 @@ yanked = "deny"
 # the app's own database. The fixed `libsqlite3-sys` 0.39 is out of reach:
 # sqlx-sqlite 0.8.6 pins `^0.30.1` and 0.9.0 caps it `<0.38`. Remove this
 # once a released sqlx allows 0.39.
-ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0459"]
+#
+# RUSTSEC-2026-0543 (chrono is unmaintained). Not a vulnerability, and no
+# maintained release replaces it yet; dates across the ORM and sqlx use it.
+ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0459", "RUSTSEC-2026-0543"]
 
 [licenses]
 allow = [
