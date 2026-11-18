@@ -205,6 +205,36 @@ pub trait SqlExecutor<'c>: sealed::Sealed<'c> + Send + Sized {
         })
     }
 
+    /// Runs `stmts` all or none; returns the rows they affected. One
+    /// statement runs alone; several need a transaction this executor can
+    /// open, so a raw sqlx executor refuses them.
+    #[doc(hidden)]
+    fn run_batches<'e>(
+        self,
+        mut stmts: Vec<crate::sql::CompiledStatement>,
+    ) -> BoxFuture<'e, Result<u64, ExecError>>
+    where
+        'c: 'e,
+        Self: 'e,
+    {
+        let dialect = self.dialect().name();
+        Box::pin(async move {
+            match stmts.len() {
+                0 => Ok(0),
+                1 => {
+                    let stmt = stmts.remove(0);
+                    super::write_on(self, &stmt.sql, stmt.params).await
+                }
+                _ => Err(ExecError::Sql(
+                    crate::sql::SqlError::OperatorNotSupportedInDialect {
+                        op: "a multi-statement write on a raw sqlx executor",
+                        dialect,
+                    },
+                )),
+            }
+        })
+    }
+
     /// Whether [`Self::run_delete_plan`] can run several statements.
     #[doc(hidden)]
     fn runs_plans(&self) -> bool {
@@ -497,6 +527,17 @@ impl<'c> SqlExecutor<'c> for &'c Pool {
         Box::pin(super::delete_plan_pool(self, plan))
     }
 
+    fn run_batches<'e>(
+        self,
+        stmts: Vec<crate::sql::CompiledStatement>,
+    ) -> BoxFuture<'e, Result<u64, ExecError>>
+    where
+        'c: 'e,
+        Self: 'e,
+    {
+        Box::pin(super::execute_all_or_none(self, stmts))
+    }
+
     fn insert_returning<'e>(
         self,
         query: InsertQuery,
@@ -670,6 +711,22 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolConn {
         })
     }
 
+    fn run_batches<'e>(
+        self,
+        stmts: Vec<crate::sql::CompiledStatement>,
+    ) -> BoxFuture<'e, Result<u64, ExecError>>
+    where
+        'c: 'e,
+        Self: 'e,
+    {
+        Box::pin(async move {
+            let mut tx = self.begin().await?;
+            let n = super::execute_batches_tx(&mut tx, stmts).await?;
+            tx.commit().await?;
+            Ok(n)
+        })
+    }
+
     fn insert_returning<'e>(
         self,
         query: InsertQuery,
@@ -764,6 +821,17 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolTx<'_> {
         'c: 'e,
     {
         Box::pin(super::run_delete_plan_tx(self, plan))
+    }
+
+    fn run_batches<'e>(
+        self,
+        stmts: Vec<crate::sql::CompiledStatement>,
+    ) -> BoxFuture<'e, Result<u64, ExecError>>
+    where
+        'c: 'e,
+        Self: 'e,
+    {
+        Box::pin(super::execute_batches_tx(self, stmts))
     }
 
     fn insert_returning<'e>(
@@ -933,6 +1001,23 @@ macro_rules! database_conn_executor {
                     let pool = self.pool_id().clone();
                     let mut tx = PoolTx::begin_on(&mut ***self, &pool).await?;
                     let n = super::run_delete_plan_tx(&mut tx, plan).await?;
+                    tx.commit().await?;
+                    Ok(n)
+                })
+            }
+
+            fn run_batches<'e>(
+                self,
+                stmts: Vec<crate::sql::CompiledStatement>,
+            ) -> BoxFuture<'e, Result<u64, ExecError>>
+            where
+                'c: 'e,
+                Self: 'e,
+            {
+                Box::pin(async move {
+                    let pool = self.pool_id().clone();
+                    let mut tx = PoolTx::begin_on(&mut ***self, &pool).await?;
+                    let n = super::execute_batches_tx(&mut tx, stmts).await?;
                     tx.commit().await?;
                     Ok(n)
                 })

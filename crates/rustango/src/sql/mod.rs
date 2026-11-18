@@ -136,7 +136,10 @@ pub use executor::row_to_json;
 
 /// Operations on a borrowed [`SqlExecutor`] rather than a pool, for one
 /// connection you have already scoped (tenancy schema mode's `search_path`).
-pub use executor::{annotate_count_children_on, fetch_aggregate_on};
+pub use executor::{
+    annotate_count_children_on, bulk_update_on, fetch_aggregate_on, fetch_dates_on,
+    fetch_datetimes_on,
+};
 /// Writes on any [`SqlExecutor`].
 pub use executor::{bulk_insert_on, insert_on, update_on};
 

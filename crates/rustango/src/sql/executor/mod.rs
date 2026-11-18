@@ -1668,11 +1668,23 @@ fn row_chunks(
 /// # Errors
 /// [`ExecError`] if the query is invalid or the driver rejects it.
 pub async fn bulk_update_pool(pool: &Pool, query: &BulkUpdateQuery) -> Result<u64, ExecError> {
+    bulk_update_on(pool, query).await
+}
+
+/// [`bulk_update_pool`] on any [`SqlExecutor`]: its batches in one
+/// transaction (a raw sqlx executor takes one batch only).
+///
+/// # Errors
+/// As [`bulk_update_pool`].
+pub async fn bulk_update_on<'c, E: SqlExecutor<'c>>(
+    exec: E,
+    query: &BulkUpdateQuery,
+) -> Result<u64, ExecError> {
     if query.rows.is_empty() {
         return Ok(0);
     }
-    let stmts = compile_bulk_update_batches(pool.dialect(), Cow::Borrowed(query), usize::MAX)?;
-    execute_all_or_none(pool, stmts).await
+    let stmts = compile_bulk_update_batches(exec.dialect(), Cow::Borrowed(query), usize::MAX)?;
+    exec.run_batches(stmts).await
 }
 
 /// Compile `query` in batches of at most `max` rows that fit the bind cap;
@@ -2561,18 +2573,21 @@ pub async fn fetch_dates_pool<T: crate::core::Model + Send>(
     pool: &Pool,
     qs: crate::query::DatesQuerySet<T>,
 ) -> Result<Vec<chrono::NaiveDate>, ExecError> {
+    fetch_dates_on(pool, qs).await
+}
+
+/// [`fetch_dates_pool`] on any [`SqlExecutor`].
+///
+/// # Errors
+/// As [`fetch_dates_pool`].
+pub async fn fetch_dates_on<'c, T: crate::core::Model + Send, E: SqlExecutor<'c>>(
+    exec: E,
+    qs: crate::query::DatesQuerySet<T>,
+) -> Result<Vec<chrono::NaiveDate>, ExecError> {
     let column = qs.resolve_column()?;
-    // The inner SELECT keeps WHERE / JOINs / LIMIT; the outer orders by bucket.
     let bucket = crate::sql::DateBucket::Date(qs.kind);
-    let descending = qs.descending;
-    let stmt = crate::sql::compile_date_buckets(
-        pool.dialect(),
-        &qs.qs.compile()?,
-        column,
-        bucket,
-        descending,
-    )?;
-    let rows: Vec<(chrono::NaiveDate,)> = run_on(pool, &stmt.sql, stmt.params, from_row).await?;
+    let rows: Vec<(chrono::NaiveDate,)> =
+        date_buckets_on(exec, &qs.qs.compile()?, column, bucket, qs.descending).await?;
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
@@ -2586,19 +2601,38 @@ pub async fn fetch_datetimes_pool<T: crate::core::Model + Send>(
     pool: &Pool,
     qs: crate::query::DateTimesQuerySet<T>,
 ) -> Result<Vec<chrono::DateTime<chrono::Utc>>, ExecError> {
+    fetch_datetimes_on(pool, qs).await
+}
+
+/// [`fetch_datetimes_pool`] on any [`SqlExecutor`].
+///
+/// # Errors
+/// As [`fetch_datetimes_pool`].
+pub async fn fetch_datetimes_on<'c, T: crate::core::Model + Send, E: SqlExecutor<'c>>(
+    exec: E,
+    qs: crate::query::DateTimesQuerySet<T>,
+) -> Result<Vec<chrono::DateTime<chrono::Utc>>, ExecError> {
     let column = qs.resolve_column()?;
     let bucket = crate::sql::DateBucket::DateTime(qs.kind);
-    let descending = qs.descending;
-    let stmt = crate::sql::compile_date_buckets(
-        pool.dialect(),
-        &qs.qs.compile()?,
-        column,
-        bucket,
-        descending,
-    )?;
     let rows: Vec<(chrono::DateTime<chrono::Utc>,)> =
-        run_on(pool, &stmt.sql, stmt.params, from_row).await?;
+        date_buckets_on(exec, &qs.qs.compile()?, column, bucket, qs.descending).await?;
     Ok(rows.into_iter().map(|r| r.0).collect())
+}
+
+/// The distinct truncated `column` values of `inner`, one row each.
+async fn date_buckets_on<'c, E: SqlExecutor<'c>, R>(
+    exec: E,
+    inner: &SelectQuery,
+    column: &'static str,
+    bucket: crate::sql::DateBucket,
+    descending: bool,
+) -> Result<Vec<R>, ExecError>
+where
+    R: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send,
+{
+    // The inner SELECT keeps WHERE / JOINs / LIMIT; the outer orders by bucket.
+    let stmt = crate::sql::compile_date_buckets(exec.dialect(), inner, column, bucket, descending)?;
+    run_on(exec, &stmt.sql, stmt.params, from_row).await
 }
 
 /// Gives `QuerySet` a `count(&Pool)` method that works on any backend.
