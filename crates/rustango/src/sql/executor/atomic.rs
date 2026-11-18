@@ -246,6 +246,18 @@ impl Gate {
     }
 }
 
+/// MySQL's lock-wait timeout (1205).
+#[allow(unused_variables)]
+fn is_lock_wait_timeout<T>(r: &Result<T, ExecError>) -> bool {
+    #[cfg(feature = "mysql")]
+    if let Err(ExecError::Driver(sqlx::Error::Database(db))) = r {
+        return db
+            .try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+            .is_some_and(|m| m.number() == 1205);
+    }
+    false
+}
+
 /// MySQL rolls the whole transaction back on a deadlock (1213) and may on a
 /// lock-wait timeout (1205); a lost connection ends it everywhere. A PG
 /// FATAL or PANIC (e.g. 57P01, terminated backend) ends the session.
@@ -490,8 +502,13 @@ impl Joined {
     /// End the statement with its result `r`: record an error that ended the
     /// transaction, else release the write's savepoint. A failed write's
     /// savepoint rolls back on the block's next use.
-    pub(crate) async fn finish<T>(self, r: Result<T, ExecError>) -> Result<T, ExecError> {
+    pub(crate) async fn finish<T>(mut self, r: Result<T, ExecError>) -> Result<T, ExecError> {
         let r = Gate(Some(Arc::clone(&self.slot))).check(r);
+        // A lock-wait timeout (MariaDB reports a `NOWAIT` miss as one too)
+        // undoes only the statement unless the server rolls back on it.
+        if is_lock_wait_timeout(&r) && self.guard.tx().status().await == TxStatus::Open {
+            self.slot.fatal.store(false, Ordering::SeqCst);
+        }
         if let Err(ExecError::Driver(sqlx::Error::Database(_))) = &r {
             // No savepoint to undo it: PG has aborted the whole block.
             if self.guard.unguarded()
@@ -781,8 +798,10 @@ pub(crate) fn in_any_block() -> bool {
 /// **Failed statements differ by backend:** PG aborts the transaction,
 /// but MySQL and SQLite undo only the failed statement (duplicate key
 /// 1062, `SQLITE_BUSY`). If the closure ignores that error and returns
-/// `Ok`, the other writes commit. A MySQL lock-wait timeout (1205) always
-/// aborts the block.
+/// `Ok`, the other writes commit. A MySQL lock-wait timeout (1205, also
+/// MariaDB's `NOWAIT` miss) aborts the block when the server rolled the
+/// transaction back; ORM calls on the pool check, statements on a guard
+/// always abort.
 ///
 /// **SQLite** begins the outermost block with `BEGIN IMMEDIATE`, so a
 /// read-then-write block waits for the write lock instead of failing with
