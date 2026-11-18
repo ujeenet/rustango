@@ -108,6 +108,12 @@ tenant's user is refused (403). With `permissions_for_model()`, a
 POST. To send anonymous visitors to a login page instead of a `401`, wrap the
 router in `auth_decorators::login_required("/login")`.
 
+The views run the same row rules as a ViewSet: `register_queryset_scope!`
+scopes narrow every read and write, and the `view` hook hides rows (a `404` on
+detail, edit and delete pages; left out of lists, bulk actions and FK display
+names). The `change` and `delete` hooks refuse with a `403`, and a
+`delete_selected` that includes a refused row is a `403` as a whole.
+
 ---
 
 ## ListView

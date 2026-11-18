@@ -716,10 +716,6 @@ where
     }
 }
 
-/// The default `view_hook_scan_cap`: an API list reads at most this many
-/// rows per request, a fifth of the admin's default.
-const DEFAULT_VIEW_HOOK_SCAN_CAP: usize = 2_000;
-
 pub use crate::list_params::DEFAULT_MAX_OFFSET;
 
 /// The largest `view_hook_scan_cap`: each list request reads that many rows.
@@ -825,7 +821,7 @@ impl ViewSet {
             pk_param: "pk".to_owned(),
             max_bulk_create: 1000,
             hooks: crate::object_permissions::Hooks::All,
-            view_hook_scan_cap: DEFAULT_VIEW_HOOK_SCAN_CAP,
+            view_hook_scan_cap: crate::object_permissions::DEFAULT_SCAN_CAP,
             related_filters: Vec::new(),
         };
         vs.assert_known_names("fields", fields.iter().copied(), false);
@@ -2059,10 +2055,7 @@ fn fk_targets(
         .iter()
         .filter_map(|&field| {
             FkTarget::of(field, |model| {
-                let mut scope = model.global_scope_exprs(&[]);
-                scope.extend(crate::soft_delete::active_filter(model));
-                let scopes = hooks.scope_filters(model.table, parts);
-                scope.extend(scopes.into_iter().map(WhereExpr::Predicate));
+                let mut scope = hooks.row_scope(model, parts);
                 for (name, backend) in &state.vs.related_filters {
                     if name == field.name {
                         scope.extend(backend.filter_with(parts, &no_params, model));
@@ -2392,18 +2385,8 @@ fn scope_filters(
     parts: &axum::http::request::Parts,
     params: &HashMap<String, String>,
 ) -> Vec<WhereExpr> {
-    let schema = state.vs.schema;
-    let mut all = schema.global_scope_exprs(&[]);
     // A soft-deleted row reads as gone to every action (#1998).
-    all.extend(crate::soft_delete::active_filter(schema));
-    all.extend(
-        state
-            .vs
-            .hooks
-            .scope_filters(schema.table, parts)
-            .into_iter()
-            .map(WhereExpr::Predicate),
-    );
+    let mut all = state.vs.hooks.row_scope(state.vs.schema, parts);
     all.extend(
         state
             .vs
@@ -3763,9 +3746,7 @@ async fn gate_item(
     action: Option<&'static str>,
 ) -> Result<(), Response> {
     let (schema, hooks) = (state.vs.schema, state.vs.hooks);
-    let hooked = std::iter::once("view")
-        .chain(action)
-        .any(|a| hooks.any(schema.table, a));
+    let hooked = hooks.judges(schema.table, action);
     let mut q = SelectQuery::by_pk(schema, pk_field.column, pk.clone());
     q.where_clause = narrow(q.where_clause, scope.to_vec());
     let fields: Vec<_> = schema.scalar_fields().collect();
@@ -3781,18 +3762,11 @@ async fn gate_item(
         }
     }
     .map_err(|e| json_server_error("viewset::object_permissions", &e))?;
-    let not_found = || json_error(StatusCode::NOT_FOUND, "not found");
-    let Some(row) = row else {
-        return Err(not_found());
-    };
-    if !hooks.allows(schema.table, "view", parts, Some(&row)) {
-        return Err(not_found());
-    }
-    match action {
-        Some(a) if !hooks.allows(schema.table, a, parts, Some(&row)) => {
-            Err(json_error(StatusCode::FORBIDDEN, "forbidden"))
-        }
-        _ => Ok(()),
+    use crate::object_permissions::Verdict;
+    match row.map(|row| hooks.judge(schema.table, parts, &row, action)) {
+        None | Some(Verdict::Hidden) => Err(json_error(StatusCode::NOT_FOUND, "not found")),
+        Some(Verdict::Refused) => Err(json_error(StatusCode::FORBIDDEN, "forbidden")),
+        Some(Verdict::Allowed) => Ok(()),
     }
 }
 

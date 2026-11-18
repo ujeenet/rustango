@@ -21,6 +21,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Framework writes that opened their own transaction join a caller's `atomic` block on the same pool and roll back with it: audit `emit_one` / `emit_many`, `truncate`, fixtures, ViewSet and admin writes, media, and SSO sign-up and invites. Tenancy registry changes and the database cache still commit on their own.
 - `iterator()` inside a block pages by primary key, so rows the loop updates out of the filter are not skipped; it must be ordered by the primary key there. `get_or_create` / `update_or_create` re-read a lost race with a locking read inside a MySQL block.
 - **Breaking:** `debug_panel::debug_router` and `metrics::metrics_router` take a `RouteAccess`, so they cannot be mounted without saying who may read them.
+- **Breaking:** template views apply queryset scopes and the "view", "change" and "delete" object-permission hooks, as ViewSets do: a hidden row is a 404 on detail, edit and delete pages and is left out of lists, bulk actions and FK display names; a refused one is a 403.
 
 ### Fixed
 

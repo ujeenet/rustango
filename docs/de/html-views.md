@@ -106,6 +106,13 @@ deiner eigenen Single-Database-Auth-Schicht; der Benutzer eines Tenants bekommt 
 seinen POST `view`, `change` und `delete`. Um anonyme Besucher statt mit `401` auf
 eine Login-Seite zu schicken, lege `auth_decorators::login_required("/login")` um den Router.
 
+Die Views wenden dieselben Zeilenregeln wie ein ViewSet an:
+`register_queryset_scope!`-Scopes schränken jedes Lesen und Schreiben ein, und
+der `view`-Hook verbirgt Zeilen (`404` auf Detail-, Bearbeiten- und
+Löschen-Seiten; sie fehlen in Listen, Sammelaktionen und FK-Anzeigenamen). Die
+Hooks `change` und `delete` lehnen mit `403` ab, und ein `delete_selected` mit
+einer abgelehnten Zeile ist als Ganzes ein `403`.
+
 ---
 
 ## ListView

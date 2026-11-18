@@ -43,6 +43,14 @@ pub fn active_filter(model: &'static ModelSchema) -> Option<WhereExpr> {
     liveness_predicate(model, false).map(WhereExpr::Predicate)
 }
 
+/// The model's global scopes and, on a soft-delete model, live rows only:
+/// what every generated view reads and writes.
+pub(crate) fn visible_scope(model: &'static ModelSchema) -> Vec<WhereExpr> {
+    let mut all = model.global_scope_exprs(&[]);
+    all.extend(active_filter(model));
+    all
+}
+
 /// `<col> IS NULL` (live) or `IS NOT NULL` (trashed); `None` without a soft-delete column.
 pub(crate) fn liveness_predicate(model: &'static ModelSchema, trashed: bool) -> Option<Filter> {
     Some(Filter {
