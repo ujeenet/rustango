@@ -6,7 +6,7 @@
 #![cfg(all(feature = "sqlite", feature = "tenancy", feature = "serializer"))]
 
 use axum::body::Body;
-use axum::http::{header, Method, Request, StatusCode};
+use axum::http::{Method, Request, StatusCode};
 use rustango::core::{Filter, Model as _, Op, SqlValue, WhereExpr};
 use rustango::sql::{sqlx, Auto, Pool};
 use rustango::Model;
@@ -43,7 +43,7 @@ fn published_only(
     })
 }
 
-async fn router() -> axum::Router {
+async fn router() -> (axum::Router, sqlx::SqlitePool) {
     let sq = sqlx::SqlitePool::connect("sqlite::memory:")
         .await
         .expect("sqlite pool");
@@ -56,13 +56,14 @@ async fn router() -> axum::Router {
     .execute(&sq)
     .await
     .expect("create");
-    let pool = Pool::Sqlite(sq);
-    rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "title", "status"])
+    let pool = Pool::Sqlite(sq.clone());
+    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "title", "status"])
         .allow_anonymous()
         .page_size(100)
         .filter_fields(&["title"])
         .filter_backend(published_only)
-        .router("/posts", pool)
+        .router("/posts", pool);
+    (app, sq)
 }
 
 async fn body_json(resp: axum::response::Response) -> Value {
@@ -80,21 +81,14 @@ fn get(uri: &str) -> Request<Body> {
         .unwrap()
 }
 
-async fn seed(app: &axum::Router, title: &str, status: &str) {
-    let body = format!(r#"{{"title":"{title}","status":"{status}"}}"#);
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/posts")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(body))
-                .unwrap(),
-        )
+/// Seeded beside the API: a create the backend would hide is refused.
+async fn seed(pool: &sqlx::SqlitePool, title: &str, status: &str) {
+    sqlx::query("INSERT INTO vs_fb_post (title, status) VALUES (?, ?)")
+        .bind(title)
+        .bind(status)
+        .execute(pool)
         .await
-        .unwrap();
-    assert!(resp.status().is_success(), "seed {title} failed");
+        .expect("seed");
 }
 
 fn count(body: &Value) -> usize {
@@ -103,12 +97,12 @@ fn count(body: &Value) -> usize {
 
 #[tokio::test]
 async fn filter_backend_constrains_list_by_default() {
-    let app = router().await;
-    seed(&app, "a", "published").await;
-    seed(&app, "b", "published").await;
-    seed(&app, "c", "published").await;
-    seed(&app, "d", "draft").await;
-    seed(&app, "e", "draft").await;
+    let (app, pool) = router().await;
+    seed(&pool, "a", "published").await;
+    seed(&pool, "b", "published").await;
+    seed(&pool, "c", "published").await;
+    seed(&pool, "d", "draft").await;
+    seed(&pool, "e", "draft").await;
 
     // Default: backend hides the 2 drafts → 3 published.
     let body = body_json(app.clone().oneshot(get("/posts")).await.unwrap()).await;
@@ -133,9 +127,9 @@ async fn filter_backend_constrains_list_by_default() {
 
 #[tokio::test]
 async fn filter_backend_ands_with_builtin_filter_fields() {
-    let app = router().await;
-    seed(&app, "shared", "published").await;
-    seed(&app, "shared", "draft").await;
+    let (app, pool) = router().await;
+    seed(&pool, "shared", "published").await;
+    seed(&pool, "shared", "draft").await;
 
     // ?title=shared matches both rows, but the backend AND-s status=published.
     let resp = app

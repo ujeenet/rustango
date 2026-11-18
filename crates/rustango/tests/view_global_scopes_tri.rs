@@ -512,7 +512,8 @@ async fn viewset_update_out_of_scope_is_204(pool: &Pool) {
     assert!(!moved.visible && moved.tag == "q", "PUT committed");
 }
 
-async fn viewset_create_out_of_scope_is_201_without_body(pool: &Pool) {
+/// A create the caller could not read back is refused and writes nothing.
+async fn viewset_create_out_of_scope_is_403(pool: &Pool) {
     let (status, body) = send(
         pool,
         Method::POST,
@@ -521,8 +522,7 @@ async fn viewset_create_out_of_scope_is_201_without_body(pool: &Pool) {
         r#"{"tag":"n","visible":false}"#,
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED, "{body}");
-    assert!(body.is_empty(), "no row echoed: {body}");
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
 
     let (status, body) = send(
         pool,
@@ -537,13 +537,10 @@ async fn viewset_create_out_of_scope_is_201_without_body(pool: &Pool) {
 
     let bulk = r#"[{"tag":"bv","visible":true},{"tag":"bh","visible":false}]"#;
     let (status, body) = send(pool, Method::POST, "/api/notes", JSON, bulk).await;
-    assert_eq!(status, StatusCode::CREATED, "{body}");
-    let v = json(&body);
-    assert_eq!(v[0]["tag"], "bv", "{body}");
-    assert!(v[1].is_null(), "hidden entry not echoed: {body}");
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
 
     let tags: Vec<String> = all_rows(pool).await.into_iter().map(|r| r.tag).collect();
-    assert_eq!(tags.len(), 4, "every row written: {tags:?}");
+    assert_eq!(tags, ["v"], "only the visible create wrote");
 }
 
 async fn custom_bulk_action_gets_only_visible_pks(pool: &Pool) {
@@ -925,7 +922,7 @@ tri_dialect_test! {
         bulk_delete_skips_hidden_rows,
         viewset_writes_on_visible_rows_work,
         viewset_update_out_of_scope_is_204,
-        viewset_create_out_of_scope_is_201_without_body,
+        viewset_create_out_of_scope_is_403,
         custom_bulk_action_gets_only_visible_pks,
         template_writes_on_visible_rows_work,
         fk_display_skips_scoped_out_targets,

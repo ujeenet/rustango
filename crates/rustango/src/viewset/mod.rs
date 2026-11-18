@@ -3810,7 +3810,7 @@ async fn handle_create(
         Ok(w) => w,
         Err(resp) => return resp,
     };
-    let add_hooks = match AddHooks::of(&state, &parts) {
+    let add_hooks = match AddHooks::of(&state, &parts, read_back.scope().to_vec()) {
         Ok(h) => h,
         Err(resp) => return resp,
     };
@@ -3901,7 +3901,7 @@ async fn handle_create(
 }
 
 /// Run `INSERT … RETURNING <pk>`, then re-fetch the row by its PK as
-/// JSON per `read_back`; `None` when the caller may not see it.
+/// JSON per `read_back`. A row outside the read-back is refused before commit.
 ///
 /// Returns `(StatusCode, message)` so the caller emits the right code:
 /// * `CONFLICT` on a duplicate key, `BAD_REQUEST` on another constraint
@@ -3918,7 +3918,7 @@ async fn insert_and_fetch_one(
     pk_field: &'static crate::core::FieldSchema,
     fields: &[&'static crate::core::FieldSchema],
     read_back: &ReadBack,
-) -> Result<(SqlValue, Option<Value>), (StatusCode, String)> {
+) -> Result<(SqlValue, Value), (StatusCode, String)> {
     let query = InsertQuery {
         model: state.vs.schema,
         columns,
@@ -3937,7 +3937,11 @@ async fn insert_and_fetch_one(
     wrote(state);
     fetch_by_pk_scoped(state, acq, pk_field, pk_val.clone(), fields, read_back)
         .await
-        .map(|row| (pk_val, row))
+        .map(|row| {
+            // Changed by another writer since the commit: echo the key alone.
+            let row = row.unwrap_or_else(|| key_only(pk_field, &pk_val));
+            (pk_val, row)
+        })
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -3947,27 +3951,32 @@ async fn insert_and_fetch_one(
 }
 
 /// The `add` hooks for a create, run as the admin runs them: on the
-/// request, then on each written row inside the write's transaction, which
-/// must also land inside the queryset scopes.
+/// request, then on each written row inside the write's transaction. The
+/// row must also be one the caller could read back: inside the scope, admitted
+/// by the "view" hook.
 struct AddHooks {
     hooks: crate::object_permissions::Hooks,
-    /// The request, kept only when a hook is registered for a row check.
+    /// The request, kept only when an "add" or "view" hook judges the row.
     parts: Option<axum::http::request::Parts>,
-    /// The queryset scopes the written row must stay inside.
+    /// The read-back scope the written row must land inside.
     scope: Vec<WhereExpr>,
 }
 
 impl AddHooks {
     /// `Err` is a `403` when a hook refuses the request itself.
-    fn of(state: &ViewSetState, parts: &axum::http::request::Parts) -> Result<Self, Response> {
+    fn of(
+        state: &ViewSetState,
+        parts: &axum::http::request::Parts,
+        scope: Vec<WhereExpr>,
+    ) -> Result<Self, Response> {
         let (table, hooks) = (state.vs.schema.table, state.vs.hooks);
         if !hooks.allows(table, "add", parts, None) {
             return Err(json_error(StatusCode::FORBIDDEN, "forbidden"));
         }
         Ok(Self {
             hooks,
-            parts: hooks.any(table, "add").then(|| parts.clone()),
-            scope: queryset_scope(state, parts),
+            parts: hooks.judges(table, Some("add")).then(|| parts.clone()),
+            scope,
         })
     }
 
@@ -3992,11 +4001,23 @@ impl AddHooks {
         select.where_clause = narrow(select.where_clause, self.scope.clone());
         let row = crate::sql::select_one_row_as_json_tx(tx, &select, &fields).await?;
         Ok(row.is_some_and(|row| {
-            self.parts
-                .as_ref()
-                .is_none_or(|parts| self.hooks.allows(model.table, "add", parts, Some(&row)))
+            self.parts.as_ref().is_none_or(|parts| {
+                let verdict = self.hooks.judge(model.table, parts, &row, Some("add"));
+                verdict == crate::object_permissions::Verdict::Allowed
+            })
         }))
     }
+}
+
+/// `{pk: value}`, for a created row the read-back no longer finds.
+fn key_only(pk_field: &'static crate::core::FieldSchema, pk: &SqlValue) -> Value {
+    let value = match pk {
+        SqlValue::I16(n) => json!(n),
+        SqlValue::I32(n) => json!(n),
+        SqlValue::I64(n) => json!(n),
+        other => Value::String(other.to_display_string()),
+    };
+    json!({ pk_field.name: value })
 }
 
 /// The host, path prefix and port a write to `rustango_orgs` or
@@ -4247,7 +4268,7 @@ fn write_failure(context: &str, e: &crate::sql::ExecError) -> (StatusCode, Strin
 
 /// Single-row create — used by both the form-urlencoded codepath
 /// and the JSON-object body codepath. Returns 201 + the row JSON (or its
-/// pk, per `read_back`) and `Location`, or no body when it is out of scope.
+/// pk, per `read_back`) and `Location`; a row out of scope is a 403.
 async fn create_one(
     state: &Arc<ViewSetState>,
     acq: &mut AcquiredConn,
@@ -4293,7 +4314,7 @@ async fn create_one(
     let row = collected.into_iter().unzip();
     let hooks = (add_hooks, &claims);
     match insert_and_fetch_one(state, acq, hooks, row, pk_field, &fields, read_back).await {
-        Ok((pk, Some(obj))) => {
+        Ok((pk, obj)) => {
             let mut resp = json_created(obj);
             let location = format!(
                 "{}/{}",
@@ -4305,7 +4326,6 @@ async fn create_one(
             }
             resp
         }
-        Ok((_, None)) => StatusCode::CREATED.into_response(),
         Err((code, msg)) => json_error(code, &msg),
     }
 }
@@ -4316,7 +4336,7 @@ async fn create_one(
 /// atomic-insert — partial-insert recovery is a separate concern).
 /// On success, inserts each row sequentially and returns 201 + the
 /// JSON array of created rows in submission order, each as `read_back`
-/// allows; a row outside the scope is `null`.
+/// allows; a row outside the scope refuses the batch with a 403.
 ///
 /// Issue #435.
 async fn create_many(

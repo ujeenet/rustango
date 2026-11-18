@@ -28,6 +28,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - In-memory SQLite: a read after a write inside `atomic` no longer hangs.
 - `get_or_create_tx` that loses an insert race returns the winner's row and leaves the transaction usable, instead of the unique violation.
 - `atomic_with` with settings on MySQL or SQLite names `set_config` in its error, not "operator `transaction settings`".
+- A ViewSet create whose row the caller could not read back (outside a filter backend or a scope, or hidden by the "view" hook) is refused with 403 and nothing is written. It used to answer 201 with an empty body.
 
 ### Documentation
 

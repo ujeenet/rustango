@@ -809,7 +809,9 @@ lignes masquées sortent de la page et du `count` ; au-delà de
 `view_hook_scan_cap`, une liste paginée ou à offset donne un `400` : ajoutez un
 scope de queryset ou passez en pagination par curseur). Les scopes de
 queryset restreignent chaque lecture et écriture ; une écriture dont la ligne en
-sortirait donne un `403`. Les hooks lisent la ligne verrouillée dans la
+sortirait donne un `403`. Une création doit pouvoir être relue par l'appelant :
+hors des backends de filtre ou des portées globales, ou masquée par `view`, elle
+donne un `403` et n'écrit rien. Les hooks lisent la ligne verrouillée dans la
 transaction d'écriture ; un identifiant d'un autre tenant donne un `403`. `change` ne vérifie que la
 ligne stockée. `object_permissions::Actor::of(&parts)` indique à un hook qui
 demande ; un jeton d'agent n'est jamais superuser. `ViewSet::for_model` et les
@@ -855,13 +857,11 @@ il restreint donc le queryset de base sur toutes les routes. Une ligne que le ba
 L'identité doit provenir de la credential, jamais de la chaîne de requête. Un
 filtre `?owner_id=` n'est pas une portée — c'est un paramètre que l'appelant choisit.
 
-Une portée ne restreint que la lecture. Un backend qui possède une colonne implémente
-aussi `write_pins` : la création enregistre le propriétaire, la mise à jour ne peut pas le
-changer, et `WritePin::Deny` refuse l'écriture avec un 403.
-
-Les portées globales statiques d'un modèle limitent aussi ce qui est lu, pas ce qui est
-écrit : une création ou une mise à jour peut sortir de la portée (201 sans corps, ou 204).
-Pour une frontière de sécurité, utilisez un backend de filtre avec `write_pins`.
+Un backend qui possède une colonne implémente aussi `write_pins` : la création
+enregistre le propriétaire, la mise à jour ne peut pas le changer, et
+`WritePin::Deny` refuse l'écriture avec un 403. Sans épinglage, une création hors
+du backend donne un 403 et n'écrit rien, mais une mise à jour peut encore en faire
+sortir une ligne (204).
 
 Une écriture ne renvoie sa ligne complète qu'à un appelant qui a la permission
 `retrieve` ; les autres reçoivent seulement `{"<pk>": …}` (un par ligne d'un
