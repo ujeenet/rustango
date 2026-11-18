@@ -179,10 +179,13 @@ where
     async fn keyset_chunk(&mut self, pool: &Pool, size: i64) -> Result<Vec<T>, ExecError> {
         let refused = ExecError::InAtomic {
             op: "`iterator()` not ordered by the primary key",
-            reason: "rows the loop changes could be skipped; order by the primary key only",
+            reason: "rows the loop changes could be skipped; order by the primary key only \
+                     and keep it in the projection",
         };
         let mut q: SelectQuery = self.query.clone();
-        let Some(pk) = q.model.primary_key().filter(|_| q.compound.is_empty()) else {
+        let Some(pk) = q.model.primary_key().filter(|pk| {
+            q.compound.is_empty() && q.projection.as_ref().is_none_or(|p| p.contains(&pk.column))
+        }) else {
             return Err(refused);
         };
         let desc = match q.order_by.as_slice() {

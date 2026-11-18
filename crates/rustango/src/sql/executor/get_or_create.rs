@@ -26,6 +26,8 @@ use crate::sql::Pool;
 /// Inside an [`atomic`](super::atomic) block on `pool`, the reads join the
 /// block and `create_fn` runs in a savepoint: its writes roll back when it
 /// fails and the block stays usable. Do not hold the block's guard across it.
+/// In a PG repeatable-read or serializable block a lost race returns the
+/// unique violation: no read sees the winner's row there.
 ///
 /// The closure receives an **owned** `Pool` (cheap to clone — it's
 /// an `Arc` internally). That sidesteps Rust's async-closure
@@ -76,7 +78,7 @@ where
         Some(row) => Ok((row, false)),
         None => match create(create_fn, pool).await {
             Ok(row) => Ok((row, true)),
-            Err(e) => Ok((lost_race(qs, e, "get_or_create", pool).await?, false)),
+            Err(e) => Ok((lost_race(qs, e, "get_or_create", pool, true).await?, false)),
         },
     }
 }
@@ -181,6 +183,7 @@ async fn lost_race<T>(
     err: ExecError,
     op: &'static str,
     pool: &Pool,
+    share: bool,
 ) -> Result<T, ExecError>
 where
     T: Model
@@ -196,10 +199,11 @@ where
     if !err.is_unique_violation() {
         return Err(err);
     }
-    // In a block the read joins its transaction: a locking read sees the
-    // winner's row past a repeatable-read snapshot (MySQL, PG RR).
-    let qs = if atomic::in_block(pool) {
-        qs.select_for_share()
+    // In a MySQL block the re-read joins its repeatable-read snapshot, which
+    // predates the winner's row: a locking read sees it. `update_or_create`
+    // takes the update lock at once, so two losers cannot deadlock upgrading.
+    let qs = if atomic::in_block(pool) && pool.dialect().name() == "mysql" {
+        qs.lock_rows_unless_set(share)
     } else {
         qs
     };
@@ -264,7 +268,7 @@ where
         Some(row) => row,
         None => match create(create_fn, pool).await {
             Ok(row) => return Ok((row, true)),
-            Err(e) => lost_race(qs, e, "update_or_create", pool).await?,
+            Err(e) => lost_race(qs, e, "update_or_create", pool, false).await?,
         },
     };
     Ok((update_fn(pool.clone(), existing).await?, false))

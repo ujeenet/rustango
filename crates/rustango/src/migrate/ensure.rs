@@ -672,6 +672,8 @@ async fn apply_batch(pool: &Pool, batch: &super::RenderedBatch) -> Result<(), sq
 
 /// Run `stmts` in order, tolerating objects that already exist.
 pub(crate) async fn run_statements(pool: &Pool, stmts: &[String]) -> Result<(), sqlx::Error> {
+    crate::sql::refuse_ddl_in_block(pool, crate::sql::Ddl::Transactional)
+        .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
     let dialect = pool.dialect().name();
     for stmt in stmts {
         let stmt = idempotent(stmt, dialect);

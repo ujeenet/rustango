@@ -152,7 +152,7 @@ untouched.
 
 - Inside `atomic(&pool, ..)`, `&pool` reads, raw SQL and DDL now run on the block's transaction: they see its uncommitted rows, and on MySQL and SQLite one snapshot for the whole block. Drop the `TxGuard` before such a call and do not `join!` two of them, or they return `NestedAtomic`. Code that relied on a read seeing only committed data must move it outside the block.
 - In a block, DDL through `run_ddl_idempotent` (and the `ensure_table` helpers) on MySQL and non-atomic migrations return `ExecError::InAtomic`: run them before or after the block. Raw SQL that commits returns `AtomicEndedEarly`.
-- `iterator()` inside a block must be ordered by the primary key, or not ordered; another order returns `InAtomic`.
+- `iterator()` inside a block must be ordered by the primary key (or not ordered) and select the primary key; otherwise it returns `InAtomic`.
 - Audit, fixture, ViewSet, admin, media and SSO writes made inside your `atomic` block now roll back with it. Registry changes (operators, tenant edits, host claims) and `DatabaseCache` still commit on their own; on SQLite they wait for the block.
 - SQLite `atomic` takes the write lock at `BEGIN`: other writers wait for the whole block, so keep blocks short.
 - Serialization failures inside a block differ per backend: PG 40001, MySQL 1213/1205 (which end the block), SQLite `SQLITE_BUSY`.

@@ -695,7 +695,9 @@ pub(crate) fn in_any_block() -> bool {
 ///
 /// **Separate connections** ([`Pool::acquire`], `Tenant::conn`, the cache,
 /// the job claim, tenancy registry changes) run outside the block's transaction: they do not see its
-/// writes and can deadlock on locks it holds (in-memory SQLite always).
+/// writes and can deadlock on locks it holds. On SQLite every block holds the
+/// write lock from `BEGIN`, so their writes wait `busy_timeout` and then fail
+/// with `SQLITE_BUSY` (file databases too); in-memory ones wait forever.
 ///
 /// **Raw SQL** is checked after each statement: a `COMMIT`, `ROLLBACK` or
 /// implicit commit in it returns [`ExecError::AtomicEndedEarly`].

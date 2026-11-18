@@ -364,16 +364,19 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
-    /// A shared lock on this model's rows only, so a repeatable-read
-    /// transaction reads the latest committed row.
+    /// A shared (`share`) or update lock on this model's rows only, so a
+    /// MySQL repeatable-read transaction reads the latest committed row.
+    /// A lock the caller already set is kept.
     #[must_use]
-    pub(crate) fn select_for_share(mut self) -> Self {
-        self.lock_mode = Some(crate::core::LockMode {
-            share: true,
-            of: vec![T::SCHEMA.table],
-            silent_on_sqlite: true,
-            ..crate::core::LockMode::default()
-        });
+    pub(crate) fn lock_rows_unless_set(mut self, share: bool) -> Self {
+        if self.lock_mode.is_none() {
+            self.lock_mode = Some(crate::core::LockMode {
+                share,
+                of: vec![T::SCHEMA.table],
+                silent_on_sqlite: true,
+                ..crate::core::LockMode::default()
+            });
+        }
         self
     }
 

@@ -269,6 +269,28 @@ async fn mysql_ddl_via_pool_is_refused(pool: &Pool) {
     assert_eq!(ids(pool).await, Vec::<i64>::new(), "nothing committed");
 }
 
+/// The schema helpers refuse DDL in a MySQL block too.
+async fn mysql_schema_helpers_are_refused(pool: &Pool) {
+    if dialect(pool) != "mysql" {
+        return;
+    }
+    let p = one_conn(pool).await;
+    let q = p.clone();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let err = std::sync::Arc::clone(&seen);
+    let res: Result<(), ExecError> = within(rustango::atomic!(&p, |tx| {
+        put(tx, 1).await?;
+        let r = rustango::testkit::create_tables_for::<Note>(&q).await;
+        *err.lock().unwrap() = r.err().map(|e| e.to_string());
+        Ok(())
+    }))
+    .await;
+    res.expect("the block commits: no implicit commit ended it");
+    let err = seen.lock().unwrap().take().expect("refused");
+    assert!(err.contains("refused inside an atomic block"), "got {err}");
+    assert_eq!(ids(pool).await, vec![1]);
+}
+
 /// Statements no transaction can hold fail without aborting the block.
 async fn non_transactional_statements_are_refused(pool: &Pool) {
     let sql = match dialect(pool) {
@@ -341,6 +363,7 @@ tri_dialect_test! {
         raw_commit_ends_the_block_early,
         mysql_ddl_via_pool_is_refused,
         non_transactional_statements_are_refused,
+        mysql_schema_helpers_are_refused,
         iterator_updating_rows_out_of_filter_visits_all,
         iterator_with_other_order_is_refused,
     ],
