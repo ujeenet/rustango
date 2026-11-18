@@ -98,12 +98,12 @@ pub use executor::{
     raw_query_pool, raw_query_tx, run_ddl_idempotent, select_one_row_as_json, select_one_row_pool,
     select_rows_as_json, select_rows_pool, select_rows_pool_with_related,
     select_rows_tx_with_related, transaction_pool, try_get_flat, try_get_flat_my,
-    try_get_flat_sqlite, update_or_create, update_pool, update_tx, write_transaction, AtomicTx,
-    CounterPool, ExistsPool, ExplainFormat, ExplainOptions, FetcherPool, FetcherTx, FkPkAccess,
-    FlatScalar, HasPkValue, InsertReturningPool, LoadRelated, MaybeMyFromRow, MaybeMyLoadRelated,
-    MaybeMyScalar, MaybePgFromRow, MaybePgScalar, MaybeSqliteFromRow, MaybeSqliteLoadRelated,
-    MaybeSqliteScalar, Page, PoolConn, PoolTx, PooledConn, SqlExecutor, TxConn, TxGuard,
-    UpdaterPool,
+    try_get_flat_sqlite, update_or_create, update_or_create_on, update_pool, update_tx,
+    write_transaction, AtomicTx, CounterPool, ExistsPool, ExplainFormat, ExplainOptions,
+    FetcherPool, FetcherTx, FkPkAccess, FlatScalar, HasPkValue, InsertReturningPool, LoadRelated,
+    MaybeMyFromRow, MaybeMyLoadRelated, MaybeMyScalar, MaybePgFromRow, MaybePgScalar,
+    MaybeSqliteFromRow, MaybeSqliteLoadRelated, MaybeSqliteScalar, Page, PoolConn, PoolTx,
+    PooledConn, SqlExecutor, TxConn, TxGuard, UpdaterPool,
 };
 pub(crate) use executor::{
     bulk_insert_pks_tx, compile_bulk_update_batches, count_rows_on, execute_batches_tx,

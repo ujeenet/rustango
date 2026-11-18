@@ -150,6 +150,7 @@ untouched.
 
 ## Unreleased
 
+- `get_or_create_tx` runs `create_fn` in a savepoint and, on a unique violation, returns the existing row with `created == false` instead of the error (PG repeatable-read / serializable still return the error).
 - Inside `atomic(&pool, ..)`, `&pool` reads, raw SQL and DDL now run on the block's transaction: they see its uncommitted rows, and on MySQL and SQLite one snapshot for the whole block. On PG a failed read or raw statement there (a caught `nowait`, a probe of a missing table) aborts the block with `AtomicAborted`: wrap such a step in a nested `atomic`. Drop the `TxGuard` before such a call and do not `join!` two of them, or they return `NestedAtomic`. Code that relied on a read seeing only committed data must move it outside the block.
 - In a block, DDL through `run_ddl_idempotent` (and the `ensure_table` helpers) on MySQL and non-atomic migrations return `ExecError::InAtomic`: run them before or after the block. Raw SQL that commits makes the block return `AtomicEndedEarly` at its end.
 - `iterator()` inside a block must be ordered by the primary key (or not ordered) and select the primary key; otherwise it returns `InAtomic`.

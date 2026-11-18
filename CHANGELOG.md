@@ -6,6 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Added
 
+- `sql::update_or_create_on`: `update_or_create` on an open `PoolTx`.
 - `ExecError::InAtomic`: an operation refused inside an `atomic` block on its pool. `LockMode::share` for a shared row lock (`FOR SHARE` / `LOCK IN SHARE MODE`).
 
 ### Changed
@@ -19,6 +20,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Fixed
 
 - In-memory SQLite: a read after a write inside `atomic` no longer hangs.
+- `get_or_create_tx` that loses an insert race returns the winner's row and leaves the transaction usable, instead of the unique violation.
 
 ## [0.66.0] — 2026-11-11
 

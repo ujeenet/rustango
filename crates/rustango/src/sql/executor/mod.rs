@@ -3324,7 +3324,7 @@ where
 }
 
 mod get_or_create;
-pub use get_or_create::{get_or_create, get_or_create_tx, update_or_create};
+pub use get_or_create::{get_or_create, get_or_create_tx, update_or_create, update_or_create_on};
 
 /// Give the queryset a deterministic order before taking one row.
 /// An existing `order_by` is kept, or flipped when `reverse`;

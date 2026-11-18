@@ -320,6 +320,94 @@ async fn cancelled_create_rolls_back(pool: &Pool) {
     assert_eq!(ids(pool).await, vec![6]);
 }
 
+/// The winner of a race on a manual transaction, committed on another pool.
+async fn winner(other: &Pool) {
+    Note {
+        id: 5,
+        label: "theirs".into(),
+    }
+    .insert(other)
+    .await
+    .unwrap();
+}
+
+/// `get_or_create_tx` that loses the insert race returns the winner's row
+/// and leaves the transaction usable. SQLite allows one writer, so there is
+/// no race to lose there.
+async fn get_or_create_tx_lost_race_returns_the_winner(pool: &Pool) {
+    if sqlite(pool) {
+        return;
+    }
+    let other = other_pool(pool).await;
+    let mut tx = rustango::sql::transaction_pool(pool).await.unwrap();
+    let (row, created) = rustango::sql::get_or_create_tx(
+        Note::objects().filter("id", 5_i64),
+        |tx| {
+            Box::pin(async move {
+                winner(&other).await;
+                let row = Note {
+                    id: 5,
+                    label: "mine".into(),
+                };
+                row.insert_tx(tx).await?;
+                Ok(row)
+            })
+        },
+        &mut tx,
+    )
+    .await
+    .expect("the winner's row");
+    Note {
+        id: 6,
+        label: "n6".into(),
+    }
+    .insert_tx(&mut tx)
+    .await
+    .expect("the transaction stays usable");
+    tx.commit().await.unwrap();
+    assert!(!created);
+    assert_eq!(row.label, "theirs");
+    assert_eq!(ids(pool).await, vec![5, 6]);
+}
+
+/// `update_or_create_on` that loses the race updates the winner's row.
+async fn update_or_create_on_lost_race_updates_the_winner(pool: &Pool) {
+    if sqlite(pool) {
+        return;
+    }
+    let other = other_pool(pool).await;
+    let mut tx = rustango::sql::transaction_pool(pool).await.unwrap();
+    let (row, created) = rustango::sql::update_or_create_on(
+        Note::objects().filter("id", 5_i64),
+        |tx, mut row| {
+            Box::pin(async move {
+                row.label = "updated".into();
+                row.save_tx(tx).await?;
+                Ok(row)
+            })
+        },
+        |tx| {
+            Box::pin(async move {
+                winner(&other).await;
+                let row = Note {
+                    id: 5,
+                    label: "mine".into(),
+                };
+                row.insert_tx(tx).await?;
+                Ok(row)
+            })
+        },
+        &mut tx,
+    )
+    .await
+    .expect("the winner's row, updated");
+    tx.commit().await.unwrap();
+    assert!(!created);
+    assert_eq!(row.label, "updated");
+    let rows: Vec<Note> = Note::objects().fetch(pool).await.unwrap();
+    assert_eq!(rows[0].label, "updated");
+}
+
 tri_dialect_test! {
     model: Note,
     sqlite: file,
@@ -330,5 +418,7 @@ tri_dialect_test! {
         created_inside_the_block_commits,
         refused_with_the_guard_held,
         cancelled_create_rolls_back,
+        get_or_create_tx_lost_race_returns_the_winner,
+        update_or_create_on_lost_race_updates_the_winner,
     ],
 }

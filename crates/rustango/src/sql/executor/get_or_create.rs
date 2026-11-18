@@ -84,8 +84,10 @@ where
 }
 
 /// [`get_or_create`] inside an open transaction: the read and `create_fn`
-/// both run on `tx`. A unique violation from `create_fn` is returned, not
-/// retried, as on PostgreSQL it has already aborted `tx`.
+/// both run on `tx`. `create_fn` runs in a savepoint: when it loses an
+/// insert race (a unique violation) it is rolled back and the winner's row
+/// read instead, so `tx` stays usable. In a PG repeatable-read or
+/// serializable transaction the unique violation is returned instead.
 ///
 /// ```ignore
 /// let (post, created) = rustango::sql::get_or_create_tx(
@@ -121,9 +123,114 @@ where
         Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'a>,
     >,
 {
-    match at_most_one(qs.fetch_tx(tx).await?, "get_or_create")? {
+    match at_most_one(qs.clone().fetch_tx(tx).await?, "get_or_create")? {
         Some(row) => Ok((row, false)),
-        None => Ok((create_fn(tx).await?, true)),
+        None => create_or_winner_tx(qs, create_fn, tx, "get_or_create", true).await,
+    }
+}
+
+/// [`update_or_create`] inside an open transaction: the read, `update_fn`
+/// and `create_fn` all run on `tx`. A lost insert race updates the winner's
+/// row, as in [`get_or_create_tx`].
+///
+/// # Errors
+/// As [`update_or_create`].
+pub async fn update_or_create_on<'t, T, UF, CF>(
+    qs: crate::query::QuerySet<T>,
+    update_fn: UF,
+    create_fn: CF,
+    tx: &mut PoolTx<'t>,
+) -> Result<(T, bool), ExecError>
+where
+    T: Model
+        + MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+    UF: for<'a> FnOnce(
+        &'a mut PoolTx<'t>,
+        T,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'a>,
+    >,
+    CF: for<'a> FnOnce(
+        &'a mut PoolTx<'t>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'a>,
+    >,
+{
+    let existing = match at_most_one(qs.clone().fetch_tx(tx).await?, "update_or_create")? {
+        Some(row) => row,
+        None => match create_or_winner_tx(qs, create_fn, tx, "update_or_create", false).await? {
+            (row, true) => return Ok((row, true)),
+            (row, false) => row,
+        },
+    };
+    Ok((update_fn(tx, existing).await?, false))
+}
+
+/// `create_fn` in a savepoint of `tx`; on a unique violation, the row a
+/// concurrent writer inserted first, with `(row, created)`.
+async fn create_or_winner_tx<'t, T, F>(
+    qs: crate::query::QuerySet<T>,
+    create_fn: F,
+    tx: &mut PoolTx<'t>,
+    op: &'static str,
+    share: bool,
+) -> Result<(T, bool), ExecError>
+where
+    T: Model
+        + MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+    F: for<'a> FnOnce(
+        &'a mut PoolTx<'t>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'a>,
+    >,
+{
+    let point = tx.dialect().quote_ident("rustango_create");
+    tx.execute_unprepared(&format!("SAVEPOINT {point}")).await?;
+    let err = match create_fn(tx).await {
+        Ok(row) => {
+            tx.execute_unprepared(&format!("RELEASE SAVEPOINT {point}"))
+                .await?;
+            return Ok((row, true));
+        }
+        Err(e) => e,
+    };
+    tx.execute_unprepared(&format!("ROLLBACK TO SAVEPOINT {point}"))
+        .await?;
+    tx.execute_unprepared(&format!("RELEASE SAVEPOINT {point}"))
+        .await?;
+    if !err.is_unique_violation() {
+        return Err(err);
+    }
+    let qs = winner_read(qs, tx.dialect(), share);
+    let row = at_most_one(qs.fetch_tx(tx).await?, op)?.ok_or(err)?;
+    Ok((row, false))
+}
+
+/// The re-read after a lost race: MySQL's repeatable-read snapshot predates
+/// the winner's row, so it reads with a lock (`share`, else for update).
+fn winner_read<T: Model>(
+    qs: crate::query::QuerySet<T>,
+    dialect: &dyn super::Dialect,
+    share: bool,
+) -> crate::query::QuerySet<T> {
+    if dialect.name() == "mysql" {
+        qs.lock_rows_unless_set(share)
+    } else {
+        qs
     }
 }
 
@@ -193,11 +300,10 @@ where
     if !err.is_unique_violation() {
         return Err(err);
     }
-    // In a MySQL block the re-read joins its repeatable-read snapshot, which
-    // predates the winner's row: a locking read sees it. `update_or_create`
-    // takes the update lock at once, so two losers cannot deadlock upgrading.
-    let qs = if atomic::in_block(pool) && pool.dialect().name() == "mysql" {
-        qs.lock_rows_unless_set(share)
+    // Only a block's re-read joins a snapshot. `update_or_create` takes the
+    // update lock at once, so two losers cannot deadlock upgrading.
+    let qs = if atomic::in_block(pool) {
+        winner_read(qs, pool.dialect(), share)
     } else {
         qs
     };
