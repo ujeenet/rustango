@@ -850,6 +850,13 @@ where
     run(pool, End::Commit, opts, f).await
 }
 
+/// Whether the running task is inside an [`atomic`] block on `pool`, so
+/// ORM calls given `pool` run on its transaction.
+#[must_use]
+pub fn in_atomic(pool: &Pool) -> bool {
+    in_block(pool)
+}
+
 /// How [`atomic_with`] begins a block. Built with its methods; the default
 /// is what [`atomic`] does.
 #[derive(Debug, Clone)]

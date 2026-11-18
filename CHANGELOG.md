@@ -8,6 +8,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 - `sql::update_or_create_on`: `update_or_create` on an open `PoolTx`.
 - `sql::atomic_with(pool, AtomicOptions, f)`: an isolation level (`Isolation`) and PG transaction settings (`TxSetting`, a custom `prefix.name` set with `set_config(.., true)`) for the outermost block; `atomic` and `atomic_immediate` send what they did.
+- `sql::in_atomic(&pool)`: whether ORM calls on `pool` run in an open `atomic` block.
 - `ExecError::InAtomic`: an operation refused inside an `atomic` block on its pool. `LockMode::share` for a shared row lock (`FOR SHARE` / `LOCK IN SHARE MODE`).
 
 ### Changed

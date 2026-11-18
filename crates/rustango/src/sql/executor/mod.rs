@@ -914,8 +914,8 @@ pub(crate) use atomic::detached;
 pub(crate) use atomic::in_any_block;
 pub(crate) use atomic::rolled_back;
 pub use atomic::{
-    atomic, atomic_immediate, atomic_with, on_commit, on_commit_pending, AtomicOptions, AtomicTx,
-    Isolation, TxGuard, TxSetting,
+    atomic, atomic_immediate, atomic_with, in_atomic, on_commit, on_commit_pending, AtomicOptions,
+    AtomicTx, Isolation, TxGuard, TxSetting,
 };
 pub(crate) use atomic::{caught, in_block};
 

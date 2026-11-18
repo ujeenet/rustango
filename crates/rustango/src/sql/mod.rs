@@ -104,13 +104,13 @@ pub use executor::{
     delete_tx, explain_pool, fetch_aggregate_dict, fetch_aggregate_pool, fetch_dates_pool,
     fetch_datetimes_pool, fetch_paginated_pool, fetch_with_prefetch_filtered,
     fetch_with_prefetch_pool, fetch_with_prefetch_related, fetch_with_prefetch_related_filtered,
-    get_or_create, get_or_create_tx, insert_or_ignore, insert_pool, insert_returning_pool,
-    insert_returning_tx, insert_tx, on_commit, on_commit_pending, raw_execute_pool, raw_execute_tx,
-    raw_query_pool, raw_query_tx, run_ddl_idempotent, select_one_row_as_json, select_one_row_pool,
-    select_rows_as_json, select_rows_pool, select_rows_pool_with_related,
-    select_rows_tx_with_related, transaction_pool, try_get_flat, try_get_flat_my,
-    try_get_flat_sqlite, update_or_create, update_or_create_on, update_pool, update_tx,
-    write_transaction,
+    get_or_create, get_or_create_tx, in_atomic, insert_or_ignore, insert_pool,
+    insert_returning_pool, insert_returning_tx, insert_tx, on_commit, on_commit_pending,
+    raw_execute_pool, raw_execute_tx, raw_query_pool, raw_query_tx, run_ddl_idempotent,
+    select_one_row_as_json, select_one_row_pool, select_rows_as_json, select_rows_pool,
+    select_rows_pool_with_related, select_rows_tx_with_related, transaction_pool, try_get_flat,
+    try_get_flat_my, try_get_flat_sqlite, update_or_create, update_or_create_on, update_pool,
+    update_tx, write_transaction,
 };
 // For the framework modules that open joined writes or read through the executor.
 #[allow(unused_imports)]

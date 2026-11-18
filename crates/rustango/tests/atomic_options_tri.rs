@@ -4,7 +4,8 @@
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
 use rustango::sql::{
-    atomic_with, raw_query_pool, AtomicOptions, ExecError, Isolation, Pool, SqlError, TxSetting,
+    atomic_with, in_atomic, raw_query_pool, AtomicOptions, ExecError, Isolation, Pool, SqlError,
+    TxSetting,
 };
 use rustango::{tri_dialect_test, Model};
 
@@ -167,6 +168,21 @@ async fn nested_options_are_refused(pool: &Pool) {
     .unwrap();
 }
 
+async fn in_atomic_tells_the_block_apart(pool: &Pool) {
+    assert!(!in_atomic(pool));
+    let q = pool.clone();
+    let inside = rustango::atomic!(pool, |_tx| { Ok::<_, ExecError>(in_atomic(&q)) })
+        .await
+        .unwrap();
+    assert!(inside);
+    let other = one_conn(pool).await;
+    let q = pool.clone();
+    let elsewhere = rustango::atomic!(&other, |_tx| { Ok::<_, ExecError>(in_atomic(&q)) })
+        .await
+        .unwrap();
+    assert!(!elsewhere, "another pool's block");
+}
+
 tri_dialect_test! {
     model: Note,
     scenarios: [
@@ -174,5 +190,6 @@ tri_dialect_test! {
         settings_are_transaction_local,
         setting_names_are_checked,
         nested_options_are_refused,
+        in_atomic_tells_the_block_apart,
     ],
 }
