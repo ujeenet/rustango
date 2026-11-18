@@ -602,6 +602,7 @@ impl Cache for DatabaseCache {
         let value: String = if dialect.name() == "mysql" {
             // No RETURNING: read back in the same transaction, which still
             // holds the row lock the upsert took.
+            // The cache's own transaction: it never rolls back with a caller.
             let mut tx = crate::sql::transaction_pool(&self.pool)
                 .await
                 .map_err(err)?;

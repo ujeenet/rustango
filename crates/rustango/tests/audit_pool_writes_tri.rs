@@ -902,6 +902,33 @@ async fn audited_writes_join_an_atomic_block(pool: &Pool) {
     assert_eq!(ops, ["update", "create"]);
 }
 
+/// `emit_many` and an audited truncate inside a caller's block roll back
+/// with it.
+async fn emit_and_truncate_roll_back_with_the_callers_block(pool: &Pool) {
+    let note = insert_note(pool).await;
+    let pk = note.id.get().expect("pk").to_string();
+    let q = pool.clone();
+    let res: Result<(), rustango::sql::ExecError> = rustango::atomic!(pool, |_tx| {
+        let entry = audit::PendingEntry {
+            entity_table: TABLE,
+            entity_pk: pk.clone(),
+            operation: audit::AuditOp::Update,
+            source: audit::AuditSource::System,
+            changes: serde_json::json!({}),
+        };
+        audit::emit_many(&q, &[entry.clone(), entry]).await?;
+        Note::truncate(&q).await?;
+        Err(rustango::sql::ExecError::Sql(
+            rustango::sql::SqlError::EmptyInList,
+        ))
+    })
+    .await;
+    assert!(res.is_err());
+    let rows: Vec<Note> = Note::objects().fetch(pool).await.unwrap();
+    assert_eq!(rows.len(), 1, "the truncate committed");
+    assert_eq!(audit_rows(pool).await, 1, "the emitted rows committed");
+}
+
 /// Saving a row that is gone is an error, with no audit row.
 async fn audited_save_of_a_missing_row_is_not_found(pool: &Pool) {
     let mut note = insert_note(pool).await;
@@ -924,6 +951,7 @@ async fn audited_save_of_a_missing_row_is_not_found(pool: &Pool) {
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        emit_and_truncate_roll_back_with_the_callers_block,
         audited_writes_join_an_atomic_block,
         audited_save_of_a_missing_row_is_not_found,
         audited_on_writes_are_refused,

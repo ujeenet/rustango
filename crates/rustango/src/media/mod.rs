@@ -779,7 +779,7 @@ impl MediaManager {
             .where_(Media::id.eq(id))
             .compile_delete()
             .map_err(media_err_from_query)?;
-        let mut tx = crate::sql::transaction_pool(&self.pool)
+        let mut tx = crate::sql::write_tx(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
         crate::sql::delete_tx(&mut tx, &unlink)
@@ -788,7 +788,7 @@ impl MediaManager {
         crate::sql::delete_tx(&mut tx, &row)
             .await
             .map_err(media_err_from_exec)?;
-        tx.commit().await?;
+        tx.commit().await.map_err(media_err_from_exec)?;
         Ok(())
     }
 
@@ -1040,14 +1040,14 @@ impl MediaManager {
             deleted_at: None,
         };
         // IMMEDIATE on SQLite: this tx reads before it writes (#2180).
-        let mut tx = crate::sql::write_transaction(&self.pool)
+        let mut tx = crate::sql::write_tx(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
         // Locked until commit, so a concurrent `delete_collection` either
         // sees this child or has already deleted the parent (#1573).
         if let Some(p) = parent {
             if !lock_live_collection_tx(&mut tx, p).await? {
-                tx.rollback().await?;
+                tx.rollback().await.map_err(media_err_from_exec)?;
                 // Not "not found": the router would answer 404 for a bad body.
                 return Err(MediaError::Other(format!(
                     "parent collection {p} is missing or deleted"
@@ -1091,7 +1091,7 @@ impl MediaManager {
                 .await
                 .map_err(media_err_from_exec)?
         };
-        tx.commit().await?;
+        tx.commit().await.map_err(media_err_from_exec)?;
         created
             .into_iter()
             .next()
@@ -1201,7 +1201,7 @@ impl MediaManager {
         // orphaned, and the old `collection_id` recorded nowhere.
         // Both are database-only, so a transaction closes it.
         // IMMEDIATE on SQLite: the walk reads before the writes (#2180).
-        let mut tx = crate::sql::write_transaction(&self.pool)
+        let mut tx = crate::sql::write_tx(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
         // One bind spare for `deleted_at`; a wide subtree is many `IN` lists.
@@ -1232,7 +1232,7 @@ impl MediaManager {
                 .await
                 .map_err(media_err_from_exec)?;
         }
-        tx.commit().await?;
+        tx.commit().await.map_err(media_err_from_exec)?;
         Ok(())
     }
 
@@ -1246,12 +1246,12 @@ impl MediaManager {
         collection_id: Option<i64>,
     ) -> Result<(), MediaError> {
         // IMMEDIATE on SQLite: the collection check reads before the update.
-        let mut tx = crate::sql::write_transaction(&self.pool)
+        let mut tx = crate::sql::write_tx(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
         if let Some(c) = collection_id {
             if !lock_live_collection_tx(&mut tx, c).await? {
-                tx.rollback().await?;
+                tx.rollback().await.map_err(media_err_from_exec)?;
                 return Err(dead_collection(c));
             }
         }
@@ -1267,7 +1267,7 @@ impl MediaManager {
         crate::sql::update_tx(&mut tx, &update)
             .await
             .map_err(media_err_from_exec)?;
-        tx.commit().await?;
+        tx.commit().await.map_err(media_err_from_exec)?;
         Ok(())
     }
 
@@ -1406,35 +1406,32 @@ impl MediaManager {
         let d = self.pool.dialect();
         let (p1, p2) = (d.placeholder(1), d.placeholder(2));
         if d.name() == "mysql" {
-            #[cfg(feature = "mysql")]
-            {
-                // Irrefutable in a mysql-only build — see the note above.
-                #[allow(irrefutable_let_patterns)]
-                let crate::sql::Pool::Mysql(my) = &self.pool
-                else {
-                    unreachable!()
-                };
-                let mut tx = my.begin().await?;
-                sqlx::query(
-                    "INSERT INTO `rustango_media_tags` (`name`, `slug`) \
-                     VALUES (?, ?) \
-                     ON DUPLICATE KEY UPDATE `name` = VALUES(`name`)",
-                )
-                .bind(slug)
-                .bind(slug)
-                .execute(&mut *tx)
-                .await?;
-                let out: MediaTag = sqlx::query_as(
-                    "SELECT id, name, slug, created_at FROM `rustango_media_tags` WHERE slug = ?",
-                )
-                .bind(slug)
-                .fetch_one(&mut *tx)
-                .await?;
-                tx.commit().await?;
-                return Ok(out);
-            }
-            #[cfg(not(feature = "mysql"))]
-            unreachable!();
+            // No RETURNING: read the row back in the same transaction.
+            let slug_value = || crate::core::SqlValue::String(slug.to_owned());
+            let mut tx = crate::sql::write_tx(&self.pool)
+                .await
+                .map_err(media_err_from_exec)?;
+            crate::sql::raw_execute_tx(
+                &mut tx,
+                "INSERT INTO `rustango_media_tags` (`name`, `slug`) \
+                 VALUES (?, ?) \
+                 ON DUPLICATE KEY UPDATE `name` = VALUES(`name`)",
+                vec![slug_value(), slug_value()],
+            )
+            .await
+            .map_err(media_err_from_exec)?;
+            let rows: Vec<MediaTag> = crate::sql::raw_query_tx(
+                &mut tx,
+                "SELECT id, name, slug, created_at FROM `rustango_media_tags` WHERE slug = ?",
+                vec![slug_value()],
+            )
+            .await
+            .map_err(media_err_from_exec)?;
+            tx.commit().await.map_err(media_err_from_exec)?;
+            return rows
+                .into_iter()
+                .next()
+                .ok_or_else(|| MediaError::Other("ensure_tag INSERT returned no rows".into()));
         }
         let sql = format!(
             "INSERT INTO rustango_media_tags (name, slug) VALUES ({p1}, {p2}) \
@@ -1626,7 +1623,7 @@ impl MediaManager {
         );
 
         // SQLite has no row lock: take its write lock at BEGIN instead.
-        let mut tx = crate::sql::write_transaction(&self.pool)
+        let mut tx = crate::sql::write_tx(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
         if let Some(lock) = lock {
@@ -1640,7 +1637,7 @@ impl MediaManager {
         crate::sql::bulk_insert_tx(&mut tx, &tag_links(media_id, tag_ids))
             .await
             .map_err(media_err_from_exec)?;
-        tx.commit().await?;
+        tx.commit().await.map_err(media_err_from_exec)?;
         Ok(())
     }
 
@@ -1822,12 +1819,12 @@ impl MediaManager {
     async fn insert_row(&self, r: InsertRow) -> Result<Media, MediaError> {
         use crate::sql::FetcherTx as _;
         // IMMEDIATE on SQLite: the collection check reads before the insert.
-        let mut tx = crate::sql::write_transaction(&self.pool)
+        let mut tx = crate::sql::write_tx(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
         if let Some(c) = r.collection_id {
             if !lock_live_collection_tx(&mut tx, c).await? {
-                tx.rollback().await?;
+                tx.rollback().await.map_err(media_err_from_exec)?;
                 return Err(dead_collection(c));
             }
         }
@@ -1856,7 +1853,7 @@ impl MediaManager {
             .fetch_tx(&mut tx)
             .await
             .map_err(media_err_from_exec)?;
-        tx.commit().await?;
+        tx.commit().await.map_err(media_err_from_exec)?;
         inserted
             .into_iter()
             .next()

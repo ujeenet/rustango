@@ -4109,17 +4109,13 @@ impl RoutingClaims {
     }
 
     /// The write's transaction, an edited tenant's values already claimed.
-    async fn begin(
-        &self,
-        pool: &Pool,
-        pk: &SqlValue,
-    ) -> Result<crate::sql::PoolTx<'static>, ClaimFailed> {
+    async fn begin(&self, pool: &Pool, pk: &SqlValue) -> Result<crate::sql::WriteTx, ClaimFailed> {
         #[cfg(feature = "tenancy")]
         return Ok(self.claims.begin(pool, pk).await?);
         #[cfg(not(feature = "tenancy"))]
         {
             let _ = pk;
-            Ok(crate::sql::write_transaction(pool).await?)
+            Ok(crate::sql::write_tx(pool).await?)
         }
     }
 
@@ -4427,7 +4423,7 @@ async fn create_many(
     // A claim MySQL broke with a deadlock: the whole batch is retried once.
     let mut retry = prepared.iter().any(|(_, c)| c.any());
     let (tx, pks) = 'attempt: loop {
-        let mut tx = match crate::sql::transaction_pool(&acq.pool).await {
+        let mut tx = match crate::sql::write_tx(&acq.pool).await {
             Ok(tx) => tx,
             Err(e) => {
                 return json_server_error("viewset::bulk_create::begin", &e);
@@ -4611,7 +4607,7 @@ async fn update_inner(
     // only on a pool is read and updated unlocked, rather than lose its
     // audit entry.
     let mut locked = match crate::audit::TxUpdate::for_model(state.vs.schema) {
-        Some(u) => match crate::sql::write_transaction(&acq.pool).await {
+        Some(u) => match crate::sql::write_tx(&acq.pool).await {
             Ok(tx) => Some((u, tx)),
             Err(e) => return json_server_error("viewset::update::begin", &e),
         },
@@ -4620,7 +4616,7 @@ async fn update_inner(
     let item = (pk_field, &pk_val);
     let read = (
         &scope[..],
-        ItemRead::Always(locked.as_mut().map(|(_, tx)| tx)),
+        ItemRead::Always(locked.as_mut().map(|(_, tx)| &mut **tx)),
     );
     if let Err(resp) = gate_item(&state, &mut acq, &parts, item, read, Some("change")).await {
         return resp;
@@ -4654,7 +4650,7 @@ async fn update_inner(
             let body = write_set.patch_body(bridge.as_ref(), &json);
             let checked = match locked.as_mut() {
                 Some((_, tx)) => bridge.validate_patch(tx, &q, &body).await,
-                None => match crate::sql::write_transaction(&acq.pool).await {
+                None => match crate::sql::write_tx(&acq.pool).await {
                     Ok(mut tx) => bridge.validate_patch(&mut tx, &q, &body).await,
                     Err(e) => return json_server_error("viewset::update::begin", &e),
                 },
@@ -4704,7 +4700,7 @@ async fn update_inner(
             }
         }
     }
-    let tx = locked.as_mut().map(|(_, tx)| tx);
+    let tx = locked.as_mut().map(|(_, tx)| &mut **tx);
     let stored = Some((pk_field, &pk_val));
     match write_set
         .check_fk_targets(&mut acq, tx, &written, stored)
@@ -4809,7 +4805,7 @@ async fn handle_destroy(
     // The row, locked in the delete's transaction: the hooks judge the row
     // the write removes. Before either path, as a soft delete is a delete.
     let schema = state.vs.schema;
-    let mut tx = match crate::sql::write_transaction(&acq.pool).await {
+    let mut tx = match crate::sql::write_tx(&acq.pool).await {
         Ok(tx) => tx,
         Err(e) => return json_server_error("viewset::destroy::begin", &e),
     };

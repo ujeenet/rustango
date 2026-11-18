@@ -267,6 +267,7 @@ async fn deactivate(registry: &crate::sql::Pool, id: i64) -> Result<u64, Tenancy
         .set("active", false)
         .compile()
         .map_err(crate::sql::ExecError::from)?;
+    // Deactivation commits on its own, never with a caller's block.
     let mut tx = crate::sql::write_transaction(registry).await?;
     let updated = crate::sql::update_tx(&mut tx, &update).await?;
     if updated > 0 {

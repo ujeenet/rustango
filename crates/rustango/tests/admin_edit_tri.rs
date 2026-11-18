@@ -626,6 +626,37 @@ async fn rename_through_the_form(
     row
 }
 
+/// An edit inside a caller's `atomic` block rolls back with it.
+async fn edit_rolls_back_with_the_callers_block(pool: &Pool) {
+    let mut d = Doc {
+        id: Auto::default(),
+        name: "a".into(),
+        meta: None,
+        status: "draft".into(),
+    };
+    d.insert(pool).await.expect("insert");
+    let id = *d.id.get().expect("pk");
+    let q = pool.clone();
+    let res: Result<(), rustango::sql::ExecError> = rustango::atomic!(pool, |_tx| {
+        let (status, html) = send(&q, "GET", &format!("/aed_doc/{id}/edit"), "").await;
+        assert_eq!(status, StatusCode::OK, "{html}");
+        let form = encode(&[
+            ("name", "renamed".to_owned()),
+            ("meta", shown(&html, "meta")),
+            ("status", shown(&html, "status")),
+        ]);
+        let (status, body) = send(&q, "POST", &format!("/aed_doc/{id}"), &form).await;
+        assert!(status.is_redirection(), "{status}: {body}");
+        Err(rustango::sql::ExecError::Sql(
+            rustango::sql::SqlError::EmptyInList,
+        ))
+    })
+    .await;
+    assert!(res.is_err());
+    let row = Doc::objects().fetch(pool).await.expect("fetch").remove(0);
+    assert_eq!(row.name, "a", "the edit outlived the rolled-back block");
+}
+
 /// A nullable `{}` survives a save that only renames the row.
 async fn untouched_nullable_json_object_is_kept(pool: &Pool) {
     let row = rename_through_the_form(pool, Some(serde_json::json!({})), false).await;
@@ -1312,6 +1343,7 @@ async fn home_links_open_the_nested_index(pool: &Pool) {
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        edit_rolls_back_with_the_callers_block,
         inline_add_row_takes_the_column_default,
         inline_edit_keeps_microseconds,
         string_pk_links_are_encoded,

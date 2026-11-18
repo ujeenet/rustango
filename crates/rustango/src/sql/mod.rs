@@ -71,7 +71,7 @@ pub use server::{
 };
 pub use vector::Vector;
 // Always-on: tri-dialect entry points + traits that don't pin on PG.
-#[cfg(feature = "cache")]
+#[cfg(any(feature = "cache", feature = "tenancy"))]
 pub(crate) use executor::detached;
 #[cfg(feature = "jobs")]
 pub(crate) use executor::in_any_block;
@@ -109,6 +109,7 @@ pub(crate) use executor::{
     bulk_insert_pks_tx, compile_bulk_update_batches, count_rows_on, execute_batches_tx,
     execute_unprepared_pool, fetch_in_chunks, fetch_select_in_chunks, fetch_values_list_on,
     inserted_pk, rows_per_batch, run_delete_statements_tx, truncate_refusal, truncate_tx, write_tx,
+    WriteTx,
 };
 pub(crate) use executor::{in_block, refuse_ddl_in_block, Ddl};
 #[cfg(feature = "admin")]

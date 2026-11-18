@@ -168,6 +168,7 @@ pub(crate) async fn ensure(
 ) -> Result<(), TenancyError> {
     let pg = crate::sql::Postgres;
     let (r, s) = (q(&role.name), q(schema));
+    // Role DDL runs on a registry connection of its own.
     let mut tx = registry.begin().await?;
     // One process at a time per role, so two first logins don't race.
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")

@@ -294,7 +294,7 @@ fn current() -> Option<Arc<Block>> {
 
 /// Run `fut` outside any [`atomic`] block, so its pool statements take
 /// their own connection and commit on their own.
-#[cfg(feature = "cache")]
+#[cfg(any(feature = "cache", feature = "tenancy"))]
 pub(crate) async fn detached<F: Future>(fut: F) -> F::Output {
     BLOCK.scope(None, fut).await
 }
@@ -694,7 +694,7 @@ pub(crate) fn in_any_block() -> bool {
 /// the whole block. DDL on MySQL returns [`ExecError::InAtomic`].
 ///
 /// **Separate connections** ([`Pool::acquire`], `Tenant::conn`, the cache,
-/// the job claim) run outside the block's transaction: they do not see its
+/// the job claim, tenancy registry changes) run outside the block's transaction: they do not see its
 /// writes and can deadlock on locks it holds (in-memory SQLite always).
 ///
 /// **Raw SQL** is checked after each statement: a `COMMIT`, `ROLLBACK` or

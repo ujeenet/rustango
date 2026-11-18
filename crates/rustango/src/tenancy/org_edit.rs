@@ -199,6 +199,20 @@ pub(crate) async fn apply_values_if(
     values: Vec<(&'static str, crate::core::SqlValue)>,
     expected: Option<&str>,
 ) -> Result<Option<Applied>, TenancyError> {
+    // A registry edit commits on its own, never with a caller's block.
+    crate::sql::detached(apply_values_if_alone(
+        registry, secrets, slug, values, expected,
+    ))
+    .await
+}
+
+async fn apply_values_if_alone(
+    registry: &Pool,
+    secrets: &TenantSecrets,
+    slug: &str,
+    values: Vec<(&'static str, crate::core::SqlValue)>,
+    expected: Option<&str>,
+) -> Result<Option<Applied>, TenancyError> {
     use crate::core::SqlValue;
     let existing = Org::objects()
         .where_(Org::slug.eq(slug.to_owned()))

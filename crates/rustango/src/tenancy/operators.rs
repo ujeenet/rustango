@@ -208,6 +208,7 @@ async fn deactivate_unless_last(
     id: i64,
 ) -> Result<Outcome, OperatorError> {
     use crate::sql::FetcherTx as _;
+    // A registry change commits on its own, never with a caller's block.
     let mut tx = crate::sql::write_transaction(registry).await?;
     // A locking read: MySQL sees the latest rows, PG re-checks `active`.
     let active = Operator::objects()

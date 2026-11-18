@@ -59,6 +59,26 @@ fn is_deadlock(e: &MediaError) -> bool {
 }
 
 /// A missing or deleted parent is refused, and a delete takes the subtree.
+/// Collection writes inside a caller's `atomic` block roll back with it.
+async fn writes_roll_back_with_the_callers_block(pool: &Pool) {
+    let mgr = manager(pool);
+    let res: Result<(), rustango::sql::ExecError> = rustango::atomic!(pool, |_tx| {
+        let root = create(&mgr, "rb-root", None).await;
+        create(&mgr, "rb-child", Some(root)).await;
+        Err(rustango::sql::ExecError::Sql(
+            rustango::sql::SqlError::EmptyInList,
+        ))
+    })
+    .await;
+    assert!(res.is_err());
+    use rustango::sql::FetcherPool as _;
+    let left = MediaCollection::objects()
+        .fetch(pool)
+        .await
+        .expect("collections");
+    assert!(left.is_empty(), "a collection outlived the block");
+}
+
 async fn dead_parent_is_refused(pool: &Pool) {
     let mgr = manager(pool);
     let root = create(&mgr, "seq-root", None).await;
@@ -435,6 +455,7 @@ tri_dialect_test!(
     setup: setup,
     sqlite: file,
     scenarios: [
+        writes_roll_back_with_the_callers_block,
         writers_wait_their_turn,
         wide_subtree_is_chunked,
         concurrent_writes_stay_consistent,

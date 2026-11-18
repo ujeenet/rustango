@@ -2211,7 +2211,7 @@ pub(crate) async fn create_submit(
     #[cfg(feature = "tenancy")]
     let mut retry = claims.retries();
     let (mut tx, pk, deferred) = loop {
-        let mut tx = match crate::sql::write_transaction(&state.pool).await {
+        let mut tx = match crate::sql::write_tx(&state.pool).await {
             Ok(tx) => tx,
             Err(e) => return Ok(refused(write_error(model, &e)).await),
         };
@@ -2780,7 +2780,7 @@ pub(crate) async fn update_submit(
             Err(e) => return Ok(refused(claim_refusal(model, e)).await),
         };
         #[cfg(not(feature = "tenancy"))]
-        let mut tx = match crate::sql::write_transaction(&state.pool).await {
+        let mut tx = match crate::sql::write_tx(&state.pool).await {
             Ok(tx) => tx,
             Err(e) => return Ok(refused(write_error(model, &e)).await),
         };
@@ -2969,7 +2969,7 @@ pub(super) async fn hidden_fk_refusal(
 
 /// A failed ROLLBACK must not replace the refusal with a 500; dropping
 /// the connection discards the tx anyway.
-async fn rollback_quietly(tx: crate::sql::PoolTx<'static>, table: &str) {
+async fn rollback_quietly(tx: crate::sql::WriteTx, table: &str) {
     if let Err(e) = tx.rollback().await {
         tracing::warn!(target: "rustango::admin", error = %e, table, "admin edit rollback failed");
     }
@@ -3041,7 +3041,7 @@ pub(crate) async fn delete_submit(
     let emit = crate::audit::DiffEmit::for_model(model);
     #[cfg(feature = "sso")]
     let links = user_links(&state, model).await?;
-    let mut tx = crate::sql::write_transaction(&state.pool).await?;
+    let mut tx = crate::sql::write_tx(&state.pool).await?;
     #[cfg(feature = "tenancy")]
     let operators = match crate::tenancy::operators::AdminOperatorWrite::lock(
         &mut tx,
@@ -3368,7 +3368,7 @@ pub(crate) async fn action_submit(
             // The handler writes in the action's transaction; an audited
             // model's entries commit with it.
             let emit = crate::audit::DiffEmit::for_model(model);
-            let mut tx = crate::sql::write_transaction(&state.pool).await?;
+            let mut tx = crate::sql::write_tx(&state.pool).await?;
             // The principal the hooks above saw, and only the rows they passed.
             let actor = crate::object_permissions::Actor::of(&parts);
             let ctx = super::ActionCtx::new(
@@ -3411,7 +3411,7 @@ pub(crate) async fn action_submit(
         BuiltinWrite::HardDelete => user_links(&state, model).await?,
         BuiltinWrite::Mark(..) => None,
     };
-    let mut tx = crate::sql::write_transaction(&state.pool).await?;
+    let mut tx = crate::sql::write_tx(&state.pool).await?;
     #[cfg(feature = "tenancy")]
     let operators = match crate::tenancy::operators::AdminOperatorWrite::lock(
         &mut tx,

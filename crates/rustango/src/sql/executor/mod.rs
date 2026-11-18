@@ -907,7 +907,7 @@ use on::{on_pool, pool_exec, pool_rows, RowRef};
 pub use on::{write_tx, PoolConn, PooledConn, SqlExecutor, WriteTx};
 
 mod atomic;
-#[cfg(feature = "cache")]
+#[cfg(any(feature = "cache", feature = "tenancy"))]
 pub(crate) use atomic::detached;
 #[cfg(feature = "jobs")]
 pub(crate) use atomic::in_any_block;
@@ -2242,11 +2242,11 @@ async fn run_truncate(
     table: &'static str,
     mode: TruncateMode,
 ) -> Result<u64, ExecError> {
-    let mut tx = tx::write_transaction(pool).await?;
+    let mut tx = write_tx(pool).await?;
     let affected = truncate_tx(&mut tx, table, mode).await?;
     tx.commit()
         .await
-        .map_err(|e| truncate_refusal(table, mode, e.into()))?;
+        .map_err(|e| truncate_refusal(table, mode, e))?;
     Ok(affected)
 }
 

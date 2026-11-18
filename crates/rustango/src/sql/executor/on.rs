@@ -565,6 +565,27 @@ impl WriteTx {
             WriteTxConn::Joined(w) => w.release().await,
         }
     }
+
+    /// Roll back, or undo the block's savepoint on its next use.
+    ///
+    /// # Errors
+    /// Driver errors from `ROLLBACK`.
+    pub async fn rollback(self) -> Result<(), ExecError> {
+        match self.0 {
+            WriteTxConn::Own(tx) => Ok(tx.rollback().await?),
+            WriteTxConn::Joined(w) => {
+                drop(w);
+                Ok(())
+            }
+        }
+    }
+}
+
+/// A transaction of its own, such as a registry claim's.
+impl From<PoolTx<'static>> for WriteTx {
+    fn from(tx: PoolTx<'static>) -> Self {
+        Self(WriteTxConn::Own(tx))
+    }
 }
 
 impl std::ops::Deref for WriteTx {

@@ -394,7 +394,7 @@ mod tests {
         // slept a fixed 80ms — CI's busy runner sometimes takes 100ms+
         // to deliver the second tick after the panicking one, so the
         // assertion landed at 0 and red-tagged main. Polling converges
-        // as soon as `counter >= 1`. Same shape as the on_commit_live /
+        // as soon as `counter >= 1`. Same shape as the on_commit_tri /
         // jobs_pg_live / job_fires_after_one_period flake fixes.
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {
