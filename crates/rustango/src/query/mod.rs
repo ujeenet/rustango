@@ -410,8 +410,8 @@ impl<T: Model> QuerySet<T> {
 
     /// PG 9.3+ / MySQL 8.0.1+: `FOR UPDATE OF table1, table2, …` — lock
     /// only the named tables when the query joins. Without `OF` the
-    /// lock covers every joined table the result touches. No-op on
-    /// SQLite.
+    /// lock covers every joined table the result touches. MariaDB has no
+    /// `OF` and locks them all; no-op on SQLite.
     ///
     /// Each call appends. Pass base table names or join aliases.
     #[must_use]
