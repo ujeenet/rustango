@@ -51,37 +51,70 @@ async fn one_conn(pool: &Pool) -> Pool {
     }
 }
 
-/// The current transaction's isolation level, as the server names it.
-async fn level(pool: &Pool) -> Option<String> {
-    let sql = match dialect(pool) {
-        "postgres" => "SHOW transaction_isolation",
-        "mysql" => {
-            "SELECT CAST(ISOLATION_LEVEL AS CHAR) FROM performance_schema.events_transactions_current \
-             WHERE THREAD_ID = PS_CURRENT_THREAD_ID()"
-        }
-        _ => return None,
-    };
-    let rows: Vec<(String,)> = raw_query_pool(sql, vec![], pool).await.unwrap();
-    rows.into_iter().next().map(|(l,)| l.to_lowercase())
+/// PG's current transaction isolation level.
+async fn pg_level(pool: &Pool) -> String {
+    let rows: Vec<(String,)> = raw_query_pool("SHOW transaction_isolation", vec![], pool)
+        .await
+        .unwrap();
+    rows[0].0.clone()
+}
+
+/// Rows `pool` sees before and after `other` commits one more, inside one
+/// block: a repeatable read sees no change.
+async fn sees_a_concurrent_commit(
+    p: &Pool,
+    other: &Pool,
+    id: i64,
+    opts: AtomicOptions,
+) -> (usize, usize) {
+    let (q, other) = (p.clone(), other.clone());
+    atomic_with(p, opts, |_tx| {
+        Box::pin(async move {
+            use rustango::sql::FetcherPool as _;
+            let before = Note::objects().fetch(&q).await?.len();
+            Note { id }.insert(&other).await?;
+            let after = Note::objects().fetch(&q).await?.len();
+            Ok((before, after))
+        })
+    })
+    .await
+    .unwrap()
 }
 
 /// The level is the block's own; MySQL's does not reach the next transaction.
 async fn isolation_level_is_read_back_in_the_block(pool: &Pool) {
     let p = one_conn(pool).await;
-    let q = p.clone();
-    let opts = AtomicOptions::new().isolation(Isolation::Serializable);
-    let inside = atomic_with(&p, opts, |_tx| Box::pin(async move { Ok(level(&q).await) }))
-        .await
-        .unwrap();
-    let q = p.clone();
-    let next = rustango::atomic!(&p, |_tx| { Ok::<_, ExecError>(level(&q).await) })
-        .await
-        .unwrap();
     match dialect(pool) {
-        "sqlite" => assert_eq!((inside, next), (None, None)),
+        "postgres" => {
+            let q = p.clone();
+            let opts = AtomicOptions::new().isolation(Isolation::Serializable);
+            let inside = atomic_with(&p, opts, |_tx| {
+                Box::pin(async move { Ok(pg_level(&q).await) })
+            })
+            .await
+            .unwrap();
+            assert_eq!(inside, "serializable");
+            let q = p.clone();
+            let next = rustango::atomic!(&p, |_tx| { Ok::<_, ExecError>(pg_level(&q).await) })
+                .await
+                .unwrap();
+            assert_ne!(next, "serializable", "the level leaked");
+        }
+        "mysql" => {
+            // Proven by behaviour: performance_schema may not be readable.
+            let other = one_conn(pool).await;
+            let rc = AtomicOptions::new().isolation(Isolation::ReadCommitted);
+            assert_eq!(sees_a_concurrent_commit(&p, &other, 1, rc).await, (0, 1));
+            // The next block on that connection is back to repeatable read.
+            let next = sees_a_concurrent_commit(&p, &other, 2, AtomicOptions::new()).await;
+            assert_eq!(next, (1, 1), "the level leaked");
+        }
+        // SQLite is always serializable: any level is accepted.
         _ => {
-            assert_eq!(inside.as_deref(), Some("serializable"));
-            assert_ne!(next.as_deref(), Some("serializable"), "the level leaked");
+            let opts = AtomicOptions::new().isolation(Isolation::ReadCommitted);
+            atomic_with(&p, opts, |_tx| Box::pin(async move { Ok(()) }))
+                .await
+                .unwrap();
         }
     }
 }
