@@ -401,6 +401,47 @@ async fn database_mode_resolves_secret_reference_via_resolver() {
 // owns) as the observable: a cached pool carries its predecessor's
 // connections, a freshly built one does not.
 
+/// The default held pool is one connection: a second `acquire` on the same
+/// tenant waits out the acquire timeout and names the held pool, never hangs.
+#[tokio::test]
+async fn a_second_held_conn_times_out_with_a_clear_error() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
+    drop_schema(&pool, "acme_held_busy").await;
+    create_schema(&pool, "acme_held_busy").await;
+    let acme = seed_org(
+        &pool,
+        "acme_held_busy",
+        StorageMode::Schema,
+        Some("acme_held_busy"),
+        None,
+    )
+    .await;
+    let pools = TenantPools::new(pool.clone()).config(rustango::tenancy::TenantPoolsConfig {
+        database_pool_acquire_timeout: std::time::Duration::from_millis(500),
+        ..Default::default()
+    });
+    let first = pools.acquire(&acme).await.expect("first held conn");
+    let second = tokio::time::timeout(std::time::Duration::from_secs(10), pools.acquire(&acme))
+        .await
+        .expect("bounded by the acquire timeout");
+    match second {
+        Err(e @ rustango::tenancy::TenancyError::TenantConnBusy { .. }) => {
+            assert!(e.to_string().contains("acme_held_busy"), "{e}");
+        }
+        Err(e) => panic!("expected TenantConnBusy, got {e}"),
+        Ok(_) => panic!("a second held conn was handed out"),
+    }
+    drop(first);
+    pools.acquire(&acme).await.expect("free again");
+    drop_schema(&pool, "acme_held_busy").await;
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+}
+
 #[tokio::test]
 async fn scoped_pool_is_cached_per_tenant() {
     let _g = live_lock().lock().await;
@@ -1010,6 +1051,7 @@ async fn a_busy_schema_tenant_does_not_block_other_tenants() {
         .unwrap();
     let cfg = rustango::tenancy::TenantPoolsConfig {
         scoped_pool_max_connections: 2,
+        scoped_held_pool_max_connections: 2,
         database_pool_acquire_timeout: Duration::from_secs(2),
         ..Default::default()
     };

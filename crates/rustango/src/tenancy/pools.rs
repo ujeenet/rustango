@@ -131,25 +131,29 @@ pub struct TenantPoolsConfig {
     /// Before 0.57.12 it returned an uncached pool per call instead,
     /// uncapped (#1528).
     ///
-    /// Budget the worst case as `2 * max_cached_scoped_pools *
-    /// scoped_pool_max_connections` concurrent connections against
-    /// the registry server, plus the registry pool itself, and keep that
-    /// under its `max_connections`. The defaults give 2 × 8 × 3 = 48,
-    /// which with a 10-connection registry pool fits a stock Postgres'
-    /// 100 with room for a second process or a console. Boot warns when
-    /// the server's limit is lower than this budget. Raise both knobs on
-    /// a bigger server or behind PgBouncer.
-    /// Default: 8.
+    /// Budget the worst case as `max_cached_scoped_pools *
+    /// (scoped_pool_max_connections + scoped_held_pool_max_connections)`
+    /// concurrent connections against the registry server, plus the
+    /// registry pool itself, and keep that under its `max_connections`.
+    /// The defaults give 16 × (3 + 1) = 64, which with a 10-connection
+    /// registry pool fits a stock Postgres' 100. Boot warns when the
+    /// server's limit, less its reserved slots, is lower than this budget.
+    /// Raise the knobs on a bigger server or behind PgBouncer.
+    /// Default: 16.
     pub max_cached_scoped_pools: usize,
 
-    /// Per-pool `max_connections` for schema-mode scoped pools. Each
-    /// tenant has two: `t.pool()`'s and the held connections', so one
-    /// never waits on the other. Budget `2 * max_cached_scoped_pools *
-    /// scoped_pool_max_connections` against the registry server's
-    /// `max_connections`. A quiet tenant closes its connections after
+    /// `max_connections` of a schema-mode tenant's queries pool, the one
+    /// `t.pool()` uses. A quiet tenant closes its connections after
     /// `database_pool_idle_timeout` (`min_connections = 0`).
     /// Default: 3.
     pub scoped_pool_max_connections: u32,
+
+    /// `max_connections` of a schema-mode tenant's held pool, the one
+    /// `Tenant::conn` takes from, apart from the queries pool so neither
+    /// waits on the other. Past it a `Tenant::conn` waits up to
+    /// `database_pool_acquire_timeout`, then fails with
+    /// [`TenancyError::TenantConnBusy`]. Default: 1.
+    pub scoped_held_pool_max_connections: u32,
 
     /// Most database-mode pools built at once, across tenants. A build
     /// waits up to `database_pool_acquire_timeout` for a slot, then fails
@@ -180,7 +184,9 @@ impl TenantPoolsConfig {
     /// Most registry-server connections the schema-mode pools open:
     /// a queries pool and a held pool per cached tenant.
     pub(crate) fn scoped_connection_budget(&self) -> u64 {
-        2 * self.max_cached_scoped_pools as u64 * u64::from(self.scoped_pool_max_connections)
+        let per_tenant = u64::from(self.scoped_pool_max_connections)
+            + u64::from(self.scoped_held_pool_max_connections);
+        self.max_cached_scoped_pools as u64 * per_tenant
     }
 }
 
@@ -197,10 +203,11 @@ impl Default for TenantPoolsConfig {
             database_pool_idle_timeout: Some(std::time::Duration::from_secs(10 * 60)),
             database_pool_max_lifetime: Some(std::time::Duration::from_secs(30 * 60)),
             prewarm_active_tenants: false,
-            // 2 × 8 × 3 = 48 registry-server connections at worst: fits
+            // 16 × (3 + 1) = 64 registry-server connections at worst: fits
             // a stock Postgres (max_connections = 100) with the registry pool.
-            max_cached_scoped_pools: 8,
+            max_cached_scoped_pools: 16,
             scoped_pool_max_connections: 3,
+            scoped_held_pool_max_connections: 1,
             max_concurrent_pool_builds: 16,
             max_pool_builds_per_minute: 600,
             media_storage: None,
@@ -938,10 +945,13 @@ fn over_budget(config: &TenantPoolsConfig, registry: u32, server: i32) -> Option
         ", or set max_cached_scoped_pools = 0 to share the registry pool"
     };
     Some(format!(
-        "schema-mode pools can open {need} connections (2 x max_cached_scoped_pools {} x \
-         scoped_pool_max_connections {} + registry pool {registry}) but the server leaves \
-         {server} after reserved slots; lower TenantPoolsConfig's knobs or raise max_connections{shared}",
-        config.max_cached_scoped_pools, config.scoped_pool_max_connections,
+        "schema-mode pools can open {need} connections (max_cached_scoped_pools {} x \
+         (scoped_pool_max_connections {} + scoped_held_pool_max_connections {}) + registry \
+         pool {registry}) but the server leaves {server} after reserved slots; lower \
+         TenantPoolsConfig's knobs or raise max_connections{shared}",
+        config.max_cached_scoped_pools,
+        config.scoped_pool_max_connections,
+        config.scoped_held_pool_max_connections,
     ))
 }
 
@@ -1700,10 +1710,18 @@ impl TenantPools<sqlx::Postgres> {
                 let pool = self
                     .schema_mode_pool(org, schema.clone(), registry, PoolUse::Held)
                     .await?;
+                // A wait past the acquire timeout names the held pool, not a bare timeout.
+                let conn = pool.acquire().await.map_err(|e| match e {
+                    sqlx::Error::PoolTimedOut => TenancyError::TenantConnBusy {
+                        slug: org.slug.clone(),
+                        max: self.config.scoped_held_pool_max_connections,
+                    },
+                    e => e.into(),
+                })?;
                 // The reset restores the connect-time `search_path`,
                 // undoing a handler's own `SET` before the next borrower.
                 Ok(TenantConn {
-                    inner: Some(pool.acquire().await?),
+                    inner: Some(conn),
                     schema: Some(schema),
                     reset: Some(reset_pg_search_path),
                 })
@@ -1809,7 +1827,13 @@ impl TenantPools<sqlx::Postgres> {
             let timeout = self.config.database_pool_acquire_timeout;
             let path =
                 TenantSearchPath::open(&registry, &schema, FallThrough::OpenPool, timeout).await?;
-            let (scoped, on_previous) = self.build_scoped_pool(&path, &registry, &schema).await?;
+            let max = match of {
+                PoolUse::Queries => self.config.scoped_pool_max_connections,
+                PoolUse::Held => self.config.scoped_held_pool_max_connections,
+            };
+            let (scoped, on_previous) = self
+                .build_scoped_pool(&path, &registry, &schema, max)
+                .await?;
             tracing::info!(
                 target: "rustango::tenancy::pools",
                 slug = %org.slug,
@@ -1878,13 +1902,16 @@ impl TenantPools<sqlx::Postgres> {
         path: &TenantSearchPath,
         registry: &PgPool,
         schema: &str,
+        max: u32,
     ) -> Result<(PgPool, bool), TenancyError> {
         let base = (*registry.connect_options())
             .clone()
             .options([("search_path", path.startup_option())]);
         let Some(role) = self.tenant_role(schema).await? else {
             return Ok((
-                scoped_pool_options(&self.config).connect_with(base).await?,
+                scoped_pool_options(&self.config, max)
+                    .connect_with(base)
+                    .await?,
                 false,
             ));
         };
@@ -1893,7 +1920,7 @@ impl TenantPools<sqlx::Postgres> {
             super::schema_role::ensure(registry, &role, schema, &path.schemas[1..]).await?;
         }
         // Never reset the password here: two secrets would flip it back and forth.
-        let err = match scoped_pool_options(&self.config)
+        let err = match scoped_pool_options(&self.config, max)
             .connect_with(role.login(base.clone()))
             .await
         {
@@ -1902,7 +1929,7 @@ impl TenantPools<sqlx::Postgres> {
         };
         if super::schema_role::is_bad_password(&err) {
             if let Some(previous) = self.previous_tenant_role(schema).await? {
-                if let Ok(pool) = scoped_pool_options(&self.config)
+                if let Ok(pool) = scoped_pool_options(&self.config, max)
                     .connect_with(previous.login(base))
                     .await
                 {
@@ -2349,10 +2376,10 @@ pub(crate) async fn connect_schema_scoped(
 
 /// Options of a schema-mode tenant pool.
 #[cfg(feature = "postgres")]
-pub(crate) fn scoped_pool_options(config: &TenantPoolsConfig) -> PgPoolOptions {
+pub(crate) fn scoped_pool_options(config: &TenantPoolsConfig, max: u32) -> PgPoolOptions {
     // Min 0: these are cached and all point at the registry server, so
     // warm connections per tenant would make caching them expensive.
-    tenant_pool_options(config, config.scoped_pool_max_connections, 0)
+    tenant_pool_options(config, max, 0)
 }
 
 /// The one place a tenant pool's options are made, so none skips
@@ -3195,25 +3222,21 @@ mod tests {
         );
     }
 
-    /// The default schema-mode budget plus a 10-connection registry pool
-    /// stays under 64, so a stock Postgres (100) keeps room to spare.
+    /// The default schema-mode budget is 64; with a 10-connection registry
+    /// pool it fits a stock Postgres (100, less 3 superuser slots).
     #[cfg(feature = "postgres")]
     #[test]
     fn default_scoped_budget_fits_a_stock_postgres() {
         let c = TenantPoolsConfig::default();
-        assert!(
-            c.scoped_connection_budget() + 10 <= 64,
-            "{}",
-            c.scoped_connection_budget()
-        );
-        assert_eq!(over_budget(&c, 10, 100), None);
+        assert_eq!(c.scoped_connection_budget(), 64);
+        assert_eq!(over_budget(&c, 10, 97), None);
         let big = TenantPoolsConfig {
             schema_tenant_roles: false,
             ..TenantPoolsConfig::default()
         };
         let msg = over_budget(&big, 10, 40).expect("over");
         assert!(
-            msg.contains("58 connections") && msg.contains("= 0"),
+            msg.contains("74 connections") && msg.contains("= 0"),
             "{msg}"
         );
     }

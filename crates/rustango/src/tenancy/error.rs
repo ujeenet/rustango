@@ -59,6 +59,15 @@ pub enum TenancyError {
     /// [`super::TenantPoolsConfig::max_pool_builds_per_minute`]. Answer 503.
     #[error("tenant pool builds are busy")]
     PoolBusy,
+
+    /// Every held connection of a schema-mode tenant stayed taken past the
+    /// acquire timeout; see
+    /// [`super::TenantPoolsConfig::scoped_held_pool_max_connections`].
+    #[error(
+        "tenant `{slug}`: all {max} held connection(s) busy past the acquire timeout; \
+         another request holds Tenant::conn, or one request asked for two"
+    )]
+    TenantConnBusy { slug: String, max: u32 },
 }
 
 impl TenancyError {

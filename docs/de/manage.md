@@ -1915,15 +1915,16 @@ sei denn, Sie schalten das Pre-Warming ein. Die Einstellungen leben auf
 | `database_pool_idle_timeout` | 10 min | Schließt untätige Verbindungen nach dieser Dauer. Wehrt Kappungen durch Load-Balancer / `idle_in_transaction_session_timeout` ab. |
 | `database_pool_max_lifetime` | 30 min | Erzwingt das Rotieren von Verbindungen, damit vault-geleaste Anmeldedaten aufgefrischt werden. |
 | `prewarm_active_tenants` | false | Wenn true, ruft `Server::Builder::serve` beim Boot `prewarm_database_tenants()` auf. |
-| `max_cached_scoped_pools` | 8 | Obergrenze für die gecachten Pools pro Tenant bei Tenants im schema-Modus. |
-| `scoped_pool_max_connections` | 3 | `max_connections` jedes Tenant-Pools im schema-Modus. |
+| `max_cached_scoped_pools` | 16 | Obergrenze für die gecachten Pools pro Tenant bei Tenants im schema-Modus. |
+| `scoped_pool_max_connections` | 3 | `max_connections` des Abfrage-Pools eines Tenants im schema-Modus (`t.pool()`). |
+| `scoped_held_pool_max_connections` | 1 | `max_connections` des Halte-Pools eines Tenants im schema-Modus (`Tenant::conn`, `DatabaseTenant`). Darüber wartet eine Anfrage bis `database_pool_acquire_timeout` und erhält dann 503 (`TenancyError::TenantConnBusy`). |
 | `max_concurrent_pool_builds` | 16 | Gleichzeitige Pool-Aufbauten im Datenbank-Modus; ein Aufbau wartet bis `database_pool_acquire_timeout`, dann 503. `0` = keine Grenze. |
 | `max_pool_builds_per_minute` | 600 | Pool-Aufbauten im Datenbank-Modus pro Minute; darüber 503. `0` = keine Grenze. |
 
-Tenants im schema-Modus können `2 × max_cached_scoped_pools × scoped_pool_max_connections`
-Verbindungen zum Registry-Server öffnen (standardmäßig 48), bemessen mit dem Registry-Pool
+Tenants im schema-Modus können `max_cached_scoped_pools × (scoped_pool_max_connections + scoped_held_pool_max_connections)`
+Verbindungen zum Registry-Server öffnen (standardmäßig 64), bemessen mit dem Registry-Pool
 für ein Standard-Postgres (`max_connections = 100`); der Start warnt, wenn der Server nach
-seinen reservierten Plätzen weniger erlaubt, auch vor dem ersten Tenant. Erhöhen Sie beide auf einem größeren Server oder hinter PgBouncer.
+seinen reservierten Plätzen weniger erlaubt, auch vor dem ersten Tenant. Erhöhen Sie sie auf einem größeren Server oder hinter PgBouncer.
 
 Mit `Cli` übergeben Sie die Konfiguration über `Cli::with_tenant_pools(config)`.
 
