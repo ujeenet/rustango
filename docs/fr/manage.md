@@ -1961,7 +1961,7 @@ sur `TenantPoolsConfig` :
 | `prewarm_active_tenants` | false | Si vrai, `Server::Builder::serve` appelle `prewarm_database_tenants()` au démarrage. |
 | `max_cached_scoped_pools` | 16 | Plafond des pools par tenant mis en cache pour les tenants en mode schéma. |
 | `scoped_pool_max_connections` | 3 | `max_connections` du pool de requêtes d'un tenant en mode schéma (`t.pool()`). |
-| `scoped_held_pool_max_connections` | 1 | `max_connections` du pool de connexions tenues d'un tenant en mode schéma (`Tenant::conn`, `DatabaseTenant`). Au-delà, une requête attend jusqu'à `database_pool_acquire_timeout`, puis reçoit un 503 (`TenancyError::TenantConnBusy`). |
+| `scoped_held_pool_max_connections` | 1 | `max_connections` du pool de connexions tenues d'un tenant en mode schéma (`Tenant::conn`). Au-delà, une requête attend jusqu'à `database_pool_acquire_timeout`, puis reçoit un 503 (`TenancyError::TenantConnBusy`). |
 | `max_concurrent_pool_builds` | 16 | Pools en mode base construits à la fois ; une construction attend jusqu'à `database_pool_acquire_timeout`, puis 503. `0` = sans limite. |
 | `max_pool_builds_per_minute` | 600 | Pools en mode base construits par minute ; au-delà 503. `0` = sans limite. |
 

@@ -939,16 +939,12 @@ fn over_budget(config: &TenantPoolsConfig, registry: u32, server: i32) -> Option
     if need <= u64::try_from(server).unwrap_or(0) {
         return None;
     }
-    let shared = if config.schema_tenant_roles {
-        ""
-    } else {
-        ", or set max_cached_scoped_pools = 0 to share the registry pool"
-    };
     Some(format!(
         "schema-mode pools can open {need} connections (max_cached_scoped_pools {} x \
          (scoped_pool_max_connections {} + scoped_held_pool_max_connections {}) + registry \
          pool {registry}) but the server leaves {server} after reserved slots; lower \
-         TenantPoolsConfig's knobs or raise max_connections{shared}",
+         TenantPoolsConfig's knobs, raise max_connections, or put a pooler in front; \
+         pools held outside the cache, such as a job queue per tenant, come on top",
         config.max_cached_scoped_pools,
         config.scoped_pool_max_connections,
         config.scoped_held_pool_max_connections,

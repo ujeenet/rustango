@@ -1210,10 +1210,9 @@ async fn handle_list(
     };
 
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
-    let (rows_result, count_result) = tokio::join!(
-        select_rows_as_json(&state.pool, &select_q, &fields),
-        count_rows_pool(&state.pool, &count_q),
-    );
+    // One after the other: inside an atomic block both reads share one connection.
+    let rows_result = select_rows_as_json(&state.pool, &select_q, &fields).await;
+    let count_result = count_rows_pool(&state.pool, &count_q).await;
     let mut object_list: Vec<Value> = match rows_result {
         Ok(r) => r,
         Err(e) => return template_error(&format!("query rows: {e}")),

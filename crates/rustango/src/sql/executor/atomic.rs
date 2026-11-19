@@ -978,7 +978,7 @@ impl TxSetting {
 /// As [`atomic`].
 #[deprecated(
     since = "0.67.0",
-    note = "use `atomic`: it begins SQLite blocks with `BEGIN IMMEDIATE` now"
+    note = "use `atomic`: it begins SQLite blocks with `BEGIN IMMEDIATE` now; removed in 0.68.0"
 )]
 pub async fn atomic_immediate<F, T>(pool: &Pool, f: F) -> Result<T, ExecError>
 where

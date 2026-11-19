@@ -4717,6 +4717,8 @@ async fn update_inner(
     if assignments.is_empty() {
         // Only locked fields: answer as an update that changed nothing.
         if write_set.sends_locked(form) {
+            // Nothing was written: release the row lock so the read-back can join a block.
+            drop(locked.take());
             let fields = state.effective_fields();
             return match fetch_by_pk_scoped(&state, &mut acq, pk_field, pk_val, &fields, &read_back)
                 .await

@@ -1882,7 +1882,7 @@ on pre-warming. The settings live on `TenantPoolsConfig`:
 | `prewarm_active_tenants` | false | When true, `Server::Builder::serve` calls `prewarm_database_tenants()` at boot. |
 | `max_cached_scoped_pools` | 16 | Cap on the cached per-tenant pools for schema-mode tenants. |
 | `scoped_pool_max_connections` | 3 | `max_connections` of a schema-mode tenant's queries pool (`t.pool()`). |
-| `scoped_held_pool_max_connections` | 1 | `max_connections` of a schema-mode tenant's held pool (`Tenant::conn`, `DatabaseTenant`). Past it a request waits up to `database_pool_acquire_timeout`, then gets a 503 (`TenancyError::TenantConnBusy`). |
+| `scoped_held_pool_max_connections` | 1 | `max_connections` of a schema-mode tenant's held pool (`Tenant::conn`). Past it a request waits up to `database_pool_acquire_timeout`, then gets a 503 (`TenancyError::TenantConnBusy`). |
 | `max_concurrent_pool_builds` | 16 | Database-mode pools built at once; a build waits up to `database_pool_acquire_timeout`, then 503. `0` = no limit. |
 | `max_pool_builds_per_minute` | 600 | Database-mode pools built per minute; past it 503. `0` = no limit. |
 

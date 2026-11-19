@@ -1893,7 +1893,7 @@ actives el pre-calentamiento. Los ajustes viven en `TenantPoolsConfig`:
 | `prewarm_active_tenants` | false | Cuando es true, `Server::Builder::serve` llama a `prewarm_database_tenants()` en el arranque. |
 | `max_cached_scoped_pools` | 16 | Tope de pools por tenant en caché para los tenants en modo esquema. |
 | `scoped_pool_max_connections` | 3 | `max_connections` del pool de consultas de un tenant en modo esquema (`t.pool()`). |
-| `scoped_held_pool_max_connections` | 1 | `max_connections` del pool de conexiones retenidas de un tenant en modo esquema (`Tenant::conn`, `DatabaseTenant`). Por encima, una petición espera hasta `database_pool_acquire_timeout` y luego recibe un 503 (`TenancyError::TenantConnBusy`). |
+| `scoped_held_pool_max_connections` | 1 | `max_connections` del pool de conexiones retenidas de un tenant en modo esquema (`Tenant::conn`). Por encima, una petición espera hasta `database_pool_acquire_timeout` y luego recibe un 503 (`TenancyError::TenantConnBusy`). |
 | `max_concurrent_pool_builds` | 16 | Pools en modo base construidos a la vez; una construcción espera hasta `database_pool_acquire_timeout`, luego 503. `0` = sin límite. |
 | `max_pool_builds_per_minute` | 600 | Pools en modo base construidos por minuto; por encima 503. `0` = sin límite. |
 
