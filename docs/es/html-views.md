@@ -114,7 +114,10 @@ Las vistas aplican las mismas reglas de fila que un ViewSet: los scopes
 oculta filas (`404` en las páginas de detalle, edición y borrado; fuera de
 listas, acciones masivas y nombres de FK mostrados). Los hooks `change` y
 `delete` rechazan con un `403`, y un `delete_selected` que incluye una fila
-rechazada es un `403` entero.
+rechazada es un `403` entero. Un formulario no puede apuntar una FK a una fila
+que los scopes o el hook `view` del destino ocultan (error de formulario). Una
+lista revisa como máximo `view_hook_scan_cap` filas (2 000 por defecto) con el
+hook `view`; por encima, la página es un `400`.
 
 ---
 

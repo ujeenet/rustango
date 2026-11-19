@@ -152,7 +152,7 @@ async fn gate_row(
 ) -> Result<(), Response> {
     #[cfg(feature = "admin")]
     {
-        use crate::object_permissions::{Hooks, Verdict};
+        use crate::object_permissions::Hooks;
         let table = q.model.table;
         if !Hooks::All.judges(table, action) {
             return Ok(());
@@ -161,15 +161,7 @@ async fn gate_row(
         let row = select_one_row_as_json(pool, q, &fields)
             .await
             .map_err(|e| template_error(&format!("query row: {e}")))?;
-        match row.map(|row| Hooks::All.judge(table, parts, &row, action)) {
-            None | Some(Verdict::Hidden) => {
-                Err((StatusCode::NOT_FOUND, "not found").into_response())
-            }
-            Some(Verdict::Refused) => {
-                Err((StatusCode::FORBIDDEN, "permission denied").into_response())
-            }
-            Some(Verdict::Allowed) => Ok(()),
-        }
+        verdict(row.map(|row| Hooks::All.judge(table, parts, &row, action)))
     }
     #[cfg(not(feature = "admin"))]
     {
@@ -178,8 +170,20 @@ async fn gate_row(
     }
 }
 
+/// Missing or hidden is a 404, refused a 403.
+#[cfg(feature = "admin")]
+fn verdict(v: Option<crate::object_permissions::Verdict>) -> Result<(), Response> {
+    use crate::object_permissions::Verdict;
+    match v {
+        None | Some(Verdict::Hidden) => Err((StatusCode::NOT_FOUND, "not found").into_response()),
+        Some(Verdict::Refused) => Err((StatusCode::FORBIDDEN, "permission denied").into_response()),
+        Some(Verdict::Allowed) => Ok(()),
+    }
+}
+
 /// The row an item view shows, `fields` of it: inside [`row_scope`] and
-/// through [`gate_row`], `action` beside "view"; `404` when it is not.
+/// judged as [`gate_row`] does, `action` beside "view". One read: when hooked,
+/// the whole row is judged and the same row rendered.
 async fn item_object(
     pool: &Pool,
     parts: &Parts,
@@ -195,7 +199,27 @@ async fn item_object(
         Err(e) => return Err(template_error(&format!("read key: {e}"))),
     };
     let q = SelectQuery::by_pk(schema, lookup.column, key).visible(parts);
-    gate_row(pool, parts, &q, action).await?;
+    #[cfg(feature = "admin")]
+    {
+        use crate::object_permissions::Hooks;
+        if Hooks::All.judges(schema.table, action) {
+            let all: Vec<_> = schema.scalar_fields().collect();
+            let row = select_one_row_as_json(pool, &q, &all)
+                .await
+                .map_err(|e| template_error(&format!("query row: {e}")))?;
+            let judged = row
+                .as_ref()
+                .map(|r| Hooks::All.judge(schema.table, parts, r, action));
+            verdict(judged)?;
+            let mut row = row.unwrap_or_default();
+            if let Value::Object(m) = &mut row {
+                m.retain(|k, _| fields.iter().any(|f| f.name == k));
+            }
+            return Ok(row);
+        }
+    }
+    #[cfg(not(feature = "admin"))]
+    let _ = action;
     match select_one_row_as_json(pool, &q, fields).await {
         Ok(Some(r)) => Ok(r),
         Ok(None) => Err(not_found()),
@@ -208,23 +232,15 @@ async fn item_object(
 async fn hide_from_list(
     pool: &Pool,
     parts: &Parts,
-    model: &'static ModelSchema,
+    (model, cap): (&'static ModelSchema, usize),
     where_clause: &mut WhereExpr,
 ) -> Result<(), Response> {
     #[cfg(feature = "admin")]
     {
-        use crate::object_permissions::{view_hook_rows, Hooks, ViewHookRows, DEFAULT_SCAN_CAP};
+        use crate::object_permissions::{view_hook_rows, Hooks, ViewHookRows};
         let budget = crate::list_params::in_values_budget(pool.dialect().max_bind_params());
         let query = (where_clause.clone(), None);
-        match view_hook_rows(
-            pool,
-            (parts, Hooks::All),
-            model,
-            query,
-            (DEFAULT_SCAN_CAP, budget),
-        )
-        .await
-        {
+        match view_hook_rows(pool, (parts, Hooks::All), model, query, (cap, budget)).await {
             Ok(ViewHookRows::All) => Ok(()),
             Ok(ViewHookRows::Only(f)) => {
                 where_clause.push_and(WhereExpr::Predicate(f));
@@ -233,7 +249,7 @@ async fn hide_from_list(
             Ok(ViewHookRows::TooMany) => Err((
                 StatusCode::BAD_REQUEST,
                 "this list matches more rows than its \"view\" hook can scan; narrow it \
-                 with filters or register a queryset scope",
+                 with filters, register a queryset scope, or raise view_hook_scan_cap",
             )
                 .into_response()),
             Err(e) => Err(template_error(&format!("view hook rows: {e}"))),
@@ -241,7 +257,7 @@ async fn hide_from_list(
     }
     #[cfg(not(feature = "admin"))]
     {
-        let _ = (pool, parts, model, where_clause);
+        let _ = (pool, parts, model, cap, where_clause);
         Ok(())
     }
 }
@@ -353,6 +369,8 @@ pub struct ListView {
     max_page_size: i64,
     /// Deepest row `?page=N` may skip to; see [`Self::max_offset`].
     max_offset: usize,
+    /// Rows a list's "view" hook scan reads. See [`ListView::view_hook_scan_cap`].
+    view_hook_scan_cap: usize,
     fields: Option<Vec<String>>,
     order_by: Vec<(String, bool)>,
     filter_fields: Vec<String>,
@@ -699,6 +717,7 @@ impl ListView {
             page_size: 20,
             max_page_size: 100,
             max_offset: crate::list_params::DEFAULT_MAX_OFFSET,
+            view_hook_scan_cap: crate::list_params::DEFAULT_VIEW_HOOK_SCAN_CAP,
             fields: None,
             order_by: Vec::new(),
             filter_fields: Vec::new(),
@@ -744,6 +763,15 @@ impl ListView {
     #[must_use]
     pub fn max_offset(mut self, n: usize) -> Self {
         self.max_offset = n;
+        self
+    }
+
+    /// Most rows a list reads to run the "view" hook (default 2 000, at
+    /// most 100 000): each list request reads that many rows. Past it the
+    /// list is a `400`; a queryset scope scales.
+    #[must_use]
+    pub fn view_hook_scan_cap(mut self, rows: usize) -> Self {
+        self.view_hook_scan_cap = rows.clamp(1, crate::list_params::MAX_VIEW_HOOK_SCAN_CAP);
         self
     }
 
@@ -1235,7 +1263,8 @@ async fn list_queries(
     for scope in row_scope(vs.schema, parts) {
         where_clause.push_and(scope);
     }
-    hide_from_list(pool, parts, vs.schema, &mut where_clause).await?;
+    let model = (vs.schema, vs.view_hook_scan_cap);
+    hide_from_list(pool, parts, model, &mut where_clause).await?;
     let select_q = SelectQuery {
         where_clause: where_clause.clone(),
         order_by,
@@ -2430,7 +2459,7 @@ async fn handle_create_post(
     // Schema-driven INSERT: nothing else supplies these (#1464).
     crate::forms::stamp_auto_timestamps(state.schema, &mut columns, &mut values);
     match create_insert(
-        &state.pool,
+        (&state.pool, &parts),
         state.schema,
         &state.success_url,
         columns,
@@ -2480,12 +2509,13 @@ fn delete_failed(e: &crate::sql::ExecError) -> Response {
 /// The CreateView INSERT shared by the static and tenant routers; returns
 /// the redirect target.
 async fn create_insert(
-    pool: &Pool,
+    (pool, parts): (&Pool, &Parts),
     schema: &'static ModelSchema,
     success_url: &str,
     columns: Vec<&'static str>,
     values: Vec<SqlValue>,
 ) -> Result<String, WriteFailed> {
+    hidden_fk((pool, parts), schema, (&columns, &values), None).await?;
     // Placeholders are checked now; their values are read after the write.
     let fields = success_url_fields(success_url, schema)
         .map_err(|e| WriteFailed::Error(template_error(&e)))?;
@@ -2552,6 +2582,52 @@ async fn create_insert(
     }
 }
 
+/// A form error for the first written FK naming a target row this request
+/// cannot see (its scopes or "view" hook), as a ViewSet refuses it. On
+/// update, `stored` is the row's pk: a value it already holds is kept.
+async fn hidden_fk(
+    (pool, parts): (&Pool, &Parts),
+    schema: &'static ModelSchema,
+    (columns, values): (&[&'static str], &[SqlValue]),
+    stored: Option<(&'static FieldSchema, &SqlValue)>,
+) -> Result<(), WriteFailed> {
+    #[cfg(feature = "admin")]
+    {
+        use crate::object_permissions::Hooks;
+        use crate::viewset::fk_target::{first_hidden, hooked_targets, FkTarget};
+        let written = schema
+            .scalar_fields()
+            .filter(|f| columns.contains(&f.column));
+        let targets = hooked_targets(written, (parts, Hooks::All), |_, _| Vec::new());
+        if targets.is_empty() {
+            return Ok(());
+        }
+        let pairs: Vec<(&'static str, SqlValue)> = columns
+            .iter()
+            .copied()
+            .zip(values.iter().cloned())
+            .collect();
+        let admits =
+            |t: &FkTarget, row: &Value| Hooks::All.allows(t.model.table, "view", parts, Some(row));
+        let owner = (schema, &row_scope(schema, parts)[..]);
+        match first_hidden(pool, None, owner, &targets, &pairs, stored, admits).await {
+            Ok(None) => Ok(()),
+            Ok(Some(field)) => Err(WriteFailed::Refused(HashMap::from([(
+                field.name.to_owned(),
+                "no such object".to_owned(),
+            )]))),
+            Err(e) => Err(WriteFailed::Error(template_error(&format!(
+                "check related rows: {e}"
+            )))),
+        }
+    }
+    #[cfg(not(feature = "admin"))]
+    {
+        let _ = (pool, parts, schema, columns, values, stored);
+        Ok(())
+    }
+}
+
 /// The UpdateView UPDATE shared by the static and tenant routers, after the
 /// row's hooks; returns the rows changed, `0` when no visible row has the PK.
 async fn update_row(
@@ -2565,6 +2641,8 @@ async fn update_row(
     gate_row(pool, parts, &row, Some("change"))
         .await
         .map_err(WriteFailed::Error)?;
+    let stored = Some((pk_field, &key));
+    hidden_fk((pool, parts), schema, (&columns, &values), stored).await?;
     let this_row = WhereExpr::Predicate(Filter::new(pk_field.column, Op::Eq, key));
     let mut stamped: Vec<(&'static str, SqlValue)> = columns
         .iter()
@@ -3702,6 +3780,10 @@ async fn visible_pks_pool(
     action: Option<&'static str>,
 ) -> Result<Vec<SqlValue>, Response> {
     let failed = |e: crate::sql::ExecError| template_error(&format!("scope selected rows: {e}"));
+    let parsed = |v: &Value| {
+        let raw = v.as_str().map_or_else(|| v.to_string(), str::to_owned);
+        crate::forms::parse_pk_string(pk_field, &raw).ok()
+    };
     if pks.is_empty() {
         return Ok(Vec::new());
     }
@@ -3714,23 +3796,23 @@ async fn visible_pks_pool(
             let rows = select_rows_as_json(pool, &q, &fields)
                 .await
                 .map_err(failed)?;
-            let mut admitted = std::collections::HashSet::new();
+            let mut admitted = Vec::new();
             for row in &rows {
                 match Hooks::All.judge(schema.table, parts, row, action) {
                     Verdict::Hidden => {}
                     Verdict::Refused => {
                         return Err((StatusCode::FORBIDDEN, "permission denied").into_response())
                     }
-                    Verdict::Allowed => {
-                        admitted.extend(crate::admin::render::read_value_as_string_json(
-                            row, pk_field,
-                        ));
-                    }
+                    Verdict::Allowed => admitted.extend(row.get(pk_field.name).and_then(parsed)),
                 }
             }
+            // Parsed on both sides: a key stored as other text (case, BLOB) still matches.
             return Ok(pks
                 .iter()
-                .filter(|p| admitted.contains(&p.to_display_string()))
+                .filter(|p| {
+                    parsed(&Value::String(p.to_display_string()))
+                        .is_some_and(|k| admitted.contains(&k))
+                })
                 .cloned()
                 .collect());
         }
@@ -3751,10 +3833,7 @@ async fn visible_pks_pool(
             .map_err(failed)?
             .iter()
             .filter_map(|r| r.get(pk_field.name))
-            .filter_map(|v| {
-                let raw = v.as_str().map_or_else(|| v.to_string(), str::to_owned);
-                crate::forms::parse_pk_string(pk_field, &raw).ok()
-            })
+            .filter_map(parsed)
             .collect(),
     };
     Ok(pks
@@ -4580,8 +4659,13 @@ mod tenant {
         }
         // Schema-driven INSERT: nothing else supplies these (#1464).
         crate::forms::stamp_auto_timestamps(state.schema, &mut columns, &mut values);
-        let insert =
-            super::create_insert(t.pool(), state.schema, &state.success_url, columns, values);
+        let insert = super::create_insert(
+            (t.pool(), &parts),
+            state.schema,
+            &state.success_url,
+            columns,
+            values,
+        );
         match insert.await {
             Ok(url) => axum::response::Redirect::to(&url).into_response(),
             Err(super::WriteFailed::Refused(errors)) => {

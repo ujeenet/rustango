@@ -50,7 +50,7 @@ mod scope;
 pub(crate) use actor::credential_tenant;
 pub use actor::{is_superuser, Actor};
 pub use scope::{for_table as queryset_scopes_for, QuerySetScope, QuerySetScopeFn};
-pub(crate) use scope::{row_pk, view_hook_rows, warn_scan_cap, ViewHookRows, DEFAULT_SCAN_CAP};
+pub(crate) use scope::{row_pk, view_hook_rows, warn_scan_cap, ViewHookRows};
 
 use axum::http::request::Parts;
 use serde_json::Value;

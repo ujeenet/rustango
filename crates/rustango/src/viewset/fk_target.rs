@@ -56,6 +56,28 @@ impl FkTarget {
     }
 }
 
+/// The FKs among `fields` whose target hides rows from this request: its row
+/// scope, its "view" hook, and `extra` filters per field.
+pub(crate) fn hooked_targets(
+    fields: impl IntoIterator<Item = &'static FieldSchema>,
+    (parts, hooks): (
+        &axum::http::request::Parts,
+        crate::object_permissions::Hooks,
+    ),
+    extra: impl Fn(&'static FieldSchema, &'static ModelSchema) -> Vec<WhereExpr>,
+) -> Vec<FkTarget> {
+    fields
+        .into_iter()
+        .filter_map(|field| {
+            FkTarget::of(field, |model| {
+                let mut scope = hooks.row_scope(model, parts);
+                scope.extend(extra(field, model));
+                (scope, hooks.any(model.table, "view"))
+            })
+        })
+        .collect()
+}
+
 /// One write [`first_hidden_in`] checks: its FK values and, on update, the
 /// owner row's pk, so a value it already holds is kept.
 pub(crate) struct FkWrite<'a> {

@@ -33,10 +33,6 @@ pub fn for_table(table: &str) -> Vec<&'static QuerySetScope> {
         .collect()
 }
 
-/// Rows a ViewSet or template list's "view" hook scan reads by default: a
-/// fifth of the admin's default.
-pub(crate) const DEFAULT_SCAN_CAP: usize = 2_000;
-
 /// The rows a "view" hook admits, as a filter SQL can apply.
 pub(crate) enum ViewHookRows {
     /// No hook, or it denies nothing.

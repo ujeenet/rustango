@@ -9,7 +9,7 @@ use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use rustango::core::{Filter, Model as _, Op, SqlValue};
 use rustango::sql::{Auto, FetcherPool as _, ForeignKey, Pool};
-use rustango::template_views::{DeleteView, DetailView, ListView, UpdateView};
+use rustango::template_views::{CreateView, DeleteView, DetailView, ListView, UpdateView};
 use rustango::{tri_dialect_test, Model};
 use serde_json::Value;
 use tera::Tera;
@@ -40,6 +40,16 @@ pub struct Pin {
     pub note: ForeignKey<Note>,
 }
 
+/// A UUID key, seeded as upper-case text where the column keeps text.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "tvop_tag", app = "tvop")]
+pub struct Tag {
+    #[rustango(primary_key)]
+    pub id: uuid::Uuid,
+    #[rustango(max_length = 32)]
+    pub title: String,
+}
+
 fn title(row: Option<&Value>) -> &str {
     row.and_then(|r| r["title"].as_str()).unwrap_or("")
 }
@@ -55,6 +65,7 @@ fn delete(_: &axum::http::request::Parts, row: Option<&Value>) -> bool {
 rustango::register_object_permission!("tvop_note", "view", view);
 rustango::register_object_permission!("tvop_note", "change", change);
 rustango::register_object_permission!("tvop_note", "delete", delete);
+rustango::register_object_permission!("tvop_tag", "view", view);
 
 fn owner_one(_: &axum::http::request::Parts) -> Vec<Filter> {
     vec![Filter::new("owner_id", Op::Eq, SqlValue::I64(1))]
@@ -68,6 +79,7 @@ async fn setup(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Note>(pool).await;
     rustango::testkit::matrix::fresh_table::<Pin>(pool).await;
     rustango::testkit::matrix::fresh_table::<Owned>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Tag>(pool).await;
 }
 
 fn app(pool: &Pool) -> axum::Router {
@@ -126,7 +138,36 @@ fn app(pool: &Pool) -> axum::Router {
             .allow_anonymous()
             .template("pins.html")
             .with_fk_display(true)
-            .router("/pins", t, pool.clone()),
+            .router("/pins", t.clone(), pool.clone()),
+    )
+    .merge(
+        CreateView::for_model(Pin::SCHEMA, &["note"])
+            .allow_anonymous()
+            .template("page.html")
+            .success_url("/done")
+            .router("/pinform", t.clone(), pool.clone()),
+    )
+    .merge(
+        UpdateView::for_model(Pin::SCHEMA, &["note"])
+            .allow_anonymous()
+            .template("page.html")
+            .success_url("/done")
+            .router("/pinform", t.clone(), pool.clone()),
+    )
+    .merge(
+        ListView::for_model(Note::SCHEMA)
+            .allow_anonymous()
+            .template("list.html")
+            .view_hook_scan_cap(2)
+            .filter_fields(&["title"])
+            .router("/capped", t.clone(), pool.clone()),
+    )
+    .merge(
+        ListView::for_model(Tag::SCHEMA)
+            .allow_anonymous()
+            .template("list.html")
+            .bulk_actions(true)
+            .router("/tags", t, pool.clone()),
     )
 }
 
@@ -297,9 +338,78 @@ async fn a_queryset_scope_narrows_template_views(pool: &Pool) {
     assert!(left.iter().any(|o| o.owner_id == 2));
 }
 
+/// Past its scan cap a list is a 400 that names the knob; under it, it serves.
+async fn a_list_past_its_scan_cap_is_refused(pool: &Pool) {
+    notes(pool, &["a", "b", "hidden-c"]).await;
+    let app = app(pool);
+    let (status, body) = send(&app, Method::GET, "/capped", "").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("view_hook_scan_cap"), "{body}");
+    let (status, body) = send(&app, Method::GET, "/capped?title=a", "").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = send(&app, Method::GET, "/notes", "").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.starts_with("2:"), "{body}");
+}
+
+/// A form may not point an FK at a row the target's "view" hook hides: a form error.
+async fn a_form_fk_to_a_hidden_target_is_refused(pool: &Pool) {
+    let ids = notes(pool, &["hidden-a", "open-b"]).await;
+    let app = app(pool);
+    let (status, body) = send(
+        &app,
+        Method::POST,
+        "/pinform/new",
+        &format!("note={}", ids[0]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    let (status, _) = send(
+        &app,
+        Method::POST,
+        "/pinform/new",
+        &format!("note={}", ids[1]),
+    )
+    .await;
+    assert!(status.is_redirection(), "{status}");
+    let pin = Pin::objects().fetch(pool).await.expect("fetch").remove(0);
+    let uri = format!("/pinform/{}/edit", pin.id.get().unwrap());
+    let (status, _) = send(&app, Method::POST, &uri, &format!("note={}", ids[0])).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let pins = Pin::objects().fetch(pool).await.expect("fetch");
+    assert_eq!(pins.len(), 1);
+    assert_eq!(pins[0].note.pk(), ids[1], "a refused FK was written");
+}
+
+/// A hooked bulk action matches a UUID key stored as other text.
+async fn a_hooked_bulk_action_matches_uuid_keys(pool: &Pool) {
+    const OPEN: &str = "0F8FAD5B-D9CB-469F-A165-70867728950E";
+    const HIDDEN: &str = "7C9E6679-7425-40DE-944B-E07FC1F90AE7";
+    for (id, title) in [(OPEN, "open-u"), (HIDDEN, "hidden-u")] {
+        let sql = format!("INSERT INTO tvop_tag (id, title) VALUES ('{id}', '{title}')");
+        rustango::sql::raw_execute_pool(pool, &sql, Vec::new())
+            .await
+            .expect("seed tag");
+    }
+    let app = app(pool);
+    let picks = format!("action=delete_selected&_selected_action={OPEN}&_selected_action={HIDDEN}");
+    let (status, body) = send(&app, Method::POST, "/tags", &picks).await;
+    assert!(status.is_redirection(), "{status} {body}");
+    // Read as text: SQLite keeps the seeded key as TEXT, which a typed fetch rejects.
+    let left: Vec<String> = Tag::objects()
+        .values_list_flat("title")
+        .fetch::<String>(pool)
+        .await
+        .expect("fetch");
+    assert_eq!(left, ["hidden-u"], "the visible row was not deleted");
+}
+
 tri_dialect_test!(
     setup: setup,
     scenarios: [
+        a_list_past_its_scan_cap_is_refused,
+        a_form_fk_to_a_hidden_target_is_refused,
+        a_hooked_bulk_action_matches_uuid_keys,
         item_views_hide_with_404_and_refuse_with_403,
         lists_and_bulk_actions_skip_hidden_rows,
         a_queryset_scope_narrows_template_views,

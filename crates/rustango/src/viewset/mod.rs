@@ -718,9 +718,6 @@ where
 
 pub use crate::list_params::DEFAULT_MAX_OFFSET;
 
-/// The largest `view_hook_scan_cap`: each list request reads that many rows.
-const MAX_VIEW_HOOK_SCAN_CAP: usize = 100_000;
-
 /// Builder for a set of REST CRUD endpoints over a single
 /// [`Model`](crate::core::Model) table.
 ///
@@ -821,7 +818,7 @@ impl ViewSet {
             pk_param: "pk".to_owned(),
             max_bulk_create: 1000,
             hooks: crate::object_permissions::Hooks::All,
-            view_hook_scan_cap: crate::object_permissions::DEFAULT_SCAN_CAP,
+            view_hook_scan_cap: crate::list_params::DEFAULT_VIEW_HOOK_SCAN_CAP,
             related_filters: Vec::new(),
         };
         vs.assert_known_names("fields", fields.iter().copied(), false);
@@ -1121,7 +1118,7 @@ impl ViewSet {
     /// or offset list is a `400`; a queryset scope or cursor pagination scales.
     #[must_use]
     pub fn view_hook_scan_cap(mut self, rows: usize) -> Self {
-        self.view_hook_scan_cap = rows.clamp(1, MAX_VIEW_HOOK_SCAN_CAP);
+        self.view_hook_scan_cap = rows.clamp(1, crate::list_params::MAX_VIEW_HOOK_SCAN_CAP);
         self
     }
 
@@ -2050,21 +2047,16 @@ fn fk_targets(
     writable: &[&'static crate::core::FieldSchema],
 ) -> Vec<FkTarget> {
     let no_params = HashMap::new();
-    let hooks = state.vs.hooks;
-    writable
-        .iter()
-        .filter_map(|&field| {
-            FkTarget::of(field, |model| {
-                let mut scope = hooks.row_scope(model, parts);
-                for (name, backend) in &state.vs.related_filters {
-                    if name == field.name {
-                        scope.extend(backend.filter_with(parts, &no_params, model));
-                    }
-                }
-                (scope, hooks.any(model.table, "view"))
-            })
-        })
-        .collect()
+    let related = |field: &'static crate::core::FieldSchema, model| {
+        state
+            .vs
+            .related_filters
+            .iter()
+            .filter(|(name, _)| name == field.name)
+            .flat_map(|(_, backend)| backend.filter_with(parts, &no_params, model))
+            .collect()
+    };
+    fk_target::hooked_targets(writable.iter().copied(), (parts, state.vs.hooks), related)
 }
 
 /// The admin's superuser-only fields of `table`, unless the principal is a superuser.

@@ -111,7 +111,10 @@ Die Views wenden dieselben Zeilenregeln wie ein ViewSet an:
 der `view`-Hook verbirgt Zeilen (`404` auf Detail-, Bearbeiten- und
 Löschen-Seiten; sie fehlen in Listen, Sammelaktionen und FK-Anzeigenamen). Die
 Hooks `change` und `delete` lehnen mit `403` ab, und ein `delete_selected` mit
-einer abgelehnten Zeile ist als Ganzes ein `403`.
+einer abgelehnten Zeile ist als Ganzes ein `403`. Ein Formular darf einen FK
+nicht auf eine Zeile setzen, die Scopes oder `view`-Hook des Ziels verbergen
+(Formularfehler). Eine Liste prüft höchstens `view_hook_scan_cap` Zeilen
+(Standard 2 000) mit dem `view`-Hook; darüber ist die Seite ein `400`.
 
 ---
 
