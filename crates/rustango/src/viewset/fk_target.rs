@@ -117,11 +117,16 @@ pub(crate) async fn first_hidden_in(
         }
         keys.clear();
         if !asked.is_empty() {
-            let mut q = SelectQuery::by_pk_in(target.model, target.on.column, asked);
-            q.where_clause = super::narrow(q.where_clause, target.scope.clone());
-            for row in read_all(pool, tx.as_deref_mut(), &q, &target.fields()).await? {
-                if !target.gated || admits(target, &row) {
-                    keys.insert(key_text(&row, target.on));
+            // One read per bind-cap batch: a big bulk create names more keys than one IN binds.
+            let mut base = SelectQuery::new(target.model);
+            base.where_clause = super::narrow(base.where_clause, target.scope.clone());
+            for batch in crate::sql::select_key_batches(pool, &base, false, asked)? {
+                let mut q = SelectQuery::by_pk_in(target.model, target.on.column, batch);
+                q.where_clause = super::narrow(q.where_clause, target.scope.clone());
+                for row in read_all(pool, tx.as_deref_mut(), &q, &target.fields()).await? {
+                    if !target.gated || admits(target, &row) {
+                        keys.insert(key_text(&row, target.on));
+                    }
                 }
             }
         }

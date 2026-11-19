@@ -1967,7 +1967,7 @@ sur `TenantPoolsConfig` :
 Les tenants en mode schéma peuvent ouvrir `2 × max_cached_scoped_pools × scoped_pool_max_connections`
 connexions sur le serveur du registre (48 par défaut), dimensionnées avec le pool du registre
 pour un Postgres standard (`max_connections = 100`) ; le démarrage avertit si le serveur en
-autorise moins. Augmentez les deux sur un serveur plus grand ou derrière PgBouncer.
+autorise moins hors places réservées, même avant le premier tenant. Augmentez les deux sur un serveur plus grand ou derrière PgBouncer.
 
 Avec `Cli`, passez la configuration via `Cli::with_tenant_pools(config)`.
 

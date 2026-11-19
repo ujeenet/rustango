@@ -23,7 +23,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `iterator()` inside a block pages by primary key, so rows the loop updates out of the filter are not skipped; it must be ordered by the primary key there. `get_or_create` / `update_or_create` re-read a lost race with a locking read inside a MySQL block.
 - **Breaking:** `debug_panel::debug_router` and `metrics::metrics_router` take a `RouteAccess`, so they cannot be mounted without saying who may read them.
 - **Breaking:** template views apply queryset scopes and the "view", "change" and "delete" object-permission hooks, as ViewSets do: a hidden row is a 404 on detail, edit and delete pages and is left out of lists, bulk actions and FK display names; a refused one is a 403. Create and update forms refuse an FK to a hidden target row.
-- Schema-mode pool defaults now fit a stock Postgres: `max_cached_scoped_pools` 8 (was 64) and `scoped_pool_max_connections` 3 (was 8), 48 connections at worst instead of 1024. Boot warns when the server's `max_connections` is below the budget.
+- Schema-mode pool defaults now fit a stock Postgres: `max_cached_scoped_pools` 8 (was 64) and `scoped_pool_max_connections` 3 (was 8), 48 connections at worst instead of 1024. Boot on a Postgres registry with schema tenants, or none yet, warns when `max_connections` minus reserved slots is below the budget.
 - **Breaking:** a ViewSet create whose row would fall outside a queryset scope or be hidden by the "view" hook is refused with 403 and writes nothing; it used to succeed.
 
 ### Fixed
@@ -32,7 +32,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `get_or_create_tx` that loses an insert race returns the winner's row and leaves the transaction usable, instead of the unique violation.
 - `atomic_with` with settings on MySQL or SQLite names `set_config` in its error, not "operator `transaction settings`".
 - A ViewSet create whose row a global scope or filter backend hides answers 201 with its key instead of an empty body.
-- A ViewSet bulk create checks FK targets with one read per FK column for the whole batch, not one per row.
+- A ViewSet bulk create checks FK targets with one read per FK column for the whole batch (split at the bind limit), not one per row. A validation error on a later entry now wins over an FK refusal on an earlier one.
 - Admin lists of a `skip_count_for` table no longer run the facet and date-bucket scans: facets are left out and the date hierarchy shows its breadcrumb only.
 - Upload and media file names are cut to 100 bytes, keeping a short extension, so a long client name cannot overflow a key column or a filesystem name limit.
 - An upload body over the request limit is `UploadError::BodyTooLarge` (a 413), not `Parse`.

@@ -154,7 +154,18 @@ where
     F: FnMut(Vec<SqlValue>) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<C>, ExecError>>,
 {
-    fetch_batches(in_batches(pool.dialect(), base, sliced, keys)?, fetch).await
+    fetch_batches(select_key_batches(pool, base, sliced, keys)?, fetch).await
+}
+
+/// `keys` split into the `IN` lists a schema-level `base` has bind room
+/// for, for callers that read each batch themselves (on a transaction).
+pub(crate) fn select_key_batches(
+    pool: &Pool,
+    base: &SelectQuery,
+    sliced: bool,
+    keys: Vec<SqlValue>,
+) -> Result<Vec<Vec<SqlValue>>, ExecError> {
+    in_batches(pool.dialect(), base, sliced, keys)
 }
 
 async fn fetch_batches<C, F, Fut>(

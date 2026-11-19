@@ -879,10 +879,14 @@ pub(crate) async fn boot_checks<DB: Database>(pools: &TenantPools<DB>) -> Result
              of them, or set search_path on the registry URL"
         )));
     }
-    if !has_schema_tenants(pg.registry()).await? {
+    let schema_tenants = any_org(pg.registry(), Some(StorageMode::Schema)).await?;
+    // A fresh registry may get schema tenants without a restart: warn there too.
+    if schema_tenants || !any_org(pg.registry(), None).await? {
+        warn_over_connection_budget(pg).await;
+    }
+    if !schema_tenants {
         return Ok(());
     }
-    warn_over_connection_budget(pg).await;
     if pg.config.schema_tenant_roles {
         super::schema_role::check_can_create_roles(pg.registry()).await?;
         pg.role_secrets()?;
@@ -904,11 +908,15 @@ pub(crate) async fn boot_checks<DB: Database>(pools: &TenantPools<DB>) -> Result
 /// connections than the registry server allows.
 #[cfg(feature = "postgres")]
 async fn warn_over_connection_budget(pg: &TenantPools<sqlx::Postgres>) {
-    // PG-only server setting; schema mode is Postgres-only.
-    let server: Result<i32, _> =
-        sqlx::query_scalar("SELECT current_setting('max_connections')::int")
-            .fetch_one(pg.registry())
-            .await;
+    // PG-only server settings; schema mode is Postgres-only. Reserved slots
+    // are not for this login (`reserved_connections` is PG 16+, NULL before).
+    let server: Result<i32, _> = sqlx::query_scalar(
+        "SELECT current_setting('max_connections')::int \
+         - current_setting('superuser_reserved_connections')::int \
+         - COALESCE(current_setting('reserved_connections', true)::int, 0)",
+    )
+    .fetch_one(pg.registry())
+    .await;
     let Ok(server) = server else { return };
     let registry = pg.registry().options().get_max_connections();
     if let Some(msg) = over_budget(&pg.config, registry, server) {
@@ -917,7 +925,7 @@ async fn warn_over_connection_budget(pg: &TenantPools<sqlx::Postgres>) {
 }
 
 /// The boot warning when `config`'s schema pools plus the `registry` pool
-/// can exceed the server's `max_connections`, else `None`.
+/// can exceed the `server` connections left after reserved slots, else `None`.
 #[cfg(feature = "postgres")]
 fn over_budget(config: &TenantPoolsConfig, registry: u32, server: i32) -> Option<String> {
     let need = config.scoped_connection_budget() + u64::from(registry);
@@ -931,8 +939,8 @@ fn over_budget(config: &TenantPoolsConfig, registry: u32, server: i32) -> Option
     };
     Some(format!(
         "schema-mode pools can open {need} connections (2 x max_cached_scoped_pools {} x \
-         scoped_pool_max_connections {} + registry pool {registry}) but the server allows \
-         {server}; lower TenantPoolsConfig's knobs or raise max_connections{shared}",
+         scoped_pool_max_connections {} + registry pool {registry}) but the server leaves \
+         {server} after reserved slots; lower TenantPoolsConfig's knobs or raise max_connections{shared}",
         config.max_cached_scoped_pools, config.scoped_pool_max_connections,
     ))
 }
@@ -949,15 +957,15 @@ pub(crate) async fn drop_schema_role<DB: Database>(
     }
 }
 
-/// Any org stored in a schema; `false` before the registry is migrated.
+/// Any org (stored in `mode`, when given); `false` before the registry is migrated.
 #[cfg(feature = "postgres")]
-async fn has_schema_tenants(registry: &PgPool) -> Result<bool, TenancyError> {
+async fn any_org(registry: &PgPool, mode: Option<StorageMode>) -> Result<bool, TenancyError> {
     use crate::core::Column as _;
-    let found = Org::objects()
-        .where_(Org::storage_mode.eq(StorageMode::Schema.as_str()))
-        .limit(1)
-        .fetch_on(registry)
-        .await;
+    let mut orgs = Org::objects();
+    if let Some(mode) = mode {
+        orgs = orgs.where_(Org::storage_mode.eq(mode.as_str()));
+    }
+    let found = orgs.limit(1).fetch_on(registry).await;
     match found {
         Ok(rows) => Ok(!rows.is_empty()),
         Err(crate::sql::ExecError::Driver(sqlx::Error::Database(d)))

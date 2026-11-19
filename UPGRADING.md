@@ -161,6 +161,7 @@ untouched.
 - `ExecError` gains `InAtomic` and `InvalidTxSetting`: map them where you turn errors into responses.
 - `debug_router()` is now `debug_router(access)` and `metrics_router(reg)` is `metrics_router(reg, access)`. Pass `RouteAccess::superuser()` (with `tenancy`), or `RouteAccess::allow_anonymous()` for an internal port or your own auth layer.
 - A ViewSet create now answers 403 and writes nothing when the new row would be outside its queryset scopes or hidden by the "view" hook. A create that only a global scope or filter backend hides still succeeds and now echoes `{"<pk>": …}` instead of an empty body.
+- A ViewSet bulk create reports a validation error on a later entry before an FK refusal on an earlier one.
 - Admin lists of tables passed to `skip_count_for` no longer show `list_filter` facets or date-hierarchy buckets (the breadcrumb stays). Leave a table out of `skip_count_for` to keep them.
 - `save_uploads` returns `UploadError::BodyTooLarge` when the body passes axum's request limit (it was `Parse`): map it to 413. `sanitize_filename` and media keys cut names to 100 bytes.
 - Schema-mode tenants: `max_cached_scoped_pools` defaults to 8 (was 64) and `scoped_pool_max_connections` to 3 (was 8). More than 8 busy tenants per process now rebuild pools, and a tenant runs at most 3 queries at once; set the old values in `TenantPoolsConfig` if your server allows it.

@@ -1922,8 +1922,8 @@ sei denn, Sie schalten das Pre-Warming ein. Die Einstellungen leben auf
 
 Tenants im schema-Modus können `2 × max_cached_scoped_pools × scoped_pool_max_connections`
 Verbindungen zum Registry-Server öffnen (standardmäßig 48), bemessen mit dem Registry-Pool
-für ein Standard-Postgres (`max_connections = 100`); der Start warnt, wenn der Server weniger
-erlaubt. Erhöhen Sie beide auf einem größeren Server oder hinter PgBouncer.
+für ein Standard-Postgres (`max_connections = 100`); der Start warnt, wenn der Server nach
+seinen reservierten Plätzen weniger erlaubt, auch vor dem ersten Tenant. Erhöhen Sie beide auf einem größeren Server oder hinter PgBouncer.
 
 Mit `Cli` übergeben Sie die Konfiguration über `Cli::with_tenant_pools(config)`.
 

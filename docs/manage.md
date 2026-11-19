@@ -1887,7 +1887,8 @@ on pre-warming. The settings live on `TenantPoolsConfig`:
 
 Schema-mode tenants can open `2 × max_cached_scoped_pools × scoped_pool_max_connections`
 connections on the registry server (48 by default), sized with the registry pool for a
-stock Postgres (`max_connections = 100`); boot warns when the server allows fewer.
+stock Postgres (`max_connections = 100`); boot warns when the server allows fewer
+after its reserved slots, also before the first tenant exists.
 Raise both on a bigger server or behind PgBouncer.
 
 With `Cli`, pass the config through `Cli::with_tenant_pools(config)`.

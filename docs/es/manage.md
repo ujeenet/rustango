@@ -1899,7 +1899,7 @@ actives el pre-calentamiento. Los ajustes viven en `TenantPoolsConfig`:
 Los tenants en modo esquema pueden abrir `2 × max_cached_scoped_pools × scoped_pool_max_connections`
 conexiones en el servidor del registro (48 por defecto), dimensionadas con el pool del registro
 para un Postgres estándar (`max_connections = 100`); el arranque avisa si el servidor permite
-menos. Sube ambos en un servidor mayor o detrás de PgBouncer.
+menos tras sus plazas reservadas, incluso antes del primer tenant. Sube ambos en un servidor mayor o detrás de PgBouncer.
 
 Con `Cli`, pasa la configuración mediante `Cli::with_tenant_pools(config)`.
 
