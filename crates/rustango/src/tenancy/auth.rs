@@ -59,7 +59,6 @@ use super::password;
     display = "username",
     scope = "registry"
 )]
-#[allow(dead_code)]
 pub struct Operator {
     #[rustango(primary_key)]
     pub id: rustango::sql::Auto<i64>,
@@ -123,7 +122,6 @@ redacted_debug!(Operator { id, username, active, created_at, password_changed_at
         formfield_overrides = "password_hash: password",
     )
 )]
-#[allow(dead_code)]
 pub struct User {
     #[rustango(primary_key)]
     pub id: rustango::sql::Auto<i64>,

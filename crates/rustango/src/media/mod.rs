@@ -628,34 +628,25 @@ impl MediaManager {
     /// Fetch by id. Soft-deleted rows are excluded; pass through to
     /// [`Self::get_including_deleted`] when you want them.
     pub async fn get(&self, id: i64) -> Result<Option<Media>, MediaError> {
-        let p = self.pool.dialect().placeholder(1);
-        let sql = format!(
-            "SELECT id, disk, storage_key, mime, size_bytes, original_filename, \
-                    status, uploaded_at, uploaded_by_id, derived_from_id, \
-                    collection_id, metadata, deleted_at \
-               FROM rustango_media WHERE id = {p} AND deleted_at IS NULL"
-        );
-        let rows: Vec<Media> =
-            crate::sql::raw_query_pool(&sql, vec![crate::core::SqlValue::I64(id)], &self.pool)
-                .await
-                .map_err(media_err_from_exec)?;
+        use crate::sql::FetcherPool as _;
+        let rows = Media::objects()
+            .where_(Media::id.eq(id))
+            .where_(Media::deleted_at.is_null())
+            .fetch(&self.pool)
+            .await
+            .map_err(media_err_from_exec)?;
         Ok(rows.into_iter().next())
     }
 
     /// Like [`Self::get`] but returns soft-deleted rows too. Use
     /// from admin / restore flows.
     pub async fn get_including_deleted(&self, id: i64) -> Result<Option<Media>, MediaError> {
-        let p = self.pool.dialect().placeholder(1);
-        let sql = format!(
-            "SELECT id, disk, storage_key, mime, size_bytes, original_filename, \
-                    status, uploaded_at, uploaded_by_id, derived_from_id, \
-                    collection_id, metadata, deleted_at \
-               FROM rustango_media WHERE id = {p}"
-        );
-        let rows: Vec<Media> =
-            crate::sql::raw_query_pool(&sql, vec![crate::core::SqlValue::I64(id)], &self.pool)
-                .await
-                .map_err(media_err_from_exec)?;
+        use crate::sql::FetcherPool as _;
+        let rows = Media::objects()
+            .where_(Media::id.eq(id))
+            .fetch(&self.pool)
+            .await
+            .map_err(media_err_from_exec)?;
         Ok(rows.into_iter().next())
     }
 
@@ -1099,15 +1090,13 @@ impl MediaManager {
 
     /// Look up by id (excludes soft-deleted).
     pub async fn get_collection(&self, id: i64) -> Result<Option<MediaCollection>, MediaError> {
-        let p = self.pool.dialect().placeholder(1);
-        let sql = format!(
-            "SELECT id, name, slug, parent_id, description, created_at, deleted_at \
-               FROM rustango_media_collections WHERE id = {p} AND deleted_at IS NULL"
-        );
-        let rows: Vec<MediaCollection> =
-            crate::sql::raw_query_pool(&sql, vec![crate::core::SqlValue::I64(id)], &self.pool)
-                .await
-                .map_err(media_err_from_exec)?;
+        use crate::sql::FetcherPool as _;
+        let rows = MediaCollection::objects()
+            .where_(MediaCollection::id.eq(id))
+            .where_(MediaCollection::deleted_at.is_null())
+            .fetch(&self.pool)
+            .await
+            .map_err(media_err_from_exec)?;
         Ok(rows.into_iter().next())
     }
 
@@ -1116,18 +1105,13 @@ impl MediaManager {
         &self,
         slug: &str,
     ) -> Result<Option<MediaCollection>, MediaError> {
-        let p = self.pool.dialect().placeholder(1);
-        let sql = format!(
-            "SELECT id, name, slug, parent_id, description, created_at, deleted_at \
-               FROM rustango_media_collections WHERE slug = {p} AND deleted_at IS NULL"
-        );
-        let rows: Vec<MediaCollection> = crate::sql::raw_query_pool(
-            &sql,
-            vec![crate::core::SqlValue::String(slug.to_owned())],
-            &self.pool,
-        )
-        .await
-        .map_err(media_err_from_exec)?;
+        use crate::sql::FetcherPool as _;
+        let rows = MediaCollection::objects()
+            .where_(MediaCollection::slug.eq(slug.to_owned()))
+            .where_(MediaCollection::deleted_at.is_null())
+            .fetch(&self.pool)
+            .await
+            .map_err(media_err_from_exec)?;
         Ok(rows.into_iter().next())
     }
 
@@ -1399,71 +1383,42 @@ impl MediaManager {
         if let Some(t) = self.get_tag_by_slug(slug).await? {
             return Ok(t);
         }
-        // Per-dialect upsert:
-        //   PG / SQLite : ON CONFLICT (slug) DO UPDATE … RETURNING
-        //   MySQL       : ON DUPLICATE KEY UPDATE, then SELECT
-        let d = self.pool.dialect();
-        let (p1, p2) = (d.placeholder(1), d.placeholder(2));
-        if d.name() == "mysql" {
-            // No RETURNING: read the row back in the same transaction.
-            let slug_value = || crate::core::SqlValue::String(slug.to_owned());
-            let mut tx = crate::sql::write_tx(&self.pool)
-                .await
-                .map_err(media_err_from_exec)?;
-            crate::sql::raw_execute_tx(
-                &mut tx,
-                "INSERT INTO `rustango_media_tags` (`name`, `slug`) \
-                 VALUES (?, ?) \
-                 ON DUPLICATE KEY UPDATE `name` = VALUES(`name`)",
-                vec![slug_value(), slug_value()],
-            )
+        self.insert_missing_tags(&[slug])
             .await
             .map_err(media_err_from_exec)?;
-            let rows: Vec<MediaTag> = crate::sql::raw_query_tx(
-                &mut tx,
-                "SELECT id, name, slug, created_at FROM `rustango_media_tags` WHERE slug = ?",
-                vec![slug_value()],
-            )
-            .await
-            .map_err(media_err_from_exec)?;
-            tx.commit().await.map_err(media_err_from_exec)?;
-            return rows
-                .into_iter()
-                .next()
-                .ok_or_else(|| MediaError::Other("ensure_tag INSERT returned no rows".into()));
-        }
-        let sql = format!(
-            "INSERT INTO rustango_media_tags (name, slug) VALUES ({p1}, {p2}) \
-             ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name \
-             RETURNING id, name, slug, created_at"
-        );
-        let rows: Vec<MediaTag> = crate::sql::raw_query_pool(
-            &sql,
-            vec![
-                crate::core::SqlValue::String(slug.to_owned()),
-                crate::core::SqlValue::String(slug.to_owned()),
-            ],
-            &self.pool,
-        )
-        .await
-        .map_err(media_err_from_exec)?;
-        rows.into_iter()
-            .next()
+        self.get_tag_by_slug(slug)
+            .await?
             .ok_or_else(|| MediaError::Other("ensure_tag INSERT returned no rows".into()))
+    }
+
+    /// Insert tags named by `slugs` (name = slug), skipping any that exist.
+    async fn insert_missing_tags(&self, slugs: &[&str]) -> Result<(), crate::sql::ExecError> {
+        let rows = slugs
+            .iter()
+            .map(|s| {
+                vec![
+                    crate::core::SqlValue::String((*s).to_owned()),
+                    crate::core::SqlValue::String((*s).to_owned()),
+                ]
+            })
+            .collect();
+        let insert = crate::core::BulkInsertQuery::new(
+            <MediaTag as crate::core::Model>::SCHEMA,
+            vec!["name", "slug"],
+            rows,
+        )
+        .on_conflict_do_nothing();
+        crate::sql::bulk_insert_pool(&self.pool, &insert).await
     }
 
     /// Look up a tag by slug.
     pub async fn get_tag_by_slug(&self, slug: &str) -> Result<Option<MediaTag>, MediaError> {
-        let p = self.pool.dialect().placeholder(1);
-        let sql =
-            format!("SELECT id, name, slug, created_at FROM rustango_media_tags WHERE slug = {p}");
-        let rows: Vec<MediaTag> = crate::sql::raw_query_pool(
-            &sql,
-            vec![crate::core::SqlValue::String(slug.to_owned())],
-            &self.pool,
-        )
-        .await
-        .map_err(media_err_from_exec)?;
+        use crate::sql::FetcherPool as _;
+        let rows = MediaTag::objects()
+            .where_(MediaTag::slug.eq(slug.to_owned()))
+            .fetch(&self.pool)
+            .await
+            .map_err(media_err_from_exec)?;
         Ok(rows.into_iter().next())
     }
 
@@ -1507,23 +1462,8 @@ impl MediaManager {
         if missing.is_empty() {
             return Ok(tag_ids_of(&found));
         }
-        let rows = missing
-            .iter()
-            .map(|s| {
-                vec![
-                    crate::core::SqlValue::String((*s).to_owned()),
-                    crate::core::SqlValue::String((*s).to_owned()),
-                ]
-            })
-            .collect();
         // Skips a tag a concurrent call created meanwhile.
-        let insert = crate::core::BulkInsertQuery::new(
-            <MediaTag as crate::core::Model>::SCHEMA,
-            vec!["name", "slug"],
-            rows,
-        )
-        .on_conflict_do_nothing();
-        if let Err(e) = crate::sql::bulk_insert_pool(&self.pool, &insert).await {
+        if let Err(e) = self.insert_missing_tags(&missing).await {
             if !is_mysql_batch_retryable(&e) {
                 return Err(media_err_from_exec(e));
             }
@@ -1560,24 +1500,19 @@ impl MediaManager {
 
     /// Remove a single tag from a media row.
     pub async fn untag(&self, media_id: i64, slug: &str) -> Result<(), MediaError> {
-        // `DELETE … USING` is PG-only. A subquery works everywhere.
-        let d = self.pool.dialect();
-        let (p1, p2) = (d.placeholder(1), d.placeholder(2));
-        let sql = format!(
-            "DELETE FROM rustango_media_tag_links \
-              WHERE tag_id IN (SELECT id FROM rustango_media_tags WHERE slug = {p1}) \
-                AND media_id = {p2}"
-        );
-        crate::sql::raw_execute_pool(
-            &self.pool,
-            &sql,
-            vec![
-                crate::core::SqlValue::String(slug.to_owned()),
-                crate::core::SqlValue::I64(media_id),
-            ],
-        )
-        .await
-        .map_err(media_err_from_exec)?;
+        let tag_ids = MediaTag::objects()
+            .where_(MediaTag::slug.eq(slug.to_owned()))
+            .values_list_flat("id")
+            .compile()
+            .map_err(media_err_from_query)?;
+        let delete = MediaTagLink::objects()
+            .where_(MediaTagLink::media_id.eq(media_id))
+            .where_in_subquery("tag_id", tag_ids)
+            .compile_delete()
+            .map_err(media_err_from_query)?;
+        crate::sql::delete_pool(&self.pool, &delete)
+            .await
+            .map_err(media_err_from_exec)?;
         Ok(())
     }
 
@@ -1642,22 +1577,18 @@ impl MediaManager {
 
     /// List tags applied to a media row, alphabetically by slug.
     pub async fn tags_for(&self, media_id: i64) -> Result<Vec<MediaTag>, MediaError> {
-        let p = self.pool.dialect().placeholder(1);
-        let sql = format!(
-            "SELECT t.id, t.name, t.slug, t.created_at \
-               FROM rustango_media_tags t \
-               JOIN rustango_media_tag_links l ON l.tag_id = t.id \
-              WHERE l.media_id = {p} \
-              ORDER BY t.slug"
-        );
-        let rows: Vec<MediaTag> = crate::sql::raw_query_pool(
-            &sql,
-            vec![crate::core::SqlValue::I64(media_id)],
-            &self.pool,
-        )
-        .await
-        .map_err(media_err_from_exec)?;
-        Ok(rows)
+        use crate::sql::FetcherPool as _;
+        let tag_ids = MediaTagLink::objects()
+            .where_(MediaTagLink::media_id.eq(media_id))
+            .values_list_flat("tag_id")
+            .compile()
+            .map_err(media_err_from_query)?;
+        MediaTag::objects()
+            .where_in_subquery("id", tag_ids)
+            .order_by(&[("slug", false)])
+            .fetch(&self.pool)
+            .await
+            .map_err(media_err_from_exec)
     }
 
     /// Tag slugs for many media rows, in **one** query.
@@ -1673,6 +1604,7 @@ impl MediaManager {
         if media_ids.is_empty() {
             return Ok(out);
         }
+        // Hand-built: the ORM cannot project columns of two joined tables.
         let d = self.pool.dialect();
         let placeholders: Vec<String> = (1..=media_ids.len()).map(|i| d.placeholder(i)).collect();
         let in_list = placeholders.join(", ");
@@ -1704,31 +1636,26 @@ impl MediaManager {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<Media>, MediaError> {
-        let d = self.pool.dialect();
-        let (p1, p2, p3) = (d.placeholder(1), d.placeholder(2), d.placeholder(3));
-        let sql = format!(
-            "SELECT m.id, m.disk, m.storage_key, m.mime, m.size_bytes, m.original_filename, \
-                    m.status, m.uploaded_at, m.uploaded_by_id, m.derived_from_id, \
-                    m.collection_id, m.metadata, m.deleted_at \
-               FROM rustango_media m \
-               JOIN rustango_media_tag_links l ON l.media_id = m.id \
-               JOIN rustango_media_tags t ON t.id = l.tag_id \
-              WHERE t.slug = {p1} AND m.deleted_at IS NULL \
-              ORDER BY m.uploaded_at DESC, m.id DESC \
-              LIMIT {p2} OFFSET {p3}"
-        );
-        let rows: Vec<Media> = crate::sql::raw_query_pool(
-            &sql,
-            vec![
-                crate::core::SqlValue::String(slug.to_owned()),
-                crate::core::SqlValue::I64(limit.clamp(1, MAX_LIST_LIMIT)),
-                crate::core::SqlValue::I64(offset.max(0)),
-            ],
-            &self.pool,
-        )
-        .await
-        .map_err(media_err_from_exec)?;
-        Ok(rows)
+        use crate::sql::FetcherPool as _;
+        let tag_ids = MediaTag::objects()
+            .where_(MediaTag::slug.eq(slug.to_owned()))
+            .values_list_flat("id")
+            .compile()
+            .map_err(media_err_from_query)?;
+        let media_ids = MediaTagLink::objects()
+            .where_in_subquery("tag_id", tag_ids)
+            .values_list_flat("media_id")
+            .compile()
+            .map_err(media_err_from_query)?;
+        Media::objects()
+            .where_in_subquery("id", media_ids)
+            .where_(Media::deleted_at.is_null())
+            .order_by(&[("uploaded_at", true), ("id", true)])
+            .limit(limit.clamp(1, MAX_LIST_LIMIT))
+            .offset(offset.max(0))
+            .fetch(&self.pool)
+            .await
+            .map_err(media_err_from_exec)
     }
 
     /// Tags by slug, one page. `limit` is clamped to `1..=MAX_LIST_LIMIT`.

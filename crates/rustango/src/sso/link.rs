@@ -141,7 +141,6 @@ impl ProviderKey {
         actions = "unlink, relink",
     )
 )]
-#[allow(dead_code)]
 pub struct SsoLink {
     #[rustango(primary_key)]
     pub id: Auto<i64>,

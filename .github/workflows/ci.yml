@@ -1722,6 +1722,7 @@ jobs:
           binary(=media_collection_race_tri) |
           binary(=media_purge_tri) |
           binary(=media_listing_bounds_tri) |
+          binary(=framework_orm_reads_tri) |
           binary(=viewset_bulk_create_is_atomic) |
           binary(=tenancy_manage_mysql_live) |
           binary(=permissions_mysql_live) |

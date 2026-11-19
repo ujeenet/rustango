@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+- `user_roles_qs_pool` returns an error for a role whose `data` is not valid JSON, where it used to substitute `{}`. `ensure_tag` no longer renames an existing tag when two calls race.
+
 ## 0.67.0
 
 - `get_or_create_tx` runs `create_fn` in a savepoint and, on a unique violation, returns the existing row with `created == false` instead of the error (PG still returns an error: the unique violation under repeatable read, a serialization failure (40001) under serializable).

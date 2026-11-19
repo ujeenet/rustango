@@ -82,7 +82,6 @@ use super::tenant_console::{self, SessionSecret, TenantSessionPayload};
         formfield_overrides = "client_secret: password",
     )
 )]
-#[allow(dead_code)]
 pub struct SharedSsoProvider {
     #[rustango(primary_key)]
     pub id: crate::sql::Auto<i64>,

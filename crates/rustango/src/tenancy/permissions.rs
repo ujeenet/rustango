@@ -314,6 +314,7 @@ pub async fn has_perm_pool(
     codename: &str,
     pool: &crate::sql::Pool,
 ) -> Result<bool, TenancyError> {
+    // Hand-built: four scalar subqueries in one SELECT, which the ORM cannot express.
     let dialect = pool.dialect();
     let users_t = dialect.quote_ident("rustango_users");
     let user_perms_t = dialect.quote_ident("rustango_user_permissions");
@@ -706,52 +707,26 @@ pub async fn clear_user_perm_pool(
     Ok(())
 }
 
-/// The roles `user_id` belongs to, on every backend.
-///
-/// SQL is
-/// rendered via the dialect's emitter so identifier quoting +
-/// placeholder syntax come out right per backend.
+/// The roles `user_id` belongs to, by name, on every backend.
 ///
 /// # Errors
-/// Driver / SQL failures from the JOIN-SELECT.
+/// Driver / SQL failures from the SELECT.
 pub async fn user_roles_qs_pool(
     user_id: i64,
     pool: &crate::sql::Pool,
 ) -> Result<Vec<Role>, sqlx::Error> {
-    let dialect = pool.dialect();
-    let roles_t = dialect.quote_ident("rustango_roles");
-    let user_roles_t = dialect.quote_ident("rustango_user_roles");
-    let p1 = dialect.placeholder(1);
-    // No table-aliasing — dialect emitters quote every identifier,
-    // and the columns we need are unambiguous since `rustango_roles`
-    // is the only side that has them.
-    let sql = format!(
-        "SELECT r.id, r.name, r.description, r.data \
-         FROM {roles_t} r \
-         JOIN {user_roles_t} ur ON ur.role_id = r.id \
-         WHERE ur.user_id = {p1} \
-         ORDER BY r.name"
-    );
-    // #561 — was three byte-similar `bind+fetch+decode` arms. The
-    // `data` JSON column legitimately differs by backend (PG: native
-    // `Value`, MySQL: `Json<Value>` wrapper, SQLite: `Option<String>`
-    // → from_str round-trip). Decode collapses onto the per-backend
-    // `decode_role_*_row` helpers below.
-    crate::sql::run_on(
-        pool,
-        &sql,
-        vec![crate::core::SqlValue::I64(user_id)],
-        |row| match row {
-            #[cfg(feature = "postgres")]
-            crate::sql::RowRef::Postgres(r) => decode_role_pg_row(r),
-            #[cfg(feature = "mysql")]
-            crate::sql::RowRef::Mysql(r) => decode_role_my_row(r),
-            #[cfg(feature = "sqlite")]
-            crate::sql::RowRef::Sqlite(r) => decode_role_sq_row(r),
-        },
-    )
-    .await
-    .map_err(exec_to_sqlx)
+    use crate::sql::FetcherPool as _;
+    let role_ids = UserRole::objects()
+        .filter("user_id", user_id)
+        .values_list_flat("role_id")
+        .compile()
+        .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+    Role::objects()
+        .where_in_subquery("id", role_ids)
+        .order_by(&[("name", false)])
+        .fetch(pool)
+        .await
+        .map_err(exec_to_sqlx)
 }
 
 /// Per-backend decoder for `has_perm_pool`'s 3-column SELECT.
@@ -801,51 +776,6 @@ fn decode_has_perm_sq_row(row: &sqlx::sqlite::SqliteRow) -> (bool, Option<bool>,
         via_role != 0,
         user_active != 0,
     )
-}
-
-#[cfg(feature = "postgres")]
-fn decode_role_pg_row(row: &sqlx::postgres::PgRow) -> Result<Role, sqlx::Error> {
-    use sqlx::Row as _;
-    Ok(Role {
-        id: Auto::Set(row.try_get::<i64, _>("id")?),
-        name: row.try_get("name")?,
-        description: row.try_get("description")?,
-        data: row
-            .try_get::<serde_json::Value, _>("data")
-            .unwrap_or_else(|_| serde_json::json!({})),
-    })
-}
-
-#[cfg(feature = "mysql")]
-fn decode_role_my_row(row: &sqlx::mysql::MySqlRow) -> Result<Role, sqlx::Error> {
-    use sqlx::Row as _;
-    let data: serde_json::Value = row
-        .try_get::<sqlx::types::Json<serde_json::Value>, _>("data")
-        .map(|j| j.0)
-        .unwrap_or_else(|_| serde_json::json!({}));
-    Ok(Role {
-        id: Auto::Set(row.try_get::<i64, _>("id")?),
-        name: row.try_get("name")?,
-        description: row.try_get("description")?,
-        data,
-    })
-}
-
-#[cfg(feature = "sqlite")]
-fn decode_role_sq_row(row: &sqlx::sqlite::SqliteRow) -> Result<Role, sqlx::Error> {
-    use sqlx::Row as _;
-    let data: serde_json::Value = row
-        .try_get::<Option<String>, _>("data")
-        .ok()
-        .flatten()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-    Ok(Role {
-        id: Auto::Set(row.try_get::<i64, _>("id")?),
-        name: row.try_get("name")?,
-        description: row.try_get("description")?,
-        data,
-    })
 }
 
 /// Every codename `uid` holds, on every backend.

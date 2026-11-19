@@ -20,7 +20,6 @@ use crate::Model;
     managed = false,
     scope = "registry"
 )]
-#[allow(dead_code)]
 pub struct OperatorTotp {
     #[rustango(primary_key)]
     pub operator_id: i64,

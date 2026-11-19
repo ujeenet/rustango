@@ -43,7 +43,6 @@ use crate::Model;
     display = "slug",
     scope = "registry"
 )]
-#[allow(dead_code)] // Slices 2+ wire these fields into resolvers / pools / migrations.
 #[non_exhaustive]
 pub struct Org {
     #[rustango(primary_key)]

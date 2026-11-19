@@ -114,7 +114,6 @@ pub trait MaybeSqliteFromRow: for<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow>
 #[cfg(feature = "sqlite")]
 impl<T> MaybeSqliteFromRow for T where T: for<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> {}
 #[cfg(not(feature = "sqlite"))]
-#[allow(dead_code)]
 pub trait MaybeSqliteFromRow {}
 #[cfg(not(feature = "sqlite"))]
 impl<T> MaybeSqliteFromRow for T {}
@@ -143,7 +142,6 @@ pub trait MaybeSqliteLoadRelated: LoadRelatedSqlite {}
 #[cfg(feature = "sqlite")]
 impl<T> MaybeSqliteLoadRelated for T where T: LoadRelatedSqlite {}
 #[cfg(not(feature = "sqlite"))]
-#[allow(dead_code)]
 pub trait MaybeSqliteLoadRelated {}
 #[cfg(not(feature = "sqlite"))]
 impl<T> MaybeSqliteLoadRelated for T {}

@@ -165,12 +165,6 @@ pub type BroadcastFn = Arc<
 ///
 /// Build once at startup and pass by reference to every `notify()` call.
 /// Channels you don't configure get silently skipped.
-///
-/// The `database` channel requires the `postgres` feature — it currently
-/// emits PG-typed JSONB INSERTs (the column is `JSONB`, placeholders are
-/// `$1, $2, $3`). Tri-dialect support is on the roadmap; until then,
-/// non-PG builds get a struct without the database channel + a
-/// `with_database` method that doesn't exist.
 #[derive(Default, Clone)]
 pub struct NotificationContext {
     mailer: Option<BoxedMailer>,
@@ -358,26 +352,47 @@ async fn insert_database_notification(
 ) -> Result<(), String> {
     use crate::core::SqlValue;
     validate_table_name(table)?;
-    let d = pool.dialect();
-    let sql = format!(
-        "INSERT INTO {} ({}, {}, {}) VALUES ({}, {}, {})",
-        d.quote_ident(table),
-        d.quote_ident("notifiable_id"),
-        d.quote_ident("type"),
-        d.quote_ident("data"),
-        d.placeholder(1),
-        d.placeholder(2),
-        d.placeholder(3),
+    let query = crate::core::InsertQuery::new(
+        notification_schema(table),
+        vec!["notifiable_id", "type", "data"],
+        vec![
+            SqlValue::I64(notifiable_id),
+            SqlValue::String(kind.to_owned()),
+            SqlValue::Json(payload.clone()),
+        ],
     );
-    let params = vec![
-        SqlValue::I64(notifiable_id),
-        SqlValue::String(kind.to_owned()),
-        SqlValue::Json(payload.clone()),
-    ];
-    crate::sql::raw_execute_pool(pool, &sql, params)
+    crate::sql::insert_pool(pool, &query)
         .await
         .map_err(|e| e.to_string())
-        .map(drop)
+}
+
+/// The schema of a configured notifications table, for the ORM insert.
+///
+/// The name is runtime config, so the schema is leaked once per distinct
+/// name; the cache holds table names only, never tenant data.
+fn notification_schema(table: &str) -> &'static crate::core::ModelSchema {
+    use crate::core::{FieldSchema, FieldType, ModelSchema};
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, &'static ModelSchema>>> = OnceLock::new();
+    static FIELDS: [FieldSchema; 3] = [
+        FieldSchema::new("notifiable_id", "notifiable_id", FieldType::I64),
+        FieldSchema::new("type", "type", FieldType::String),
+        FieldSchema::new("data", "data", FieldType::Json),
+    ];
+    let mut cache = CACHE
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(schema) = cache.get(table) {
+        return schema;
+    }
+    let name: &'static str = Box::leak(table.to_owned().into_boxed_str());
+    let mut schema = ModelSchema::new(name, name);
+    schema.fields = &FIELDS;
+    let schema: &'static ModelSchema = Box::leak(Box::new(schema));
+    cache.insert(table.to_owned(), schema);
+    schema
 }
 
 /// Reject table names with characters that could break the quoted form.

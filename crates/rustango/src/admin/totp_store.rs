@@ -19,7 +19,6 @@ use crate::Model;
 /// Only a confirmed device gates login.
 #[derive(Model, Clone)]
 #[rustango(table = "rustango_admin_totp", access = "never", managed = false)]
-#[allow(dead_code)]
 pub struct AdminTotp {
     /// Admin user id this device belongs to (one per user).
     #[rustango(primary_key)]
