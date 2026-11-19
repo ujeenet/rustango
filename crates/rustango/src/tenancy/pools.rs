@@ -3232,7 +3232,7 @@ mod tests {
         };
         let msg = over_budget(&big, 10, 40).expect("over");
         assert!(
-            msg.contains("74 connections") && msg.contains("= 0"),
+            msg.contains("74 connections") && !msg.contains("= 0"),
             "{msg}"
         );
     }

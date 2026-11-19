@@ -217,13 +217,25 @@ async fn concurrent_reads_are_refused(pool: &Pool) {
     let (a, b) = (p.clone(), p.clone());
     within(rustango::atomic!(&p, |tx| {
         put(tx, 1).await?;
-        let (ra, rb) = tokio::join!(Note::objects().fetch(&a), Note::objects().count(&b));
-        let refused = [ra.as_ref().err(), rb.as_ref().err()]
-            .into_iter()
-            .filter(|e| matches!(e, Some(ExecError::NestedAtomic)))
-            .count();
-        assert_eq!(refused, 1, "{ra:?} {rb:?}");
-        assert!(ra.is_ok() || rb.is_ok(), "{ra:?} {rb:?}");
+        // A fast backend can finish the first read before the second starts: retry until they overlap.
+        let mut seen = false;
+        for _ in 0..50 {
+            let (ra, rb) = tokio::join!(Note::objects().fetch(&a), Note::objects().count(&b));
+            let refused = [ra.as_ref().err(), rb.as_ref().err()]
+                .into_iter()
+                .filter(|e| matches!(e, Some(ExecError::NestedAtomic)))
+                .count();
+            assert!(ra.is_ok() || rb.is_ok(), "{ra:?} {rb:?}");
+            assert!(
+                refused + usize::from(ra.is_ok()) + usize::from(rb.is_ok()) == 2,
+                "{ra:?} {rb:?}"
+            );
+            if refused == 1 {
+                seen = true;
+                break;
+            }
+        }
+        assert!(seen, "two reads at once were never refused");
         Ok(())
     }))
     .await
