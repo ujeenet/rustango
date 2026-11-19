@@ -641,30 +641,9 @@ fn owner_seven(
     ))]
 }
 
-/// A create the caller could not read back is refused and rolled back,
-/// never an empty 201: outside a filter backend, or hidden by the "view" hook.
-async fn a_create_outside_the_callers_scope_is_refused(pool: &Pool) {
-    let app = ViewSet::for_model(Owned::SCHEMA, &["id", "owner_id"])
-        .allow_anonymous()
-        .filter_backend(owner_seven)
-        .router("/owned", pool.clone());
-    let (status, body) = send(&app, "POST", "/owned", Some(json!({ "owner_id": 8 }))).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    let bulk = json!([{ "owner_id": 7 }, { "owner_id": 8 }]);
-    let (status, body) = send(&app, "POST", "/owned", Some(bulk)).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    assert!(
-        Owned::objects()
-            .fetch(pool)
-            .await
-            .expect("fetch")
-            .is_empty(),
-        "a refused create wrote"
-    );
-    let (status, body) = send(&app, "POST", "/owned", Some(json!({ "owner_id": 7 }))).await;
-    assert_eq!(status, StatusCode::CREATED, "{body}");
-    assert_eq!(body["owner_id"], 7, "{body}");
-
+/// A create the "view" hook would hide is refused and rolled back; one only a
+/// filter backend hides is written and echoes its key, never an empty 201.
+async fn a_create_hidden_by_the_view_hook_is_refused(pool: &Pool) {
     let docs = doc_app(pool, |v| v);
     let (status, body) = send(
         &docs,
@@ -673,6 +652,9 @@ async fn a_create_outside_the_callers_scope_is_refused(pool: &Pool) {
         Some(json!({ "title": "hidden-new" })),
     )
     .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let bulk = json!([{ "title": "open-a" }, { "title": "hidden-b" }]);
+    let (status, body) = send(&docs, "POST", "/docs", Some(bulk)).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     let (status, body) = send(&docs, "POST", "/docs", Some(json!({ "title": "open-new" }))).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
@@ -684,7 +666,16 @@ async fn a_create_outside_the_callers_scope_is_refused(pool: &Pool) {
         .into_iter()
         .map(|d| d.title)
         .collect();
-    assert_eq!(titles, ["open-new"]);
+    assert_eq!(titles, ["open-new"], "a refused create wrote");
+
+    let owned = ViewSet::for_model(Owned::SCHEMA, &["id", "owner_id"])
+        .allow_anonymous()
+        .filter_backend(owner_seven)
+        .router("/owned", pool.clone());
+    let (status, body) = send(&owned, "POST", "/owned", Some(json!({ "owner_id": 8 }))).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert!(body["id"].is_i64(), "the key, never an empty body: {body}");
+    assert!(body.get("owner_id").is_none(), "{body}");
 }
 
 /// A hidden row is a 404 before its body's FK is checked: a 422 would confirm it.
@@ -841,7 +832,7 @@ tri_dialect_test!(
         a_row_hidden_after_the_scan_is_not_rendered,
         the_old_macro_names_still_apply,
         a_write_cannot_leave_the_queryset_scope,
-        a_create_outside_the_callers_scope_is_refused,
+        a_create_hidden_by_the_view_hook_is_refused,
         a_hidden_row_is_404_before_its_fk_check,
         a_concurrent_edit_is_judged_after_it_lands,
         item_routes_hide_with_404_and_refuse_with_403,

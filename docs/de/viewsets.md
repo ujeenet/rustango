@@ -788,7 +788,7 @@ eine solche Schicht vollständig: Lesen öffentlich, Schreiben mit Bearer-Token.
 `view` bei Retrieve, Update und Delete (verborgen ist `404`), dann `change` bzw.
 `delete` (`403`, auch beim Soft Delete); `view` in Listen (verborgene Zeilen
 fehlen in Seite und `count`, ab `view_hook_scan_cap` ist eine Seiten- oder
-Offset-Liste ein `400`: Queryset-Scope ergänzen oder Cursor-Paginierung nutzen). Queryset-Scopes schränken jedes Lesen und Schreiben ein; ein Schreiben, dessen Zeile sie verließe, ist ein `403`. Ein Create muss eine Zeile sein, die der Aufrufer zurücklesen kann: außerhalb der Filter-Backends oder globalen Scopes oder von `view` verborgen ist es ein `403`, das nichts schreibt. Hooks lesen die Zeile gesperrt in der Schreib-Transaktion; ein Credential eines anderen Mandanten ist ein `403`.
+Offset-Liste ein `400`: Queryset-Scope ergänzen oder Cursor-Paginierung nutzen). Queryset-Scopes schränken jedes Lesen und Schreiben ein; ein Schreiben, dessen Zeile sie verließe, ist ein `403`, ebenso ein Create, das der `view`-Hook verbergen würde. Hooks lesen die Zeile gesperrt in der Schreib-Transaktion; ein Credential eines anderen Mandanten ist ein `403`.
 `change` prüft nur die gespeicherte Zeile. `object_permissions::Actor::of(&parts)`
 sagt einem Hook, wer fragt; ein Agent-Token ist nie Superuser.
 `rustango_api_keys`, `rustango_agents`, `rustango_agent_grants`, `rustango_operators`,
@@ -834,10 +834,13 @@ es engt also das Basis-Queryset für alle Routen ein. Eine vom Backend ausgeschl
 Die Identität muss aus der Credential kommen, niemals aus dem Query-String. Ein
 `?owner_id=`-Filter ist kein Scope — er ist ein Parameter, den der Aufrufer wählt.
 
-Ein Backend, dem eine Spalte gehört, implementiert auch `write_pins`: Create
-speichert den Besitzer, Update kann ihn nicht ändern, und `WritePin::Deny` lehnt
-den Schreibzugriff mit 403 ab. Ohne Pin ist ein Create außerhalb des Backends ein
-403, das nichts schreibt; ein Update kann eine Zeile aber noch herausbewegen (204).
+Ein Scope schränkt nur das Lesen ein. Ein Backend, dem eine Spalte gehört, implementiert
+auch `write_pins`: Create speichert den Besitzer, Update kann ihn nicht ändern, und
+`WritePin::Deny` lehnt den Schreibzugriff mit 403 ab.
+
+Auch die statischen globalen Scopes eines Modells begrenzen, was gelesen wird, nicht was
+geschrieben wird: Create oder Update darf den Scope verlassen (201 nur mit dem Schlüssel oder 204).
+Für eine Sicherheitsgrenze nimm ein Filter-Backend mit `write_pins`.
 
 Ein Schreibvorgang gibt seine volle Zeile nur an einen Aufrufer mit der
 Berechtigung `retrieve` zurück; andere bekommen nur `{"<pk>": …}` (eine pro
