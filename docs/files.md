@@ -142,7 +142,8 @@ except the ones a browser runs as script (`html`, `svg`, `xml`, `js`, … —
 `uploads::ACTIVE_EXTENSIONS`). The first error stops the loop and deletes the
 files already saved, so a refused request leaves nothing behind. Each
 `SavedUpload` carries `key`, `original_filename`, `content_type` (as the client
-claimed it — do not trust it) and `size_bytes`.
+claimed it — do not trust it) and `size_bytes`. A body over axum's request
+limit (`DefaultBodyLimit`) is `UploadError::BodyTooLarge`: answer it with 413.
 
 ```rust
 let cfg = UploadConfig::new("avatars/").allowed_extensions(&["PNG", "Jpg"]);
@@ -409,8 +410,9 @@ sanitize_filename("my photo!.png");      // "my_photo_.png"
 sanitize_filename("");                    // "upload"   — never empty
 ```
 
-`save_uploads` applies this for you; call it directly only if you build keys by
-hand.
+Names longer than 100 bytes (`MAX_FILENAME_BYTES`) are cut, keeping a short
+extension. `save_uploads` applies this for you; call it directly only if you
+build keys by hand.
 
 ---
 

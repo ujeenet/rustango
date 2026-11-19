@@ -143,7 +143,8 @@ extensión salvo las que un navegador ejecuta como script (`html`, `svg`, `xml`,
 `js`, … — `uploads::ACTIVE_EXTENSIONS`). El primer error detiene el bucle y borra
 los archivos ya guardados, así que una petición rechazada no deja nada. Cada
 `SavedUpload` lleva `key`, `original_filename`, `content_type` (lo que dice el
-cliente — no te fíes) y `size_bytes`.
+cliente — no te fíes) y `size_bytes`. Un cuerpo que pasa el límite de axum
+(`DefaultBodyLimit`) da `UploadError::BodyTooLarge`: responde con 413.
 
 ```rust
 let cfg = UploadConfig::new("avatars/").allowed_extensions(&["PNG", "Jpg"]);
@@ -390,7 +391,8 @@ sanitize_filename("my photo!.png");      // "my_photo_.png"
 sanitize_filename("");                    // "upload"   — never empty
 ```
 
-`save_uploads` lo aplica por ti; llámalo directamente solo si construyes claves a mano.
+Un nombre de más de 100 bytes (`MAX_FILENAME_BYTES`) se recorta y conserva una
+extensión corta. `save_uploads` lo aplica por ti; llámalo directamente solo si construyes claves a mano.
 
 ---
 

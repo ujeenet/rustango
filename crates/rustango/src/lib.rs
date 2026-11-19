@@ -601,6 +601,9 @@ pub mod jti_store;
 #[cfg(feature = "uploads")]
 pub mod uploads;
 
+#[cfg(any(feature = "uploads", feature = "media"))]
+mod file_name;
+
 /// First-class `Media` model — database-backed file references with
 /// direct-browser upload, CDN-aware URLs, soft delete and orphan purge.
 /// See [`media::Media`] + [`media::MediaManager`].

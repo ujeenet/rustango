@@ -33,6 +33,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - A ViewSet create whose row a global scope or filter backend hides answers 201 with its key instead of an empty body.
 - A ViewSet bulk create checks FK targets with one read per FK column for the whole batch, not one per row.
 - Admin lists of a `skip_count_for` table no longer run the facet and date-bucket scans: facets are left out and the date hierarchy shows its breadcrumb only.
+- Upload and media file names are cut to 100 bytes, keeping a short extension, so a long client name cannot overflow a key column or a filesystem name limit.
+- An upload body over the request limit is `UploadError::BodyTooLarge` (a 413), not `Parse`.
+- Generated projects that get `uploads` name axum's `multipart` feature themselves.
 
 ### Documentation
 

@@ -36,6 +36,10 @@ const DEPENDENCIES: &[(&str, &str)] = &[
     ("dotenvy", r#""0.15""#),
 ];
 
+/// The end of the axum feature list, and the same with `multipart` added.
+const AXUM_LAST_FEATURE: &str = r#""query"]"#;
+const AXUM_WITH_MULTIPART: &str = r#""query", "multipart"]"#;
+
 /// Added only when the project gets `jobs`; see [`cargo_toml`].
 const ASYNC_TRAIT: &str = "async-trait";
 
@@ -96,9 +100,22 @@ pub fn cargo_toml(
     } else {
         String::new()
     };
+    // `uploads` takes an axum `Multipart`: name the feature here, not only through rustango.
+    let wants_multipart = template
+        .base_features()
+        .iter()
+        .copied()
+        .chain(features.iter().map(String::as_str))
+        .any(|f| matches!(f, "uploads" | "batteries" | "tenancy"));
     let deps = DEPENDENCIES
         .iter()
-        .map(|(n, v)| format!("{n} = {v}"))
+        .map(|(n, v)| match *n {
+            "axum" if wants_multipart => format!(
+                "{n} = {}",
+                v.replace(AXUM_LAST_FEATURE, AXUM_WITH_MULTIPART)
+            ),
+            _ => format!("{n} = {v}"),
+        })
         .collect::<Vec<_>>()
         .join("\n");
     format!(

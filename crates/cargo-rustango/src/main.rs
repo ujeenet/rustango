@@ -1582,6 +1582,30 @@ mod tests {
         }
     }
 
+    /// A project that gets `uploads` names axum's `multipart` itself, so its
+    /// `Multipart` handlers do not build only through rustango's features.
+    #[test]
+    fn axum_gets_multipart_only_with_uploads() {
+        let axum_features = |template: &str, extra: &[&str]| {
+            let args = parse(&["app", "--template", template]).expect(template);
+            let extra: Vec<String> = extra.iter().map(|f| (*f).to_owned()).collect();
+            let toml =
+                templates::cargo_toml("app", args.template, args.backend, &extra, None, args.dep);
+            let parsed: toml::Table = toml.parse().expect("valid TOML");
+            parsed["dependencies"]["axum"]["features"]
+                .as_array()
+                .expect("features")
+                .iter()
+                .filter_map(|f| f.as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+        };
+        let has = |f: Vec<String>| f.iter().any(|f| f == "multipart");
+        assert!(has(axum_features("fullstack", &[])));
+        assert!(has(axum_features("tenant", &[])));
+        assert!(has(axum_features("api", &["uploads"])));
+        assert!(!has(axum_features("api", &[])));
+    }
+
     #[test]
     fn backend_accepts_both_flag_forms() {
         for argv in [

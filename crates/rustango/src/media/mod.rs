@@ -2153,42 +2153,13 @@ fn upload_matches(meta: &crate::storage::ObjectMeta, media: &Media) -> bool {
 /// Build a storage key: `<prefix>/<uuid>-<sanitized filename>`.
 fn build_key(prefix: &str, original_filename: &str) -> String {
     let prefix = prefix.trim_end_matches('/');
-    let safe = sanitize_filename(original_filename);
+    let safe = crate::file_name::sanitize_filename(original_filename);
     let uuid = uuid::Uuid::new_v4();
     if prefix.is_empty() {
         format!("{uuid}-{safe}")
     } else {
         format!("{prefix}/{uuid}-{safe}")
     }
-}
-
-// Basename only, safe ASCII, underscore for the rest.
-//
-// Identical to `crate::uploads::sanitize_filename`. They sit behind
-// different feature gates (`media` vs `uploads`), so neither can call
-// the other — change both or neither.
-fn sanitize_filename(name: &str) -> String {
-    // Split on both separators, not `Path::file_name`, which is
-    // per-platform: `\` separates on Windows and is an ordinary
-    // character elsewhere, so the same upload would be stored under a
-    // different name depending on the server's OS.
-    let base = name
-        .rsplit(['/', '\\'])
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(name);
-    let mut out = String::with_capacity(base.len());
-    for c in base.chars() {
-        if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-            out.push(c);
-        } else {
-            out.push('_');
-        }
-    }
-    if out.is_empty() {
-        out.push_str("upload");
-    }
-    out
 }
 
 /// Default disk name when the registry has nothing configured. Use
@@ -2245,17 +2216,6 @@ mod tests {
         assert!(!k.starts_with('/'));
         assert!(k.ends_with("-a.png"));
         assert_eq!(k.matches('/').count(), 0);
-    }
-
-    #[test]
-    fn sanitize_strips_directory_and_unsafe_chars() {
-        assert_eq!(sanitize_filename("../etc/passwd"), "passwd");
-        assert_eq!(sanitize_filename("My File.png"), "My_File.png");
-        assert_eq!(sanitize_filename("évil.jpg"), "_vil.jpg");
-        assert_eq!(sanitize_filename(""), "upload");
-        // Windows separators, asserted on every platform.
-        assert_eq!(sanitize_filename("C:\\windows\\evil.exe"), "evil.exe");
-        assert_eq!(sanitize_filename("C:/Users/me/photo.jpg"), "photo.jpg");
     }
 
     #[test]

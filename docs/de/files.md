@@ -143,7 +143,8 @@ außer denen, die ein Browser als Skript ausführt (`html`, `svg`, `xml`, `js`, 
 `uploads::ACTIVE_EXTENSIONS`). Der erste Fehler stoppt die Schleife und löscht die
 schon gespeicherten Dateien; eine abgelehnte Anfrage hinterlässt also nichts. Jedes
 `SavedUpload` trägt `key`, `original_filename`, `content_type` (wie vom Client
-behauptet — nicht vertrauen) und `size_bytes`.
+behauptet — nicht vertrauen) und `size_bytes`. Ein Body über axums Limit
+(`DefaultBodyLimit`) ergibt `UploadError::BodyTooLarge`: antworte mit 413.
 
 ```rust
 let cfg = UploadConfig::new("avatars/").allowed_extensions(&["PNG", "Jpg"]);
@@ -393,7 +394,8 @@ sanitize_filename("my photo!.png");      // "my_photo_.png"
 sanitize_filename("");                    // "upload"   — never empty
 ```
 
-`save_uploads` wendet dies für dich an; rufe es nur direkt auf, wenn du Keys von Hand baust.
+Namen über 100 Bytes (`MAX_FILENAME_BYTES`) werden gekürzt; eine kurze Endung
+bleibt. `save_uploads` wendet dies für dich an; rufe es nur direkt auf, wenn du Keys von Hand baust.
 
 ---
 
