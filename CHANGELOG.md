@@ -46,6 +46,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Documentation
 
+- The naming guide says the bare-name rule covers `Model` and `QuerySet` methods; free functions such as `has_perm_pool` keep their `_pool` suffix until 1.0.
 - New Transactions guide (all four languages): what joins an `atomic` block, savepoints, `on_commit`, failures per backend, SQLite `BEGIN IMMEDIATE`, `atomic_with`, races, the `_on` forms, DDL, iterators and cancellation. The ORM guide no longer points SQLite users to `atomic_immediate`.
 
 ## [0.66.0] — 2026-11-11
