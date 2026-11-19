@@ -2264,20 +2264,12 @@ mod prefix_tests {
             resp.status()
         );
 
-        // A console route is served without a tenant lookup; an unknown
-        // segment is looked up once and cached as a miss.
-        for path in ["/login", "/no-such-tenant"] {
-            let req = Request::builder()
-                .uri(path)
-                .header("host", "apex.test")
-                .body(Body::empty())
-                .unwrap();
-            let _ = app.clone().oneshot(req).await.unwrap();
-        }
-        assert!(
-            !crate::tenancy::prefix_looked_up(&registry, "/login"),
-            "a console path was resolved"
-        );
+        // The console keeps its own route; an unknown segment is looked up
+        // once and cached as a miss. A console segment is looked up too, off
+        // the request, by the shadow check.
+        let login = get(&app, "/login").await;
+        assert_eq!(login.status(), StatusCode::OK, "the console's sign-in page");
+        let _ = get(&app, "/no-such-tenant").await;
         assert!(crate::tenancy::prefix_looked_up(
             &registry,
             "/no-such-tenant"
