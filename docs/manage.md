@@ -1880,10 +1880,15 @@ on pre-warming. The settings live on `TenantPoolsConfig`:
 | `database_pool_idle_timeout` | 10 min | Close idle connections after this duration. Defends against load-balancer / `idle_in_transaction_session_timeout` cuts. |
 | `database_pool_max_lifetime` | 30 min | Force-rotate connections so vault-leased credentials get refreshed. |
 | `prewarm_active_tenants` | false | When true, `Server::Builder::serve` calls `prewarm_database_tenants()` at boot. |
-| `max_cached_scoped_pools` | 64 | Cap on the cached per-tenant pools for schema-mode tenants. |
-| `scoped_pool_max_connections` | 8 | `max_connections` of each schema-mode tenant pool. |
+| `max_cached_scoped_pools` | 8 | Cap on the cached per-tenant pools for schema-mode tenants. |
+| `scoped_pool_max_connections` | 3 | `max_connections` of each schema-mode tenant pool. |
 | `max_concurrent_pool_builds` | 16 | Database-mode pools built at once; a build waits up to `database_pool_acquire_timeout`, then 503. `0` = no limit. |
 | `max_pool_builds_per_minute` | 600 | Database-mode pools built per minute; past it 503. `0` = no limit. |
+
+Schema-mode tenants can open `2 × max_cached_scoped_pools × scoped_pool_max_connections`
+connections on the registry server (48 by default), sized with the registry pool for a
+stock Postgres (`max_connections = 100`); boot warns when the server allows fewer.
+Raise both on a bigger server or behind PgBouncer.
 
 With `Cli`, pass the config through `Cli::with_tenant_pools(config)`.
 

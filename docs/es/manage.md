@@ -1891,10 +1891,15 @@ actives el pre-calentamiento. Los ajustes viven en `TenantPoolsConfig`:
 | `database_pool_idle_timeout` | 10 min | Cierra las conexiones inactivas tras esta duración. Se defiende de los cortes por load-balancer / `idle_in_transaction_session_timeout`. |
 | `database_pool_max_lifetime` | 30 min | Fuerza la rotación de conexiones para que las credenciales arrendadas por vault se refresquen. |
 | `prewarm_active_tenants` | false | Cuando es true, `Server::Builder::serve` llama a `prewarm_database_tenants()` en el arranque. |
-| `max_cached_scoped_pools` | 64 | Tope de pools por tenant en caché para los tenants en modo esquema. |
-| `scoped_pool_max_connections` | 8 | `max_connections` de cada pool de tenant en modo esquema. |
+| `max_cached_scoped_pools` | 8 | Tope de pools por tenant en caché para los tenants en modo esquema. |
+| `scoped_pool_max_connections` | 3 | `max_connections` de cada pool de tenant en modo esquema. |
 | `max_concurrent_pool_builds` | 16 | Pools en modo base construidos a la vez; una construcción espera hasta `database_pool_acquire_timeout`, luego 503. `0` = sin límite. |
 | `max_pool_builds_per_minute` | 600 | Pools en modo base construidos por minuto; por encima 503. `0` = sin límite. |
+
+Los tenants en modo esquema pueden abrir `2 × max_cached_scoped_pools × scoped_pool_max_connections`
+conexiones en el servidor del registro (48 por defecto), dimensionadas con el pool del registro
+para un Postgres estándar (`max_connections = 100`); el arranque avisa si el servidor permite
+menos. Sube ambos en un servidor mayor o detrás de PgBouncer.
 
 Con `Cli`, pasa la configuración mediante `Cli::with_tenant_pools(config)`.
 

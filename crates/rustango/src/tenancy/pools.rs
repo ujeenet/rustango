@@ -133,24 +133,22 @@ pub struct TenantPoolsConfig {
     ///
     /// Budget the worst case as `2 * max_cached_scoped_pools *
     /// scoped_pool_max_connections` concurrent connections against
-    /// the registry server (held connections have their own pool),
-    /// and keep that under its `max_connections`. The default pair
-    /// gives 2 × 64 × 8 = 1024, far
-    /// above a stock Postgres' 100 — but that ceiling needs every
-    /// cached tenant saturated simultaneously, and these pools hold no
-    /// idle connections (`min_connections = 0` plus
-    /// `database_pool_idle_timeout`), so a quiet tenant costs nothing.
-    /// Lower this, or `scoped_pool_max_connections`, if your registry
-    /// server's limit is tight and your tenants are uniformly busy.
-    /// Default: 64.
+    /// the registry server, plus the registry pool itself, and keep that
+    /// under its `max_connections`. The defaults give 2 × 8 × 3 = 48,
+    /// which with a 10-connection registry pool fits a stock Postgres'
+    /// 100 with room for a second process or a console. Boot warns when
+    /// the server's limit is lower than this budget. Raise both knobs on
+    /// a bigger server or behind PgBouncer.
+    /// Default: 8.
     pub max_cached_scoped_pools: usize,
 
     /// Per-pool `max_connections` for schema-mode scoped pools. Each
     /// tenant has two: `t.pool()`'s and the held connections', so one
     /// never waits on the other. Budget `2 * max_cached_scoped_pools *
     /// scoped_pool_max_connections` against the registry server's
-    /// `max_connections`; quiet tenants hold none (`min_connections = 0`).
-    /// Default: 8.
+    /// `max_connections`. A quiet tenant closes its connections after
+    /// `database_pool_idle_timeout` (`min_connections = 0`).
+    /// Default: 3.
     pub scoped_pool_max_connections: u32,
 
     /// Most database-mode pools built at once, across tenants. A build
@@ -177,6 +175,15 @@ pub struct TenantPoolsConfig {
     pub schema_tenant_roles: bool,
 }
 
+#[cfg(feature = "postgres")]
+impl TenantPoolsConfig {
+    /// Most registry-server connections the schema-mode pools open:
+    /// a queries pool and a held pool per cached tenant.
+    pub(crate) fn scoped_connection_budget(&self) -> u64 {
+        2 * self.max_cached_scoped_pools as u64 * u64::from(self.scoped_pool_max_connections)
+    }
+}
+
 impl Default for TenantPoolsConfig {
     fn default() -> Self {
         Self {
@@ -190,11 +197,10 @@ impl Default for TenantPoolsConfig {
             database_pool_idle_timeout: Some(std::time::Duration::from_secs(10 * 60)),
             database_pool_max_lifetime: Some(std::time::Duration::from_secs(30 * 60)),
             prewarm_active_tenants: false,
-            max_cached_scoped_pools: 64,
-            // Raised from the pre-#1235 hardcoded 2: these pools are
-            // shared per tenant now, and 2 deadlocks the documented
-            // `Tenant::conn` + `t.pool()` + job-worker combination.
-            scoped_pool_max_connections: 8,
+            // 2 × 8 × 3 = 48 registry-server connections at worst: fits
+            // a stock Postgres (max_connections = 100) with the registry pool.
+            max_cached_scoped_pools: 8,
+            scoped_pool_max_connections: 3,
             max_concurrent_pool_builds: 16,
             max_pool_builds_per_minute: 600,
             media_storage: None,
@@ -873,7 +879,11 @@ pub(crate) async fn boot_checks<DB: Database>(pools: &TenantPools<DB>) -> Result
              of them, or set search_path on the registry URL"
         )));
     }
-    if pg.config.schema_tenant_roles && has_schema_tenants(pg.registry()).await? {
+    if !has_schema_tenants(pg.registry()).await? {
+        return Ok(());
+    }
+    warn_over_connection_budget(pg).await;
+    if pg.config.schema_tenant_roles {
         super::schema_role::check_can_create_roles(pg.registry()).await?;
         pg.role_secrets()?;
         if pg.config.max_cached_scoped_pools == 0 {
@@ -888,6 +898,43 @@ pub(crate) async fn boot_checks<DB: Database>(pools: &TenantPools<DB>) -> Result
         super::schema_role::refuse_writable(&mut conn, "public").await?;
     }
     Ok(())
+}
+
+/// Warn when the schema pools and the registry pool can open more
+/// connections than the registry server allows.
+#[cfg(feature = "postgres")]
+async fn warn_over_connection_budget(pg: &TenantPools<sqlx::Postgres>) {
+    // PG-only server setting; schema mode is Postgres-only.
+    let server: Result<i32, _> =
+        sqlx::query_scalar("SELECT current_setting('max_connections')::int")
+            .fetch_one(pg.registry())
+            .await;
+    let Ok(server) = server else { return };
+    let registry = pg.registry().options().get_max_connections();
+    if let Some(msg) = over_budget(&pg.config, registry, server) {
+        tracing::warn!(target: "rustango::tenancy::pools", "{msg}");
+    }
+}
+
+/// The boot warning when `config`'s schema pools plus the `registry` pool
+/// can exceed the server's `max_connections`, else `None`.
+#[cfg(feature = "postgres")]
+fn over_budget(config: &TenantPoolsConfig, registry: u32, server: i32) -> Option<String> {
+    let need = config.scoped_connection_budget() + u64::from(registry);
+    if need <= u64::try_from(server).unwrap_or(0) {
+        return None;
+    }
+    let shared = if config.schema_tenant_roles {
+        ""
+    } else {
+        ", or set max_cached_scoped_pools = 0 to share the registry pool"
+    };
+    Some(format!(
+        "schema-mode pools can open {need} connections (2 x max_cached_scoped_pools {} x \
+         scoped_pool_max_connections {} + registry pool {registry}) but the server allows \
+         {server}; lower TenantPoolsConfig's knobs or raise max_connections{shared}",
+        config.max_cached_scoped_pools, config.scoped_pool_max_connections,
+    ))
 }
 
 /// Drop `schema`'s login role on a Postgres registry; elsewhere there is none.
@@ -3137,6 +3184,29 @@ mod tests {
         assert_eq!(
             path.startup_option(),
             "\"a\"\"b\\ c\\\\d\\\x0Be\",\\ \"ext\""
+        );
+    }
+
+    /// The default schema-mode budget plus a 10-connection registry pool
+    /// stays under 64, so a stock Postgres (100) keeps room to spare.
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn default_scoped_budget_fits_a_stock_postgres() {
+        let c = TenantPoolsConfig::default();
+        assert!(
+            c.scoped_connection_budget() + 10 <= 64,
+            "{}",
+            c.scoped_connection_budget()
+        );
+        assert_eq!(over_budget(&c, 10, 100), None);
+        let big = TenantPoolsConfig {
+            schema_tenant_roles: false,
+            ..TenantPoolsConfig::default()
+        };
+        let msg = over_budget(&big, 10, 40).expect("over");
+        assert!(
+            msg.contains("58 connections") && msg.contains("= 0"),
+            "{msg}"
         );
     }
 

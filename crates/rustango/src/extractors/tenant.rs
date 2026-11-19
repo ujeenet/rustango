@@ -145,7 +145,7 @@ impl<DB: Database> Tenant<DB> {
     ///
     /// **Cost in schema mode:** one pool build on the first miss,
     /// then free. `scoped_pool` caches per tenant slug up to
-    /// `max_cached_scoped_pools`, 64 by default; past that it evicts the
+    /// `max_cached_scoped_pools`, 8 by default; past that it evicts the
     /// least recently used tenant's pool, which rebuilds on its next
     /// request. Raise the cap if many tenants are busy at once. Database
     /// mode reuses the tenant's own pool throughout.

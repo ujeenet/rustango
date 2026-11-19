@@ -422,8 +422,8 @@ async fn scoped_pool_is_cached_per_tenant() {
     .await;
     let pools = TenantPools::new(pool.clone());
 
-    // Saturate the first pool: default `scoped_pool_max_connections`
-    // is 2, so holding two checkouts puts its size at 2.
+    // Two checkouts (default `scoped_pool_max_connections` is 3)
+    // put the first pool's size at 2.
     let first = pools.scoped_pool(&acme).await.unwrap();
     let _c1 = first.acquire().await.unwrap();
     let _c2 = first.acquire().await.unwrap();
