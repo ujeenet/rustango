@@ -69,7 +69,7 @@ Nutzungshilfe aus.
 
 Die Abschnitte oben erklären die gängigen Verben im Detail. Diese Tabelle ist
 die **vollständige** Liste, aus den beiden Dispatchern
-(`migrate/manage.rs` und `tenancy/manage/mod.rs`) gezogen statt aus der Prosa —
+(`migrate/manage/mod.rs` und `tenancy/manage/mod.rs`) gezogen statt aus der Prosa —
 ein Verb, das im Leitfaden fehlt, ist hier trotzdem auffindbar. Für die Flags
 `<verb> --help` ausführen; der Hilfetext ist maßgeblich, diese Seite nicht.
 

@@ -73,7 +73,7 @@ for inline usage.
 
 The sections below explain the commonly used verbs in depth. This table is
 the **complete** list, taken from the two dispatchers
-(`migrate/manage.rs` and `tenancy/manage/mod.rs`) rather than from the
+(`migrate/manage/mod.rs` and `tenancy/manage/mod.rs`) rather than from the
 prose — so a verb missing from the guide is still findable here. Run
 `<verb> --help` for its flags; the help text is authoritative and this
 page is not.

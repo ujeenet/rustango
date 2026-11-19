@@ -69,7 +69,7 @@ retour non nul en cas d'erreur de validation ou d'E/S. Exécutez
 ## Tous les verbes
 
 Les sections ci-dessous détaillent les verbes courants. Ce tableau est la liste
-**complète**, tirée des deux dispatchers (`migrate/manage.rs` et
+**complète**, tirée des deux dispatchers (`migrate/manage/mod.rs` et
 `tenancy/manage/mod.rs`) plutôt que de la prose — un verbe absent du guide
 reste donc trouvable ici. Lancez `<verb> --help` pour ses drapeaux ; le texte
 d'aide fait foi, pas cette page.

@@ -67,7 +67,7 @@ errores de validación o de E/S. Ejecuta `cargo run -- --help` (o
 ## Todos los verbos
 
 Las secciones siguientes explican en detalle los verbos habituales. Esta tabla
-es la lista **completa**, tomada de los dos dispatchers (`migrate/manage.rs` y
+es la lista **completa**, tomada de los dos dispatchers (`migrate/manage/mod.rs` y
 `tenancy/manage/mod.rs`) en vez de la prosa — así que un verbo que falte en la
 guía sigue siendo localizable aquí. Ejecuta `<verb> --help` para sus banderas;
 el texto de ayuda manda, esta página no.
