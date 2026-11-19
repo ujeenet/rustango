@@ -28,7 +28,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Removed
 
-- **Breaking:** the items deprecated in 0.63 and earlier: `register_tx_action*` and `admin_register_tx_action*`, `AdminTxActionFn`, `register_admin_object_permission!`, `register_admin_queryset!`, `BoundedDmlReason::SetOperation`, `i18n::timezone::activate`, `media::router::media_router`. See UPGRADING for replacements.
+- **Breaking:** the items deprecated in 0.63 and earlier: `register_tx_action*` and `admin_register_tx_action*`, `AdminTxActionFn`, `register_admin_object_permission!`, `register_admin_queryset!`, `BoundedDmlReason::SetOperation`, `i18n::timezone::activate`, `media::router::media_router`, `DistributedLock::for_tenant` / `scoped`, `ScopedCache::for_tenant`, `tenancy::server::run`. See UPGRADING for replacements.
 - **Breaking:** the pre-0.64 tenant lock, idempotency and page-counter keys, and `IdempotencyLayer::legacy_keys`.
 
 ### Fixed

@@ -13,7 +13,7 @@
 //! works"; the property is whether the serve underneath ever returns.
 //!
 //! A commit comment even asserted "the tenancy server drains via its own
-//! `shutdown_signal`" — true of `tenancy::server::run`, which is the
+//! `shutdown_signal`" — true of the old `tenancy::server::run`, which was the
 //! `manage server` subcommand, and not of the path `Cli::run` actually
 //! takes. Close enough to be convincing, and wrong.
 //!

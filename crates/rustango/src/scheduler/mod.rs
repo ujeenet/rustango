@@ -105,7 +105,7 @@ impl Scheduler {
     /// over per-tenant tables must fan out explicitly with
     /// [`crate::tenancy::for_each_tenant`] (#1226), and a
     /// once-per-cluster guard should be scoped per tenant with
-    /// [`crate::distributed_lock::DistributedLock::for_tenant`] (#1228).
+    /// `CacheScope::for_tenant(cache, &tenant).locks()`.
     pub fn every<F, Fut>(&self, name: &str, period: Duration, job: F)
     where
         F: Fn() -> Fut + Send + Sync + 'static,

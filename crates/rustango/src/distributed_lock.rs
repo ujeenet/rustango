@@ -82,8 +82,6 @@ pub struct DistributedLock {
     cache: BoxedCache,
     /// `Global` is process-wide: `lock:<name>`.
     space: KeySpace,
-    /// The deprecated [`Self::scoped`] namespace, put before each name.
-    named: Option<String>,
 }
 
 impl DistributedLock {
@@ -94,48 +92,12 @@ impl DistributedLock {
 
     /// Locks of `space`: `tenant:#org:<id>:<slug>:lock:<name>` for a tenant.
     pub(crate) fn in_space(cache: BoxedCache, space: KeySpace) -> Self {
-        Self {
-            cache,
-            space,
-            named: None,
-        }
-    }
-
-    /// Scope every lock name to one tenant, so the same name in two
-    /// tenants gives two separate locks.
-    #[cfg(feature = "tenancy")]
-    #[deprecated(
-        since = "0.64.0",
-        note = "use `CacheScope::for_tenant(cache, tenant).locks()`; removed in 0.67.0"
-    )]
-    #[must_use]
-    pub fn for_tenant(self, tenant: &crate::tenancy::TenantSlug) -> Self {
-        Self::in_space(self.cache, KeySpace::Tenant(tenant.clone()))
-    }
-
-    /// Scope lock names under any namespace: `lock:<namespace>:<name>`.
-    #[deprecated(
-        since = "0.64.0",
-        note = "put the namespace in the lock name, or use `CacheScope::locks()` per tenant; removed in 0.67.0"
-    )]
-    #[must_use]
-    pub fn scoped(self, namespace: impl AsRef<str>) -> Self {
-        Self {
-            named: Some(namespace.as_ref().to_owned()),
-            ..Self::new(self.cache)
-        }
-    }
-
-    fn rest(&self, name: &str) -> String {
-        match &self.named {
-            Some(ns) => format!("{ns}:{name}"),
-            None => name.to_owned(),
-        }
+        Self { cache, space }
     }
 
     /// The cache key for `name`, including this factory's scope.
     fn key_for(&self, name: &str) -> String {
-        self.space.key(Area::Lock, &self.rest(name))
+        self.space.key(Area::Lock, name)
     }
 
     /// Try to take `name` for `ttl`. Gives `None` when someone else
@@ -747,60 +709,32 @@ mod tests {
         );
     }
 
-    /// Scoped, the same lock name in two tenants is two locks, so a
-    /// per-tenant cron actually runs for every tenant.
-    #[allow(deprecated)]
+    /// The same lock name in two tenants is two locks, so a per-tenant cron
+    /// runs for every tenant; inside one tenant there is one holder.
+    #[cfg(feature = "tenancy")]
     #[tokio::test]
-    async fn scoped_locks_do_not_contend_across_tenants() {
+    async fn tenant_locks_do_not_contend_across_tenants() {
         let cache: BoxedCache = StdArc::new(InMemoryCache::new());
-        let acme_lock = DistributedLock::new(cache.clone()).scoped("tenant:acme");
-        let globex_lock = DistributedLock::new(cache).scoped("tenant:globex");
-
-        let acme = acme_lock
-            .try_acquire("daily_report", Duration::from_secs(30))
-            .await;
-        let globex = globex_lock
-            .try_acquire("daily_report", Duration::from_secs(30))
-            .await;
-
-        assert!(acme.is_some(), "acme gets its own lock");
-        assert!(globex.is_some(), "globex gets its own lock, not acme's");
-    }
-
-    /// Scoping must not weaken the guarantee inside a tenant.
-    #[allow(deprecated)]
-    #[tokio::test]
-    async fn scoped_lock_still_excludes_within_a_tenant() {
-        let cache: BoxedCache = StdArc::new(InMemoryCache::new());
-        let lock = DistributedLock::new(cache).scoped("tenant:acme");
-
-        let first = lock
-            .try_acquire("daily_report", Duration::from_secs(30))
-            .await;
-        let second = lock
-            .try_acquire("daily_report", Duration::from_secs(30))
-            .await;
-
-        assert!(first.is_some());
-        assert!(second.is_none(), "one holder at a time, per tenant");
+        let ttl = Duration::from_secs(30);
+        let acme = tenant_lock(&cache, 1, "acme");
+        let globex = tenant_lock(&cache, 2, "globex");
+        let held = acme.try_acquire("daily_report", ttl).await;
+        assert!(held.is_some(), "acme gets its own lock");
+        assert!(acme.try_acquire("daily_report", ttl).await.is_none());
+        assert!(globex.try_acquire("daily_report", ttl).await.is_some());
     }
 
     /// One slug must not collide with another by prefix, such as
     /// `acme` against `acme-corp`.
-    #[allow(deprecated)]
+    #[cfg(feature = "tenancy")]
     #[tokio::test]
     async fn tenant_scopes_are_separated_by_slug() {
         let cache: BoxedCache = StdArc::new(InMemoryCache::new());
-        let acme = DistributedLock::new(cache.clone()).scoped("tenant:acme");
-        let acme_corp = DistributedLock::new(cache).scoped("tenant:acme-corp");
-
-        assert!(acme
-            .try_acquire("j", Duration::from_secs(30))
-            .await
-            .is_some());
+        let ttl = Duration::from_secs(30);
+        let _held = tenant_lock(&cache, 1, "acme").try_acquire("j", ttl).await;
         assert!(
-            acme_corp
-                .try_acquire("j", Duration::from_secs(30))
+            tenant_lock(&cache, 1, "acme-corp")
+                .try_acquire("j", ttl)
                 .await
                 .is_some(),
             "`acme-corp` must not be blocked by `acme`'s lock"
@@ -870,41 +804,5 @@ mod tests {
             .unwrap();
         let acme = tenant_lock(&cache, 1, "acme");
         assert!(acme.try_acquire("j", ttl).await.is_some());
-    }
-
-    /// The deprecated wrappers build the same keys as before or the new layout.
-    #[cfg(feature = "tenancy")]
-    #[allow(deprecated)]
-    #[test]
-    fn deprecated_wrappers_map_onto_the_key_space() {
-        let cache: BoxedCache = StdArc::new(InMemoryCache::new());
-        let t = crate::tenancy::TenantSlug::new(1, "acme");
-        let lock = DistributedLock::new(cache.clone()).for_tenant(&t);
-        assert_eq!(lock.key_for("j"), "tenant:#org:1:acme:lock:j");
-        let named = DistributedLock::new(cache.clone())
-            .for_tenant(&t)
-            .scoped("r");
-        assert_eq!(named.key_for("j"), "lock:r:j");
-        assert_eq!(DistributedLock::new(cache).key_for("j"), "lock:j");
-    }
-
-    /// `scoped` names its own keyspace, apart from unscoped and other scopes.
-    #[allow(deprecated)]
-    #[tokio::test]
-    async fn scoped_locks_use_their_namespace() {
-        let cache: BoxedCache = StdArc::new(InMemoryCache::new());
-        let ttl = Duration::from_secs(30);
-        let ns = DistributedLock::new(cache.clone()).scoped("reports");
-        let _held = ns.try_acquire("j", ttl).await.expect("scoped");
-
-        assert!(cache.exists("lock:reports:j").await.unwrap());
-        assert!(
-            ns.try_acquire("j", ttl).await.is_none(),
-            "same scope contends"
-        );
-        let other = DistributedLock::new(cache.clone()).scoped("billing");
-        assert!(other.try_acquire("j", ttl).await.is_some());
-        let unscoped = DistributedLock::new(cache);
-        assert!(unscoped.try_acquire("j", ttl).await.is_some());
     }
 }
