@@ -32,7 +32,7 @@
 //!
 //! **DO NOT mount in production** — the panel exposes request paths,
 //! query patterns, and timing data that an attacker could use for
-//! reconnaissance. [`debug_router`] takes a [`RouteAccess`] saying who may
+//! reconnaissance. [`debug_router`](crate::debug_panel::debug_router) takes a [`RouteAccess`] saying who may
 //! read it; also gate the mount on `RUSTANGO_ENV != "prod"`:
 //!
 //! ```ignore

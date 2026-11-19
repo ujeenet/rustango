@@ -199,9 +199,11 @@ pub fn page_offset(page: i64, page_size: i64) -> i64 {
 
 /// Rows a ViewSet or template list's "view" hook scan reads by default: a
 /// fifth of the admin's default.
+#[cfg(any(feature = "admin", feature = "tenancy", feature = "template_views"))]
 pub(crate) const DEFAULT_VIEW_HOOK_SCAN_CAP: usize = 2_000;
 
 /// The largest `view_hook_scan_cap`: each list request reads that many rows.
+#[cfg(any(feature = "admin", feature = "tenancy", feature = "template_views"))]
 pub(crate) const MAX_VIEW_HOOK_SCAN_CAP: usize = 100_000;
 
 /// Default deepest row a list may skip to: a deeper `OFFSET` reads every

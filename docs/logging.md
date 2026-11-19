@@ -115,6 +115,7 @@ matches on. Framework events live under the `rustango::` root, so
 
 | Target | What it covers |
 |---|---|
+| `rustango::access` | Route access checks that failed on a database error |
 | `rustango::admin` | Admin routing and registration |
 | `rustango::admin::audit` | Audit-log writes |
 | `rustango::admin::sso` | Admin SSO |

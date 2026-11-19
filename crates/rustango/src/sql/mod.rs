@@ -84,13 +84,14 @@ pub(crate) use executor::rolled_back;
 pub use executor::row_to_json_my;
 #[cfg(feature = "sqlite")]
 pub use executor::row_to_json_sqlite;
+#[cfg(any(feature = "admin", feature = "tenancy"))]
+pub(crate) use executor::select_key_batches;
 #[cfg(feature = "template_views")]
 pub(crate) use executor::select_stored_uuids;
 pub(crate) use executor::{
     bulk_insert_pks_tx, compile_bulk_update_batches, count_rows_on, execute_batches_tx,
     execute_unprepared_pool, fetch_in_chunks, fetch_select_in_chunks, fetch_values_list_on,
-    inserted_pk, rows_per_batch, run_delete_statements_tx, select_key_batches, truncate_refusal,
-    truncate_tx, write_tx,
+    inserted_pk, rows_per_batch, run_delete_statements_tx, truncate_refusal, truncate_tx, write_tx,
 };
 pub(crate) use executor::{caught, in_block, refuse_ddl_in_block, Ddl};
 #[allow(deprecated)]

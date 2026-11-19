@@ -1,7 +1,7 @@
 //! Who may call a generated route: decided when the router mounts, checked
 //! per request. ViewSet and the template views share it, so a surface over a
 //! model cannot mount with nobody having said who may use it. Routers over no
-//! model take a [`RouteAccess`] argument instead.
+//! model take a [`RouteAccess`](crate::access::RouteAccess) argument instead.
 
 use axum::http::request::Parts;
 
