@@ -85,27 +85,11 @@ pub(crate) struct FkWrite<'a> {
     pub(crate) stored: Option<(&'static FieldSchema, &'a SqlValue)>,
 }
 
-/// The first FK among `values` naming a row `targets` hide, read on `tx`
-/// when the write holds one. On update, `stored` is the owner row's pk: a
-/// value it already holds inside `owner`'s scope is kept. `admits` judges
-/// a gated target's row.
-pub(crate) async fn first_hidden(
-    pool: &Pool,
-    tx: Option<&mut PoolTx<'_>>,
-    owner: (&'static ModelSchema, &[WhereExpr]),
-    targets: &[FkTarget],
-    values: &[(&'static str, SqlValue)],
-    stored: Option<(&'static FieldSchema, &SqlValue)>,
-    admits: impl Fn(&FkTarget, &Value) -> bool,
-) -> Result<Option<&'static FieldSchema>, ExecError> {
-    let writes = [FkWrite { values, stored }];
-    let hidden = first_hidden_in(pool, tx, owner, targets, &writes, admits).await?;
-    Ok(hidden.map(|(_, field)| field))
-}
-
-/// [`first_hidden`] over many writes: `(index, field)` of the first hidden
-/// link. Each target is read once for every value the writes name; only a
-/// value that read did not admit is re-checked one by one, as before.
+/// `(index, field)` of the first FK among `writes` naming a row `targets`
+/// hide, read on `tx` when the write holds one. On update, a write's
+/// `stored` value inside `owner`'s scope is kept; `admits` judges a gated
+/// target's row. Each target is read once for every value the writes
+/// name; only a value that read did not admit is re-checked one by one.
 pub(crate) async fn first_hidden_in(
     pool: &Pool,
     mut tx: Option<&mut PoolTx<'_>>,

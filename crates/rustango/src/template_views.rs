@@ -2594,7 +2594,7 @@ async fn hidden_fk(
     #[cfg(feature = "admin")]
     {
         use crate::object_permissions::Hooks;
-        use crate::viewset::fk_target::{first_hidden, hooked_targets, FkTarget};
+        use crate::viewset::fk_target::{first_hidden_in, hooked_targets, FkTarget, FkWrite};
         let written = schema
             .scalar_fields()
             .filter(|f| columns.contains(&f.column));
@@ -2610,9 +2610,13 @@ async fn hidden_fk(
         let admits =
             |t: &FkTarget, row: &Value| Hooks::All.allows(t.model.table, "view", parts, Some(row));
         let owner = (schema, &row_scope(schema, parts)[..]);
-        match first_hidden(pool, None, owner, &targets, &pairs, stored, admits).await {
+        let writes = [FkWrite {
+            values: &pairs,
+            stored,
+        }];
+        match first_hidden_in(pool, None, owner, &targets, &writes, admits).await {
             Ok(None) => Ok(()),
-            Ok(Some(field)) => Err(WriteFailed::Refused(HashMap::from([(
+            Ok(Some((_, field))) => Err(WriteFailed::Refused(HashMap::from([(
                 field.name.to_owned(),
                 "no such object".to_owned(),
             )]))),
