@@ -37,6 +37,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Upload and media file names are cut to 100 bytes, keeping a short extension, so a long client name cannot overflow a key column or a filesystem name limit.
 - An upload body over the request limit is `UploadError::BodyTooLarge` (a 413), not `Parse`.
 - Generated projects that get `uploads` name axum's `multipart` feature themselves.
+- `find(1, &pool)` on an `i64` key (and the other key lookups: `find_or_fail`, `where_key`, `where_key_not`, `find_many_or_fail`) fits the integer to the key's width instead of failing with `TypeMismatch`.
 
 ### Documentation
 

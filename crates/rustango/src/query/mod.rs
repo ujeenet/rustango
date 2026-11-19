@@ -1359,7 +1359,7 @@ impl<T: Model> QuerySet<T> {
     #[must_use]
     pub fn where_key(self, pk: impl Into<SqlValue>) -> Self {
         match T::SCHEMA.primary_key() {
-            Some(f) => self.filter_op(f.name, Op::Eq, pk),
+            Some(f) => self.filter_op(f.name, Op::Eq, pk.into().fit_integer(f.ty)),
             None => self.with_pending_error(QueryError::UnknownField {
                 model: T::SCHEMA.name,
                 field: "<pk>".to_string(),
@@ -1381,7 +1381,7 @@ impl<T: Model> QuerySet<T> {
     #[must_use]
     pub fn where_key_not(self, pk: impl Into<SqlValue>) -> Self {
         match T::SCHEMA.primary_key() {
-            Some(f) => self.filter_op(f.name, Op::Ne, pk),
+            Some(f) => self.filter_op(f.name, Op::Ne, pk.into().fit_integer(f.ty)),
             None => self.with_pending_error(QueryError::UnknownField {
                 model: T::SCHEMA.name,
                 field: "<pk>".to_string(),

@@ -6263,10 +6263,10 @@ fn inherent_impl_tokens(
             ) -> ::core::result::Result<::core::option::Option<Self>, #root::sql::ExecError>
             {
                 use #root::sql::FetcherPool as _;
-                let _pk_val: #root::core::SqlValue = pk.into();
+                // `where_key` fits an integer to the key's width.
                 let mut _rows: ::std::vec::Vec<Self> =
                     #root::query::QuerySet::<Self>::default()
-                        .filter(::core::stringify!(#pk_ident), _pk_val)
+                        .where_key(pk)
                         .limit(1)
                         .fetch(pool)
                         .await?;
@@ -6360,7 +6360,7 @@ fn inherent_impl_tokens(
                         continue;
                     }
                     let _hit = #root::query::QuerySet::<Self>::default()
-                        .filter(::core::stringify!(#pk_ident), _key)
+                        .where_key(_key)
                         .exists(pool)
                         .await?;
                     if !_hit {
