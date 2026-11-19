@@ -479,6 +479,47 @@ async fn an_fk_to_a_hidden_target_is_refused(pool: &Pool) {
     assert_eq!(status, StatusCode::CREATED, "{body}");
 }
 
+/// A bulk create reads each FK target once per request, not once per row,
+/// and still names the entry that points at a hidden row.
+async fn a_bulk_create_reads_each_fk_target_once(pool: &Pool) {
+    let mut ids = Vec::new();
+    for name in ["public", "other", "secret"] {
+        let mut l = Label {
+            id: Auto::default(),
+            name: name.into(),
+        };
+        l.insert(pool).await.expect("seed");
+        ids.push(*l.id.get().expect("pk"));
+    }
+    let app = ViewSet::for_model(Scoped::SCHEMA, &["id", "owner_id", "label_id"])
+        .allow_anonymous()
+        .router("/scoped", pool.clone());
+    let bulk = |labels: [Option<i64>; 4]| {
+        Some(Value::Array(
+            labels
+                .iter()
+                .map(|l| json!({ "owner_id": 1, "label_id": l }))
+                .collect(),
+        ))
+    };
+    let count = |body| {
+        let app = app.clone();
+        rustango::test_assertions::QueryCounter::scope(async move {
+            let (status, body) = send(&app, "POST", "/scoped", body).await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+            rustango::test_assertions::QueryCounter::current()
+        })
+    };
+    let unlinked = count(bulk([None; 4])).await;
+    let (a, b) = (Some(ids[0]), Some(ids[1]));
+    let linked = count(bulk([a, b, a, b])).await;
+    assert_eq!(linked, unlinked + 1, "one FK read per request");
+
+    let (status, body) = send(&app, "POST", "/scoped", bulk([a, b, Some(ids[2]), a])).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(body.to_string().contains("bulk entry 2"), "{body}");
+}
+
 /// A superuser's row needs a superuser through the API too: an agent never is one,
 /// and the opt-out does not skip this framework rule.
 async fn a_superuser_row_needs_an_api_superuser(pool: &Pool) {
@@ -843,6 +884,7 @@ tri_dialect_test!(
         skip_object_permissions_skips_app_hooks,
         a_queryset_scope_narrows_every_action,
         an_fk_to_a_hidden_target_is_refused,
+        a_bulk_create_reads_each_fk_target_once,
         a_superuser_row_needs_an_api_superuser,
     ],
 );

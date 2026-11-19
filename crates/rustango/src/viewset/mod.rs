@@ -2161,26 +2161,38 @@ impl WriteSet {
         values: &[(&'static str, SqlValue)],
         stored: Option<(&'static crate::core::FieldSchema, &SqlValue)>,
     ) -> Result<Result<(), Refusal>, crate::sql::ExecError> {
+        let writes = [fk_target::FkWrite { values, stored }];
+        let hidden = self.first_fk_refusal(acq, tx, &writes).await?;
+        Ok(hidden.map_or(Ok(()), |(_, refusal)| Err(refusal)))
+    }
+
+    /// [`Self::check_fk_targets`] over many writes, one read per FK target:
+    /// the index of the first write that links a hidden row, and why.
+    async fn first_fk_refusal(
+        &self,
+        acq: &mut AcquiredConn,
+        tx: Option<&mut crate::sql::PoolTx<'_>>,
+        writes: &[fk_target::FkWrite<'_>],
+    ) -> Result<Option<(usize, Refusal)>, crate::sql::ExecError> {
         let (parts, hooks) = &self.view_gate;
         let admits =
             |t: &FkTarget, row: &Value| hooks.allows(t.model.table, "view", parts, Some(row));
-        let hidden = fk_target::first_hidden(
+        let hidden = fk_target::first_hidden_in(
             &acq.pool,
             tx,
             (self.schema, &self.owner_scope),
             &self.fk_targets,
-            values,
-            stored,
+            writes,
             admits,
         )
         .await?;
-        Ok(match hidden {
-            None => Ok(()),
-            Some(field) => Err(Refusal::Invalid {
+        Ok(hidden.map(|(i, field)| {
+            let refusal = Refusal::Invalid {
                 field: field.name,
                 message: "no such object".to_owned(),
-            }),
-        })
+            };
+            (i, refusal)
+        }))
     }
 
     fn is_writable(&self, name: &str) -> bool {
@@ -4342,7 +4354,7 @@ async fn create_many(
     // Atomic validation: collect every (columns, values) up front
     // so a bad row near the end of the list doesn't leave half the
     // INSERTs committed: validate the whole list before any save.
-    let mut prepared: Vec<((Vec<&'static str>, Vec<SqlValue>), RoutingClaims)> =
+    let mut prepared: Vec<(Vec<(&'static str, SqlValue)>, RoutingClaims)> =
         Vec::with_capacity(rows.len());
     for (i, (row, json)) in rows.iter().enumerate() {
         if let Err(resp) = serializer_validate(state, json, Some(i)) {
@@ -4368,16 +4380,25 @@ async fn create_many(
             Ok(c) => c,
             Err(resp) => return resp,
         };
-        match write_set
-            .check_fk_targets(acq, None, &collected, None)
-            .await
-        {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => return e.into_response(state, Some(i)),
-            Err(e) => return json_server_error("viewset::bulk_create::fk", &e),
-        }
-        prepared.push((collected.into_iter().unzip(), claims));
+        prepared.push((collected, claims));
     }
+    // One read per FK target for the whole batch, not one per row.
+    let writes: Vec<_> = prepared
+        .iter()
+        .map(|(values, _)| fk_target::FkWrite {
+            values,
+            stored: None,
+        })
+        .collect();
+    match write_set.first_fk_refusal(acq, None, &writes).await {
+        Ok(None) => {}
+        Ok(Some((i, e))) => return e.into_response(state, Some(i)),
+        Err(e) => return json_server_error("viewset::bulk_create::fk", &e),
+    }
+    let prepared: Vec<((Vec<&'static str>, Vec<SqlValue>), RoutingClaims)> = prepared
+        .into_iter()
+        .map(|(values, claims)| (values.into_iter().unzip(), claims))
+        .collect();
 
     // Insert sequentially. We loop INSERT-RETURNING rather than
     // emitting one multi-row INSERT because:

@@ -31,6 +31,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `get_or_create_tx` that loses an insert race returns the winner's row and leaves the transaction usable, instead of the unique violation.
 - `atomic_with` with settings on MySQL or SQLite names `set_config` in its error, not "operator `transaction settings`".
 - A ViewSet create whose row a global scope or filter backend hides answers 201 with its key instead of an empty body.
+- A ViewSet bulk create checks FK targets with one read per FK column for the whole batch, not one per row.
 
 ### Documentation
 
