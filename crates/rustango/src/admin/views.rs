@@ -847,7 +847,9 @@ pub(crate) async fn table_view(
     // toggles `?<col>=<value>`: clicking the active value clears the
     // filter, clicking another value swaps to it.
     let show_all_facet = params.get("facet_show_all").map(String::as_str);
-    let facets_ctx: Vec<serde_json::Value> = if aggregates_withheld {
+    // A `skip_count_for` table is too big for the facet and date-bucket scans too.
+    let big_table = state.count_skipped_for_table(model.table);
+    let facets_ctx: Vec<serde_json::Value> = if aggregates_withheld || big_table {
         Vec::new()
     } else {
         compute_facets(
@@ -867,16 +869,16 @@ pub(crate) async fn table_view(
 
     // Date-hierarchy strip: the breadcrumb plus the child buckets at
     // the current drill level (year, month or day). One GROUP BY
-    // query, narrowed by the parent level's WHERE.
+    // query, narrowed by the parent level's WHERE; a big table gets the breadcrumb only.
     let date_hierarchy_ctx: Option<serde_json::Value> =
         if admin_cfg.date_hierarchy.is_empty() || aggregates_withheld {
             None
         } else {
-            let source = SelectQuery {
+            let source = (!big_table).then(|| SelectQuery {
                 where_clause: where_clause.clone(),
                 search: search.clone(),
                 ..SelectQuery::new(model)
-            };
+            });
             compute_date_hierarchy(&state, model, &admin_cfg, date_sel, &list_query, source).await?
         };
 
@@ -1421,7 +1423,7 @@ async fn compute_date_hierarchy(
     admin_cfg: &crate::core::AdminConfig,
     sel: crate::admin::date_hierarchy::DateSelection,
     list_query: &ListQuery,
-    source: SelectQuery,
+    source: Option<SelectQuery>,
 ) -> Result<Option<serde_json::Value>, AdminError> {
     use crate::admin::date_hierarchy::{range, DateSelection, DrillLevel};
 
@@ -1487,7 +1489,8 @@ async fn compute_date_hierarchy(
     }
 
     // ---------- Children ---------------------------------------------------
-    let Some(level) = DrillLevel::for_selection(sel) else {
+    // No `source`: the breadcrumb only, no bucket scans.
+    let (Some(level), Some(source)) = (DrillLevel::for_selection(sel), source) else {
         return Ok(Some(serde_json::json!({
             "field": field_name,
             "crumbs": crumbs,

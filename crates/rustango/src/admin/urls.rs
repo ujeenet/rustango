@@ -537,7 +537,8 @@ impl Builder {
     /// Skip the list view's `SELECT COUNT(*)` for these tables. The
     /// pager renders "Page N" instead of "Page N of M". Needed for
     /// tables with millions of rows, where a filtered `COUNT(*)`
-    /// takes seconds.
+    /// takes seconds. These tables also skip the facet and date-bucket
+    /// scans: no facets, and the date hierarchy shows its breadcrumb only.
     ///
     /// Any list URL also accepts `?count=skip` or `?count=0` for the
     /// same effect on one request, with no code change.

@@ -528,6 +528,41 @@ async fn facet_and_date_counts_follow_the_filters(pool: &Pool) {
     );
 }
 
+/// A table marked `skip_count_for` skips the facet and date-bucket scans too;
+/// the date breadcrumb still renders.
+async fn skip_count_tables_skip_facet_and_date_scans(pool: &Pool) {
+    for t in ["a", "b", "c"] {
+        seed(pool, t, true).await;
+    }
+    let list = |skip: bool| async move {
+        let mut b = rustango::admin::Builder::new(pool.clone()).admin_prefix(PREFIX);
+        if skip {
+            b = b.skip_count_for(["adminls_item"]);
+        }
+        let app = b.build();
+        let req = Request::builder().uri("/adminls_item?year=2024");
+        rustango::test_assertions::QueryCounter::scope(async move {
+            let res = app.oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            let bytes = res.into_body().collect().await.unwrap().to_bytes();
+            let body = String::from_utf8_lossy(&bytes).into_owned();
+            (rustango::test_assertions::QueryCounter::current(), body)
+        })
+        .await
+    };
+    let (counted, full) = list(false).await;
+    assert!(full.contains("By rank") && full.contains("date-hierarchy-buckets"));
+    let (skipped, body) = list(true).await;
+    assert!(
+        !body.contains("By rank") && !body.contains("By flag"),
+        "{body}"
+    );
+    assert!(!body.contains("date-hierarchy-buckets"), "{body}");
+    assert!(body.contains("date-hierarchy-crumbs"), "{body}");
+    // COUNT, two facets and the month buckets.
+    assert!(skipped + 4 <= counted, "{skipped} vs {counted}");
+}
+
 /// A CR/LF in a string PK is percent-encoded into the redirect, not a panic (#1862).
 async fn string_pk_redirect_is_encoded(pool: &Pool) {
     let req = Request::builder()
@@ -818,6 +853,7 @@ tri_dialect_test! {
         bool_facet_reads_true_and_toggles_off,
         soft_deleted_rows_leave_the_list,
         facet_and_date_counts_follow_the_filters,
+        skip_count_tables_skip_facet_and_date_scans,
         string_pk_redirect_is_encoded,
         url_filters_skip_secret_and_unshown_fields,
         null_facet_lists_the_null_rows,

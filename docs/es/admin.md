@@ -173,7 +173,9 @@ invertir la dirección (`?sort=col&order=asc|desc`). El valor por defecto provie
 Una página más allá de la fila 100 000 (lista y registro de auditoría) responde 400; acota con búsqueda o filtros.
 Para tablas muy grandes, regístralas con `Builder::skip_count_for([...])` para omitir el
 `SELECT COUNT(*)` (el paginador muestra entonces "Page N" sin un total general); un
-`?count=skip` por petición hace lo mismo de forma ad hoc.
+`?count=skip` por petición hace lo mismo de forma ad hoc. Esa tabla tampoco
+muestra las facetas de `list_filter` ni los tramos de la jerarquía de fechas (solo
+queda la ruta de navegación), porque cada uno lee toda la tabla.
 
 **Búsqueda.** Cuando `search_fields` está configurado, aparece un cuadro de búsqueda y
 coincide esos campos con `ILIKE` (PostgreSQL) / `LIKE` (MySQL, SQLite).

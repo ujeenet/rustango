@@ -169,7 +169,9 @@ A facet card shows up to 15 values; the rest collapse into a "+N more" link
 A page past row 100 000 (list and audit log) answers 400; narrow it with search or filters.
 For very large tables, register them with `Builder::skip_count_for([...])` to
 skip the `SELECT COUNT(*)` (the pager then shows "Page N" without a grand
-total); a per-request `?count=skip` does the same ad hoc.
+total); a per-request `?count=skip` does the same ad hoc. Such a table also
+skips the `list_filter` facets and the date-hierarchy buckets (only the
+breadcrumb stays), since each is a full scan.
 
 **Search.** When `search_fields` is set, a search box appears and matches those
 fields with `ILIKE` (PostgreSQL) / `LIKE` (MySQL, SQLite). `search_help_text`
