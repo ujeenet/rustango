@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.67.0] — 2026-11-19
+
 ### Added
 
 - `sql::update_or_create_tx`: `update_or_create` on an open `PoolTx`.
