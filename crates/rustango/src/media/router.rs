@@ -30,8 +30,7 @@
 //! # This router requires an authorization policy
 //!
 //! Build it with [`media_router_with`] and supply a
-//! [`MediaAuthorizer`]. [`media_router`] is deprecated and refuses
-//! every request — it does not serve.
+//! [`MediaAuthorizer`]; there is no policy-free constructor.
 //!
 //! Without a policy these routes take no authentication and no tenant.
 //! An anonymous caller could walk the id space collecting presigned S3
@@ -411,18 +410,6 @@ impl<T: MediaAuthorizer + ?Sized> MediaAuthorizer for Arc<T> {
     }
 }
 
-/// Refuses everything. What [`media_router`] uses.
-struct DenyAll;
-
-#[async_trait::async_trait]
-impl MediaAuthorizer for DenyAll {
-    async fn authorize(&self, _: &axum::http::request::Parts, _: MediaAction) -> MediaDecision {
-        // `Forbidden`, not `Unauthenticated`: it refuses whoever asks,
-        // so telling a client to authenticate would invite a retry loop.
-        MediaDecision::Forbidden
-    }
-}
-
 /// The permission codenames a [`MediaPerms`] request must satisfy —
 /// **all** of them, not any.
 ///
@@ -489,8 +476,8 @@ pub fn required_codenames(action: &MediaAction) -> Option<&'static [&'static str
 /// already use.
 ///
 /// This exists so the **secure** path is the one-liner. Do not reach
-/// for an `AllowAll` trait impl to clear the 403s `media_router` gives
-/// you — that is the original hole with extra steps.
+/// for an `AllowAll` trait impl to clear a 403 — that is the
+/// original hole with extra steps.
 ///
 /// ```ignore
 /// use rustango::media::router::{media_router_with, MediaPerms};
@@ -1054,20 +1041,6 @@ async fn no_store(req: axum::extract::Request, next: axum::middleware::Next) -> 
         axum::http::HeaderValue::from_static("Cookie, Authorization"),
     );
     resp
-}
-
-/// Build the media router. Pass to `axum::Router::nest("/media", ...)`.
-///
-/// # This refuses every request
-///
-/// It mounts a refuse-everything policy, so every route answers `403`.
-/// Use [`media_router_with`] and supply a [`MediaAuthorizer`].
-#[deprecated(
-    since = "0.57.7",
-    note = "serves nothing — every route is 403, and it is removed in 0.65.0. Use `media_router_with(manager, authorizer)` and supply a `MediaAuthorizer`; see the module docs."
-)]
-pub fn media_router(manager: MediaManager) -> Router {
-    media_router_with(manager, DenyAll)
 }
 
 fn media_routes(manager: MediaManager) -> Router {

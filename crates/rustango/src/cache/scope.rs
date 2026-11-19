@@ -92,9 +92,7 @@ impl CacheScope {
         crate::feature_flags::FeatureFlags::new(self.root.clone()).in_space(self.space.clone())
     }
 
-    /// Delete every key of this tenant from the root, in every area, plus the
-    /// 0.63 lock layout. The 0.63 idempotency copies (`idem:<sha>`, written until
-    /// 0.65.0) carry no tenant prefix, so they expire with their TTL instead.
+    /// Delete every key of this tenant from the root, in every area.
     /// A global scope deletes nothing.
     ///
     /// # Errors

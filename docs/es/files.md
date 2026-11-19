@@ -636,9 +636,7 @@ let app = axum::Router::new()
     .nest("/media", media_router_with(manager, MediaPerms::new(pool)));
 ```
 
-`media_router(manager)` — el constructor antiguo — está obsoleto (se elimina en 0.65.0) y ahora
-responde `403` en cada ruta. Es un cambio de comportamiento deliberado en
-0.57.7: antes, esas rutas no tomaban ningún extractor de autenticación,
+No existe un router sin política. Antes de 0.57.7, esas rutas no tomaban ningún extractor de autenticación,
 autorización ni tenant, así que `GET /media/{id}` devolvía la fila **y una
 URL de descarga prefirmada de S3** a cualquiera capaz de adivinar un entero,
 y `POST /uploads/begin` emitía un `PUT` prefirmado para un prefijo de clave

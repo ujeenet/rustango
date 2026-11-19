@@ -178,7 +178,8 @@ untouched.
 - `_http_layers` turns on axum's `matched-path` feature, which the route caps key on.
 - S3 and Azure failures with an HTTP status are now `StorageError::Status` instead of `Io`; the message is unchanged. Match `Status` (or call `http_status()`) where you matched `Io` for these.
 - `passkey::RegistrationOutcome` gains `user_verified` and is now `#[non_exhaustive]`: build it only through `verify_registration`.
-- The deprecated items and the old tenant lock / idempotency key fallbacks that 0.65.0 announced for removal in 0.66.0 stay one more release; they go in 0.67.0.
+- Removed (deprecated since 0.63 and earlier): `register_tx_action` and `register_tx_action_with_perm` on `admin::Builder` and `TenantAdminBuilder`, and `admin_register_tx_action*` on `server::Builder` (use `register_action` / `admin_register_action`, whose handler takes an `ActionCtx`: `ctx.tx()`, `ctx.pks()`); `admin::AdminTxActionFn`; `register_admin_object_permission!` (use `register_object_permission!`); `register_admin_queryset!` (use `register_queryset_scope!`); `BoundedDmlReason::SetOperation` (match `QueryError::SetOperationDml`); `i18n::timezone::activate`, a no-op (use `with_offset`); `media::router::media_router`, which refused every request (use `media_router_with(manager, authorizer)`).
+- Tenant cache keys: the pre-0.64 keys (`lock:tenant:<ns>:<name>`, `idem:<sha>` and the bare page counter) are no longer written, read or purged, and `IdempotencyLayer::legacy_keys` is gone. Deploy 0.64 or later to every node first: a lock, idempotency answer or page counter written by an older version is ignored, so a request in flight across the switch can run twice.
 
 ## 0.65.0
 

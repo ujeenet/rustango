@@ -317,9 +317,6 @@ Verbindung blockieren. `ctx.actor()` ist, wer die Aktion ausgelöst hat;
 Anfrage (mit Cookies) liegt hinter `ctx.raw_request_parts_with_credentials()`, also
 halte sie aus Logs heraus.
 
-`register_tx_action` und `register_tx_action_with_perm`, deren Handler `(tx, pks)`
-erhält, sind veraltet.
-
 ---
 
 ## Prüfpfad

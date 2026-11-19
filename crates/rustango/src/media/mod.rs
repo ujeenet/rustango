@@ -46,8 +46,7 @@
 //! ```
 //!
 //! The REST router over this surface lives in [`router`] and needs the
-//! `admin` feature. It requires an authorization policy: `media_router`
-//! is deprecated and answers `403` to everything, and
+//! `admin` feature. It requires an authorization policy:
 //! `router::media_router_with` takes a [`router::MediaAuthorizer`].
 //!
 //! ## Schema

@@ -232,18 +232,6 @@ macro_rules! register_object_permission {
     };
 }
 
-/// The old name of [`register_object_permission!`](crate::register_object_permission!).
-#[deprecated(
-    since = "0.62.0",
-    note = "use `register_object_permission!`; removed in 0.65.0"
-)]
-#[macro_export]
-macro_rules! register_admin_object_permission {
-    ($table:expr, $action:expr, $check:expr $(,)?) => {
-        $crate::register_object_permission!($table, $action, $check);
-    };
-}
-
 /// A framework table's hook: `skip_object_permissions()` does not skip it.
 macro_rules! register_framework_object_permission {
     ($table:expr, $action:expr, $check:expr $(,)?) => {

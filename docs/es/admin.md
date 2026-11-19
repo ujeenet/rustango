@@ -322,9 +322,6 @@ la acción; `ctx.method()`, `ctx.path()` y `ctx.client_ip()` describen la petici
 petición en bruto (con cookies) está tras `ctx.raw_request_parts_with_credentials()`:
 mantenla fuera de los logs.
 
-`register_tx_action` y `register_tx_action_with_perm`, cuyo manejador recibe
-`(tx, pks)`, están obsoletos.
-
 ---
 
 ## Registro de auditoría

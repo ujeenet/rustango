@@ -313,10 +313,7 @@ Der Slug eines gelöschten Tenants kann von einem neuen Tenant wiederverwendet
 werden. Damit `purge-tenant` die Keys des alten Tenants löscht, rufe beim Start
 `rustango::tenancy::decommission::clear_on_purge(cache)` für jeden Cache auf,
 der sie hält. Der Purge löscht dort jeden Bereich
-(`CacheScope::for_tenant(cache, &tenant).purge()` tut dasselbe von Hand). Bis
-0.65.0 werden Idempotency-Antworten auch unter ihrem 0.63-Key `idem:<sha>`
-geschrieben; dieser Key ist gehasht und hat kein Tenant-Präfix, der Purge findet
-ihn also nicht, und er läuft mit seiner TTL ab (standardmäßig 24 Stunden).
+(`CacheScope::for_tenant(cache, &tenant).purge()` tut dasselbe von Hand).
 
 ---
 

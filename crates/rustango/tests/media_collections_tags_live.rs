@@ -16,8 +16,7 @@ use axum::http::{Request, StatusCode};
 use rustango::media::router::{media_router_with, MediaAction, MediaAuthorizer, MediaDecision};
 
 /// These tests exercise the routes, not the access check, so they mount
-/// a permissive authorizer. `media_router` itself now refuses every
-/// request (security finding 01) — the refusals are covered in
+/// a permissive authorizer. The refusals are covered in
 /// `media_router_requires_authorization.rs`.
 struct AllowAll;
 

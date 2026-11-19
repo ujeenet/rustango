@@ -338,9 +338,6 @@ connexion. `ctx.actor()` est qui a lancé l'action ; `ctx.method()`, `ctx.path()
 et `ctx.client_ip()` décrivent la requête. La requête brute (cookies compris) est
 derrière `ctx.raw_request_parts_with_credentials()` : gardez-la hors des logs.
 
-`register_tx_action` et `register_tx_action_with_perm`, dont le gestionnaire
-reçoit `(tx, pks)`, sont dépréciés.
-
 ---
 
 ## Piste d'audit

@@ -243,65 +243,6 @@ impl<DB: Database> TenantAdminBuilder<DB> {
         });
         self
     }
-
-    /// [`Self::register_action`] with `ActionPerm::Change` and a `(tx, pks)` handler.
-    #[deprecated(
-        since = "0.63.0",
-        note = "use `register_action(table, name, ActionPerm::Change, handler)`; removed in 0.65.0"
-    )]
-    #[must_use]
-    pub fn register_tx_action<F>(
-        self,
-        model_table: &'static str,
-        action_name: &'static str,
-        handler: F,
-    ) -> Self
-    where
-        F: for<'a> Fn(
-                &'a mut crate::sql::PoolTx<'static>,
-                &'a [crate::core::SqlValue],
-            ) -> crate::admin::AdminActionFuture<'a>
-            + Send
-            + Sync
-            + 'static,
-    {
-        self.register_action(
-            model_table,
-            action_name,
-            crate::admin::ActionPerm::Change,
-            crate::admin::from_tx_handler(handler),
-        )
-    }
-
-    /// [`Self::register_action`] with a `(tx, pks)` handler.
-    #[deprecated(
-        since = "0.63.0",
-        note = "use `register_action`, whose handler takes an `ActionCtx`; removed in 0.65.0"
-    )]
-    #[must_use]
-    pub fn register_tx_action_with_perm<F>(
-        self,
-        model_table: &'static str,
-        action_name: &'static str,
-        perm: crate::admin::ActionPerm,
-        handler: F,
-    ) -> Self
-    where
-        F: for<'a> Fn(
-                &'a mut crate::sql::PoolTx<'static>,
-                &'a [crate::core::SqlValue],
-            ) -> crate::admin::AdminActionFuture<'a>
-            + Send
-            + Sync
-            + 'static,
-    {
-        self.register_action(
-            model_table,
-            action_name,
-            perm,
-            crate::admin::from_tx_handler(handler),
-        )
-    }
 }
 
 impl<DB: Database> TenantAdminBuilder<DB>

@@ -314,9 +314,6 @@ action, and `ctx.method()`, `ctx.path()` and `ctx.client_ip()` describe the
 request; the raw request (cookies included) is behind
 `ctx.raw_request_parts_with_credentials()`, so keep it out of logs.
 
-`register_tx_action` and `register_tx_action_with_perm`, whose handler takes
-`(tx, pks)`, are deprecated.
-
 ---
 
 ## Audit trail

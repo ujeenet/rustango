@@ -26,6 +26,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Schema-mode pool defaults now fit a stock Postgres: 16 cached tenants (was 64), each with a 3-connection queries pool and a 1-connection held pool (new knob `scoped_held_pool_max_connections`), 64 connections at worst instead of 1024. A held connection busy past the acquire timeout is `TenancyError::TenantConnBusy` (a 503). Boot on a Postgres registry with schema tenants, or none yet, warns when `max_connections` minus reserved slots is below the budget.
 - **Breaking:** a ViewSet create whose row would fall outside a queryset scope or be hidden by the "view" hook is refused with 403 and writes nothing; it used to succeed.
 
+### Removed
+
+- **Breaking:** the items deprecated in 0.63 and earlier: `register_tx_action*` and `admin_register_tx_action*`, `AdminTxActionFn`, `register_admin_object_permission!`, `register_admin_queryset!`, `BoundedDmlReason::SetOperation`, `i18n::timezone::activate`, `media::router::media_router`. See UPGRADING for replacements.
+- **Breaking:** the pre-0.64 tenant lock, idempotency and page-counter keys, and `IdempotencyLayer::legacy_keys`.
+
 ### Fixed
 
 - In-memory SQLite: a read after a write inside `atomic` no longer hangs.

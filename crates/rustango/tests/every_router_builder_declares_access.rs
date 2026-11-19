@@ -133,12 +133,6 @@ const EXEMPT: &[(&str, &str, &str, &str)] = &[
     (
         "media/router.rs",
         "",
-        "media_router",
-        "refuses every request; `media_router_with` takes an authorizer",
-    ),
-    (
-        "media/router.rs",
-        "",
         "media_router_with",
         "every request goes through the caller's `MediaAuthorizer`",
     ),

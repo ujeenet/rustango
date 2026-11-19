@@ -9,7 +9,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crate::core::SqlValue;
 use crate::sql::Pool;
 use axum::routing::{get, post};
 
@@ -24,18 +23,6 @@ use super::views;
 
 /// Future returned by a custom bulk action handler.
 pub type AdminActionFuture<'a> = Pin<Box<dyn Future<Output = Result<(), AdminError>> + Send + 'a>>;
-
-/// The `(tx, pks)` bulk action handler of the deprecated
-/// `register_tx_action*` methods.
-#[deprecated(
-    since = "0.63.0",
-    note = "take an `ActionCtx`: see `Builder::register_action`; removed in 0.65.0"
-)]
-pub type AdminTxActionFn = Arc<
-    dyn for<'a> Fn(&'a mut crate::sql::PoolTx<'static>, &'a [SqlValue]) -> AdminActionFuture<'a>
-        + Send
-        + Sync,
->;
 
 /// The permission a custom bulk action is checked against.
 ///
@@ -720,57 +707,6 @@ impl Builder {
         F: for<'a> Fn(super::ActionCtx<'a>) -> AdminActionFuture<'a> + Send + Sync + 'static,
     {
         self.insert_action(model_table, action_name, perm, Arc::new(handler))
-    }
-
-    /// [`Self::register_action`] with [`ActionPerm::Change`] and a `(tx, pks)` handler.
-    #[deprecated(
-        since = "0.63.0",
-        note = "use `register_action(table, name, ActionPerm::Change, handler)`; removed in 0.65.0"
-    )]
-    pub fn register_tx_action<F>(
-        self,
-        model_table: &'static str,
-        action_name: &'static str,
-        handler: F,
-    ) -> Self
-    where
-        F: for<'a> Fn(&'a mut crate::sql::PoolTx<'static>, &'a [SqlValue]) -> AdminActionFuture<'a>
-            + Send
-            + Sync
-            + 'static,
-    {
-        self.register_action(
-            model_table,
-            action_name,
-            ActionPerm::Change,
-            super::action::from_tx_handler(handler),
-        )
-    }
-
-    /// [`Self::register_action`] with a `(tx, pks)` handler.
-    #[deprecated(
-        since = "0.63.0",
-        note = "use `register_action`, whose handler takes an `ActionCtx`; removed in 0.65.0"
-    )]
-    pub fn register_tx_action_with_perm<F>(
-        self,
-        model_table: &'static str,
-        action_name: &'static str,
-        perm: ActionPerm,
-        handler: F,
-    ) -> Self
-    where
-        F: for<'a> Fn(&'a mut crate::sql::PoolTx<'static>, &'a [SqlValue]) -> AdminActionFuture<'a>
-            + Send
-            + Sync
-            + 'static,
-    {
-        self.register_action(
-            model_table,
-            action_name,
-            perm,
-            super::action::from_tx_handler(handler),
-        )
     }
 
     pub(crate) fn insert_action(

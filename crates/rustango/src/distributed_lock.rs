@@ -138,11 +138,6 @@ impl DistributedLock {
         self.space.key(Area::Lock, &self.rest(name))
     }
 
-    /// The 0.63 key of a tenant lock. Remove in 0.67.0.
-    fn legacy_key_for(&self, name: &str) -> Option<String> {
-        self.space.legacy_key(Area::Lock, &self.rest(name))
-    }
-
     /// Try to take `name` for `ttl`. Gives `None` when someone else
     /// holds it, or when the cache is unreachable.
     ///
@@ -151,7 +146,6 @@ impl DistributedLock {
     /// the TTL runs out.
     pub async fn try_acquire(&self, name: &str, ttl: Duration) -> Option<LockGuard> {
         let key = self.key_for(name);
-        let legacy = self.legacy_key_for(name);
         // The whole acquire is one atomic set-if-absent: `add` writes
         // the key only when it is absent and says whether it did. The
         // key's value IS the token, so there is no second write that
@@ -163,17 +157,9 @@ impl DistributedLock {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_nanos())
         );
-        // Remove in 0.67.0: the 0.63 key first, so a pod still on 0.63 and
-        // this one exclude each other during a rolling deploy.
-        if let Some(old) = &legacy {
-            if !matches!(self.cache.add(old, &token, Some(ttl)).await, Ok(true)) {
-                return None;
-            }
-        }
         let guard = LockGuard {
             cache: self.cache.clone(),
             key,
-            legacy,
             token: Arc::new(token),
             released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
@@ -181,9 +167,8 @@ impl DistributedLock {
             Ok(true) => Some(guard),
             // `Ok(false)`: another holder. `Err`: the cache is down.
             // Both fail closed — skip the work rather than run it
-            // unguarded. Frees the 0.63 key taken above.
+            // unguarded.
             _ => {
-                guard.release_key(guard.legacy.as_deref()).await;
                 guard.keep_until_ttl();
                 None
             }
@@ -257,10 +242,6 @@ impl DistributedLock {
         if let Some(old) = window.checked_sub(2) {
             let old = format!("{name}@{old}");
             let _ = self.cache.delete(&self.key_for(&old)).await;
-            // Remove in 0.67.0.
-            if let Some(legacy) = self.legacy_key_for(&old) {
-                let _ = self.cache.delete(&legacy).await;
-            }
         }
         // A run from the last window may still be going on another pod.
         // Free this window so a later tick retries once it ends.
@@ -311,8 +292,6 @@ impl Drop for ReleaseOnDrop {
 pub struct LockGuard {
     cache: BoxedCache,
     key: String,
-    /// The 0.63 key, held too. Remove in 0.67.0.
-    legacy: Option<String>,
     token: Arc<String>,
     released: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -337,12 +316,7 @@ impl LockGuard {
         {
             return;
         }
-        self.release_key(Some(&self.key)).await;
-        self.release_key(self.legacy.as_deref()).await;
-    }
-
-    async fn release_key(&self, key: Option<&str>) {
-        let Some(key) = key else { return };
+        let key = self.key.as_str();
         // Delete only if the stored value is still our token. If our
         // TTL ran out and someone else took the lock, the value is
         // theirs and we must not free it. Get-then-delete leaves a
@@ -870,49 +844,32 @@ mod tests {
         DistributedLock::in_space(cache.clone(), KeySpace::Tenant(t))
     }
 
-    /// A tenant lock is `tenant:<ns>:lock:<name>`, and the 0.63 key is held too.
+    /// A tenant lock is `tenant:<ns>:lock:<name>` and only that key.
     #[cfg(feature = "tenancy")]
     #[tokio::test]
-    async fn a_tenant_lock_holds_the_new_and_the_old_key() {
+    async fn a_tenant_lock_holds_only_the_tenant_key() {
         let cache: BoxedCache = StdArc::new(InMemoryCache::new());
         let ttl = Duration::from_secs(30);
         let held = tenant_lock(&cache, 1, "acme").try_acquire("j", ttl).await;
         let held = held.expect("free");
         assert!(cache.exists("tenant:#org:1:acme:lock:j").await.unwrap());
-        // A pod still on 0.63 takes only the old key: it must be refused.
-        assert!(!cache
-            .add("lock:tenant:#org:1:acme:j", "pod-063", Some(ttl))
-            .await
-            .unwrap());
+        assert!(!cache.exists("lock:tenant:#org:1:acme:j").await.unwrap());
         held.release().await;
         assert!(!cache.exists("tenant:#org:1:acme:lock:j").await.unwrap());
-        assert!(!cache.exists("lock:tenant:#org:1:acme:j").await.unwrap());
     }
 
-    /// Dual read: a lock a 0.63 pod holds under the old key blocks this release.
+    /// An entry under the pre-0.64 key does not block a new acquire.
     #[cfg(feature = "tenancy")]
     #[tokio::test]
-    async fn a_lock_held_under_the_old_key_blocks_a_new_acquire() {
+    async fn a_lock_under_the_old_key_is_ignored() {
         let cache: BoxedCache = StdArc::new(InMemoryCache::new());
         let ttl = Duration::from_secs(30);
         cache
-            .add("lock:tenant:#org:1:acme:j", "pod-063", Some(ttl))
+            .add("lock:tenant:#org:1:acme:j", "old", Some(ttl))
             .await
             .unwrap();
         let acme = tenant_lock(&cache, 1, "acme");
-        assert!(acme.try_acquire("j", ttl).await.is_none(), "ran twice");
-        assert!(
-            !cache.exists("tenant:#org:1:acme:lock:j").await.unwrap(),
-            "a refused acquire left the new key"
-        );
-        // A new key held elsewhere frees the old key this acquire took.
-        cache.delete("lock:tenant:#org:1:acme:j").await.unwrap();
-        cache
-            .add("tenant:#org:1:acme:lock:j", "other", Some(ttl))
-            .await
-            .unwrap();
-        assert!(acme.try_acquire("j", ttl).await.is_none());
-        assert!(!cache.exists("lock:tenant:#org:1:acme:j").await.unwrap());
+        assert!(acme.try_acquire("j", ttl).await.is_some());
     }
 
     /// The deprecated wrappers build the same keys as before or the new layout.

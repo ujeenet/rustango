@@ -9,9 +9,9 @@
     feature = "testkit",
     feature = "admin"
 ))]
-//! `media_router` must not serve media to an unauthenticated caller.
+//! The media router must not serve media to an unauthenticated caller.
 //!
-//! Security review of v0.57.6, finding 01 (High). `media_router`
+//! Security review of v0.57.6, finding 01 (High). The old `media_router`
 //! mounted 16 routes and **not one handler took an authentication,
 //! authorization, or tenant extractor** — every signature was
 //! `State(manager)` plus a path or body. `MediaManager` holds a single
@@ -95,14 +95,11 @@ async fn seed(mgr: &MediaManager) -> i64 {
 }
 
 /// An anonymous `GET /media/{id}` must not return the row.
-// Calls the deprecated constructor on purpose — proving it refuses is
-// the point of the test.
-#[allow(deprecated)]
 #[tokio::test]
 async fn an_anonymous_read_is_refused() {
     let mgr = manager().await;
     let id = seed(&mgr).await;
-    let app = rustango::media::router::media_router(mgr);
+    let app = media_router_with(mgr, DenyAll);
 
     let resp = app
         .oneshot(
@@ -128,12 +125,11 @@ async fn an_anonymous_read_is_refused() {
 }
 
 /// An anonymous `DELETE /media/{id}` must not destroy the row.
-#[allow(deprecated)]
 #[tokio::test]
 async fn an_anonymous_delete_is_refused() {
     let mgr = manager().await;
     let id = seed(&mgr).await;
-    let app = rustango::media::router::media_router(mgr);
+    let app = media_router_with(mgr, DenyAll);
 
     let resp = app
         .oneshot(
@@ -164,11 +160,10 @@ async fn an_anonymous_delete_is_refused() {
 ///
 /// This is the write primitive: a caller-chosen `disk` and
 /// `key_prefix`, with caller-supplied attribution.
-#[allow(deprecated)]
 #[tokio::test]
 async fn an_anonymous_upload_ticket_is_refused() {
     let mgr = manager().await;
-    let app = rustango::media::router::media_router(mgr);
+    let app = media_router_with(mgr, DenyAll);
 
     let resp = app
         .oneshot(
@@ -196,6 +191,16 @@ async fn an_anonymous_upload_ticket_is_refused() {
          unrefused call is a write primitive into the app's storage.",
         resp.status()
     );
+}
+
+/// Refuses every request, whoever asks.
+struct DenyAll;
+
+#[async_trait::async_trait]
+impl MediaAuthorizer for DenyAll {
+    async fn authorize(&self, _: &axum::http::request::Parts, _: MediaAction) -> MediaDecision {
+        MediaDecision::Forbidden
+    }
 }
 
 /// The control: a permissive authorizer still serves.
@@ -802,8 +807,7 @@ async fn the_whole_surface_is_uncacheable() {
 async fn a_refusal_is_not_cached_either() {
     let mgr = manager().await;
     let id = seed(&mgr).await;
-    #[allow(deprecated)]
-    let app = rustango::media::router::media_router(mgr);
+    let app = media_router_with(mgr, DenyAll);
 
     let resp = app
         .oneshot(
