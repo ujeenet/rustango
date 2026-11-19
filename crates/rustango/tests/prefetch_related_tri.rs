@@ -5,7 +5,8 @@
 
 use rustango::core::{BulkInsertQuery, Model as _, SqlValue};
 use rustango::sql::{
-    bulk_insert_pool, fetch_with_prefetch_related, fetch_with_prefetch_related_filtered, Auto,
+    bulk_insert_pool, fetch_with_prefetch_on, fetch_with_prefetch_pool,
+    fetch_with_prefetch_related, fetch_with_prefetch_related_filtered, transaction_pool, Auto,
     ExecError, FetcherPool as _, ForeignKey, Pool,
 };
 use rustango::test_assertions::QueryCounter;
@@ -568,6 +569,68 @@ async fn reverse_split_keys_load_each_child_once(pool: &Pool) {
     assert_eq!(parts, [1], "bin abc");
 }
 
+/// Shop id with its item ids, sorted.
+fn shop_items(rows: Vec<(Shop, Vec<Item>)>) -> Vec<(i64, Vec<i64>)> {
+    rows.into_iter()
+        .map(|(s, items)| {
+            let mut ids: Vec<i64> = items.iter().map(|i| i.id).collect();
+            ids.sort_unstable();
+            (s.id, ids)
+        })
+        .collect()
+}
+
+fn send<F: Send>(f: F) -> F {
+    f
+}
+
+/// The `_on` prefetch reads parents and children through the transaction:
+/// its uncommitted rows are seen inside and gone after the rollback.
+async fn prefetch_on_runs_on_the_transaction(pool: &Pool) {
+    let mut tx = transaction_pool(pool).await.unwrap();
+    for (id, code) in [(1_i64, "zz"), (2, "aa")] {
+        Shop {
+            id,
+            code: code.into(),
+        }
+        .insert_tx(&mut tx)
+        .await
+        .unwrap();
+    }
+    for (id, shop) in [(1_i64, "zz"), (2, "zz"), (3, "aa")] {
+        Item {
+            id,
+            shop: ForeignKey::unloaded(shop.to_owned()),
+        }
+        .insert_tx(&mut tx)
+        .await
+        .unwrap();
+    }
+    let ordered = || Shop::objects().order_by(&[("id", false)]);
+    let inside = send(fetch_with_prefetch_on::<Shop, Item, _>(
+        ordered(),
+        "shop",
+        &mut tx,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(shop_items(inside), vec![(1, vec![1, 2]), (2, vec![3])]);
+    tx.rollback().await.unwrap();
+    let after = send(fetch_with_prefetch_pool::<Shop, Item>(
+        ordered(),
+        "shop",
+        pool,
+    ))
+    .await
+    .unwrap();
+    assert!(after.is_empty(), "the rollback left {after:?}");
+    let mut conn = pool.acquire().await.unwrap();
+    let held = fetch_with_prefetch_on::<Shop, Item, _>(ordered(), "shop", &mut conn)
+        .await
+        .unwrap();
+    assert!(held.is_empty(), "a held connection saw {held:?}");
+}
+
 async fn unknown_or_mismatched_relation_is_an_error(pool: &Pool) {
     let err = fetch_with_prefetch_related::<Post, Tag>(Post::objects(), "nope", pool)
         .await
@@ -596,5 +659,6 @@ tri_dialect_test! {
         reverse_over_a_plain_column,
         reverse_split_keys_load_each_child_once,
         unknown_or_mismatched_relation_is_an_error,
+        prefetch_on_runs_on_the_transaction,
     ],
 }

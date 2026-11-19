@@ -10,6 +10,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `sql::atomic_with(pool, AtomicOptions, f)`: an isolation level (`Isolation`) and PG transaction settings (`TxSetting`, a dotted name set with `set_config(.., true)`) for the outermost block; `atomic` sends what it did.
 - `sql::in_atomic(&pool)`: whether ORM calls on `pool` run in an open `atomic` block.
 - `_on` forms for an open transaction or connection: `sql::bulk_update_on`, `fetch_dates_on`, `fetch_datetimes_on`, `model_shortcuts::increment_one_on`, and the derived `Model::bulk_upsert_on` / `bulk_insert_or_ignore_on`.
+- `sql::fetch_with_prefetch_on`: prefetch on an open `&mut PoolTx` or a held `&mut PoolConn`; the sealed `ReusableExecutor` names what it takes.
 - `ExecError::InAtomic`: an operation refused inside an `atomic` block on its pool. `LockMode::share` for a shared row lock (`FOR SHARE` / `LOCK IN SHARE MODE`).
 - `access::RouteAccess`: who may read a router that serves no model: `allow_anonymous()`, or with `tenancy` `superuser()`.
 - `ListView::view_hook_scan_cap`: most rows a template list reads to run the "view" hook.

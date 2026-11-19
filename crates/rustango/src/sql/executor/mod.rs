@@ -108,11 +108,20 @@ where
     F: FnMut(Vec<SqlValue>) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<C>, ExecError>>,
 {
-    let select = base.clone().compile()?;
-    let batches = in_batches(pool.dialect(), &select, base.is_sliced(), keys)?;
+    let batches = key_batches(pool.dialect(), base, keys)?;
     let split = batches.len() > 1;
     let rows = fetch_batches(batches, fetch).await?;
     Ok(Chunked { rows, split })
+}
+
+/// The `IN` lists [`fetch_in_chunks`] splits `keys` into.
+fn key_batches<T: Model>(
+    dialect: &dyn Dialect,
+    base: &QuerySet<T>,
+    keys: Vec<SqlValue>,
+) -> Result<Vec<Vec<SqlValue>>, ExecError> {
+    let select = base.clone().compile()?;
+    in_batches(dialect, &select, base.is_sliced(), keys)
 }
 
 /// Rows [`fetch_in_chunks`] read over one or more `IN` lists. A collation
@@ -916,7 +925,7 @@ pub use tx::{transaction_pool, write_transaction, PoolTx, TxConn};
 mod on;
 pub(crate) use on::RowRef;
 use on::{on_pool, pool_exec, pool_rows};
-pub use on::{write_tx, PoolConn, PooledConn, SqlExecutor, WriteTx};
+pub use on::{write_tx, PoolConn, PooledConn, ReusableExecutor, SqlExecutor, WriteTx};
 
 mod atomic;
 #[cfg(any(feature = "cache", feature = "tenancy"))]
@@ -2775,8 +2784,8 @@ where
 
 mod prefetch;
 pub use prefetch::{
-    __reverse_fk_key, fetch_with_prefetch_filtered, fetch_with_prefetch_pool,
-    fetch_with_prefetch_related, fetch_with_prefetch_related_filtered,
+    __reverse_fk_key, fetch_with_prefetch_filtered, fetch_with_prefetch_on,
+    fetch_with_prefetch_pool, fetch_with_prefetch_related, fetch_with_prefetch_related_filtered,
 };
 
 /// [`select_rows_pool`] that also decodes `select_related` joins.

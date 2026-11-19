@@ -384,6 +384,7 @@ Anweisung läuft auf dem, was du übergibst.
 - `Model::bulk_insert_on`, `Model::bulk_upsert_on`, `Model::bulk_insert_or_ignore_on`
 - `rustango::sql::bulk_update_on`
 - `rustango::sql::fetch_dates_on`, `rustango::sql::fetch_datetimes_on`
+- `rustango::sql::fetch_with_prefetch_on`
 - `rustango::sql::model_shortcuts::increment_one_on`
 - Queryset-Updates und -Löschungen: `.update().execute_on(..)`, `.delete_on(..)`
 

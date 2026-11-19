@@ -283,6 +283,57 @@ pub trait SqlExecutor<'c>: sealed::Sealed<'c> + Send + Sized {
 
 mod sealed {
     pub trait Sealed<'c> {}
+    pub trait Reusable {}
+}
+
+/// What the multi-statement `_on` forms run on: `&Pool`, `&mut PoolConn`
+/// or `&mut PoolTx`, each statement in turn on the same one. Sealed.
+pub trait ReusableExecutor: sealed::Reusable + Send {
+    /// The executor one statement takes.
+    #[doc(hidden)]
+    type Exec<'a>: SqlExecutor<'a>
+    where
+        Self: 'a;
+
+    /// Lend this executor to one statement.
+    #[doc(hidden)]
+    fn again(&mut self) -> Self::Exec<'_>;
+}
+
+impl sealed::Reusable for &Pool {}
+impl ReusableExecutor for &Pool {
+    type Exec<'a>
+        = &'a Pool
+    where
+        Self: 'a;
+
+    fn again(&mut self) -> &Pool {
+        self
+    }
+}
+
+impl sealed::Reusable for &mut PoolConn {}
+impl ReusableExecutor for &mut PoolConn {
+    type Exec<'a>
+        = &'a mut PoolConn
+    where
+        Self: 'a;
+
+    fn again(&mut self) -> &mut PoolConn {
+        self
+    }
+}
+
+impl<'t> sealed::Reusable for &mut PoolTx<'t> {}
+impl<'t> ReusableExecutor for &mut PoolTx<'t> {
+    type Exec<'a>
+        = &'a mut PoolTx<'t>
+    where
+        Self: 'a;
+
+    fn again(&mut self) -> &mut PoolTx<'t> {
+        self
+    }
 }
 
 #[cfg(feature = "postgres")]
