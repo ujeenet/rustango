@@ -145,6 +145,8 @@ PATCH, DELETE), et il reste synchronisé avec la configuration du ViewSet :
   `?search=` lorsqu'il est configuré et `?ordering=` (ci-dessous).
 - **`read_only()`** → les opérations d'écriture (POST/PUT/PATCH/DELETE) sont
   omises.
+- **Choix** → un champ `choices` ou `text_enum` porte un `enum` de ses noms
+  stockés (les alias d'une enum n'y figurent pas).
 - **Corps et erreurs** → create, PUT et PATCH acceptent des corps JSON ou
   urlencoded et documentent `422 validation_failed`, `400` pour un corps
   malformé et `413` pour un corps trop gros. L'opération create décrit la

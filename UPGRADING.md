@@ -155,6 +155,10 @@ untouched.
 - `CompiledStatement { sql, params }` no longer builds and `stmt.params` no longer reads: use `CompiledStatement::new(dialect, sql, params)?` and `stmt.params()`. `sql` stays a public field.
 - A Postgres array bind of an element type other than i16/i32/i64/text/bool/uuid now returns `ValueNotSupportedInDialect` where it panicked.
 - Generic helpers can bound `T: DecodeModel` instead of the eight `Maybe*` / `LoadRelated` traits; the old bounds still work.
+- `expected StorageMode, found &str` / `expected BackendKind, found String`: `Org.storage_mode` and `Org.backend_kind` are enums now. Assign `StorageMode::Schema`, compare with `== StorageMode::Database`, and filter with `Org::storage_mode.eq(StorageMode::Database)` or `.is_in([..])` (a string no longer builds). Struct literals and `Debug` output change the same way.
+- `no method named as_str found for enum StorageMode`: import the trait, `use rustango::core::TextEnum as _;` (or `rustango::prelude::*`). `no function parse found`: use `StorageMode::from_db(s)` or `s.parse::<BackendKind>()`; the error is an `UnknownVariant` (`?` turns it into `TenancyError::Validation`).
+- Reading an org row whose stored value is not a known spelling (case and spaces count) is now an error for that tenant; `pg`, `postgresql`, `mariadb` and `sqlite3` still read. Run `manage check-tenants` after upgrading and `repair-tenant` on what it lists.
+- New variants of a `TextEnum` need two releases on a running system: first the code that reads them, then the code that writes them.
 
 ## 0.67.0
 

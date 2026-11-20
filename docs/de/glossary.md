@@ -223,6 +223,11 @@ auf einen `Author` zeigt. So referenzieren sich Zeilen gegenseitig.
 **NULL / nullable** — `NULL` ist das Wort der Datenbank für „kein Wert / leer". Ein
 **nullable** Feld darf leer sein; ein nicht-nullable Feld ist erforderlich.
 
+**Enum-Feld (`TextEnum`)** — ein Feld, dessen Rust-Typ ein Enum wie
+`Status::Draft` ist, gespeichert als kurzer Text wie `draft`. Einen Wert zu lesen,
+den keine Variante nennt, ist ein Fehler, kein Raten. Siehe
+[Enum-Felder](models.md#enum-felder-als-text-gespeichert).
+
 **ORM** — *Object-Relational Mapper.* Der Teil des Frameworks, der deine
 Rust-Structs in Datenbankzeilen verwandelt und zurück. So fragst du in Rust ab,
 statt SQL von Hand zu schreiben. Siehe den [ORM-Leitfaden](orm.md).

@@ -8,6 +8,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 - `sql::DialectKind` and `Dialect::kind()`: match on the backend so the compiler checks every arm. `Dialect::date_bucket_sql` / `datetime_bucket_sql` hold the `.dates()` / `.datetimes()` truncation; `testkit::matrix::Backend::kind()`.
 - `sql::DecodeModel`: one bound for every row-decoding executor, in place of the eight marker traits. `CompiledStatement::new(dialect, sql, params)` and `sql::BindParams`: a hand-written statement checked for its dialect.
+- `#[derive(TextEnum)]` and `#[rustango(text_enum, max_length = N)]`: a model field that is a fieldless Rust enum, stored as text on every backend. Filters, `pluck`, admin choices and the OpenAPI `enum` take the enum's values; a stored value no variant names is a `ColumnDecode` error with an `UnknownVariant` source. `#[text_enum(alias = "...")]` reads old spellings.
+- `manage check-tenants` lists `rustango_orgs` rows whose storage mode or backend cannot be read; `manage repair-tenant <slug>` rewrites such a value, or an old spelling, from the raw text. `Org::fetch_reporting` reads orgs and returns the unreadable rows apart. `ExecError::is_row_decode`.
 
 ### Changed
 
@@ -16,6 +18,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `allow(dead_code)` removed from the framework models and the SQLite marker traits, so an unused field on them warns again.
 - **Breaking:** `CompiledStatement::params` is private: read it with `params()`, build a statement with `CompiledStatement::new`. The hidden `audit::__bind_value_pg` / `_my` / `_sqlite` are gone.
 - A value a backend cannot bind (a Postgres-only value off Postgres, a raw `List`, a Postgres array of floats) returns `SqlError::ValueNotSupportedInDialect` instead of panicking in the binder.
+- **Breaking:** `Org.storage_mode` is a `StorageMode` and `Org.backend_kind` a `BackendKind` (both `TextEnum`), not `String`. Stored values and the table are unchanged. `StorageMode::parse` / `BackendKind::parse` are gone (use `from_db` or `str::parse`); `as_str` is the `TextEnum` trait method.
+- One `rustango_orgs` row with an unreadable storage mode or backend fails only that tenant: it no longer opens the registry breaker, and migrate-all, pre-warm, the per-tenant sweep, `list-tenants` and the console list skip and report it. Cast fields decode the cell without copying it first.
 
 ## [0.67.0] — 2026-11-19
 

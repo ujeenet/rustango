@@ -287,6 +287,7 @@ different type, name it: `ForeignKey<User, String>`. One-to-one uses
 | `default = "…"` | `#[rustango(default = "'draft'")]` | DB column default (raw SQL: quote text as `'draft'`; a bare word or a non-number on a numeric field is a compile error) |
 | `unique` | `#[rustango(unique)]` | unique constraint on the column |
 | `choices = "…"` | `#[rustango(choices = "draft:Draft, published:Published")]` | enumerated values (`value:Label`); admin `<select>` + validation |
+| `text_enum` | `#[rustango(text_enum, max_length = 16)]` | the field is a Rust enum stored as text; see [Enum fields](#enum-fields-stored-as-text) |
 | `auto_now_add` | `#[rustango(auto_now_add)]` | set to now on **insert** (on an `Auto<DateTime<Utc>>`) |
 | `auto_now` | `#[rustango(auto_now)]` | set to now on **every save** |
 | `column = "…"` | `#[rustango(column = "account_no")]` | rename the SQL column |
@@ -308,6 +309,52 @@ pub created_at: Auto<DateTime<Utc>>,
 #[rustango(soft_delete)]
 pub deleted_at: Option<DateTime<Utc>>,
 ```
+
+### Enum fields stored as text
+
+If code branches on the value, use an enum instead of `choices`. Derive
+`TextEnum` on a fieldless enum and mark the field `text_enum`:
+
+```rust
+use rustango::core::TextEnum as _; // for `.as_str()`
+
+#[derive(rustango::TextEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[text_enum(rename_all = "snake_case")] // also lowercase, kebab-case, SCREAMING_SNAKE_CASE
+pub enum Status {
+    Draft,
+    #[text_enum(rename = "live", alias = "published", label = "Published")]
+    Live,
+}
+
+#[derive(Model)]
+pub struct Post {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(text_enum, max_length = 16, default = "'draft'")]
+    pub status: Status,
+    #[rustango(text_enum, max_length = 16)]
+    pub review: Option<Status>,
+}
+
+let live = Post::objects().where_(Post::status.eq(Status::Live)).fetch(&pool).await?;
+```
+
+- The column is plain text (`VARCHAR(max_length)`) on every backend; no migration
+  beyond that. `max_length` is required and must fit the longest stored value; a
+  `default` is a quoted stored name. Both are checked at compile time.
+- The derive also gives `Display`, `FromStr` and serde as the stored string. Do not
+  derive serde on the enum as well.
+- The admin form, form validation and the OpenAPI `enum` offer the stored names
+  (`choices` comes from the variants). `choices`, `blank`, `citext` and `validators`
+  are refused on the field.
+- A read refuses a stored value no variant names, exactly and case-sensitively: the
+  row fails with a `ColumnDecode` error whose source is `UnknownVariant`. An empty
+  string is such a value, not `None`. An `alias` is read as its variant; a save writes
+  the stored name back.
+- MySQL's default collation is case-insensitive, so a filter there matches `Draft`
+  for `draft`, and the read of that row then fails.
+- To add a variant to a live system, ship the reading code first and the writing code
+  in a later release, so older processes never meet a value they cannot read.
 
 ---
 
@@ -439,6 +486,7 @@ above; this is the complete list, including advanced/PostgreSQL-specific ones.
 | `unique` | flag | unique constraint |
 | `index` / `index(...)` | flag, or `unique`, `name`, `method` | single-column index on this field |
 | `choices` | `"v:Label, …"` | enumerated values |
+| `text_enum` | flag | the field's type is a `TextEnum`, stored as text; needs `max_length` |
 | `min` / `max` | number | range validation |
 | `blank` | flag | allow empty in forms/admin |
 | `editable` | `true`/`false` | form/admin editability |

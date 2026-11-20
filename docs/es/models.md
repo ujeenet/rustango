@@ -293,6 +293,7 @@ filas relacionadas con `select_related` (también en la guía del ORM).
 | `default = "…"` | `#[rustango(default = "'draft'")]` | valor por defecto de columna en la BD (SQL en bruto: texto entre comillas, `'draft'`; una palabra suelta o un no-número en un campo numérico es un error de compilación) |
 | `unique` | `#[rustango(unique)]` | restricción de unicidad sobre la columna |
 | `choices = "…"` | `#[rustango(choices = "draft:Draft, published:Published")]` | valores enumerados (`value:Label`); `<select>` del admin + validación |
+| `text_enum` | `#[rustango(text_enum, max_length = 16)]` | el campo es un enum de Rust guardado como texto; ver [Campos enum](#campos-enum-guardados-como-texto) |
 | `auto_now_add` | `#[rustango(auto_now_add)]` | establecer a ahora en la **inserción** (en un `Auto<DateTime<Utc>>`) |
 | `auto_now` | `#[rustango(auto_now)]` | establecer a ahora en **cada guardado** |
 | `column = "…"` | `#[rustango(column = "account_no")]` | renombrar la columna SQL |
@@ -314,6 +315,52 @@ pub created_at: Auto<DateTime<Utc>>,
 #[rustango(soft_delete)]
 pub deleted_at: Option<DateTime<Utc>>,
 ```
+
+### Campos enum guardados como texto
+
+Si el código decide según el valor, usa un enum en lugar de `choices`. Deriva
+`TextEnum` en un enum sin datos y marca el campo con `text_enum`:
+
+```rust
+use rustango::core::TextEnum as _; // para `.as_str()`
+
+#[derive(rustango::TextEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[text_enum(rename_all = "snake_case")] // también lowercase, kebab-case, SCREAMING_SNAKE_CASE
+pub enum Status {
+    Draft,
+    #[text_enum(rename = "live", alias = "published", label = "Published")]
+    Live,
+}
+
+#[derive(Model)]
+pub struct Post {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(text_enum, max_length = 16, default = "'draft'")]
+    pub status: Status,
+    #[rustango(text_enum, max_length = 16)]
+    pub review: Option<Status>,
+}
+
+let live = Post::objects().where_(Post::status.eq(Status::Live)).fetch(&pool).await?;
+```
+
+- La columna es texto simple (`VARCHAR(max_length)`) en cada backend.
+  `max_length` es obligatorio y debe caber el valor guardado más largo; un
+  `default` es un nombre guardado entre comillas simples. Ambos se comprueban al compilar.
+- El derive también da `Display`, `FromStr` y serde como la cadena guardada. No
+  derives serde además en el enum.
+- El formulario del admin, la validación de formularios y el `enum` de OpenAPI
+  ofrecen los nombres guardados (`choices` sale de las variantes). `choices`,
+  `blank`, `citext` y `validators` se rechazan en el campo.
+- Una lectura rechaza un valor guardado que ninguna variante nombra, de forma exacta
+  y distinguiendo mayúsculas: la fila falla con un error `ColumnDecode` cuya fuente es
+  `UnknownVariant`. Una cadena vacía es uno de esos valores, no `None`. Un `alias` se
+  lee como su variante; guardar escribe de nuevo el nombre guardado.
+- La collation por defecto de MySQL no distingue mayúsculas: un filtro allí encuentra
+  `Draft` para `draft`, y la lectura de esa fila falla después.
+- Para añadir una variante a un sistema en producción, publica primero el código que
+  la lee y el que la escribe en una versión posterior.
 
 ---
 
@@ -445,6 +492,7 @@ la lista completa, incluyendo las avanzadas/específicas de PostgreSQL.
 | `unique` | flag | restricción de unicidad |
 | `index` / `index(...)` | flag, o `unique`, `name`, `method` | índice de una sola columna sobre este campo |
 | `choices` | `"v:Label, …"` | valores enumerados |
+| `text_enum` | flag | el tipo del campo es un `TextEnum`, guardado como texto; requiere `max_length` |
 | `min` / `max` | número | validación de rango |
 | `blank` | flag | permitir vacío en formularios/admin |
 | `editable` | `true`/`false` | editabilidad en formulario/admin |

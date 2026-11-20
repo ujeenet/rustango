@@ -287,6 +287,7 @@ type différent, précisez-le : `ForeignKey<User, String>`. Le un-à-un utilise
 | `default = "…"` | `#[rustango(default = "'draft'")]` | valeur par défaut de la colonne en base (SQL brut : texte entre apostrophes, `'draft'` ; un mot nu ou une non-valeur numérique sur un champ numérique est une erreur de compilation) |
 | `unique` | `#[rustango(unique)]` | contrainte d'unicité sur la colonne |
 | `choices = "…"` | `#[rustango(choices = "draft:Draft, published:Published")]` | valeurs énumérées (`value:Label`) ; `<select>` de l'admin + validation |
+| `text_enum` | `#[rustango(text_enum, max_length = 16)]` | le champ est une enum Rust stockée en texte ; voir [Champs enum](#champs-enum-stockés-en-texte) |
 | `auto_now_add` | `#[rustango(auto_now_add)]` | réglé à l'heure actuelle à l'**insertion** (sur un `Auto<DateTime<Utc>>`) |
 | `auto_now` | `#[rustango(auto_now)]` | réglé à l'heure actuelle à **chaque save** |
 | `column = "…"` | `#[rustango(column = "account_no")]` | renomme la colonne SQL |
@@ -308,6 +309,52 @@ pub created_at: Auto<DateTime<Utc>>,
 #[rustango(soft_delete)]
 pub deleted_at: Option<DateTime<Utc>>,
 ```
+
+### Champs enum stockés en texte
+
+Si le code se décide selon la valeur, utilisez une enum plutôt que `choices`.
+Dérivez `TextEnum` sur une enum sans données et marquez le champ `text_enum` :
+
+```rust
+use rustango::core::TextEnum as _; // pour `.as_str()`
+
+#[derive(rustango::TextEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[text_enum(rename_all = "snake_case")] // aussi lowercase, kebab-case, SCREAMING_SNAKE_CASE
+pub enum Status {
+    Draft,
+    #[text_enum(rename = "live", alias = "published", label = "Published")]
+    Live,
+}
+
+#[derive(Model)]
+pub struct Post {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(text_enum, max_length = 16, default = "'draft'")]
+    pub status: Status,
+    #[rustango(text_enum, max_length = 16)]
+    pub review: Option<Status>,
+}
+
+let live = Post::objects().where_(Post::status.eq(Status::Live)).fetch(&pool).await?;
+```
+
+- La colonne est du texte simple (`VARCHAR(max_length)`) sur chaque backend.
+  `max_length` est obligatoire et doit contenir la plus longue valeur stockée ;
+  un `default` est un nom stocké entre apostrophes. Les deux sont vérifiés à la compilation.
+- Le derive fournit aussi `Display`, `FromStr` et serde sous forme de la chaîne
+  stockée. Ne dérivez pas serde en plus sur l'enum.
+- Le formulaire admin, la validation des formulaires et l'`enum` OpenAPI proposent
+  les noms stockés (`choices` vient des variantes). `choices`, `blank`, `citext` et
+  `validators` sont refusés sur le champ.
+- Une lecture refuse une valeur stockée qu'aucune variante ne nomme, exactement et
+  en respectant la casse : la ligne échoue avec une erreur `ColumnDecode` dont la
+  source est `UnknownVariant`. Une chaîne vide est une telle valeur, pas `None`. Un
+  `alias` se lit comme sa variante ; un enregistrement réécrit le nom stocké.
+- La collation par défaut de MySQL ignore la casse : un filtre y trouve `Draft`
+  pour `draft`, puis la lecture de cette ligne échoue.
+- Pour ajouter une variante à un système en production, livrez d'abord le code qui
+  la lit, puis celui qui l'écrit dans une version suivante.
 
 ---
 
@@ -440,6 +487,7 @@ ci-dessus ; voici la liste complète, y compris les avancées/spécifiques à Po
 | `unique` | indicateur | contrainte d'unicité |
 | `index` / `index(...)` | indicateur, ou `unique`, `name`, `method` | index mono-colonne sur ce champ |
 | `choices` | `"v:Label, …"` | valeurs énumérées |
+| `text_enum` | drapeau | le type du champ est un `TextEnum`, stocké en texte ; exige `max_length` |
 | `min` / `max` | nombre | validation de plage |
 | `blank` | indicateur | autorise le vide dans les formulaires/admin |
 | `editable` | `true`/`false` | éditabilité formulaire/admin |

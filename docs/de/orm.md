@@ -122,6 +122,11 @@ Post::objects().where_(Post::deleted_at.is_null()).fetch(&pool).await?;
 Post::objects().where_(Post::published_at.between(start, end)).fetch(&pool).await?;
 ```
 
+Auf einem Enum-Feld (`text_enum`, siehe [Modelle](models.md#enum-felder-als-text-gespeichert))
+nimmt ein Filter das Enum, keinen String: `Post::stage.eq(Stage::Live)`,
+`Post::stage.is_in([Stage::Draft, Stage::Live])`. Er bindet den gespeicherten Namen.
+`pluck::<Stage>("stage")` liest ebenfalls das Enum.
+
 ### Ergebnisse sortieren
 
 Sortiere Zeilen nach einer oder mehreren Spalten, nach einem Ausdruck oder mit expliziter Kontrolle darüber, wo NULLs landen. Über das grundlegende `.order_by(&[("col", desc)])` hinaus bekommst du drei zusätzliche Dimensionen:

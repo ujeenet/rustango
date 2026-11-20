@@ -122,6 +122,11 @@ Post::objects().where_(Post::deleted_at.is_null()).fetch(&pool).await?;
 Post::objects().where_(Post::published_at.between(start, end)).fetch(&pool).await?;
 ```
 
+Sur un champ enum (`text_enum`, voir [modèles](models.md#champs-enum-stockés-en-texte)),
+un filtre prend l'enum, pas une chaîne : `Post::stage.eq(Stage::Live)`,
+`Post::stage.is_in([Stage::Draft, Stage::Live])`. Il lie le nom stocké.
+`pluck::<Stage>("stage")` lit aussi l'enum.
+
 ### Tri des résultats
 
 Trie les lignes selon une ou plusieurs colonnes, selon une expression, ou avec un contrôle explicite de l'emplacement des NULL. Au-delà du `.order_by(&[("col", desc)])` de base, vous disposez de trois dimensions supplémentaires :
