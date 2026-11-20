@@ -41,8 +41,9 @@
 //!     pub status: Status,
 //! }
 //!
-//! let _ = Post::status.eq(Status::Live);
-//! # fn main() {}
+//! fn main() {
+//!     let _ = Post::status.eq(Status::Live);
+//! }
 //! ```
 //!
 //! A filter does not take a string:
@@ -60,8 +61,9 @@
 //! #     #[rustango(text_enum, max_length = 8)]
 //! #     pub status: Status,
 //! # }
-//! let _ = Post::status.eq("live");
-//! # fn main() {}
+//! fn main() {
+//!     let _ = Post::status.eq("live");
+//! }
 //! ```
 //!
 //! `max_length` shorter than the longest stored value does not compile:

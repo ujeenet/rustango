@@ -495,8 +495,10 @@ pub enum StorageMode {
 /// console and the `manage create-tenant` CLI call it before persisting.
 ///
 /// ```
+/// use rustango::core::TextEnum as _;
 /// use rustango::tenancy::{BackendKind, StorageMode};
 /// assert_eq!(BackendKind::Postgres.as_str(), "postgres");
+/// assert_eq!("pg".parse::<BackendKind>().unwrap(), BackendKind::Postgres);
 /// assert!(BackendKind::Postgres.validate_storage_mode(StorageMode::Schema).is_ok());
 /// assert!(BackendKind::Sqlite.validate_storage_mode(StorageMode::Schema).is_err());
 /// assert!(BackendKind::MySql.validate_storage_mode(StorageMode::Database).is_ok());
