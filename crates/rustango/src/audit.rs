@@ -1360,14 +1360,7 @@ async fn rows_in_tx<M>(
     lock: bool,
 ) -> Result<Vec<M>, crate::sql::ExecError>
 where
-    M: crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    M: crate::sql::DecodeModel,
 {
     let mut select = crate::core::SelectQuery::new(model).where_clause(where_clause);
     if lock {
@@ -1407,15 +1400,7 @@ enum Pages<M> {
 
 impl<M> Pages<M>
 where
-    M: crate::sql::HasPkValue
-        + crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    M: crate::sql::HasPkValue + crate::sql::DecodeModel,
 {
     async fn start(
         tx: &mut crate::sql::PoolTx<'_>,
@@ -1487,15 +1472,7 @@ pub async fn delete_many_with_audit<M>(
     entry: impl Fn(&M) -> PendingEntry,
 ) -> Result<u64, crate::sql::ExecError>
 where
-    M: crate::sql::HasPkValue
-        + crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    M: crate::sql::HasPkValue + crate::sql::DecodeModel,
 {
     delete_each_with_audit(pool, std::slice::from_ref(query), entry).await
 }
@@ -1512,15 +1489,7 @@ pub async fn delete_each_with_audit<M>(
     entry: impl Fn(&M) -> PendingEntry,
 ) -> Result<u64, crate::sql::ExecError>
 where
-    M: crate::sql::HasPkValue
-        + crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    M: crate::sql::HasPkValue + crate::sql::DecodeModel,
 {
     let mut tx = crate::sql::write_tx(pool).await?;
     let mut affected = 0;
@@ -1557,15 +1526,7 @@ pub async fn update_many_with_audit<M>(
     entry: impl Fn(&M) -> PendingEntry,
 ) -> Result<u64, crate::sql::ExecError>
 where
-    M: crate::sql::HasPkValue
-        + crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    M: crate::sql::HasPkValue + crate::sql::DecodeModel,
 {
     let pk = query
         .model
@@ -1651,15 +1612,7 @@ pub async fn cascade_rows<M>(
     entry: impl Fn(&M) -> PendingEntry,
 ) -> Result<Vec<(crate::core::SqlValue, PendingEntry)>, crate::sql::ExecError>
 where
-    M: crate::sql::HasPkValue
-        + crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    M: crate::sql::HasPkValue + crate::sql::DecodeModel,
 {
     let found: Vec<M> = rows_in_tx(tx, model, rows, true).await?;
     Ok(found
@@ -1804,14 +1757,7 @@ pub async fn record_create<M>(
     entry: impl Fn(&M) -> PendingEntry,
 ) -> Result<(), crate::sql::ExecError>
 where
-    M: crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    M: crate::sql::DecodeModel,
 {
     record_by_pk(
         tx,
@@ -1836,14 +1782,7 @@ pub async fn record_update<M>(
     entry: impl Fn(&M) -> PendingEntry,
 ) -> Result<(), crate::sql::ExecError>
 where
-    M: crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    M: crate::sql::DecodeModel,
 {
     record_by_pk(
         tx,
@@ -1863,14 +1802,7 @@ async fn record_by_pk<M>(
     missing: &'static str,
 ) -> Result<(), crate::sql::ExecError>
 where
-    M: crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    M: crate::sql::DecodeModel,
 {
     let rows: Vec<M> = rows_in_tx(tx, model, pk_in(model, vec![pk])?, false).await?;
     if rows.len() != 1 {
@@ -2029,14 +1961,7 @@ pub async fn bulk_update_with_audit<M>(
     entry: impl Fn(&M) -> PendingEntry,
 ) -> Result<u64, crate::sql::ExecError>
 where
-    M: crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    M: crate::sql::DecodeModel,
 {
     if query.rows.is_empty() {
         return Ok(0);
@@ -2088,14 +2013,7 @@ pub async fn bulk_insert_with_audit<M>(
     entry: impl Fn(&M, AuditOp) -> PendingEntry,
 ) -> Result<(), crate::sql::ExecError>
 where
-    M: crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    M: crate::sql::DecodeModel,
 {
     if !pool.dialect().supports_returning() {
         return Err(crate::sql::ExecError::AuditUnsupported {

@@ -27,10 +27,7 @@ use axum::response::{IntoResponse, Response};
 
 use crate::core::Model;
 use crate::query::QuerySet;
-use crate::sql::{
-    ExecError, FetcherPool, LoadRelated, MaybeMyFromRow, MaybeMyLoadRelated, MaybePgFromRow,
-    MaybeSqliteFromRow, MaybeSqliteLoadRelated, Pool,
-};
+use crate::sql::{DecodeModel, ExecError, FetcherPool, Pool};
 
 /// Error returned by [`get_object_or_404`] and [`get_list_or_404`]. The
 /// two variants keep "no row matched" apart from a driver failure, so a
@@ -118,15 +115,7 @@ impl From<ExecError> for ShortcutError {
 /// - [`ShortcutError::Database`] wrapping any underlying [`ExecError`].
 pub async fn get_object_or_404<T>(qs: QuerySet<T>, pool: &Pool) -> Result<T, ShortcutError>
 where
-    T: Model
-        + Send
-        + Unpin
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated,
+    T: Model + DecodeModel,
 {
     match qs.first(pool).await? {
         Some(row) => Ok(row),
@@ -152,15 +141,7 @@ where
 /// - [`ShortcutError::Database`] wrapping any underlying [`ExecError`].
 pub async fn get_list_or_404<T>(qs: QuerySet<T>, pool: &Pool) -> Result<Vec<T>, ShortcutError>
 where
-    T: Model
-        + Send
-        + Unpin
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated,
+    T: Model + DecodeModel,
 {
     let rows = qs.fetch(pool).await?;
     if rows.is_empty() {

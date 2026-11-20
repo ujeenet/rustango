@@ -96,9 +96,9 @@ pub(crate) use executor::{
 pub(crate) use executor::{caught, in_block, refuse_ddl_in_block, Ddl};
 #[allow(deprecated)]
 pub use executor::{
-    AtomicOptions, AtomicTx, CounterPool, ExistsPool, ExplainFormat, ExplainOptions, FetcherPool,
-    FetcherTx, FkPkAccess, FlatScalar, HasPkValue, InsertReturningPool, Isolation, LoadRelated,
-    MaybeMyFromRow, MaybeMyLoadRelated, MaybeMyScalar, MaybePgFromRow, MaybePgScalar,
+    AtomicOptions, AtomicTx, CounterPool, DecodeModel, ExistsPool, ExplainFormat, ExplainOptions,
+    FetcherPool, FetcherTx, FkPkAccess, FlatScalar, HasPkValue, InsertReturningPool, Isolation,
+    LoadRelated, MaybeMyFromRow, MaybeMyLoadRelated, MaybeMyScalar, MaybePgFromRow, MaybePgScalar,
     MaybeSqliteFromRow, MaybeSqliteLoadRelated, MaybeSqliteScalar, Page, PoolConn, PoolTx,
     PooledConn, ReusableExecutor, SqlExecutor, TxConn, TxGuard, TxSetting, UpdaterPool,
     __reverse_fk_key, __rustango_dedupe_by_pk, __rustango_delete_all_or_none,

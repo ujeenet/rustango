@@ -368,14 +368,7 @@ struct Bridge<S>(PhantomData<S>);
 impl<S> SerializerBridge for Bridge<S>
 where
     S: crate::serializer::ModelSerializer + Send + Sync + 'static,
-    S::Model: crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    S::Model: crate::sql::DecodeModel,
 {
     fn render_rows<'a>(
         &'a self,
@@ -842,14 +835,7 @@ impl ViewSet {
     pub fn serializer<S>(mut self) -> Self
     where
         S: crate::serializer::ModelSerializer + Send + Sync + 'static,
-        S::Model: crate::sql::MaybePgFromRow
-            + crate::sql::MaybeMyFromRow
-            + crate::sql::MaybeSqliteFromRow
-            + crate::sql::LoadRelated
-            + crate::sql::MaybeMyLoadRelated
-            + crate::sql::MaybeSqliteLoadRelated
-            + Send
-            + Unpin,
+        S::Model: crate::sql::DecodeModel,
     {
         self.serializer = Some(Arc::new(Bridge::<S>(PhantomData)));
         self
@@ -1555,14 +1541,7 @@ impl AcquiredConn {
         q: &SelectQuery,
     ) -> Result<Vec<T>, crate::sql::ExecError>
     where
-        T: crate::sql::MaybePgFromRow
-            + crate::sql::MaybeMyFromRow
-            + crate::sql::MaybeSqliteFromRow
-            + crate::sql::LoadRelated
-            + crate::sql::MaybeMyLoadRelated
-            + crate::sql::MaybeSqliteLoadRelated
-            + Send
-            + Unpin,
+        T: crate::sql::DecodeModel,
     {
         crate::sql::select_rows_pool_with_related::<T>(&self.pool, q).await
     }

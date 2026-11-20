@@ -145,3 +145,28 @@ impl<T> MaybeSqliteLoadRelated for T where T: LoadRelatedSqlite {}
 pub trait MaybeSqliteLoadRelated {}
 #[cfg(not(feature = "sqlite"))]
 impl<T> MaybeSqliteLoadRelated for T {}
+
+/// Everything a row-decoding executor needs from `T` on every enabled
+/// backend, so a new marker changes one bound instead of every signature.
+pub trait DecodeModel:
+    MaybePgFromRow
+    + MaybeMyFromRow
+    + MaybeSqliteFromRow
+    + super::LoadRelated
+    + MaybeMyLoadRelated
+    + MaybeSqliteLoadRelated
+    + Send
+    + Unpin
+{
+}
+impl<T> DecodeModel for T where
+    T: MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + super::LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + Send
+        + Unpin
+{
+}

@@ -2312,14 +2312,7 @@ pub async fn select_rows_tx_with_related<T>(
     query: &SelectQuery,
 ) -> Result<Vec<T>, ExecError>
 where
-    T: MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    T: DecodeModel,
 {
     select_rows_with_related_on(tx, query).await
 }
@@ -2402,7 +2395,8 @@ pub use traits::LoadRelatedMy;
 #[cfg(feature = "sqlite")]
 pub use traits::LoadRelatedSqlite;
 pub use traits::{
-    MaybeMyFromRow, MaybeMyLoadRelated, MaybePgFromRow, MaybeSqliteFromRow, MaybeSqliteLoadRelated,
+    DecodeModel, MaybeMyFromRow, MaybeMyLoadRelated, MaybePgFromRow, MaybeSqliteFromRow,
+    MaybeSqliteLoadRelated,
 };
 
 /// Run a `SelectQuery` on any backend and decode each row into `T`.
@@ -2802,14 +2796,7 @@ pub async fn select_rows_pool_with_related<T>(
     query: &SelectQuery,
 ) -> Result<Vec<T>, ExecError>
 where
-    T: MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    T: DecodeModel,
 {
     select_rows_with_related_on(pool, query).await
 }
@@ -2821,14 +2808,7 @@ pub(crate) async fn select_rows_with_related_on<'c, T, E>(
 ) -> Result<Vec<T>, ExecError>
 where
     E: SqlExecutor<'c>,
-    T: MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    T: DecodeModel,
 {
     select_rows_mapped_on(exec, query, None, |_, t| t).await
 }
@@ -2842,14 +2822,7 @@ pub(crate) async fn select_rows_keyed_on<'c, T, E>(
 ) -> Result<Vec<(SqlValue, T)>, ExecError>
 where
     E: SqlExecutor<'c>,
-    T: MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    T: DecodeModel,
 {
     select_rows_mapped_on(exec, query, Some(key), |k, t| (k, t)).await
 }
@@ -2864,14 +2837,7 @@ async fn select_rows_mapped_on<'c, T, E, U>(
 where
     E: SqlExecutor<'c>,
     U: Send,
-    T: MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    T: DecodeModel,
 {
     let stmt = exec.dialect().compile_select(query)?;
     // Each JOIN target is stitched from the same row, once per FK chain
@@ -2924,15 +2890,7 @@ where
 /// backend. `select_related` joins are decoded for you.
 pub trait FetcherPool<T>
 where
-    T: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    T: Model + DecodeModel,
 {
     /// Compile the queryset and fetch every matching row.
     ///
@@ -2946,15 +2904,7 @@ where
 
 impl<T> FetcherPool<T> for QuerySet<T>
 where
-    T: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    T: Model + DecodeModel,
 {
     async fn fetch(self, pool: &Pool) -> Result<Vec<T>, ExecError> {
         let select = self.compile()?;
@@ -2966,15 +2916,7 @@ where
 // or any Postgres sqlx executor.
 impl<T> QuerySet<T>
 where
-    T: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    T: Model + DecodeModel,
 {
     /// [`FetcherPool::fetch`] on a [`SqlExecutor`], e.g. a connection
     /// from [`Pool::acquire`] shared by a handler's queries. On Postgres
@@ -3025,15 +2967,7 @@ impl<T: Model + Send> QuerySet<T> {
 // `order_by`, adds `limit(1)` and forwards to `fetch`.
 impl<T> crate::query::QuerySet<T>
 where
-    T: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    T: Model + DecodeModel,
 {
     /// Fetch the first row by the current ordering, or `None` when
     /// nothing matches. With no `order_by`, it sorts by primary key
@@ -3412,15 +3346,7 @@ fn ensure_pk_ordering<T: Model>(
 /// that follow it share one transaction.
 pub trait FetcherTx<T>
 where
-    T: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    T: Model + DecodeModel,
 {
     /// Compile the queryset and fetch every matching row inside the
     /// open transaction.
@@ -3435,15 +3361,7 @@ where
 
 impl<T> FetcherTx<T> for QuerySet<T>
 where
-    T: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    T: Model + DecodeModel,
 {
     async fn fetch_tx(self, tx: &mut PoolTx<'_>) -> Result<Vec<T>, ExecError> {
         let select = self.compile()?;

@@ -9,9 +9,8 @@
 //! in mod.rs proper.
 
 use super::{
-    extract_pk_value, ExecError, FkPkAccess, HasPkValue, LoadRelated, MaybeMyFromRow,
-    MaybeMyLoadRelated, MaybePgFromRow, MaybeSqliteFromRow, MaybeSqliteLoadRelated,
-    ReusableExecutor, SqlExecutor as _,
+    extract_pk_value, DecodeModel, ExecError, FkPkAccess, HasPkValue, ReusableExecutor,
+    SqlExecutor as _,
 };
 use crate::core::Model;
 use crate::sql::Pool;
@@ -38,26 +37,8 @@ pub async fn fetch_with_prefetch_pool<P, C>(
     pool: &Pool,
 ) -> Result<Vec<(P, Vec<C>)>, ExecError>
 where
-    P: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + HasPkValue
-        + Send
-        + Unpin,
-    C: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + FkPkAccess
-        + Send
-        + Unpin,
+    P: Model + DecodeModel + HasPkValue,
+    C: Model + DecodeModel + FkPkAccess,
 {
     fetch_with_prefetch_on(parent_qs, child_fk_column, pool).await
 }
@@ -74,26 +55,8 @@ pub async fn fetch_with_prefetch_on<P, C, E>(
 ) -> Result<Vec<(P, Vec<C>)>, ExecError>
 where
     E: ReusableExecutor,
-    P: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + HasPkValue
-        + Send
-        + Unpin,
-    C: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + FkPkAccess
-        + Send
-        + Unpin,
+    P: Model + DecodeModel + HasPkValue,
+    C: Model + DecodeModel + FkPkAccess,
 {
     filtered_on(
         parent_qs,
@@ -144,26 +107,8 @@ pub async fn fetch_with_prefetch_filtered<P, C>(
     pool: &Pool,
 ) -> Result<Vec<(P, Vec<C>)>, ExecError>
 where
-    P: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + HasPkValue
-        + Send
-        + Unpin,
-    C: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + FkPkAccess
-        + Send
-        + Unpin,
+    P: Model + DecodeModel + HasPkValue,
+    C: Model + DecodeModel + FkPkAccess,
 {
     filtered_on(parent_qs, child_fk_column, child_qs, pool).await
 }
@@ -177,26 +122,8 @@ async fn filtered_on<P, C, E>(
 ) -> Result<Vec<(P, Vec<C>)>, ExecError>
 where
     E: ReusableExecutor,
-    P: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + HasPkValue
-        + Send
-        + Unpin,
-    C: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + FkPkAccess
-        + Send
-        + Unpin,
+    P: Model + DecodeModel + HasPkValue,
+    C: Model + DecodeModel + FkPkAccess,
 {
     let parents: Vec<P> = parent_qs.fetch_on(exec.again()).boxed().await?;
     let on = target_column::<P, C>(child_fk_column);
@@ -227,15 +154,7 @@ async fn reverse_children<C, E>(
 ) -> Result<super::Chunked<C>, ExecError>
 where
     E: ReusableExecutor,
-    C: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    C: Model + DecodeModel,
 {
     let batches = super::key_batches(exec.again().dialect(), child_qs, keys)?;
     let split = batches.len() > 1;
@@ -275,26 +194,8 @@ pub async fn fetch_with_prefetch_related<P, C>(
     pool: &Pool,
 ) -> Result<Vec<(P, Vec<C>)>, ExecError>
 where
-    P: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + HasPkValue
-        + Send
-        + Unpin,
-    C: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + HasPkValue
-        + Send
-        + Unpin,
+    P: Model + DecodeModel + HasPkValue,
+    C: Model + DecodeModel + HasPkValue,
 {
     let child_qs = crate::query::QuerySet::<C>::new();
     fetch_with_prefetch_related_filtered(parent_qs, relation, child_qs, pool).await
@@ -312,26 +213,8 @@ pub async fn fetch_with_prefetch_related_filtered<P, C>(
     pool: &Pool,
 ) -> Result<Vec<(P, Vec<C>)>, ExecError>
 where
-    P: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + HasPkValue
-        + Send
-        + Unpin,
-    C: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + HasPkValue
-        + Send
-        + Unpin,
+    P: Model + DecodeModel + HasPkValue,
+    C: Model + DecodeModel + HasPkValue,
 {
     related_filtered_on(parent_qs, relation, child_qs, pool).await
 }
@@ -345,26 +228,8 @@ async fn related_filtered_on<P, C, E>(
 ) -> Result<Vec<(P, Vec<C>)>, ExecError>
 where
     E: ReusableExecutor,
-    P: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + HasPkValue
-        + Send
-        + Unpin,
-    C: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + HasPkValue
-        + Send
-        + Unpin,
+    P: Model + DecodeModel + HasPkValue,
+    C: Model + DecodeModel + HasPkValue,
 {
     // Resolved first, so a bad name costs no query.
     let named = Named::resolve::<P, C>(relation)?;
@@ -463,15 +328,7 @@ async fn m2m_children<C, E>(
 ) -> Result<Vec<(crate::core::SqlValue, C)>, ExecError>
 where
     E: ReusableExecutor,
-    C: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    C: Model + DecodeModel,
 {
     use crate::core::joins::aliased;
     use crate::core::{Filter, Join, JoinKind, Op, SqlValue, WhereExpr};

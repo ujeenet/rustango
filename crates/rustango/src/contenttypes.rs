@@ -616,16 +616,7 @@ pub async fn prefetch_soft<C, F>(
     extract: F,
 ) -> Result<::std::collections::HashMap<i64, Vec<C>>, ExecError>
 where
-    C: crate::core::Model
-        + crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + Send
-        + Unpin
-        + 'static,
+    C: crate::core::Model + crate::sql::DecodeModel + 'static,
     F: Fn(&C) -> i64,
 {
     use crate::sql::FetcherPool as _;
@@ -681,17 +672,7 @@ pub async fn prefetch_generic<C>(
     pairs: &[(i64, i64)],
 ) -> Result<::std::collections::HashMap<(i64, i64), C>, ExecError>
 where
-    C: crate::core::Model
-        + crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + crate::sql::HasPkValue
-        + Send
-        + Unpin
-        + 'static,
+    C: crate::core::Model + crate::sql::DecodeModel + crate::sql::HasPkValue + 'static,
 {
     use crate::sql::FetcherPool as _;
     if pairs.is_empty() {
