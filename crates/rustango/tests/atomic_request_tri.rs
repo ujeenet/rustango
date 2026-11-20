@@ -281,6 +281,19 @@ async fn a_swallowed_failure_is_not_committed(pool: &Pool) {
     }
 }
 
+/// `areq_item.id` references an empty `areq_parent`, checked at COMMIT.
+async fn deferred_fk(pool: &Pool) {
+    for sql in [
+        "DROP TABLE IF EXISTS areq_item",
+        "DROP TABLE IF EXISTS areq_parent",
+        "CREATE TABLE areq_parent (id BIGINT PRIMARY KEY)",
+        "CREATE TABLE areq_item (id BIGINT PRIMARY KEY \
+         REFERENCES areq_parent (id) DEFERRABLE INITIALLY DEFERRED)",
+    ] {
+        raw_execute_pool(pool, sql, vec![]).await.unwrap();
+    }
+}
+
 /// A failed COMMIT drops the handler's response, its cookie included: a
 /// constraint checked at COMMIT (PG deferred unique, SQLite deferred FK).
 /// MySQL has no deferred constraint to fail a COMMIT with.
@@ -288,15 +301,7 @@ async fn a_failed_commit_drops_the_response(pool: &Pool) {
     if kind(pool) == DialectKind::Mysql {
         return;
     }
-    let ddl = [
-        "DROP TABLE IF EXISTS areq_item",
-        "CREATE TABLE IF NOT EXISTS areq_parent (id BIGINT PRIMARY KEY)",
-        "CREATE TABLE areq_item (id BIGINT PRIMARY KEY \
-         REFERENCES areq_parent (id) DEFERRABLE INITIALLY DEFERRED)",
-    ];
-    for sql in ddl {
-        raw_execute_pool(pool, sql, vec![]).await.unwrap();
-    }
+    deferred_fk(pool).await;
     let app = app(ctx(pool));
     let resp = send(&app, Method::POST, "mode=cookie&status=200").await;
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -315,14 +320,7 @@ async fn a_failed_commit_is_never_replayed(pool: &Pool) {
     if kind(pool) == DialectKind::Mysql {
         return;
     }
-    for sql in [
-        "DROP TABLE IF EXISTS areq_item",
-        "CREATE TABLE IF NOT EXISTS areq_parent (id BIGINT PRIMARY KEY)",
-        "CREATE TABLE areq_item (id BIGINT PRIMARY KEY \
-         REFERENCES areq_parent (id) DEFERRABLE INITIALLY DEFERRED)",
-    ] {
-        raw_execute_pool(pool, sql, vec![]).await.unwrap();
-    }
+    deferred_fk(pool).await;
     let cache: rustango::cache::BoxedCache = Arc::new(rustango::cache::InMemoryCache::new());
     let routes = Router::new()
         .route("/w", post(handler))

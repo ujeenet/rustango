@@ -163,6 +163,9 @@ untouched.
 - `AuditEntry: From<AuditLog>` is now `TryFrom<AuditLog>` (error `UnsavedRow`): use `AuditEntry::try_from(row)?`.
 - A model-level `save` on an audited model whose key is unset now returns `ExecError::UnsavedRow` instead of reading the key as `0`.
 - New variants of a `TextEnum` need two releases on a running system: first the code that reads them, then the code that writes them.
+- `atomic_immediate` is removed: call `atomic`, which begins SQLite blocks with `BEGIN IMMEDIATE`.
+- Inside an `atomic` block on `t.pool()`, `t.conn()` now returns the block's connection: its writes roll back with the block, and ORM calls on the pool return `NestedAtomic` until `t.pool()` is called again. `t.pool_conn()` and `t.into_conn()` there return `TenancyError::Exec(ExecError::InAtomic)`: use `t.conn()`, or move the work out of the block.
+- `AtomicOptions::deferred()` on a nested block is refused with `InAtomic`, like an isolation level.
 
 ## 0.67.0
 

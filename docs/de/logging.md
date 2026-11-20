@@ -121,6 +121,7 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::admin` | Admin-Routing und -Registrierung |
 | `rustango::admin::audit` | Audit-Log-Schreibvorgänge |
 | `rustango::admin::sso` | Admin-SSO |
+| `rustango::atomic_request` | Eine Anfrage-Transaktion, die einen Konflikt verlor (503), oder ein abgelehnter Schreibzugriff für einen nicht aufgelösten Tenant |
 | `rustango::cache` | Cache-Backends |
 | `rustango::cache_page` | Page-Cache-Middleware |
 | `rustango::cors` | CORS-Entscheidungen |

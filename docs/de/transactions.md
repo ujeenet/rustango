@@ -26,6 +26,7 @@ siehe den [ORM-Leitfaden](orm.md).
 - [DDL in einem Block](#ddl-in-einem-block)
 - [Iterieren in einem Block](#iterieren-in-einem-block)
 - [Abbruch](#abbruch)
+- [Eine Transaktion pro Anfrage](#eine-transaktion-pro-anfrage)
 - [Fehler](#fehler)
 
 ## Ein erster Block
@@ -92,7 +93,7 @@ sie rückgängig. Auf SQLite, und auf MySQL mit seiner Standardstufe
 (repeatable read), sehen alle Lesezugriffe im Block einen einzigen Snapshot.
 
 Diese laufen **außerhalb** des Blocks, auf einer eigenen Verbindung:
-`pool.acquire()`, `Tenant::conn`, der Cache, das Abholen von Jobs, Änderungen an
+`pool.acquire()`, der Cache, das Abholen von Jobs, Änderungen an
 der Tenancy-Registry, ein mit `tokio::spawn` gestarteter Task und ein separat
 verbundener Pool (auch auf dieselbe Datenbank). Sie sehen die Schreibvorgänge
 des Blocks nicht und können auf Sperren warten, die der Block hält.
@@ -238,8 +239,11 @@ liest und dann schreibt, scheitert nicht bei seinem ersten Schreibvorgang mit
 5 Sekunden) und scheitern dann mit `SQLITE_BUSY`; auf einer In-Memory-Datenbank
 warten sie ohne Timeout. Halte SQLite-Blöcke kurz.
 
-`atomic_immediate` tat das, bevor `atomic` es tat. Es ist veraltet: Rufe
-`atomic` auf.
+`AtomicOptions::deferred()` beginnt stattdessen mit einem einfachen `BEGIN`:
+Ein Block, der nur liest, nimmt keine Schreibsperre, und sein erster
+Schreibvorgang nach einem Lesen schlägt sofort mit `SQLITE_BUSY` fehl, wenn
+eine andere Verbindung inzwischen geschrieben hat. Auf PostgreSQL und MySQL,
+deren `BEGIN` nie sperrt, wirkt es nicht.
 
 ## Isolationsstufen und Einstellungen
 
@@ -498,6 +502,99 @@ Verbindung bleibt belegt, bis der Server diese Anweisung beendet hat; dann läuf
 das Rollback, und die Verbindung geht zurück an den Pool. In der Zwischenzeit
 können einem kleinen Pool Verbindungen fehlen. Ein verworfener verschachtelter
 Block wird bei der nächsten Benutzung des Blocks zurückgerollt.
+
+## Eine Transaktion pro Anfrage
+
+`atomic_requests` führt jede schreibende Anfrage an die Routen deiner App in
+einem `atomic`-Block auf dem Pool der Anfrage aus. Eine Antwort, die nicht 2xx
+oder 3xx ist, oder ein Panic rollt jeden Schreibvorgang zurück, den der
+Handler dort gemacht hat.
+
+```rust
+use rustango::atomic_request::AtomicRequests;
+use rustango::sql::{AtomicOptions, Isolation};
+
+// Tenancy: each block runs on the request's tenant pool.
+let app = rustango::server::Builder::from_env().await?
+    .api(routes)
+    .atomic_requests(AtomicRequests::new())
+    .into_router()
+    .await?;
+
+// One database: each block runs on the builder's pool.
+rustango::server::AppBuilder::from_env().await?
+    .api(other_routes)
+    .atomic_requests(AtomicRequests::new().options(
+        AtomicOptions::new().isolation(Isolation::ReadCommitted),
+    ))
+    .serve("0.0.0.0:8080")
+    .await?;
+```
+
+- Nur POST, PUT, PATCH, DELETE und andere unsichere Methoden. GET, HEAD,
+  OPTIONS, TRACE und QUERY laufen ohne Transaktion; eine GET-Route, die
+  schreibt (ein SSO-Callback), bleibt im Autocommit.
+- Nur die eigenen Routen deiner App: Tenant-Admin, Login, SSO und
+  Operator-Konsole werden nicht umhüllt.
+- Jeder Tenant-Extraktor der Anfrage (`TenantScope`, `Tenant`) liefert den
+  Pool, auf dem der Block läuft, auch wenn der Pool-Cache ihn inzwischen
+  verdrängt. Eine Anfrage ohne Tenant läuft durch; ein Tenant, dessen Pool
+  nicht zu finden ist, bekommt 500, nie den Registry-Pool.
+- Jede schreibende Anfrage hält bis zu ihrem Ende eine Verbindung. Der Start
+  lehnt `max_cached_scoped_pools = 0` oder `max_cached_database_pools = 0` ab
+  und warnt, wenn `scoped_pool_max_connections` unter 8 liegt.
+
+**Reihenfolge.** Der Builder setzt den Block innerhalb seiner eigenen Layer
+(Panic-Schutz, Access-Log, Tracing, Tenant-Verteilung) und um deinen Router.
+Layer auf deinem Router (Sessions, CSRF, Auth, Idempotenz) laufen im Block:
+Was sie auf dem Pool schreiben, wird mit der Anfrage committet oder
+zurückgerollt. Ein `IdempotencyLayer` im Block speichert eine Antwort erst
+nach dem `COMMIT`. Auf einem selbst gebauten Router füge
+`AtomicRequestLayer::new(pool)` oder `AtomicRequestLayer::tenant()` vor den
+Layern hinzu, die die endgültige Antwort sehen müssen.
+
+**Ein fehlgeschlagener Commit.** Die Antwort des Handlers wird verworfen, mit
+ihren Cookies und ihrer Weiterleitung, und eine neue wird gesendet. Nichts
+wird wiederholt: Handler haben Nebenwirkungen.
+
+| Ursache | Antwort |
+|---|---|
+| Serialisierungsfehler (40001), Deadlock, MySQL-Sperr-Timeout (1205), `SQLITE_BUSY`, keine freie Verbindung | 503 mit `Retry-After: 1` |
+| `AtomicAborted`, `AtomicEndedEarly`, jeder andere Fehler | 500, mit der Request-ID geloggt |
+
+**Was dem Block entkommt.**
+
+- Ein mit `tokio::spawn` gestarteter Task committet selbst; starte ihn aus
+  `on_commit(|| ..)`.
+- Ein Streaming-Body läuft nach dem `COMMIT`.
+- Zwei Anweisungen gleichzeitig in einem Handler (`join!`) liefern
+  `NestedAtomic`.
+- `outside_atomic(fut)` führt `fut` außerhalb des Blocks aus, für einen
+  Schreibvorgang, der ein Rollback überstehen muss. Das Framework schreibt so
+  Sicherheits-Auditzeilen und Logout-Stempel. Auf dem Pool der Anfrage
+  braucht es eine zweite Verbindung: Auf SQLite wartet sie auf die
+  Schreibsperre des Blocks, auf PostgreSQL kann sie auf eine Zeile warten,
+  die der Block gesperrt hat.
+
+**`Tenant::conn`.** In einem Block auf dem Pool des Tenants leiht `t.conn()`
+die Verbindung des Blocks aus, sodass ihre Anweisungen mit der Anfrage
+committet oder zurückgerollt werden. ORM-Aufrufe auf dem Pool liefern
+währenddessen `NestedAtomic`; `t.pool()` gibt sie zurück. `t.pool_conn()` und
+`t.into_conn()` liefern dort `InAtomic`.
+
+**Je Backend.** PostgreSQL: Ein Anweisungsfehler, den der Handler ignoriert,
+bricht den Block ab, und die Anfrage antwortet mit 500. MySQL:
+`REPEATABLE READ` hält einen Snapshot für die ganze Anfrage, daher passt
+`Isolation::ReadCommitted` meist besser; DDL committet den Block vorzeitig
+(500). SQLite: Blöcke beginnen verzögert, ein POST, der nur liest, nimmt also
+keine Schreibsperre; ein Schreiben nach einem Lesen schlägt sofort mit
+`SQLITE_BUSY` (503) fehl, wenn eine andere Verbindung inzwischen geschrieben
+hat.
+
+**Kosten.** `BEGIN` und `COMMIT` pro schreibender Anfrage, eine Prüfung vor
+dem Commit und ein Savepoint um jeden ORM-Schreibvorgang. Auf einem lokalen
+PostgreSQL kostet ein POST mit einem Schreibvorgang allein etwa 1 ms mehr im
+p99, unter Last mehr.
 
 ## Fehler
 

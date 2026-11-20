@@ -126,6 +126,7 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::admin` | Routage et enregistrement de l'admin |
 | `rustango::admin::audit` | Écritures du journal d'audit |
 | `rustango::admin::sso` | SSO de l'admin |
+| `rustango::atomic_request` | Une transaction de requête qui a perdu un conflit (503), ou une écriture refusée pour un tenant non résolu |
 | `rustango::cache` | Backends de cache |
 | `rustango::cache_page` | Middleware de cache de page |
 | `rustango::cors` | Décisions de politique CORS |
