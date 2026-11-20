@@ -729,6 +729,11 @@ required-features = ["sqlite", "tenancy", "runtime", "postgres"]
 
 # Row copies on read paths; in-memory SQLite.
 [[bench]]
+name              = "atomic_request"
+harness           = false
+required-features = ["sqlite", "postgres", "runserver"]
+
+[[bench]]
 name              = "row_copies"
 harness           = false
 required-features = ["sqlite", "admin", "template_views", "serializer"]
