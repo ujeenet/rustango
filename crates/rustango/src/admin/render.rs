@@ -462,14 +462,13 @@ pub(crate) fn render_value_json(row: &serde_json::Value, field: &FieldSchema) ->
             Some(true) => r#"<span class="rcms-bool yes" aria-label="true">☑</span>"#.to_owned(),
             _ => r#"<span class="rcms-bool no" aria-label="false">☐</span>"#.to_owned(),
         },
+        // A number's text has nothing to escape.
         FieldType::I16 | FieldType::I32 | FieldType::I64 => v
             .as_i64()
-            .map(|n| escape(&n.to_string()))
-            .unwrap_or_else(|| escape(&v.to_string())),
+            .map_or_else(|| escape(&v.to_string()), |n| n.to_string()),
         FieldType::F32 | FieldType::F64 => v
             .as_f64()
-            .map(|n| escape(&n.to_string()))
-            .unwrap_or_else(|| escape(&v.to_string())),
+            .map_or_else(|| escape(&v.to_string()), |n| n.to_string()),
         FieldType::String
         | FieldType::Uuid
         | FieldType::Date

@@ -230,14 +230,14 @@ pub(crate) async fn index(state: AppState) -> Html<String> {
         })
         .collect();
 
-    let mut ctx = serde_json::json!({
+    let ctx = serde_json::json!({
         "groups": groups_ctx,
         "models": flat_models_ctx,
         "recent_actions": recent_actions_ctx,
     });
     Html(render_with_chrome(
         "index.html",
-        &mut ctx,
+        ctx,
         chrome_context(&state, None),
     ))
 }
@@ -804,7 +804,12 @@ pub(crate) async fn table_view(
                     }
                 })
                 .collect();
-            serde_json::json!({ "cells": cells, "pk": pk, "pk_path": pk_path })
+            // Built by move: `json!` would copy every cell.
+            serde_json::Value::Object(serde_json::Map::from_iter([
+                ("cells".to_owned(), cells.into()),
+                ("pk".to_owned(), pk.into()),
+                ("pk_path".to_owned(), pk_path.into()),
+            ]))
         })
         .collect();
 
@@ -960,7 +965,6 @@ pub(crate) async fn table_view(
         "date_hierarchy": date_hierarchy_ctx,
         "actions": actions_ctx,
         "columns": columns_ctx,
-        "rows": rows_ctx,
         "page": page,
         "last_page": last_page,
         "pager_suffix": pager_suffix_str,
@@ -978,9 +982,11 @@ pub(crate) async fn table_view(
             list_query.without(&["page"]).with("trashed", "1").url()
         }),
     });
+    // Moved in, not copied as `json!` would.
+    ctx["rows"] = rows_ctx.into();
     Ok(Html(render_with_chrome(
         "list.html",
-        &mut ctx,
+        ctx,
         chrome_context(&state, Some(model.table)),
     )))
 }
@@ -1339,7 +1345,7 @@ async fn fk_map_for_rows(
         let names =
             fk_display_names(state, parts, t.target, on_field, t.display_field, keys).await?;
         for (raw, name) in names {
-            map.insert((t.to.to_owned(), raw), render::escape(&name));
+            map.insert(t.to, raw, render::escape(&name));
         }
     }
     Ok(map)
@@ -1981,7 +1987,7 @@ pub(crate) async fn detail_view(
     #[cfg(not(feature = "tenancy"))]
     let user_roles_ctx: Option<serde_json::Value> = None;
 
-    let mut ctx = serde_json::json!({
+    let ctx = serde_json::json!({
         "model": {
             "name": model.name,
             "table": model.table,
@@ -2002,7 +2008,7 @@ pub(crate) async fn detail_view(
     });
     let html = render_with_chrome(
         "detail.html",
-        &mut ctx,
+        ctx,
         chrome_context(&state, Some(model.table)),
     );
     Ok(Html(html))
@@ -3162,7 +3168,7 @@ fn refused_delete(
         model.name
     );
     if crate::errors::accepts_html(&parts.headers) && !parts.headers.contains_key("hx-request") {
-        let mut ctx = serde_json::json!({
+        let ctx = serde_json::json!({
             "model": {
                 "name": model.name,
                 "table": model.table,
@@ -3172,7 +3178,7 @@ fn refused_delete(
         });
         let html = render_with_chrome(
             "delete_refused.html",
-            &mut ctx,
+            ctx,
             chrome_context(state, Some(model.table)),
         );
         return Ok((axum::http::StatusCode::CONFLICT, Html(html)).into_response());

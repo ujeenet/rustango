@@ -224,7 +224,7 @@ async fn render_login_form(
         // build-time flag is enough and the login GET needs no lookup.
         "totp_enabled": cfg!(feature = "totp"),
     });
-    render_template("login.html", &ctx)
+    render_template("login.html", ctx)
 }
 
 // ============================================================ Login form (POST)
@@ -744,7 +744,7 @@ fn render_change_password_form(
     error: Option<&str>,
 ) -> String {
     let admin_prefix = &state.config.admin_prefix;
-    let mut ctx = serde_json::json!({
+    let ctx = serde_json::json!({
         "title": "Change password",
         "action": format!("{admin_prefix}/account/password"),
         "success": success,
@@ -753,7 +753,7 @@ fn render_change_password_form(
     });
     super::templates::render_with_chrome(
         "change_password.html",
-        &mut ctx,
+        ctx,
         super::helpers::chrome_context(state, None),
     )
 }
@@ -794,7 +794,7 @@ fn render_totp_enroll(
         "success": success,
         "csrf_input": super::helpers::current_csrf_input(),
     });
-    render_template("totp_enroll.html", &ctx)
+    render_template("totp_enroll.html", ctx)
 }
 
 /// Build an `otpauth://` URI for the session user against `secret`.

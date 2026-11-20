@@ -60,10 +60,10 @@ pub(crate) async fn docs_view(state: AppState) -> Html<String> {
         .map(|(app, models)| json!({ "app": app, "models": models }))
         .collect();
 
-    let mut ctx = json!({ "apps": apps });
+    let ctx = json!({ "apps": apps });
     Html(render_with_chrome(
         "docs.html",
-        &mut ctx,
+        ctx,
         // `__docs` highlights the sidebar "Model reference" link. It
         // matches no real table, so no model row lights up.
         chrome_context(&state, Some("__docs")),

@@ -332,7 +332,7 @@ pub(crate) async fn audit_log_view(
         .map(|(k, v)| serde_json::json!({ "key": k, "value": v }))
         .collect();
 
-    let mut ctx = serde_json::json!({
+    let ctx = serde_json::json!({
         "total": total,
         "plural": if total == 1 { "" } else { "s" },
         "entries": entries_ctx,
@@ -345,7 +345,7 @@ pub(crate) async fn audit_log_view(
     });
     Ok(Html(render_with_chrome(
         "audit_log.html",
-        &mut ctx,
+        ctx,
         chrome_context(&state, Some("__audit")),
     )))
 }
