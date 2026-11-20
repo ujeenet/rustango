@@ -479,9 +479,9 @@ async fn in_lists_match_alike_and_share_a_statement(pool: &Pool) {
     let (two, four) = (sql(2), sql(4));
     if pool.dialect().kind() == rustango::sql::DialectKind::Postgres {
         assert_eq!(two.sql, four.sql);
-        assert_eq!(four.params.len(), 1);
+        assert_eq!(four.params().len(), 1);
     } else {
-        assert_eq!(four.params.len(), 4);
+        assert_eq!(four.params().len(), 4);
     }
 }
 

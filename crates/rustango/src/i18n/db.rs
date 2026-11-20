@@ -228,7 +228,7 @@ async fn case_sensitive_keys(pool: &Pool) -> Result<(), ExecError> {
     let Some(probe) = d.ci_columns_sql("rustango_translations") else {
         return Ok(());
     };
-    let found: Vec<(String,)> = crate::sql::raw_query_pool(&probe.sql, probe.params, pool).await?;
+    let found: Vec<(String,)> = crate::sql::raw_query_stmt(probe, pool).await?;
     for (column,) in found {
         let len = match column.as_str() {
             "locale" => LOCALE_LEN,

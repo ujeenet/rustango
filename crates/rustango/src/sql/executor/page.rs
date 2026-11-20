@@ -74,11 +74,9 @@ pub(super) fn paginated_statement(
         return b.finish();
     }
     if select.compound.is_empty() {
-        let stmt = d.compile_select(select)?;
-        return Ok(crate::sql::CompiledStatement {
-            sql: inject_total_count(&stmt.sql),
-            params: stmt.params,
-        });
+        let mut stmt = d.compile_select(select)?;
+        stmt.sql = inject_total_count(&stmt.sql);
+        return Ok(stmt);
     }
     let mut b = crate::sql::writers::Sql::new(d);
     crate::sql::writers::write_compound_with_total(&mut b, select)?;

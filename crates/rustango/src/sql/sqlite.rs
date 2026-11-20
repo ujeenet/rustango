@@ -920,7 +920,7 @@ mod tests {
         // SQLite emits ANSI-quoted identifiers and `?` placeholders.
         assert!(stmt.sql.contains("\"demo\""), "table quoted: {}", stmt.sql);
         assert!(stmt.sql.contains("\"id\" = ?"), "predicate: {}", stmt.sql);
-        assert_eq!(stmt.params.len(), 1);
+        assert_eq!(stmt.params().len(), 1);
     }
 
     /// The encoder must produce a fixed width for every input.

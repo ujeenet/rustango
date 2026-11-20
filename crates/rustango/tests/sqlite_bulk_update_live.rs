@@ -100,7 +100,7 @@ fn compile_bulk_update_emits_cte_correlated_subquery_shape() {
         "expected PK IN-subquery; got: {}",
         stmt.sql
     );
-    assert_eq!(stmt.params.len(), 6);
+    assert_eq!(stmt.params().len(), 6);
 }
 
 #[tokio::test]

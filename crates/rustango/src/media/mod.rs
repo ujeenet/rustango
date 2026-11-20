@@ -1561,7 +1561,7 @@ impl MediaManager {
             .await
             .map_err(media_err_from_exec)?;
         if let Some(lock) = lock {
-            crate::sql::raw_execute_tx(&mut tx, &lock.sql, lock.params)
+            crate::sql::raw_execute_stmt_tx(&mut tx, lock)
                 .await
                 .map_err(media_err_from_exec)?;
         }

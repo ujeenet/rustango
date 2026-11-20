@@ -361,6 +361,8 @@ pub async fn has_perm_pool(
         cn(),
         uid_v,
     ];
+    let binds = crate::sql::BindParams::check(pool.dialect(), binds)
+        .map_err(crate::sql::ExecError::from)?;
     let rows = crate::sql::run_on(pool, &sql, binds, |row| {
         Ok(match row {
             #[cfg(feature = "postgres")]

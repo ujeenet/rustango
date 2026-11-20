@@ -58,11 +58,11 @@ fn pg_emits_plainto_tsquery() {
         stmt.sql
     );
     assert!(
-        stmt.params
+        stmt.params()
             .iter()
             .any(|p| matches!(p, SqlValue::String(s) if s == "rust orm")),
         "search query bound as param: {:?}",
-        stmt.params
+        stmt.params()
     );
 }
 

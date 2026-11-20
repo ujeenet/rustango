@@ -7,12 +7,15 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Added
 
 - `sql::DialectKind` and `Dialect::kind()`: match on the backend so the compiler checks every arm. `Dialect::date_bucket_sql` / `datetime_bucket_sql` hold the `.dates()` / `.datetimes()` truncation; `testkit::matrix::Backend::kind()`.
+- `sql::DecodeModel`: one bound for every row-decoding executor, in place of the eight marker traits. `CompiledStatement::new(dialect, sql, params)` and `sql::BindParams`: a hand-written statement checked for its dialect.
 
 ### Changed
 
 - Framework code branches on `Dialect::kind()` instead of comparing `name()` strings; a structural test refuses new comparisons. Emitted SQL is unchanged.
 - Audit list, count and facets, a user's roles, media get/tag reads and the notifications table insert now run through the ORM instead of per-dialect hand-built SQL. Results are unchanged.
 - `allow(dead_code)` removed from the framework models and the SQLite marker traits, so an unused field on them warns again.
+- **Breaking:** `CompiledStatement::params` is private: read it with `params()`, build a statement with `CompiledStatement::new`. The hidden `audit::__bind_value_pg` / `_my` / `_sqlite` are gone.
+- A value a backend cannot bind (a Postgres-only value off Postgres, a raw `List`, a Postgres array of floats) returns `SqlError::ValueNotSupportedInDialect` instead of panicking in the binder.
 
 ## [0.67.0] — 2026-11-19
 

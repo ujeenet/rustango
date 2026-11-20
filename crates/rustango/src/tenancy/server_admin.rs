@@ -749,7 +749,7 @@ impl ServerAdmin {
         };
         let d = pool.dialect();
         if let Some(stmt) = tag.and_then(|t| d.end_sessions_sql(name, t)) {
-            crate::sql::raw_query_pool::<(i64,)>(&stmt.sql, stmt.params, pool)
+            crate::sql::raw_query_stmt::<(i64,)>(stmt, pool)
                 .await
                 .map_err(|e| denied_or_exec(e, "end the tenant's sessions"))?;
         }
@@ -842,7 +842,7 @@ impl ServerAdmin {
             return Ok(all);
         };
         let rows: Vec<(Option<bool>, Option<bool>, Option<bool>)> =
-            crate::sql::raw_query_pool(&stmt.sql, stmt.params, pool).await?;
+            crate::sql::raw_query_stmt(stmt, pool).await?;
         let Some((db, user, end)) = rows.into_iter().next() else {
             return Ok(all);
         };
@@ -867,8 +867,7 @@ impl ServerAdmin {
         let Some(stmt) = pool.dialect().database_sessions_sql(name, tag) else {
             return Ok(Sessions::default());
         };
-        let rows: Vec<(i64, i64)> =
-            crate::sql::raw_query_pool(&stmt.sql, stmt.params, pool).await?;
+        let rows: Vec<(i64, i64)> = crate::sql::raw_query_stmt(stmt, pool).await?;
         Ok(rows
             .into_iter()
             .next()
@@ -882,9 +881,7 @@ impl ServerAdmin {
             return None;
         };
         let stmt = pool.dialect().collation_exists_sql(collation)?;
-        let rows: Vec<(i64,)> = crate::sql::raw_query_pool(&stmt.sql, stmt.params, pool)
-            .await
-            .ok()?;
+        let rows: Vec<(i64,)> = crate::sql::raw_query_stmt(stmt, pool).await.ok()?;
         rows.first().map(|(n,)| *n > 0)
     }
 
@@ -909,7 +906,7 @@ impl ServerAdmin {
             Target::Server { pool, .. } => pool,
         };
         if let Some(stmt) = pool.dialect().database_exists_sql(name) {
-            let rows: Vec<(i64,)> = crate::sql::raw_query_pool(&stmt.sql, stmt.params, pool)
+            let rows: Vec<(i64,)> = crate::sql::raw_query_stmt(stmt, pool)
                 .await
                 .unwrap_or_default();
             if rows.first().is_some_and(|(n,)| *n > 0) {
@@ -970,9 +967,7 @@ fn undo_login_after_failure(fault: Fault, existed_before: Option<bool>) -> bool 
 /// `Some(true)` when `login` exists; `None` when it cannot be checked.
 async fn login_exists(pool: &Pool, login: &Login) -> Option<bool> {
     let stmt = pool.dialect().login_exists_sql(login)?;
-    let rows: Vec<(i64,)> = crate::sql::raw_query_pool(&stmt.sql, stmt.params, pool)
-        .await
-        .ok()?;
+    let rows: Vec<(i64,)> = crate::sql::raw_query_stmt(stmt, pool).await.ok()?;
     rows.first().map(|(n,)| *n > 0)
 }
 

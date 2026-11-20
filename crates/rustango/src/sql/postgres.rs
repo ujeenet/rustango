@@ -109,25 +109,23 @@ impl Dialect for Postgres {
     }
 
     fn database_exists_sql(&self, db: &DatabaseName) -> Option<CompiledStatement> {
-        Some(CompiledStatement {
-            sql: format!(
+        Some(CompiledStatement::with_text(
+            format!(
                 "SELECT count(*) FROM pg_database WHERE datname = {}",
                 self.placeholder(1)
             ),
-            params: vec![crate::core::SqlValue::String(db.as_str().to_owned())],
-        })
+            [db.as_str().to_owned()],
+        ))
     }
 
     fn login_exists_sql(&self, login: &Login) -> Option<CompiledStatement> {
-        Some(CompiledStatement {
-            sql: format!(
+        Some(CompiledStatement::with_text(
+            format!(
                 "SELECT count(*) FROM pg_roles WHERE rolname = {}",
                 self.placeholder(1)
             ),
-            params: vec![crate::core::SqlValue::String(
-                login.name().as_str().to_owned(),
-            )],
-        })
+            [login.name().as_str().to_owned()],
+        ))
     }
 
     /// A SCRAM verifier where it can be built, so the server log never
@@ -165,8 +163,8 @@ impl Dialect for Postgres {
     /// ADMIN OPTION on, so a replaced admin may not touch older logins.
     /// Ending sessions needs membership or `pg_signal_backend`.
     fn tenant_rights_sql(&self, db: &DatabaseName, login: &Login) -> Option<CompiledStatement> {
-        Some(CompiledStatement {
-            sql: "SELECT \
+        Some(CompiledStatement::with_text(
+            "SELECT \
                   (SELECT me.rolsuper OR pg_has_role(current_user, d.datdba, 'USAGE') \
                      FROM pg_database d WHERE d.datname = $1), \
                   (SELECT CASE WHEN current_setting('server_version_num')::int >= 160000 \
@@ -178,38 +176,29 @@ impl Dialect for Postgres {
                      FROM pg_roles t WHERE t.rolname = $2), false) \
                   FROM pg_roles me WHERE me.rolname = current_user"
                 .to_owned(),
-            params: vec![
-                crate::core::SqlValue::String(db.as_str().to_owned()),
-                crate::core::SqlValue::String(login.name().as_str().to_owned()),
-            ],
-        })
+            [db.as_str().to_owned(), login.name().as_str().to_owned()],
+        ))
     }
 
     /// `DROP DATABASE` ends an autovacuum worker itself, so it is neither.
     fn database_sessions_sql(&self, db: &DatabaseName, tag: &str) -> Option<CompiledStatement> {
-        Some(CompiledStatement {
-            sql: "SELECT count(*) FILTER (WHERE application_name = $2), \
+        Some(CompiledStatement::with_text(
+            "SELECT count(*) FILTER (WHERE application_name = $2), \
                   count(*) FILTER (WHERE application_name IS DISTINCT FROM $2) \
                   FROM pg_stat_activity WHERE datname = $1 \
                   AND backend_type IS DISTINCT FROM 'autovacuum worker'"
                 .to_owned(),
-            params: vec![
-                crate::core::SqlValue::String(db.as_str().to_owned()),
-                crate::core::SqlValue::String(tag.to_owned()),
-            ],
-        })
+            [db.as_str().to_owned(), tag.to_owned()],
+        ))
     }
 
     fn end_sessions_sql(&self, db: &DatabaseName, tag: &str) -> Option<CompiledStatement> {
-        Some(CompiledStatement {
-            sql: "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity \
+        Some(CompiledStatement::with_text(
+            "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity \
                   WHERE datname = $1 AND application_name = $2"
                 .to_owned(),
-            params: vec![
-                crate::core::SqlValue::String(db.as_str().to_owned()),
-                crate::core::SqlValue::String(tag.to_owned()),
-            ],
-        })
+            [db.as_str().to_owned(), tag.to_owned()],
+        ))
     }
 
     /// PUBLIC has CONNECT on every new database; revoking it keeps the
@@ -245,18 +234,18 @@ impl Dialect for Postgres {
         let (database, params) = match db {
             Some(db) => (
                 format!("{}::text", self.placeholder(1)),
-                vec![crate::core::SqlValue::String(db.to_owned())],
+                vec![db.to_owned()],
             ),
             None => ("current_database()::text".to_owned(), Vec::new()),
         };
-        Some(CompiledStatement {
-            sql: format!(
+        Some(CompiledStatement::with_text(
+            format!(
                 "SELECT system_identifier::text || ':' || \
                  extract(epoch FROM pg_postmaster_start_time())::text, {database} \
                  FROM pg_control_system()"
             ),
             params,
-        })
+        ))
     }
 
     /// One row: `rolsuper`, `rolcreatedb`, `rolcreaterole`.

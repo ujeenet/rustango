@@ -1139,7 +1139,7 @@ pub async fn save_one_with_audit(
     query.validate()?;
     let stmt = pool.dialect().compile_update(query)?;
     let mut tx = crate::sql::write_tx(pool).await?;
-    let affected = crate::sql::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
+    let affected = crate::sql::raw_execute_stmt_tx(&mut tx, stmt).await?;
     if affected > 0 {
         emit_one_tx(&mut tx, entry).await?;
     }
@@ -1217,7 +1217,7 @@ pub(crate) async fn update_one_with_row_diff_tx(
     };
     let entry = entry_of(&row);
     let affected = match stmt {
-        Some(stmt) => crate::sql::raw_execute_tx(tx, &stmt.sql, stmt.params).await?,
+        Some(stmt) => crate::sql::raw_execute_stmt_tx(tx, stmt).await?,
         None => 0,
     };
     let entry = entry.filter(|_| affected > 0);
@@ -2101,38 +2101,6 @@ pub async fn truncate_with_audit(
     Ok(affected)
 }
 
-/// Postgres bind helper, exposed so generated bodies on the audited
-/// `save_pool` diff path can bind `SqlValue` arguments to a transaction.
-/// Not part of the public API.
-#[doc(hidden)]
-#[cfg(feature = "postgres")]
-pub fn __bind_value_pg(
-    q: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments>,
-    value: crate::core::SqlValue,
-) -> sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments> {
-    crate::sql::bind_query(q, value)
-}
-
-/// MySQL counterpart of [`__bind_value_pg`].
-#[doc(hidden)]
-#[cfg(feature = "mysql")]
-pub fn __bind_value_my(
-    q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments>,
-    value: crate::core::SqlValue,
-) -> sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> {
-    crate::sql::bind_query_my(q, value)
-}
-
-/// SQLite counterpart of [`__bind_value_pg`].
-#[doc(hidden)]
-#[cfg(feature = "sqlite")]
-pub fn __bind_value_sqlite<'q>(
-    q: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>,
-    value: crate::core::SqlValue,
-) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>> {
-    crate::sql::bind_query_sqlite(q, value)
-}
-
 /// The BEFORE read of an audited update: `columns` of the row at `pk_value`.
 #[doc(hidden)]
 #[must_use]
@@ -2187,7 +2155,7 @@ where
     let _ = (&decode_before_pg, &decode_before_my, &decode_before_sqlite);
     update_query.validate()?;
     let stmt = pool.dialect().compile_update(update_query)?;
-    let before = pool.dialect().compile_select(before_query)?;
+    let (before_sql, before_params) = pool.dialect().compile_select(before_query)?.into_parts();
     // SQLite's write lock at BEGIN: a deferred read-then-write fails at
     // once if another connection commits in between.
     let mut tx = crate::sql::write_tx(pool).await?;
@@ -2196,36 +2164,30 @@ where
     // A failed pre-read must not let the UPDATE commit unaudited.
     let before_pairs: Option<Vec<(&'static str, serde_json::Value)>> = match &mut tx.conn {
         #[cfg(feature = "postgres")]
-        crate::sql::TxConn::Postgres(t) => before
-            .params
-            .iter()
-            .cloned()
-            .fold(sqlx::query(&before.sql), crate::sql::bind_query)
-            .fetch_optional(&mut **t)
-            .await?
-            .map(|row| decode_before_pg(&row)),
+        crate::sql::TxConn::Postgres(t) => {
+            crate::sql::bind_pg(sqlx::query(&before_sql), before_params)?
+                .fetch_optional(&mut **t)
+                .await?
+                .map(|row| decode_before_pg(&row))
+        }
         #[cfg(feature = "mysql")]
-        crate::sql::TxConn::Mysql(t) => before
-            .params
-            .iter()
-            .cloned()
-            .fold(sqlx::query(&before.sql), crate::sql::bind_query_my)
-            .fetch_optional(&mut **t)
-            .await?
-            .map(|row| decode_before_my(&row)),
+        crate::sql::TxConn::Mysql(t) => {
+            crate::sql::bind_my(sqlx::query(&before_sql), before_params)?
+                .fetch_optional(&mut **t)
+                .await?
+                .map(|row| decode_before_my(&row))
+        }
         #[cfg(feature = "sqlite")]
-        crate::sql::TxConn::Sqlite(t) => before
-            .params
-            .iter()
-            .cloned()
-            .fold(sqlx::query(&before.sql), crate::sql::bind_query_sqlite)
-            .fetch_optional(&mut **t)
-            .await?
-            .map(|row| decode_before_sqlite(&row)),
+        crate::sql::TxConn::Sqlite(t) => {
+            crate::sql::bind_sqlite(sqlx::query(&before_sql), before_params)?
+                .fetch_optional(&mut **t)
+                .await?
+                .map(|row| decode_before_sqlite(&row))
+        }
     };
     let affected = finish_update_with_audit_diff(
         &mut tx,
-        &stmt,
+        stmt,
         before_pairs,
         &after_pairs,
         entity_table,
@@ -2240,14 +2202,14 @@ where
 /// UPDATE, then emit the audit row if a BEFORE snapshot was captured.
 async fn finish_update_with_audit_diff(
     tx: &mut crate::sql::PoolTx<'_>,
-    stmt: &crate::sql::CompiledStatement,
+    stmt: crate::sql::CompiledStatement,
     before_pairs: Option<Vec<(&'static str, serde_json::Value)>>,
     after_pairs: &[(&'static str, serde_json::Value)],
     entity_table: &'static str,
     entity_pk: &str,
 ) -> Result<u64, crate::sql::ExecError> {
     // Return rows-affected: 0 means the PK no longer exists.
-    let _affected = crate::sql::raw_execute_tx(tx, &stmt.sql, stmt.params.clone()).await?;
+    let _affected = crate::sql::raw_execute_stmt_tx(tx, stmt).await?;
     let entry = before_pairs.and_then(|before| {
         PendingEntry::update_diff(entity_table, entity_pk.to_owned(), &before, after_pairs)
     });

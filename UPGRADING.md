@@ -152,6 +152,9 @@ untouched.
 
 - Branch on `pool.dialect().kind()` (a `DialectKind`) instead of `dialect().name() == "sqlite"`. `DialectKind` is a closed enum, so a match on it with no `_` arm fails to build when a backend is added.
 - `user_roles_qs_pool` returns an error for a role whose `data` is not valid JSON, where it used to substitute `{}`. `ensure_tag` no longer renames an existing tag when two calls race.
+- `CompiledStatement { sql, params }` no longer builds and `stmt.params` no longer reads: use `CompiledStatement::new(dialect, sql, params)?` and `stmt.params()`. `sql` stays a public field.
+- A Postgres array bind of an element type other than i16/i32/i64/text/bool/uuid now returns `ValueNotSupportedInDialect` where it panicked.
+- Generic helpers can bound `T: DecodeModel` instead of the eight `Maybe*` / `LoadRelated` traits; the old bounds still work.
 
 ## 0.67.0
 

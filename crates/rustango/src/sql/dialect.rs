@@ -129,28 +129,6 @@ pub(crate) fn quote_qualified(d: &dyn Dialect, name: &str) -> String {
     }
 }
 
-/// Refuse a bind whose bind arm can only panic: a `List` (the writer
-/// expands those) anywhere, a Postgres-only value off Postgres. The one
-/// check for both compiled and raw statements.
-pub(crate) fn refuse_unbindable_values(
-    d: &dyn Dialect,
-    params: &[crate::core::SqlValue],
-) -> Result<(), SqlError> {
-    let pg = d.binds_pg_only_values();
-    // Off Postgres a PG-only item names itself, even inside a list.
-    let kind = params.iter().find_map(|v| {
-        let pg_only = if pg { None } else { v.pg_only_kind() };
-        pg_only.or(matches!(v, crate::core::SqlValue::List(_)).then_some("list"))
-    });
-    match kind {
-        Some(value) => Err(SqlError::ValueNotSupportedInDialect {
-            value,
-            dialect: d.name(),
-        }),
-        None => Ok(()),
-    }
-}
-
 /// The strftime-style mask for a timestamp bucket; `min` / `sec` are the
 /// minute and second tokens, which MySQL and SQLite spell differently.
 pub(crate) fn datetime_bucket_mask(kind: DateTimeKind, min: &str, sec: &str) -> String {
@@ -1527,14 +1505,15 @@ mod quote_with_tests {
 }
 
 #[cfg(test)]
-mod refuse_unbindable_values_tests {
-    use super::{refuse_unbindable_values, Dialect};
+mod bind_params_check_tests {
+    use super::Dialect;
     use crate::core::SqlValue;
+    use crate::sql::BindParams;
     use crate::sql::{MySql, Postgres, SqlError, Sqlite};
 
     fn refused(d: &dyn Dialect, v: SqlValue) -> Option<&'static str> {
-        match refuse_unbindable_values(d, &[SqlValue::I64(1), v]) {
-            Ok(()) => None,
+        match BindParams::check(d, vec![SqlValue::I64(1), v]) {
+            Ok(_) => None,
             Err(SqlError::ValueNotSupportedInDialect { value, dialect }) => {
                 assert_eq!(dialect, d.name());
                 Some(value)
@@ -1582,6 +1561,16 @@ mod refuse_unbindable_values_tests {
             let list = SqlValue::List(vec![SqlValue::Array(vec![])]);
             assert_eq!(refused(d, list), Some(inner), "{}", d.name());
             assert_eq!(refused(d, SqlValue::String("x".into())), None);
+        }
+    }
+
+    /// Postgres binds typed arrays of a few element types; others used to panic.
+    #[test]
+    fn a_postgres_array_of_an_unbindable_element_is_refused() {
+        let floats = SqlValue::Array(vec![SqlValue::F64(1.0)]);
+        assert_eq!(refused(&Postgres, floats), Some("array element"));
+        for ok in [vec![], vec![SqlValue::I32(1)], vec![SqlValue::Bool(true)]] {
+            assert_eq!(refused(&Postgres, SqlValue::Array(ok)), None);
         }
     }
 }

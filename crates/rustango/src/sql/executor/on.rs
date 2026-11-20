@@ -6,7 +6,7 @@ use futures_util::stream::{BoxStream, TryStreamExt as _};
 
 use super::atomic::{self, Gate, Stmt};
 use super::{Dialect, ExecError, InsertReturningPool, PoolTx, TxConn};
-use crate::core::{BulkInsertQuery, InsertQuery, SqlValue};
+use crate::core::{BulkInsertQuery, InsertQuery};
 use crate::sql::{DeletePlan, Pool};
 
 /// One connection held from a [`Pool`]. Every `_on` query given
@@ -165,7 +165,7 @@ pub trait SqlExecutor<'c>: sealed::Sealed<'c> + Send + Sized {
     fn fetch_rows<'e, 'q: 'e, U, F>(
         self,
         sql: &'q str,
-        params: Vec<SqlValue>,
+        params: crate::sql::BindParams,
         decode: F,
     ) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
     where
@@ -178,7 +178,7 @@ pub trait SqlExecutor<'c>: sealed::Sealed<'c> + Send + Sized {
     fn execute_rows<'e, 'q: 'e>(
         self,
         sql: &'q str,
-        params: Vec<SqlValue>,
+        params: crate::sql::BindParams,
     ) -> BoxFuture<'e, Result<u64, ExecError>>
     where
         'c: 'e;
@@ -340,7 +340,7 @@ impl<'t> ReusableExecutor for &mut PoolTx<'t> {
 fn pg_rows<'c: 'e, 'e, 'q: 'e, E, U, F>(
     exec: E,
     sql: &'q str,
-    params: Vec<SqlValue>,
+    params: crate::sql::BindParams,
     mut decode: F,
 ) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
 where
@@ -348,15 +348,18 @@ where
     U: Send + 'e,
     F: FnMut(RowRef<'_>) -> Result<U, sqlx::Error> + Send + 'e,
 {
-    let rows = exec.fetch(params.into_iter().fold(sqlx::query(sql), super::bind_query));
-    Box::pin(drain(rows, move |r| decode(RowRef::Postgres(r))))
+    let q = match super::bind_pg(sqlx::query(sql), params) {
+        Ok(q) => q,
+        Err(e) => return Box::pin(std::future::ready(Err(e.into()))),
+    };
+    Box::pin(drain(exec.fetch(q), move |r| decode(RowRef::Postgres(r))))
 }
 
 #[cfg(feature = "mysql")]
 fn my_rows<'c: 'e, 'e, 'q: 'e, E, U, F>(
     exec: E,
     sql: &'q str,
-    params: Vec<SqlValue>,
+    params: crate::sql::BindParams,
     mut decode: F,
 ) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
 where
@@ -364,19 +367,18 @@ where
     U: Send + 'e,
     F: FnMut(RowRef<'_>) -> Result<U, sqlx::Error> + Send + 'e,
 {
-    let rows = exec.fetch(
-        params
-            .into_iter()
-            .fold(sqlx::query(sql), super::bind_query_my),
-    );
-    Box::pin(drain(rows, move |r| decode(RowRef::Mysql(r))))
+    let q = match super::bind_my(sqlx::query(sql), params) {
+        Ok(q) => q,
+        Err(e) => return Box::pin(std::future::ready(Err(e.into()))),
+    };
+    Box::pin(drain(exec.fetch(q), move |r| decode(RowRef::Mysql(r))))
 }
 
 #[cfg(feature = "sqlite")]
 fn sq_rows<'c: 'e, 'e, 'q: 'e, E, U, F>(
     exec: E,
     sql: &'q str,
-    params: Vec<SqlValue>,
+    params: crate::sql::BindParams,
     mut decode: F,
 ) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
 where
@@ -384,23 +386,26 @@ where
     U: Send + 'e,
     F: FnMut(RowRef<'_>) -> Result<U, sqlx::Error> + Send + 'e,
 {
-    let q = params
-        .into_iter()
-        .fold(sqlx::query(sql), super::bind_query_sqlite);
-    let rows = exec.fetch(q);
-    Box::pin(drain(rows, move |r| decode(RowRef::Sqlite(r))))
+    let q = match super::bind_sqlite(sqlx::query(sql), params) {
+        Ok(q) => q,
+        Err(e) => return Box::pin(std::future::ready(Err(e.into()))),
+    };
+    Box::pin(drain(exec.fetch(q), move |r| decode(RowRef::Sqlite(r))))
 }
 
 #[cfg(feature = "postgres")]
 fn pg_exec<'c: 'e, 'e, 'q: 'e, E>(
     exec: E,
     sql: &'q str,
-    params: Vec<SqlValue>,
+    params: crate::sql::BindParams,
 ) -> BoxFuture<'e, Result<u64, ExecError>>
 where
     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
 {
-    let q = params.into_iter().fold(sqlx::query(sql), super::bind_query);
+    let q = match super::bind_pg(sqlx::query(sql), params) {
+        Ok(q) => q,
+        Err(e) => return Box::pin(std::future::ready(Err(e.into()))),
+    };
     crate::test_assertions::query_counter::bump();
     let done = exec.execute(q);
     Box::pin(async move { Ok(done.await?.rows_affected()) })
@@ -410,14 +415,15 @@ where
 fn my_exec<'c: 'e, 'e, 'q: 'e, E>(
     exec: E,
     sql: &'q str,
-    params: Vec<SqlValue>,
+    params: crate::sql::BindParams,
 ) -> BoxFuture<'e, Result<u64, ExecError>>
 where
     E: sqlx::Executor<'c, Database = sqlx::MySql>,
 {
-    let q = params
-        .into_iter()
-        .fold(sqlx::query(sql), super::bind_query_my);
+    let q = match super::bind_my(sqlx::query(sql), params) {
+        Ok(q) => q,
+        Err(e) => return Box::pin(std::future::ready(Err(e.into()))),
+    };
     crate::test_assertions::query_counter::bump();
     let done = exec.execute(q);
     Box::pin(async move { Ok(done.await?.rows_affected()) })
@@ -427,14 +433,15 @@ where
 fn sq_exec<'c: 'e, 'e, 'q: 'e, E>(
     exec: E,
     sql: &'q str,
-    params: Vec<SqlValue>,
+    params: crate::sql::BindParams,
 ) -> BoxFuture<'e, Result<u64, ExecError>>
 where
     E: sqlx::Executor<'c, Database = sqlx::Sqlite>,
 {
-    let q = params
-        .into_iter()
-        .fold(sqlx::query(sql), super::bind_query_sqlite);
+    let q = match super::bind_sqlite(sqlx::query(sql), params) {
+        Ok(q) => q,
+        Err(e) => return Box::pin(std::future::ready(Err(e.into()))),
+    };
     crate::test_assertions::query_counter::bump();
     let done = exec.execute(q);
     Box::pin(async move { Ok(done.await?.rows_affected()) })
@@ -495,7 +502,7 @@ pub(super) fn pool_rows<'e, U, F>(
     pool: &'e Pool,
     stmt: Stmt,
     sql: &'e str,
-    params: Vec<SqlValue>,
+    params: crate::sql::BindParams,
     decode: F,
 ) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
 where
@@ -524,7 +531,7 @@ pub(super) async fn pool_exec(
     pool: &Pool,
     stmt: Stmt,
     sql: &str,
-    params: Vec<SqlValue>,
+    params: crate::sql::BindParams,
 ) -> Result<u64, ExecError> {
     on_pool!(
         pool,
@@ -545,7 +552,7 @@ impl<'c> SqlExecutor<'c> for &'c Pool {
     fn fetch_rows<'e, 'q: 'e, U, F>(
         self,
         sql: &'q str,
-        params: Vec<SqlValue>,
+        params: crate::sql::BindParams,
         decode: F,
     ) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
     where
@@ -559,7 +566,7 @@ impl<'c> SqlExecutor<'c> for &'c Pool {
     fn execute_rows<'e, 'q: 'e>(
         self,
         sql: &'q str,
-        params: Vec<SqlValue>,
+        params: crate::sql::BindParams,
     ) -> BoxFuture<'e, Result<u64, ExecError>>
     where
         'c: 'e,
@@ -710,7 +717,7 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolConn {
     fn fetch_rows<'e, 'q: 'e, U, F>(
         self,
         sql: &'q str,
-        params: Vec<SqlValue>,
+        params: crate::sql::BindParams,
         decode: F,
     ) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
     where
@@ -731,7 +738,7 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolConn {
     fn execute_rows<'e, 'q: 'e>(
         self,
         sql: &'q str,
-        params: Vec<SqlValue>,
+        params: crate::sql::BindParams,
     ) -> BoxFuture<'e, Result<u64, ExecError>>
     where
         'c: 'e,
@@ -830,7 +837,7 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolTx<'_> {
     fn fetch_rows<'e, 'q: 'e, U, F>(
         self,
         sql: &'q str,
-        params: Vec<SqlValue>,
+        params: crate::sql::BindParams,
         decode: F,
     ) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
     where
@@ -851,7 +858,7 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolTx<'_> {
     fn execute_rows<'e, 'q: 'e>(
         self,
         sql: &'q str,
-        params: Vec<SqlValue>,
+        params: crate::sql::BindParams,
     ) -> BoxFuture<'e, Result<u64, ExecError>>
     where
         'c: 'e,
@@ -927,7 +934,7 @@ impl<'c, E: sqlx::Executor<'c, Database = sqlx::Postgres>> SqlExecutor<'c> for E
     fn fetch_rows<'e, 'q: 'e, U, F>(
         self,
         sql: &'q str,
-        params: Vec<SqlValue>,
+        params: crate::sql::BindParams,
         decode: F,
     ) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
     where
@@ -941,7 +948,7 @@ impl<'c, E: sqlx::Executor<'c, Database = sqlx::Postgres>> SqlExecutor<'c> for E
     fn execute_rows<'e, 'q: 'e>(
         self,
         sql: &'q str,
-        params: Vec<SqlValue>,
+        params: crate::sql::BindParams,
     ) -> BoxFuture<'e, Result<u64, ExecError>>
     where
         'c: 'e,
@@ -988,10 +995,7 @@ impl<'c, E: sqlx::Executor<'c, Database = sqlx::Postgres>> SqlExecutor<'c> for E
             }
             let stmt = stmts.remove(0);
             crate::test_assertions::query_counter::bump();
-            let q = stmt
-                .params
-                .into_iter()
-                .fold(sqlx::query(&stmt.sql), super::bind_query);
+            let q = super::bind_pg(sqlx::query(&stmt.sql), stmt.params)?;
             if !returns {
                 q.execute(self).await?;
                 return Ok(Vec::new());
@@ -1021,7 +1025,7 @@ macro_rules! database_conn_executor {
             fn fetch_rows<'e, 'q: 'e, U, F>(
                 self,
                 sql: &'q str,
-                params: Vec<SqlValue>,
+                params: crate::sql::BindParams,
                 decode: F,
             ) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
             where
@@ -1035,7 +1039,7 @@ macro_rules! database_conn_executor {
             fn execute_rows<'e, 'q: 'e>(
                 self,
                 sql: &'q str,
-                params: Vec<SqlValue>,
+                params: crate::sql::BindParams,
             ) -> BoxFuture<'e, Result<u64, ExecError>>
             where
                 'c: 'e,

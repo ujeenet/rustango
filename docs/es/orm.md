@@ -1211,7 +1211,7 @@ HAVING COUNT(*) FILTER (WHERE "status" = $2) > $3
               -- "published" bound twice (once at $1, once at $2)
 ```
 
-La semántica SQL no cambia (vuelven los mismos conteos de filas), pero `stmt.params.len()` crece por cada llamada `.filter()` que apunte a un alias no trivial. Para alias `COUNT(*)` (sin literales internos) el inflado es cero. Documéntalo si tu suite de tests fija conteos de parámetros.
+La semántica SQL no cambia (vuelven los mismos conteos de filas), pero `stmt.params().len()` crece por cada llamada `.filter()` que apunte a un alias no trivial. Para alias `COUNT(*)` (sin literales internos) el inflado es cero. Documéntalo si tu suite de tests fija conteos de parámetros.
 
 ---
 

@@ -1213,7 +1213,7 @@ HAVING COUNT(*) FILTER (WHERE "status" = $2) > $3
               -- "published" bound twice (once at $1, once at $2)
 ```
 
-SQL semantic is unchanged (the same row counts come back), but `stmt.params.len()` grows per `.filter()` call that targets a non-trivial alias. For `COUNT(*)` aliases (no inner literals) the bloat is zero. Document if your test suite pins param counts.
+SQL semantic is unchanged (the same row counts come back), but `stmt.params().len()` grows per `.filter()` call that targets a non-trivial alias. For `COUNT(*)` aliases (no inner literals) the bloat is zero. Document if your test suite pins param counts.
 
 ---
 

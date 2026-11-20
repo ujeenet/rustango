@@ -43,9 +43,9 @@ fn pg_emits_range_contains_operator() {
         stmt.sql
     );
     assert!(
-        matches!(&stmt.params[0], SqlValue::RangeLiteral(s) if s == "[2025-01-01, 2025-02-01)"),
+        matches!(&stmt.params()[0], SqlValue::RangeLiteral(s) if s == "[2025-01-01, 2025-02-01)"),
         "range literal bound as RangeLiteral: {:?}",
-        stmt.params[0]
+        stmt.params()[0]
     );
 }
 
@@ -171,9 +171,9 @@ fn parser_routes_range_overlap_from_string() {
         stmt.sql
     );
     assert!(
-        matches!(&stmt.params[0], SqlValue::RangeLiteral(_)),
+        matches!(&stmt.params()[0], SqlValue::RangeLiteral(_)),
         "auto-wrapped in RangeLiteral: {:?}",
-        stmt.params[0]
+        stmt.params()[0]
     );
 }
 

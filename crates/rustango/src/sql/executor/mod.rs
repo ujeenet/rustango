@@ -281,7 +281,7 @@ pub fn __rustango_dedupe_by_pk<T: HasPkValue>(rows: Vec<T>) -> Vec<T> {
 
 /// Binds left for an `IN` list beside the ones `base` already carries.
 fn bind_room(dialect: &dyn Dialect, base: &SelectQuery) -> Result<usize, ExecError> {
-    let carried = dialect.compile_select(base)?.params.len();
+    let carried = dialect.compile_select(base)?.params().len();
     Ok(dialect.max_bind_params().saturating_sub(carried))
 }
 
@@ -659,248 +659,6 @@ pub fn refuse_audited<T: Model>(reason: &'static str) -> Result<(), ExecError> {
     Ok(())
 }
 
-/// A NULL with no type attached, so PostgreSQL infers the type from
-/// the column it lands in.
-///
-/// Binding `None::<String>` would send the text OID, and Postgres then
-/// rejects the parameter for any non-text column. OID 0 is the wire
-/// protocol's "unspecified", so the server resolves the type during
-/// Parse. MySQL and SQLite type parameters loosely and don't need this.
-#[cfg(feature = "postgres")]
-struct UntypedNull;
-
-#[cfg(feature = "postgres")]
-impl sqlx::Type<sqlx::Postgres> for UntypedNull {
-    fn type_info() -> sqlx::postgres::PgTypeInfo {
-        sqlx::postgres::PgTypeInfo::with_oid(sqlx::postgres::types::Oid(0))
-    }
-}
-
-#[cfg(feature = "postgres")]
-impl sqlx::Encode<'_, sqlx::Postgres> for UntypedNull {
-    fn encode_by_ref(
-        &self,
-        _buf: &mut sqlx::postgres::PgArgumentBuffer,
-    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
-        Ok(sqlx::encode::IsNull::Yes)
-    }
-}
-
-/// Match on `SqlValue` and bind it to a sqlx query builder. Used for
-/// both `Query` and `QueryAs`, which share no bind trait.
-///
-/// PG-only: it relies on `sqlx::types::Json` through `PgArguments` and
-/// on `SqlValue::Array` binding as a typed PG array. Use
-/// `bind_match_mysql!` / `bind_match_sqlite!` for the other dialects.
-#[cfg(feature = "postgres")]
-macro_rules! bind_match {
-    ($q:expr, $value:expr) => {
-        match $value {
-            SqlValue::Null => $q.bind($crate::sql::executor::UntypedNull),
-            SqlValue::I16(v) => $q.bind(v),
-            SqlValue::I32(v) => $q.bind(v),
-            SqlValue::I64(v) => $q.bind(v),
-            SqlValue::F32(v) => $q.bind(v),
-            SqlValue::F64(v) => $q.bind(v),
-            SqlValue::Bool(v) => $q.bind(v),
-            SqlValue::String(v) => $q.bind(v),
-            SqlValue::DateTime(v) => $q.bind(v),
-            SqlValue::Date(v) => $q.bind(v),
-            SqlValue::Time(v) => $q.bind(v),
-            SqlValue::Uuid(v) => $q.bind(v),
-            SqlValue::Json(v) => $q.bind(sqlx::types::Json(v)),
-            SqlValue::Decimal(v) => $q.bind(v),
-            SqlValue::Binary(v) => $q.bind(v),
-            SqlValue::List(_) => {
-                unreachable!("`SqlValue::List` is expanded to scalars by the SQL writer")
-            }
-            // Range literal: bound as text, cast by PG to the column's
-            // range type.
-            SqlValue::RangeLiteral(s) => $q.bind(s),
-            // hstore: bound as a native `PgHstore`, no text escaping.
-            SqlValue::HStore(pairs) => {
-                $q.bind(sqlx::postgres::types::PgHstore(pairs.into_iter().collect()))
-            }
-            // pgvector: binary wire format via the `Vector` newtype.
-            SqlValue::Vector(v) => $q.bind(crate::sql::Vector(v)),
-            // PostGIS: EWKB binary via the `Point` newtype.
-            SqlValue::Geometry { x, y, srid } => {
-                $q.bind(crate::sql::Point { x, y, srid })
-            }
-            // PG arrays are typed, so elements must be homogeneous.
-            // I16/I32/I64/String/Bool/Uuid are supported; anything else panics
-            // at bind time.
-            SqlValue::Array(elems) => match elems.first() {
-                None => $q.bind(Vec::<i32>::new()),
-                Some(SqlValue::I16(_)) => {
-                    let v: Vec<i16> = elems
-                        .into_iter()
-                        .filter_map(|e| if let SqlValue::I16(n) = e { Some(n) } else { None })
-                        .collect();
-                    $q.bind(v)
-                }
-                Some(SqlValue::Uuid(_)) => {
-                    let v: Vec<::uuid::Uuid> = elems
-                        .into_iter()
-                        .filter_map(|e| if let SqlValue::Uuid(u) = e { Some(u) } else { None })
-                        .collect();
-                    $q.bind(v)
-                }
-                Some(SqlValue::I64(_)) => {
-                    let v: Vec<i64> = elems
-                        .into_iter()
-                        .filter_map(|e| if let SqlValue::I64(n) = e { Some(n) } else { None })
-                        .collect();
-                    $q.bind(v)
-                }
-                Some(SqlValue::I32(_)) => {
-                    let v: Vec<i32> = elems
-                        .into_iter()
-                        .filter_map(|e| if let SqlValue::I32(n) = e { Some(n) } else { None })
-                        .collect();
-                    $q.bind(v)
-                }
-                Some(SqlValue::String(_)) => {
-                    let v: Vec<String> = elems
-                        .into_iter()
-                        .filter_map(|e| {
-                            if let SqlValue::String(s) = e {
-                                Some(s)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    $q.bind(v)
-                }
-                Some(SqlValue::Bool(_)) => {
-                    let v: Vec<bool> = elems
-                        .into_iter()
-                        .filter_map(|e| if let SqlValue::Bool(b) = e { Some(b) } else { None })
-                        .collect();
-                    $q.bind(v)
-                }
-                Some(_) => unreachable!(
-                    "SqlValue::Array elements other than I16/I32/I64/String/Bool/Uuid are not yet supported"
-                ),
-            },
-        }
-    };
-}
-
-/// MySQL counterpart of [`bind_match`]. MySQL has no array type, so
-/// the `Array` arm is `unreachable!()`: the writer rejects array
-/// operators before any bind happens.
-#[cfg(feature = "mysql")]
-macro_rules! bind_match_mysql {
-    ($q:expr, $value:expr) => {
-        match $value {
-            SqlValue::Null => $q.bind(None::<String>),
-            SqlValue::I16(v) => $q.bind(v),
-            SqlValue::I32(v) => $q.bind(v),
-            SqlValue::I64(v) => $q.bind(v),
-            SqlValue::F32(v) => $q.bind(v),
-            SqlValue::F64(v) => $q.bind(v),
-            SqlValue::Bool(v) => $q.bind(v),
-            SqlValue::String(v) => $q.bind(v),
-            SqlValue::DateTime(v) => $q.bind(v),
-            SqlValue::Date(v) => $q.bind(v),
-            SqlValue::Time(v) => $q.bind(v),
-            // The column is CHAR(36); sqlx would send `Uuid` as 16 raw bytes (#1733).
-            SqlValue::Uuid(v) => $q.bind(v.hyphenated()),
-            SqlValue::Json(v) => $q.bind(sqlx::types::Json(v)),
-            SqlValue::Decimal(v) => $q.bind(v),
-            SqlValue::Binary(v) => $q.bind(v),
-            SqlValue::List(_) => {
-                unreachable!("`SqlValue::List` is expanded to scalars by the SQL writer")
-            }
-            SqlValue::Array(_) => unreachable!(
-                "MySQL has no array type; `write_array_op` rejects before bind. Issue #30."
-            ),
-            SqlValue::RangeLiteral(_) => unreachable!(
-                "MySQL has no range type; `write_range_op` rejects before bind. Issue #31."
-            ),
-            SqlValue::HStore(_) => {
-                unreachable!("MySQL has no hstore type; `HStore` columns are PG-only. Issue #342.")
-            }
-            SqlValue::Vector(_) => unreachable!(
-                "MySQL has no vector type; pgvector distance operators are rejected before bind. Issue #824."
-            ),
-            SqlValue::Geometry { .. } => unreachable!(
-                "MySQL has no geometry type; PostGIS `Point` columns are PG-only. Issue #443."
-            ),
-        }
-    };
-}
-
-/// SQLite counterpart of [`bind_match`]. `sqlx-sqlite` has no
-/// `Decimal: Type<Sqlite>` impl, so the `Decimal` arm binds
-/// `to_string()`. NUMERIC affinity stores it as INTEGER or REAL, so
-/// digits past what a REAL holds (~15) are lost. The writer wraps the
-/// placeholder in `CAST(? AS NUMERIC)` so expressions compare it as a number.
-#[cfg(feature = "sqlite")]
-macro_rules! bind_match_sqlite {
-    ($q:expr, $value:expr) => {
-        match $value {
-            SqlValue::Null => $q.bind(None::<String>),
-            SqlValue::I16(v) => $q.bind(v),
-            SqlValue::I32(v) => $q.bind(v),
-            SqlValue::I64(v) => $q.bind(v),
-            SqlValue::F32(v) => $q.bind(v),
-            SqlValue::F64(v) => $q.bind(v),
-            SqlValue::Bool(v) => $q.bind(v),
-            SqlValue::String(v) => $q.bind(v),
-            // Encoded here, not by sqlx. SQLite stores datetimes as
-            // TEXT and compares them as text, so the width must be
-            // fixed. sqlx emits 0/3/6/9 fractional digits depending on
-            // the value, so a stored timestamp would not equal its own
-            // re-bound form. This matches what the DDL default writes.
-            SqlValue::DateTime(v) => $q.bind(crate::sql::encode_datetime(v)),
-            SqlValue::Date(v) => $q.bind(v),
-            SqlValue::Time(v) => $q.bind(v),
-            SqlValue::Uuid(v) => $q.bind(v),
-            SqlValue::Json(v) => $q.bind(sqlx::types::Json(v)),
-            // sqlite-only string round-trip — see macro doc.
-            SqlValue::Decimal(v) => $q.bind(v.to_string()),
-            SqlValue::Binary(v) => $q.bind(v),
-            SqlValue::List(_) => {
-                unreachable!("`SqlValue::List` is expanded to scalars by the SQL writer")
-            }
-            SqlValue::Array(_) => unreachable!(
-                "SQLite has no array type; `write_array_op` rejects before bind. Issue #30."
-            ),
-            SqlValue::RangeLiteral(_) => unreachable!(
-                "SQLite has no range type; `write_range_op` rejects before bind. Issue #31."
-            ),
-            SqlValue::HStore(_) => {
-                unreachable!("SQLite has no hstore type; `HStore` columns are PG-only. Issue #342.")
-            }
-            SqlValue::Vector(_) => unreachable!(
-                "SQLite has no vector type; pgvector distance operators are rejected before bind. Issue #824."
-            ),
-            SqlValue::Geometry { .. } => unreachable!(
-                "SQLite has no geometry type; PostGIS `Point` columns are PG-only. Issue #443."
-            ),
-        }
-    };
-}
-
-#[cfg(feature = "postgres")]
-pub(super) fn bind_query_as<T>(
-    q: QueryAs<'_, sqlx::Postgres, T, PgArguments>,
-    value: SqlValue,
-) -> QueryAs<'_, sqlx::Postgres, T, PgArguments> {
-    bind_match!(q, value)
-}
-
-#[cfg(feature = "postgres")]
-pub(crate) fn bind_query(
-    q: Query<'_, sqlx::Postgres, PgArguments>,
-    value: SqlValue,
-) -> Query<'_, sqlx::Postgres, PgArguments> {
-    bind_match!(q, value)
-}
-
 /// Like [`fetch_aggregate_dict`] but on any [`SqlExecutor`].
 ///
 /// # Errors
@@ -917,6 +675,15 @@ where
 
 // Result cells to `SqlValue`, one plan per result set (#2655).
 mod decode;
+
+#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+mod bind;
+#[cfg(feature = "mysql")]
+pub(crate) use bind::bind_my;
+#[cfg(feature = "postgres")]
+pub(crate) use bind::bind_pg;
+#[cfg(feature = "sqlite")]
+pub(crate) use bind::bind_sqlite;
 
 mod tx;
 pub use tx::{transaction_pool, write_transaction, PoolTx, TxConn};
@@ -944,25 +711,7 @@ pub(crate) use atomic::{caught, in_block};
 // compile SQL through `pool.dialect()` and run it on the matching
 // sqlx driver, so one call works against any backend. The older
 // `&PgPool`-typed functions still work for existing callers.
-use super::Pool;
-
-/// MySQL counterpart of [`bind_query`].
-#[cfg(feature = "mysql")]
-pub(crate) fn bind_query_my(
-    q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments>,
-    value: SqlValue,
-) -> sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> {
-    bind_match_mysql!(q, value)
-}
-
-/// SQLite counterpart of [`bind_query`].
-#[cfg(feature = "sqlite")]
-pub(crate) fn bind_query_sqlite<'a>(
-    q: sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>>,
-    value: SqlValue,
-) -> sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>> {
-    bind_match_sqlite!(q, value)
-}
+use super::{BindParams, CompiledStatement, Pool};
 
 /// `INSERT` on any backend: compiled for the [`Pool`]'s dialect.
 ///
@@ -1004,11 +753,9 @@ async fn insert_or_ignore_alone(pool: &Pool, query: &InsertQuery) -> Result<bool
         #[cfg(feature = "mysql")]
         Pool::Mysql(my) => {
             crate::test_assertions::query_counter::bump();
-            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+            let q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
                 sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_my(q, v);
-            }
+            let q = bind_my(q, stmt.params)?;
             let done = q.execute(my).await?;
             Ok(done.rows_affected() > 0
                 && done.last_insert_id() != crate::sql::mysql::SKIPPED_INSERT_ID)
@@ -1039,11 +786,9 @@ pub(crate) async fn insert_or_ignore_tx(
         if let TxConn::Mysql(t) = &mut tx.conn {
             // A skip reports one affected row too: read the insert id instead.
             crate::test_assertions::query_counter::bump();
-            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+            let q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
                 sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_my(q, v);
-            }
+            let q = bind_my(q, stmt.params)?;
             let done = gate.check(q.execute(&mut **t).await.map_err(ExecError::from))?;
             return Ok(done.rows_affected() > 0
                 && done.last_insert_id() != crate::sql::mysql::SKIPPED_INSERT_ID);
@@ -1059,8 +804,7 @@ pub(crate) async fn raw_write(
     sql: &str,
     binds: Vec<SqlValue>,
 ) -> Result<u64, ExecError> {
-    crate::sql::refuse_unbindable_values(pool.dialect(), &binds)?;
-    write_on(pool, sql, binds).await
+    write_on(pool, sql, BindParams::check(pool.dialect(), binds)?).await
 }
 
 /// Run a raw single-row `INSERT` and return the new row's `id_col`.
@@ -1073,7 +817,7 @@ pub(crate) async fn raw_insert_id(
     binds: Vec<SqlValue>,
     id_col: &str,
 ) -> Result<i64, ExecError> {
-    crate::sql::refuse_unbindable_values(pool.dialect(), &binds)?;
+    let binds = BindParams::check(pool.dialect(), binds)?;
     on_pool!(
         pool,
         atomic::Stmt::Write,
@@ -1086,7 +830,7 @@ pub(crate) async fn raw_insert_id(
 async fn raw_insert_id_alone(
     pool: &Pool,
     sql: &str,
-    binds: Vec<SqlValue>,
+    binds: BindParams,
     id_col: &str,
 ) -> Result<i64, ExecError> {
     match pool {
@@ -1094,18 +838,16 @@ async fn raw_insert_id_alone(
         #[cfg(feature = "mysql")]
         Pool::Mysql(my) => {
             crate::test_assertions::query_counter::bump();
-            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+            let q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
                 sqlx::query(sql);
-            for v in binds {
-                q = bind_query_my(q, v);
-            }
+            let q = bind_my(q, binds)?;
             let id = q.execute(my).await?.last_insert_id();
             Ok(i64::try_from(id).unwrap_or(i64::MAX))
         }
         #[allow(unreachable_patterns)]
         _ => {
             let sql = format!("{sql} RETURNING {}", pool.dialect().quote_ident(id_col));
-            let (id,): (i64,) = raw_query_pool(&sql, binds, pool)
+            let (id,): (i64,) = query_checked(&sql, binds, pool)
                 .await?
                 .pop()
                 .ok_or(sqlx::Error::RowNotFound)?;
@@ -1118,7 +860,7 @@ async fn raw_insert_id_alone(
 async fn raw_insert_id_tx(
     tx: &mut PoolTx<'_>,
     sql: &str,
-    binds: Vec<SqlValue>,
+    binds: BindParams,
     id_col: &str,
 ) -> Result<i64, ExecError> {
     #[cfg(feature = "mysql")]
@@ -1127,17 +869,15 @@ async fn raw_insert_id_tx(
         let gate = atomic::gate(tx)?;
         if let TxConn::Mysql(t) = &mut tx.conn {
             crate::test_assertions::query_counter::bump();
-            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+            let q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
                 sqlx::query(sql);
-            for v in binds {
-                q = bind_query_my(q, v);
-            }
+            let q = bind_my(q, binds)?;
             let done = gate.check(q.execute(&mut **t).await.map_err(ExecError::from))?;
             return Ok(i64::try_from(done.last_insert_id()).unwrap_or(i64::MAX));
         }
     }
     let sql = format!("{sql} RETURNING {}", tx.dialect().quote_ident(id_col));
-    let (id,): (i64,) = raw_query_tx(tx, &sql, binds)
+    let (id,): (i64,) = query_tx_checked(tx, &sql, binds)
         .await?
         .pop()
         .ok_or(sqlx::Error::RowNotFound)?;
@@ -1203,11 +943,9 @@ async fn insert_returning_alone(
             // SQLite 3.35+ has `INSERT … RETURNING`, so this mirrors
             // the Postgres path.
             let stmt = pool.dialect().compile_insert_cow(query)?;
-            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
+            let q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
                 sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_sqlite(q, v);
-            }
+            let q = bind_sqlite(q, stmt.params)?;
             let row = q.fetch_one(sq).await?;
             Ok(InsertReturningPool::SqliteRow(row))
         }
@@ -1264,11 +1002,9 @@ where
         });
     }
     let stmt = super::mysql::DIALECT.compile_insert_auto_id(query)?;
-    let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+    let q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
         sqlx::query(&stmt.sql);
-    for v in stmt.params {
-        q = bind_query_my(q, v);
-    }
+    let q = bind_my(q, stmt.params)?;
     let done = q.execute(exec).await?;
     // A skipped `DoNothing` inserted no row, as RETURNING shows elsewhere.
     if done.last_insert_id() == crate::sql::mysql::SKIPPED_INSERT_ID {
@@ -1749,8 +1485,13 @@ pub async fn raw_execute_pool(
     sql: &str,
     binds: Vec<SqlValue>,
 ) -> Result<u64, ExecError> {
-    crate::sql::refuse_unbindable_values(pool.dialect(), &binds)?;
-    pool_exec(pool, atomic::Stmt::Plain, sql, binds).await
+    pool_exec(
+        pool,
+        atomic::Stmt::Plain,
+        sql,
+        BindParams::check(pool.dialect(), binds)?,
+    )
+    .await
 }
 
 /// [`raw_execute_pool`] inside an open [`PoolTx`], so several writes
@@ -1763,46 +1504,16 @@ pub async fn raw_execute_tx(
     sql: &str,
     binds: Vec<SqlValue>,
 ) -> Result<u64, ExecError> {
-    crate::sql::refuse_unbindable_values(tx.dialect(), &binds)?;
-    let gate = atomic::gate(tx)?;
-    gate.check(
-        async {
-            // Counts toward `assert_num_queries`; a no-op outside tests.
-            crate::test_assertions::query_counter::bump();
-            match &mut tx.conn {
-                #[cfg(feature = "postgres")]
-                TxConn::Postgres(t) => {
-                    let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(sql);
-                    for v in binds {
-                        q = bind_query(q, v);
-                    }
-                    Ok(q.execute(&mut **t).await?.rows_affected())
-                }
-                #[cfg(feature = "mysql")]
-                TxConn::Mysql(t) => {
-                    let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
-                        sqlx::query(sql);
-                    for v in binds {
-                        q = bind_query_my(q, v);
-                    }
-                    Ok(q.execute(&mut **t).await?.rows_affected())
-                }
-                #[cfg(feature = "sqlite")]
-                TxConn::Sqlite(t) => {
-                    let mut q: sqlx::query::Query<
-                        '_,
-                        sqlx::Sqlite,
-                        sqlx::sqlite::SqliteArguments<'_>,
-                    > = sqlx::query(sql);
-                    for v in binds {
-                        q = bind_query_sqlite(q, v);
-                    }
-                    Ok(q.execute(&mut **t).await?.rows_affected())
-                }
-            }
-        }
-        .await,
-    )
+    execute_tx(tx, sql, BindParams::check(tx.dialect(), binds)?).await
+}
+
+/// [`raw_execute_tx`] for an already-checked statement.
+pub(crate) async fn raw_execute_stmt_tx(
+    tx: &mut tx::PoolTx<'_>,
+    stmt: CompiledStatement,
+) -> Result<u64, ExecError> {
+    let (sql, params) = stmt.into_parts();
+    execute_tx(tx, &sql, params).await
 }
 
 /// Run a `;`-separated DDL script on any backend, safe to re-run.
@@ -1822,7 +1533,7 @@ pub async fn run_ddl_idempotent(pool: &Pool, ddl: &str) -> Result<(), sqlx::Erro
         .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
     for stmt in ddl.split(';').map(str::trim).filter(|s| !s.is_empty()) {
         // A caught "already exists" must not abort the block on PG.
-        let run = pool_exec(pool, atomic::Stmt::Plain, stmt, Vec::new());
+        let run = pool_exec(pool, atomic::Stmt::Plain, stmt, BindParams::default());
         match atomic::caught(pool, run).await {
             Ok(_) => {}
             Err(crate::sql::ExecError::Driver(err)) => {
@@ -1913,34 +1624,28 @@ pub fn row_saved(n: u64) -> Result<u64, ExecError> {
 
 /// Run a parameterized statement that returns no rows. Shared by the
 /// non-`FromRow` `_pool` functions.
-async fn execute_pool(pool: &Pool, sql: &str, binds: Vec<SqlValue>) -> Result<u64, ExecError> {
+async fn execute_pool(pool: &Pool, sql: &str, binds: BindParams) -> Result<u64, ExecError> {
     // Counts toward `assert_num_queries`; a no-op outside tests.
     crate::test_assertions::query_counter::bump();
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {
-            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(sql);
-            for v in binds {
-                q = bind_query(q, v);
-            }
+            let q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(sql);
+            let q = bind_pg(q, binds)?;
             Ok(q.execute(pg).await?.rows_affected())
         }
         #[cfg(feature = "mysql")]
         Pool::Mysql(my) => {
-            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+            let q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
                 sqlx::query(sql);
-            for v in binds {
-                q = bind_query_my(q, v);
-            }
+            let q = bind_my(q, binds)?;
             Ok(q.execute(my).await?.rows_affected())
         }
         #[cfg(feature = "sqlite")]
         Pool::Sqlite(sq) => {
-            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
+            let q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
                 sqlx::query(sql);
-            for v in binds {
-                q = bind_query_sqlite(q, v);
-            }
+            let q = bind_sqlite(q, binds)?;
             Ok(q.execute(sq).await?.rows_affected())
         }
     }
@@ -1952,11 +1657,7 @@ async fn execute_pool(pool: &Pool, sql: &str, binds: Vec<SqlValue>) -> Result<u6
 // `insert_tx` / `update_tx` / `delete_tx` all funnel through here, so
 // one query-counter bump covers all three. `raw_execute_tx` bumps on
 // its own and does not reach this.
-async fn execute_tx(
-    tx: &mut PoolTx<'_>,
-    sql: &str,
-    binds: Vec<SqlValue>,
-) -> Result<u64, ExecError> {
+async fn execute_tx(tx: &mut PoolTx<'_>, sql: &str, binds: BindParams) -> Result<u64, ExecError> {
     let gate = atomic::gate(tx)?;
     gate.check(
         async {
@@ -1964,31 +1665,22 @@ async fn execute_tx(
             match &mut tx.conn {
                 #[cfg(feature = "postgres")]
                 TxConn::Postgres(t) => {
-                    let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(sql);
-                    for v in binds {
-                        q = bind_query(q, v);
-                    }
+                    let q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(sql);
+                    let q = bind_pg(q, binds)?;
                     Ok(q.execute(&mut **t).await?.rows_affected())
                 }
                 #[cfg(feature = "mysql")]
                 TxConn::Mysql(t) => {
-                    let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                    let q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
                         sqlx::query(sql);
-                    for v in binds {
-                        q = bind_query_my(q, v);
-                    }
+                    let q = bind_my(q, binds)?;
                     Ok(q.execute(&mut **t).await?.rows_affected())
                 }
                 #[cfg(feature = "sqlite")]
                 TxConn::Sqlite(t) => {
-                    let mut q: sqlx::query::Query<
-                        '_,
-                        sqlx::Sqlite,
-                        sqlx::sqlite::SqliteArguments<'_>,
-                    > = sqlx::query(sql);
-                    for v in binds {
-                        q = bind_query_sqlite(q, v);
-                    }
+                    let q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
+                        sqlx::query(sql);
+                    let q = bind_sqlite(q, binds)?;
                     Ok(q.execute(&mut **t).await?.rows_affected())
                 }
             }
@@ -2044,14 +1736,9 @@ pub(crate) async fn insert_returning_cow_tx(
                 #[cfg(feature = "sqlite")]
                 TxConn::Sqlite(t) => {
                     let stmt = super::sqlite::DIALECT.compile_insert_cow(query)?;
-                    let mut q: sqlx::query::Query<
-                        '_,
-                        sqlx::Sqlite,
-                        sqlx::sqlite::SqliteArguments<'_>,
-                    > = sqlx::query(&stmt.sql);
-                    for v in stmt.params {
-                        q = bind_query_sqlite(q, v);
-                    }
+                    let q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
+                        sqlx::query(&stmt.sql);
+                    let q = bind_sqlite(q, stmt.params)?;
                     let row = q.fetch_one(&mut **t).await?;
                     Ok(InsertReturningPool::SqliteRow(row))
                 }
@@ -2119,9 +1806,7 @@ pub(crate) async fn bulk_insert_rows_tx(
         match &mut tx.conn {
             #[cfg(feature = "postgres")]
             TxConn::Postgres(t) => out.extend(
-                stmt.params
-                    .into_iter()
-                    .fold(sqlx::query(&stmt.sql), bind_query)
+                bind_pg(sqlx::query(&stmt.sql), stmt.params)?
                     .fetch_all(&mut **t)
                     .await?
                     .into_iter()
@@ -2131,9 +1816,7 @@ pub(crate) async fn bulk_insert_rows_tx(
             TxConn::Mysql(_) => unreachable!("refused above"),
             #[cfg(feature = "sqlite")]
             TxConn::Sqlite(t) => out.extend(
-                stmt.params
-                    .into_iter()
-                    .fold(sqlx::query(&stmt.sql), bind_query_sqlite)
+                bind_sqlite(sqlx::query(&stmt.sql), stmt.params)?
                     .fetch_all(&mut **t)
                     .await?
                     .into_iter()
@@ -2235,7 +1918,7 @@ pub(crate) async fn truncate_tx(
     let before = crate::audit::cascade::truncate_counts(tx, table, mode).await?;
     let mut affected = 0;
     for sql in tx.dialect().truncate_sql(table, mode, &referencing) {
-        affected = execute_tx(tx, &sql, Vec::new())
+        affected = execute_tx(tx, &sql, BindParams::default())
             .await
             .map_err(|e| truncate_refusal(table, mode, e))?;
     }
@@ -2365,7 +2048,7 @@ pub(crate) async fn count_stmt_on<'c, E: SqlExecutor<'c>>(
 pub(crate) async fn run_on<'c, E, U, F>(
     exec: E,
     sql: &str,
-    params: Vec<SqlValue>,
+    params: BindParams,
     decode: F,
 ) -> Result<Vec<U>, ExecError>
 where
@@ -2383,7 +2066,7 @@ where
 pub(crate) async fn write_on<'c, E: SqlExecutor<'c>>(
     exec: E,
     sql: &str,
-    params: Vec<SqlValue>,
+    params: BindParams,
 ) -> Result<u64, ExecError> {
     let guard = exec.guard()?;
     guard.check(exec.execute_rows(sql, params).await)
@@ -2445,24 +2128,6 @@ where
     Ok(select_rows_pool(pool, query).await?.into_iter().next())
 }
 
-/// MySQL-typed `QueryAs` binding helper, symmetric with [`bind_query_as`].
-#[cfg(feature = "mysql")]
-pub(super) fn bind_query_as_my<T>(
-    q: sqlx::query::QueryAs<'_, sqlx::MySql, T, sqlx::mysql::MySqlArguments>,
-    value: SqlValue,
-) -> sqlx::query::QueryAs<'_, sqlx::MySql, T, sqlx::mysql::MySqlArguments> {
-    bind_match_mysql!(q, value)
-}
-
-/// SQLite-typed `QueryAs` binding helper, symmetric with [`bind_query_as`].
-#[cfg(feature = "sqlite")]
-pub(super) fn bind_query_as_sqlite<'a, T>(
-    q: sqlx::query::QueryAs<'a, sqlx::Sqlite, T, sqlx::sqlite::SqliteArguments<'a>>,
-    value: SqlValue,
-) -> sqlx::query::QueryAs<'a, sqlx::Sqlite, T, sqlx::sqlite::SqliteArguments<'a>> {
-    bind_match_sqlite!(q, value)
-}
-
 /// Aggregates on any backend: runs an `AggregateQuery`
 /// (GROUP BY / HAVING / aggregate expressions) and decodes each row
 /// into `T`.
@@ -2510,9 +2175,27 @@ pub async fn raw_query_pool<T>(
 where
     T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
-    crate::sql::refuse_unbindable_values(pool.dialect(), &binds)?;
+    query_checked(sql, BindParams::check(pool.dialect(), binds)?, pool).await
+}
+
+/// [`raw_query_pool`] for an already-checked statement.
+pub(crate) async fn raw_query_stmt<T>(
+    stmt: CompiledStatement,
+    pool: &Pool,
+) -> Result<Vec<T>, ExecError>
+where
+    T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
+{
+    let (sql, params) = stmt.into_parts();
+    query_checked(&sql, params, pool).await
+}
+
+async fn query_checked<T>(sql: &str, params: BindParams, pool: &Pool) -> Result<Vec<T>, ExecError>
+where
+    T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
+{
     crate::test_assertions::query_counter::bump();
-    pool_rows(pool, atomic::Stmt::Plain, sql, binds, from_row::<T>).await
+    pool_rows(pool, atomic::Stmt::Plain, sql, params, from_row::<T>).await
 }
 
 /// [`raw_query_pool`] inside an open [`PoolTx`], for reads that must
@@ -2529,7 +2212,17 @@ pub async fn raw_query_tx<T>(
 where
     T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
-    crate::sql::refuse_unbindable_values(tx.dialect(), &binds)?;
+    query_tx_checked(tx, sql, BindParams::check(tx.dialect(), binds)?).await
+}
+
+async fn query_tx_checked<T>(
+    tx: &mut tx::PoolTx<'_>,
+    sql: &str,
+    binds: BindParams,
+) -> Result<Vec<T>, ExecError>
+where
+    T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
+{
     let gate = atomic::gate(tx)?;
     gate.check(
         async {
@@ -2538,37 +2231,27 @@ where
             match &mut tx.conn {
                 #[cfg(feature = "postgres")]
                 TxConn::Postgres(t) => {
-                    let mut q: QueryAs<'_, sqlx::Postgres, T, PgArguments> =
+                    let q: QueryAs<'_, sqlx::Postgres, T, PgArguments> =
                         sqlx::query_as::<_, T>(sql);
-                    for v in binds {
-                        q = bind_query_as(q, v);
-                    }
+                    let q = bind_pg(q, binds)?;
                     Ok(q.fetch_all(&mut **t).await?)
                 }
                 #[cfg(feature = "mysql")]
                 TxConn::Mysql(t) => {
-                    let mut q: sqlx::query::QueryAs<
-                        '_,
-                        sqlx::MySql,
-                        T,
-                        sqlx::mysql::MySqlArguments,
-                    > = sqlx::query_as::<_, T>(sql);
-                    for v in binds {
-                        q = bind_query_as_my(q, v);
-                    }
+                    let q: sqlx::query::QueryAs<'_, sqlx::MySql, T, sqlx::mysql::MySqlArguments> =
+                        sqlx::query_as::<_, T>(sql);
+                    let q = bind_my(q, binds)?;
                     Ok(q.fetch_all(&mut **t).await?)
                 }
                 #[cfg(feature = "sqlite")]
                 TxConn::Sqlite(t) => {
-                    let mut q: sqlx::query::QueryAs<
+                    let q: sqlx::query::QueryAs<
                         '_,
                         sqlx::Sqlite,
                         T,
                         sqlx::sqlite::SqliteArguments<'_>,
                     > = sqlx::query_as::<_, T>(sql);
-                    for v in binds {
-                        q = bind_query_as_sqlite(q, v);
-                    }
+                    let q = bind_sqlite(q, binds)?;
                     Ok(q.fetch_all(&mut **t).await?)
                 }
             }
@@ -3541,7 +3224,7 @@ mod last_per_conflict_key_tests {
         rows.push(row(Some(0), 0, -1));
         let batches =
             compile_bulk_insert_batches(d, Cow::Owned(upsert(&["a", "b"], rows))).unwrap();
-        let params: Vec<&SqlValue> = batches.iter().flat_map(|s| &s.params).collect();
+        let params: Vec<&SqlValue> = batches.iter().flat_map(|s| s.params()).collect();
         assert_eq!(params.len(), usize::try_from(per_batch).unwrap() * 3);
         assert_eq!(
             params[..3],
@@ -3586,7 +3269,7 @@ mod owned_compile_tests {
     fn bound_ptrs(stmts: &[crate::sql::CompiledStatement]) -> Vec<*const u8> {
         stmts
             .iter()
-            .flat_map(|s| &s.params)
+            .flat_map(|s| s.params())
             .filter_map(|v| match v {
                 SqlValue::String(t) => Some(t.as_ptr()),
                 _ => None,

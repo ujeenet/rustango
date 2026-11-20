@@ -45,7 +45,7 @@ pub use backend::{
     apply_auto_pk, try_get_returning, try_get_returning_my, try_get_returning_sqlite,
     AssignAutoPkPool, MyReturningRow, MysqlAutoIdSet, PgReturningRow, SqliteReturningRow,
 };
-pub use compiled::CompiledStatement;
+pub use compiled::{BindParams, CompiledStatement};
 pub use connect_diagnosis::{ConnectDiagnosis, ConnectFault};
 pub(crate) use dialect::is_uuid_expr;
 #[cfg(any(feature = "cache", feature = "postgres"))]
@@ -56,7 +56,6 @@ pub(crate) use mysql::ByServer;
 // Its callers are feature-gated (PG schemas, SQLite inspectdb).
 #[allow(unused_imports)]
 pub(crate) use dialect::quote_with;
-pub(crate) use dialect::refuse_unbindable_values;
 pub(crate) use dialect::split_qualified;
 pub use dialect::{Dialect, DialectKind, TableTarget};
 pub use error::{is_mysql_dup_index_error, is_pg_dup_object_error, ExecError, SqlError};
@@ -157,22 +156,19 @@ pub mod __macro_internals {
     pub use super::executor::{row_saved, write_tx, WriteTx};
 }
 
-/// The per-dialect `SqlValue` binders, so nothing outside `executor`
-/// has to hand-copy what `bind_match_*!` expands to.
-///
-/// `audit` carried 116 lines of exactly that copy across three
-/// dialects, and the SQLite one silently missed #1464's encoding change
-/// because a copy cannot track the macro it was copied from.
-#[cfg(feature = "postgres")]
-pub(crate) use executor::bind_query;
+/// The per-dialect binders, so nothing outside `executor` copies them.
 #[cfg(feature = "mysql")]
-pub(crate) use executor::bind_query_my;
+pub(crate) use executor::bind_my;
+#[cfg(feature = "postgres")]
+pub(crate) use executor::bind_pg;
 #[cfg(feature = "sqlite")]
-pub(crate) use executor::bind_query_sqlite;
+pub(crate) use executor::bind_sqlite;
 #[cfg(feature = "mysql")]
 pub use executor::LoadRelatedMy;
 #[cfg(feature = "sqlite")]
 pub use executor::LoadRelatedSqlite;
+/// Raw runners for a statement already checked when it was built.
+pub(crate) use executor::{raw_execute_stmt_tx, raw_query_stmt};
 pub use foreign_key::ForeignKey;
 pub use m2m::{GenericM2MManager, M2MManager};
 pub use mysql::MySql;

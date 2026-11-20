@@ -360,10 +360,10 @@ impl<'d> Sql<'d> {
     }
 
     /// # Errors
-    /// [`SqlError::ValueNotSupportedInDialect`] for a bind whose bind arm
-    /// can only panic, as [`super::refuse_unbindable_values`] decides.
+    /// [`SqlError::ValueNotSupportedInDialect`] for a bind the dialect
+    /// cannot take, as [`super::BindParams::check`] decides.
     pub(super) fn finish(mut self) -> Result<CompiledStatement, SqlError> {
-        super::refuse_unbindable_values(self.d, &self.params)?;
+        let params = super::BindParams::check(self.d, std::mem::take(&mut self.params))?;
         if self.group_concat {
             // A statement-level hint: it covers the GROUP_CONCAT in any block.
             let start = self.sql.len() - self.sql.trim_start_matches('(').len();
@@ -381,7 +381,7 @@ impl<'d> Sql<'d> {
         }
         Ok(CompiledStatement {
             sql: self.sql,
-            params: self.params,
+            params,
         })
     }
 }

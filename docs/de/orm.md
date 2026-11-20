@@ -1211,7 +1211,7 @@ HAVING COUNT(*) FILTER (WHERE "status" = $2) > $3
               -- "published" bound twice (once at $1, once at $2)
 ```
 
-Die SQL-Semantik ist unverändert (dieselben Zeilenzahlen kommen zurück), aber `stmt.params.len()` wächst pro `.filter()`-Aufruf, der einen nicht-trivialen Alias anvisiert. Für `COUNT(*)`-Aliase (keine inneren Literale) ist die Aufblähung null. Dokumentiere das, wenn deine Testsuite Parameterzählungen festnagelt.
+Die SQL-Semantik ist unverändert (dieselben Zeilenzahlen kommen zurück), aber `stmt.params().len()` wächst pro `.filter()`-Aufruf, der einen nicht-trivialen Alias anvisiert. Für `COUNT(*)`-Aliase (keine inneren Literale) ist die Aufblähung null. Dokumentiere das, wenn deine Testsuite Parameterzählungen festnagelt.
 
 ---
 

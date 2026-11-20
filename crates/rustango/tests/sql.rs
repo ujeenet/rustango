@@ -71,7 +71,7 @@ fn select_with_no_filters_lists_scalar_columns() {
         .compile_select(&User::objects().compile().unwrap())
         .unwrap();
     assert_eq!(stmt.sql, r#"SELECT "id", "name", "is_active" FROM "user""#);
-    assert!(stmt.params.is_empty());
+    assert!(stmt.params().is_empty());
 }
 
 #[test]
@@ -83,7 +83,7 @@ fn equality_filter_emits_dollar_placeholder() {
         stmt.sql,
         r#"SELECT "id", "name", "is_active" FROM "user" WHERE "name" = $1"#
     );
-    assert_eq!(stmt.params, vec![SqlValue::String("alice".into())]);
+    assert_eq!(stmt.params(), vec![SqlValue::String("alice".into())]);
 }
 
 #[test]
@@ -103,7 +103,7 @@ fn multiple_filters_join_with_and_and_increment_placeholders() {
         r#"SELECT "id", "name", "is_active" FROM "user" WHERE "name" = $1 AND "is_active" = $2 AND "id" > $3"#
     );
     assert_eq!(
-        stmt.params,
+        stmt.params(),
         vec![
             SqlValue::String("alice".into()),
             SqlValue::Bool(true),
@@ -127,7 +127,7 @@ fn is_null_does_not_consume_placeholder() {
         stmt.sql,
         r#"SELECT "id", "name", "is_active" FROM "user" WHERE "name" IS NULL AND "id" = $1"#
     );
-    assert_eq!(stmt.params, vec![SqlValue::I64(1)]);
+    assert_eq!(stmt.params(), vec![SqlValue::I64(1)]);
 }
 
 #[test]
@@ -167,7 +167,7 @@ fn pg_in_list_binds_one_array() {
         stmt.sql,
         r#"SELECT "id", "name", "is_active" FROM "user" WHERE "id" = ANY($1)"#
     );
-    assert_eq!(stmt.params, vec![SqlValue::Array(i64s(&[1, 2, 3]))]);
+    assert_eq!(stmt.params(), vec![SqlValue::Array(i64s(&[1, 2, 3]))]);
     let not_in = in_stmt(&Postgres, Op::NotIn, i64s(&[1, 2]));
     assert!(
         not_in.sql.ends_with(r#"WHERE "id" <> ALL($1)"#),
@@ -196,7 +196,7 @@ fn pg_in_list_with_null_or_mixed_types_keeps_in() {
             "{}",
             stmt.sql
         );
-        assert_eq!(stmt.params, list);
+        assert_eq!(stmt.params(), list);
     }
 }
 
@@ -210,7 +210,7 @@ fn mysql_and_sqlite_keep_one_placeholder_per_element() {
         "{}",
         lite.sql
     );
-    assert_eq!(lite.params, i64s(&[1, 2]));
+    assert_eq!(lite.params(), i64s(&[1, 2]));
 }
 
 #[test]
@@ -225,7 +225,7 @@ fn empty_in_list_matches_nothing() {
             )
             .unwrap();
         assert!(stmt.sql.ends_with(want), "{}", stmt.sql);
-        assert!(stmt.params.is_empty());
+        assert!(stmt.params().is_empty());
     }
 }
 
@@ -272,7 +272,7 @@ fn insert_emits_columns_and_placeholders() {
         r#"INSERT INTO "user" ("id", "name", "is_active") VALUES ($1, $2, $3)"#,
     );
     assert_eq!(
-        stmt.params,
+        stmt.params(),
         vec![
             SqlValue::I64(7),
             SqlValue::String("alice".into()),
@@ -365,7 +365,7 @@ fn bulk_insert_emits_one_values_tuple_per_row() {
         stmt.sql,
         r#"INSERT INTO "user" ("id", "name", "is_active") VALUES ($1, $2, $3), ($4, $5, $6)"#,
     );
-    assert_eq!(stmt.params.len(), 6);
+    assert_eq!(stmt.params().len(), 6);
 }
 
 #[test]
@@ -419,7 +419,7 @@ fn update_single_set_no_where_runs_table_wide() {
     );
     let stmt = pg().compile_update(&query).unwrap();
     assert_eq!(stmt.sql, r#"UPDATE "user" SET "is_active" = $1"#);
-    assert_eq!(stmt.params, vec![SqlValue::Bool(false)]);
+    assert_eq!(stmt.params(), vec![SqlValue::Bool(false)]);
 }
 
 #[test]
@@ -438,7 +438,7 @@ fn update_multi_set_with_where_orders_set_then_filter_placeholders() {
         r#"UPDATE "user" SET "name" = $1, "is_active" = $2 WHERE "id" = $3"#,
     );
     assert_eq!(
-        stmt.params,
+        stmt.params(),
         vec![
             SqlValue::String("ALICE".into()),
             SqlValue::Bool(false),
@@ -494,7 +494,7 @@ fn delete_with_no_filters_runs_table_wide() {
     let query = DeleteQuery::new(User::SCHEMA, WhereExpr::And(vec![]));
     let stmt = pg().compile_delete(&query).unwrap();
     assert_eq!(stmt.sql, r#"DELETE FROM "user""#);
-    assert!(stmt.params.is_empty());
+    assert!(stmt.params().is_empty());
 }
 
 #[test]
@@ -505,7 +505,7 @@ fn delete_with_single_filter() {
     );
     let stmt = pg().compile_delete(&query).unwrap();
     assert_eq!(stmt.sql, r#"DELETE FROM "user" WHERE "id" = $1"#);
-    assert_eq!(stmt.params, vec![SqlValue::I64(42)]);
+    assert_eq!(stmt.params(), vec![SqlValue::I64(42)]);
 }
 
 #[test]
@@ -523,7 +523,7 @@ fn delete_with_multiple_filters_chains_with_and() {
         r#"DELETE FROM "user" WHERE "name" = $1 AND "is_active" = $2"#,
     );
     assert_eq!(
-        stmt.params,
+        stmt.params(),
         vec![SqlValue::String("alice".into()), SqlValue::Bool(false)],
     );
 }
@@ -540,7 +540,7 @@ fn delete_with_in_list_expands_placeholders() {
     );
     let stmt = pg().compile_delete(&query).unwrap();
     assert_eq!(stmt.sql, r#"DELETE FROM "user" WHERE "id" = ANY($1)"#);
-    assert_eq!(stmt.params, vec![SqlValue::Array(i64s(&[1, 2, 3]))]);
+    assert_eq!(stmt.params(), vec![SqlValue::Array(i64s(&[1, 2, 3]))]);
 }
 
 #[test]
@@ -551,7 +551,7 @@ fn delete_with_is_null_does_not_consume_placeholder() {
     );
     let stmt = pg().compile_delete(&query).unwrap();
     assert_eq!(stmt.sql, r#"DELETE FROM "user" WHERE "name" IS NULL"#);
-    assert!(stmt.params.is_empty());
+    assert!(stmt.params().is_empty());
 }
 
 #[test]
@@ -627,7 +627,7 @@ fn count_with_no_filters() {
     let q = CountQuery::new(User::SCHEMA, WhereExpr::And(vec![]));
     let stmt = pg().compile_count(&q).unwrap();
     assert_eq!(stmt.sql, r#"SELECT COUNT(*) FROM "user""#);
-    assert!(stmt.params.is_empty());
+    assert!(stmt.params().is_empty());
 }
 
 #[test]
@@ -644,7 +644,7 @@ fn count_with_filters() {
         stmt.sql,
         r#"SELECT COUNT(*) FROM "user" WHERE "is_active" = $1 AND "id" > $2"#,
     );
-    assert_eq!(stmt.params, vec![SqlValue::Bool(true), SqlValue::I64(0)]);
+    assert_eq!(stmt.params(), vec![SqlValue::Bool(true), SqlValue::I64(0)]);
 }
 
 #[test]
@@ -676,7 +676,7 @@ fn search_alone_emits_or_chain_with_one_param_per_column() {
         r#"SELECT "id", "name", "is_active" FROM "user" WHERE ("name" ILIKE $1 ESCAPE '!' OR CAST("is_active" AS TEXT) ILIKE $2 ESCAPE '!')"#,
     );
     assert_eq!(
-        stmt.params,
+        stmt.params(),
         vec![
             SqlValue::String("%ali%".into()),
             SqlValue::String("%ali%".into()),
@@ -701,7 +701,7 @@ fn search_combined_with_filter_uses_and() {
         r#"SELECT "id", "name", "is_active" FROM "user" WHERE ("is_active" = $1) AND ("name" ILIKE $2 ESCAPE '!')"#,
     );
     assert_eq!(
-        stmt.params,
+        stmt.params(),
         vec![SqlValue::Bool(true), SqlValue::String("%ali%".into())],
     );
 }
@@ -732,7 +732,7 @@ fn empty_search_query_emits_no_clause() {
     });
     let stmt = pg().compile_select(&q).unwrap();
     assert_eq!(stmt.sql, r#"SELECT "id", "name", "is_active" FROM "user""#);
-    assert!(stmt.params.is_empty());
+    assert!(stmt.params().is_empty());
 }
 
 /// A query with no column to search matches nothing (#2391).
@@ -748,7 +748,7 @@ fn empty_search_columns_match_nothing() {
         stmt.sql,
         r#"SELECT "id", "name", "is_active" FROM "user" WHERE 1 = 0"#
     );
-    assert!(stmt.params.is_empty());
+    assert!(stmt.params().is_empty());
 }
 
 #[test]
@@ -789,7 +789,7 @@ fn join_qualifies_main_columns_and_aliases_joined_ones() {
         stmt.sql,
         r#"SELECT "post"."id", "post"."title", "post"."author_id", "author_id"."name" AS "author_id__name" FROM "post" LEFT JOIN "user" AS "author_id" ON "post"."author_id" = "author_id"."id""#,
     );
-    assert!(stmt.params.is_empty());
+    assert!(stmt.params().is_empty());
 }
 
 #[test]
@@ -871,4 +871,23 @@ fn join_with_limit_and_offset_orders_clauses() {
         stmt.sql
     );
     assert!(stmt.sql.contains("LEFT JOIN"));
+}
+
+/// A hand-written statement is checked like a compiled one, so a value the
+/// backend cannot bind is an error before it reaches the driver.
+#[test]
+fn a_hand_written_statement_refuses_a_postgres_only_value_off_postgres() {
+    use rustango::sql::{CompiledStatement, MySql, Sqlite};
+    let cases: [(&dyn Dialect, SqlValue, &str); 2] = [
+        (&MySql, SqlValue::Vector(vec![1.0]), "vector"),
+        (&Sqlite, SqlValue::Array(vec![SqlValue::I64(1)]), "array"),
+    ];
+    for (d, v, kind) in cases {
+        match CompiledStatement::new(d, "SELECT ?", vec![v.clone()]) {
+            Err(SqlError::ValueNotSupportedInDialect { value, .. }) => assert_eq!(value, kind),
+            other => panic!("{}: {other:?}", d.name()),
+        }
+        let pg = CompiledStatement::new(&Postgres, "SELECT $1", vec![v]).unwrap();
+        assert_eq!(pg.params().len(), 1);
+    }
 }

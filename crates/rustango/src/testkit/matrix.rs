@@ -197,7 +197,7 @@ impl SlotDatabase {
         let d = admin.dialect();
         let exists = || async {
             let stmt = d.database_exists_sql(&self.name).expect("a server backend");
-            let rows: Vec<(i64,)> = crate::sql::raw_query_pool(&stmt.sql, stmt.params, &admin)
+            let rows: Vec<(i64,)> = crate::sql::raw_query_stmt(stmt, &admin)
                 .await
                 .unwrap_or_else(|e| panic!("looking up {}: {e}", self.name));
             rows.first().is_some_and(|(n,)| *n > 0)
