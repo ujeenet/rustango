@@ -150,6 +150,24 @@ untouched.
 
 ## Unreleased
 
+- Branch on `pool.dialect().kind()` (a `DialectKind`) instead of `dialect().name() == "sqlite"`. `DialectKind` is a closed enum, so a match on it with no `_` arm fails to build when a backend is added.
+- `user_roles_qs_pool` returns an error for a role whose `data` is not valid JSON, where it used to substitute `{}`. `ensure_tag` no longer renames an existing tag when two calls race.
+- `CompiledStatement { sql, params }` no longer builds and `stmt.params` no longer reads: use `CompiledStatement::new(dialect, sql, params)?` and `stmt.params()`. `sql` stays a public field.
+- A Postgres array bind of an element type other than i16/i32/i64/text/bool/uuid now returns `ValueNotSupportedInDialect` where it panicked.
+- Generic helpers can bound `T: DecodeModel` instead of the eight `Maybe*` / `LoadRelated` traits; the old bounds still work.
+- `expected StorageMode, found &str` / `expected BackendKind, found String`: `Org.storage_mode` and `Org.backend_kind` are enums now. Assign `StorageMode::Schema`, compare with `== StorageMode::Database`, and filter with `Org::storage_mode.eq(StorageMode::Database)` or `.is_in([..])` (a string no longer builds). Struct literals and `Debug` output change the same way.
+- `no method named as_str found for enum StorageMode`: import the trait, `use rustango::core::TextEnum as _;` (or `rustango::prelude::*`). `no function parse found`: use `StorageMode::from_db(s)` or `s.parse::<BackendKind>()`; the error is an `UnknownVariant` (`?` turns it into `TenancyError::Validation`).
+- Reading an org row whose stored value is not a known spelling (case and spaces count) is now an error for that tenant; `pg`, `postgresql`, `mariadb` and `sqlite3` still read. Run `manage check-tenants` after upgrading and `repair-tenant` on what it lists.
+- `Auto::require()` returns the key or `UnsavedRow`; use it in place of `id.get().copied().unwrap_or_default()`, which reads `0` for a row never saved. `UnsavedRow` converts into `ExecError`; add a `From<UnsavedRow>` to your own error type to use `?`.
+- `JwtBackend::issue_for_user` / `issue_for_tenant_user` now return `Result<String, UnsavedRow>`: add `?` or `.unwrap()` at the call.
+- `AuditEntry: From<AuditLog>` is now `TryFrom<AuditLog>` (error `UnsavedRow`): use `AuditEntry::try_from(row)?`.
+- A model-level `save` on an audited model whose key is unset now returns `ExecError::UnsavedRow` instead of reading the key as `0`.
+- New variants of a `TextEnum` need two releases on a running system: first the code that reads them, then the code that writes them.
+- `atomic_immediate` is removed: call `atomic`, which begins SQLite blocks with `BEGIN IMMEDIATE`.
+- Inside an `atomic` block on `t.pool()`, `t.conn()` now returns the block's connection: its writes roll back with the block, and ORM calls on the pool return `NestedAtomic` until `t.pool()` is called again. `t.pool_conn()` and `t.into_conn()` there return `TenancyError::Exec(ExecError::InAtomic)`: use `t.conn()`, or move the work out of the block.
+- `AtomicOptions::deferred()` on a nested block is refused with `InAtomic`, like an isolation level.
+- `on_commit` callbacks now run on their own task after the COMMIT: a task-local the block's caller set is not visible in them. Capture the value in the closure instead.
+
 ## 0.67.0
 
 - `get_or_create_tx` runs `create_fn` in a savepoint and, on a unique violation, returns the existing row with `created == false` instead of the error (PG still returns an error: the unique violation under repeatable read, a serialization failure (40001) under serializable).

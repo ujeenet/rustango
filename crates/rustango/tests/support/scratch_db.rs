@@ -55,7 +55,7 @@ impl Drop for ScratchDb {
                 let roles = tenant_roles(&url).await;
                 let admin = Pool::connect(&admin_url).await.map_err(|e| e.to_string())?;
                 let dialect = admin.dialect();
-                let force = if dialect.name() == "postgres" {
+                let force = if dialect.kind() == rustango::sql::DialectKind::Postgres {
                     " WITH (FORCE)"
                 } else {
                     ""

@@ -72,5 +72,5 @@ fn hstore_column_is_bound_as_a_single_param() {
     );
     let stmt = Postgres.compile_insert(&q).unwrap();
     assert!(stmt.sql.contains("VALUES ($1)"), "sql: {}", stmt.sql);
-    assert!(matches!(&stmt.params[0], SqlValue::HStore(_)));
+    assert!(matches!(&stmt.params()[0], SqlValue::HStore(_)));
 }

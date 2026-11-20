@@ -48,11 +48,11 @@ fn pg_emits_st_distance() {
         stmt.sql
     );
     assert!(
-        stmt.params
+        stmt.params()
             .iter()
             .any(|p| matches!(p, SqlValue::Geometry { .. })),
         "point bound as a Geometry param: {:?}",
-        stmt.params
+        stmt.params()
     );
 }
 

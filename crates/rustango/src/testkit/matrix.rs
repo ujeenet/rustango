@@ -4,8 +4,8 @@
 //! ## Why this exists
 //!
 //! The integration suite is shaped by dialect rather than by feature.
-//! Of 209 `*_sqlite_live.rs` files, 17 stems have a sibling
-//! file for another backend and **191 have no MySQL or PG counterpart at
+//! Of 211 `*_sqlite_live.rs` files, 17 stems have a sibling
+//! file for another backend and **193 have no MySQL or PG counterpart at
 //! all** — not because those features are SQLite-only, but because
 //! writing the second and third copy by hand costs more than it returns.
 //! The `orm_*` scenario files already solved this for eight features;
@@ -76,15 +76,21 @@ impl Backend {
         }
     }
 
-    /// What [`crate::sql::Dialect::name`] calls this backend, so a test
-    /// can match a pool back to its `Backend`.
+    /// This backend's [`crate::sql::DialectKind`], so a test can match a
+    /// pool back to its `Backend`.
+    #[must_use]
+    pub fn kind(self) -> crate::sql::DialectKind {
+        match self {
+            Backend::Postgres => crate::sql::DialectKind::Postgres,
+            Backend::MySql => crate::sql::DialectKind::Mysql,
+            Backend::Sqlite => crate::sql::DialectKind::Sqlite,
+        }
+    }
+
+    /// What [`crate::sql::Dialect::name`] calls this backend.
     #[must_use]
     pub fn dialect_name(self) -> &'static str {
-        match self {
-            Backend::Postgres => "postgres",
-            Backend::MySql => "mysql",
-            Backend::Sqlite => "sqlite",
-        }
+        self.kind().name()
     }
 
     /// Open a pool, or `None` when this backend is not configured here.
@@ -191,7 +197,7 @@ impl SlotDatabase {
         let d = admin.dialect();
         let exists = || async {
             let stmt = d.database_exists_sql(&self.name).expect("a server backend");
-            let rows: Vec<(i64,)> = crate::sql::raw_query_pool(&stmt.sql, stmt.params, &admin)
+            let rows: Vec<(i64,)> = crate::sql::raw_query_stmt(stmt, &admin)
                 .await
                 .unwrap_or_else(|e| panic!("looking up {}: {e}", self.name));
             rows.first().is_some_and(|(n,)| *n > 0)
@@ -381,7 +387,7 @@ impl OwnDatabase {
         use crate::sql::server::DatabaseName;
         let Some(var) = [Backend::Postgres, Backend::MySql]
             .into_iter()
-            .find(|b| b.dialect_name() == pool.dialect().name())
+            .find(|b| b.kind() == pool.dialect().kind())
             .and_then(Backend::env_var)
         else {
             return Self {
@@ -623,24 +629,19 @@ macro_rules! by_dialect {
      mysql    => $my:expr, because $myw:expr,
      sqlite   => $sq:expr, because $sqw:expr $(,)?
     ) => {{
-        match $pool.dialect().name() {
-            "postgres" => $crate::testkit::matrix::Divergence {
+        match $pool.dialect().kind() {
+            $crate::sql::DialectKind::Postgres => $crate::testkit::matrix::Divergence {
                 value: $pg,
                 why: $pgw,
             },
-            "mysql" => $crate::testkit::matrix::Divergence {
+            $crate::sql::DialectKind::Mysql => $crate::testkit::matrix::Divergence {
                 value: $my,
                 why: $myw,
             },
-            "sqlite" => $crate::testkit::matrix::Divergence {
+            $crate::sql::DialectKind::Sqlite => $crate::testkit::matrix::Divergence {
                 value: $sq,
                 why: $sqw,
             },
-            other => panic!(
-                "by_dialect!: unknown dialect `{other}`. A backend was added \
-                 without teaching this macro about it, so every shared test \
-                 body is silently missing an expectation for it."
-            ),
         }
     }};
 }
@@ -880,9 +881,7 @@ mod tests {
         let _ = SlotDatabase::of("V", "postgres://u@h:5432", 1);
     }
 
-    /// The names must match `Dialect::name`, because that string is what
-    /// `by_dialect!` matches a pool against. A mismatch would send every
-    /// shared test body down the panic arm.
+    /// The names must match `Dialect::name`, which logs and test labels use.
     #[test]
     fn dialect_names_match_the_dialect_impls() {
         assert_eq!(Backend::Postgres.dialect_name(), "postgres");
@@ -890,20 +889,18 @@ mod tests {
         assert_eq!(Backend::Sqlite.dialect_name(), "sqlite");
     }
 
-    /// The same invariant, proven against real pools rather than a second
-    /// copy of the table: whatever is configured here must report the
-    /// name its `Backend` claims. Asserting the mapping twice would only
-    /// prove the two lists agree with each other.
+    /// Proven against real pools rather than a second copy of the table:
+    /// whatever is configured here must report the kind its `Backend` claims.
     #[tokio::test]
     async fn a_pool_reports_the_name_its_backend_claims() {
         let mut checked = 0;
         for backend in [Backend::Postgres, Backend::MySql, Backend::Sqlite] {
             if let Some(pool) = backend.pool().await {
                 assert_eq!(
-                    pool.dialect().name(),
-                    backend.dialect_name(),
-                    "{backend:?} opens a pool whose dialect calls itself something else, \
-                     so `by_dialect!` would fall through to its panic arm"
+                    pool.dialect().kind(),
+                    backend.kind(),
+                    "{backend:?} opens a pool of another dialect, so `by_dialect!` \
+                     would pick the wrong arm"
                 );
                 checked += 1;
             }

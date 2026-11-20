@@ -171,8 +171,8 @@ async fn boot() -> Env {
     let host = format!("{slug}.app.test");
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = slug.clone();
-        o.storage_mode = "database".into();
-        o.backend_kind = "sqlite".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Database;
+        o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
         o.database_url = Some(tenant_url.clone());
         o.host_pattern = Some(host.clone());
     });

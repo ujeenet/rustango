@@ -117,7 +117,7 @@ fn typed_filters_compile_to_same_postgres_sql() {
     let stmt_string = Postgres.compile_select(&string_keyed).unwrap();
 
     assert_eq!(stmt_typed.sql, stmt_string.sql);
-    assert_eq!(stmt_typed.params, stmt_string.params);
+    assert_eq!(stmt_typed.params(), stmt_string.params());
 }
 
 // ---------------- typed SET on UpdateBuilder ----------------

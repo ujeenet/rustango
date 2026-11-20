@@ -65,6 +65,7 @@
 //!   and target — only that the new location is reachable. Strict
 //!   parity is the operator's responsibility.
 
+use crate::core::TextEnum as _;
 use std::io::Write;
 use std::process::Stdio;
 
@@ -73,7 +74,7 @@ use crate::sql::Dialect as _;
 use crate::sql::UpdaterPool as _;
 use crate::tenancy::db_server::TenantDatabase;
 use crate::tenancy::error::TenancyError;
-use crate::tenancy::manage::args::next_value;
+use crate::tenancy::manage::args::{flag_error, next_value};
 use crate::tenancy::org::{Org, StorageMode};
 use crate::tenancy::pools::TenantPools;
 
@@ -112,12 +113,7 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
         .pop()
         .ok_or_else(|| TenancyError::Validation(format!("tenant `{}` not found", parsed.slug)))?;
 
-    let current = StorageMode::parse(&org.storage_mode).map_err(|got| {
-        TenancyError::Validation(format!(
-            "org `{}` has unknown storage_mode `{got}`",
-            parsed.slug
-        ))
-    })?;
+    let current = org.storage_mode;
     if current == parsed.target {
         return Err(TenancyError::Validation(format!(
             "tenant `{}` is already in `{}` mode — nothing to do",
@@ -609,7 +605,7 @@ impl MoveCtx<'_> {
         let mut update = self
             .offline()
             .update()
-            .set_typed(Org::storage_mode.set(self.parsed.target.as_str().to_owned()))
+            .set_typed(Org::storage_mode.set(self.parsed.target))
             .set_typed(Org::database_url.set(database_url))
             .set_typed(Org::schema_name.set(schema_name));
         if self.reactivate {
@@ -736,11 +732,7 @@ fn parse_args(args: &[String]) -> Result<MigrateStorageArgs, TenancyError> {
         match flag.as_str() {
             "--to" => {
                 let v = next_value(&mut iter, "--to")?;
-                target = Some(StorageMode::parse(&v).map_err(|got| {
-                    TenancyError::Validation(format!(
-                        "--to must be `schema` or `database`, got `{got}`"
-                    ))
-                })?);
+                target = Some(StorageMode::from_db(&v).map_err(|e| flag_error("--to", &e))?);
             }
             "--database-url" => database_url = Some(next_value(&mut iter, "--database-url")?),
             "--schema-name" => schema_name = Some(next_value(&mut iter, "--schema-name")?),
@@ -1384,7 +1376,10 @@ mod tests {
     #[test]
     fn parse_args_rejects_unknown_to_value() {
         let err = parse_args(&s(&["acme", "--to", "redis"])).unwrap_err();
-        assert!(format!("{err}").contains("--to must be"));
+        assert!(
+            format!("{err}").contains("--to: unknown value `redis` for StorageMode"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1733,7 +1728,7 @@ mod tests {
         pg.close().await;
         sqlx::query(drop_db).execute(&admin).await.unwrap();
         assert!(left.is_none(), "the record is still linked");
-        assert_eq!(moved[0].storage_mode, "schema");
+        assert_eq!(moved[0].storage_mode, StorageMode::Schema);
         let advice = old_copy_advice(None, "postgres://acme:pw@db.example/acme", Some(&record));
         assert!(advice.contains("login `acme`"), "{advice}");
         assert!(advice.contains("server `s`"), "{advice}");

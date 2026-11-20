@@ -1071,6 +1071,41 @@ mod tests {
         assert!(body["properties"].get("deleted_at").is_none(), "{body}");
     }
 
+    #[derive(crate::TextEnum, Clone, Copy, Debug, PartialEq, Eq)]
+    #[text_enum(rename_all = "snake_case")]
+    pub enum Stage {
+        #[text_enum(alias = "new")]
+        Draft,
+        #[text_enum(rename = "on_air")]
+        Live,
+    }
+
+    #[derive(crate::Model)]
+    #[rustango(table = "oa_stage_doc")]
+    pub struct StageDoc {
+        #[rustango(primary_key)]
+        pub id: crate::sql::Auto<i64>,
+        #[rustango(text_enum, max_length = 8)]
+        pub stage: Stage,
+    }
+
+    /// A `text_enum` field's `enum` is the enum's stored names, renames
+    /// included and aliases left out.
+    #[test]
+    fn text_enum_field_lists_its_stored_names() {
+        use crate::core::{Model as _, TextEnum};
+        let paths = ViewSet::for_model(StageDoc::SCHEMA, &["stage"]).openapi_paths("/p", "P");
+        let coll = &paths.iter().find(|(p, _)| p == "/p").unwrap().1;
+        let body = body_schema(coll.post.as_ref());
+        let want: Vec<_> = Stage::VARIANTS.iter().map(|(_, s, _)| *s).collect();
+        assert_eq!(want, ["draft", "on_air"]);
+        assert_eq!(
+            body["properties"]["stage"]["enum"],
+            serde_json::json!(want),
+            "{body}"
+        );
+    }
+
     /// Choices, max_length and min/max reach the body and filter schemas.
     #[test]
     fn write_and_filter_schemas_carry_field_limits() {

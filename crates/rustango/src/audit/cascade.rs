@@ -593,7 +593,7 @@ mod tx_source_tests {
 
     async fn delete_on_tenant_conn_keeps_the_tenant_source(pool: &Pool) {
         // Postgres tenants run `delete_on` on the raw sqlx connection.
-        if pool.dialect().name() == "postgres" {
+        if pool.dialect().kind() == crate::sql::DialectKind::Postgres {
             return;
         }
         let source = cascade_source(pool, Via::DeleteOnTenantConn).await;

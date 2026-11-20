@@ -149,8 +149,13 @@ impl<'a> MountedTenantContext<'a> {
         })
     }
 
-    /// `org`'s data pool from this context.
-    pub(crate) async fn pool_for(self, org: &Org) -> Result<Pool, TenancyError> {
+    /// `org`'s data pool from this context: the request's stored pool when
+    /// `org` is the dispatched org, so every lookup in a request agrees.
+    pub(crate) async fn pool_for(self, ext: &Extensions, org: &Org) -> Result<Pool, TenancyError> {
+        crate::tenancy::request_tenant::RequestPool::get_or_lookup(ext, org, self.lookup(org)).await
+    }
+
+    async fn lookup(self, org: &Org) -> Result<Pool, TenancyError> {
         each!(self, |c|
             full => c.pools.scoped_pool_dyn(org).await,
             db => c.pools.pool_for_org(org).await.map(|p| Pool::from(p.pool().clone())))

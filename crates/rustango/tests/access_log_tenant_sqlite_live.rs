@@ -48,8 +48,8 @@ async fn registry() -> (Pool, tempfile::TempDir) {
         o.id = rustango::sql::Auto::Unset;
         o.slug = "acme".into();
         o.display_name = "Acme".into();
-        o.storage_mode = "database".into();
-        o.backend_kind = "sqlite".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Database;
+        o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
         o.database_url = Some("sqlite::memory:".into());
         o.host_pattern = Some("acme.app.test".into());
     });

@@ -84,8 +84,8 @@ fn bail() -> ExecError {
     ExecError::Sql(SqlError::EmptyInList)
 }
 
-fn dialect(pool: &Pool) -> &'static str {
-    pool.dialect().name()
+fn dialect(pool: &Pool) -> rustango::sql::DialectKind {
+    pool.dialect().kind()
 }
 
 /// Bound a scenario so a wait for a second connection fails instead of hanging.
@@ -133,7 +133,7 @@ async fn failed_read_aborts_the_block_on_pg(pool: &Pool) {
     // Another transaction holds row 5, so a `nowait` read of it fails.
     let other = one_conn(pool).await;
     let mut held = transaction_pool(&other).await.unwrap();
-    let locks = dialect(pool) != "sqlite";
+    let locks = dialect(pool) != rustango::sql::DialectKind::Sqlite;
     if locks {
         Note::objects()
             .filter("id", 5_i64)
@@ -142,7 +142,7 @@ async fn failed_read_aborts_the_block_on_pg(pool: &Pool) {
             .await
             .unwrap();
     }
-    let pg = dialect(pool) == "postgres";
+    let pg = dialect(pool) == rustango::sql::DialectKind::Postgres;
     let res: Result<(), ExecError> = within(rustango::atomic!(&p, |tx| {
         put(tx, 1).await?;
         // Inside a nested block the failure stays there.
@@ -191,7 +191,7 @@ async fn failed_read_aborts_the_block_on_pg(pool: &Pool) {
 /// Joined writes dropped at any point, savepoint and RELEASE included,
 /// leave the block usable.
 async fn cancelled_joined_writes_leave_the_block_usable(pool: &Pool) {
-    if dialect(pool) == "mysql" {
+    if dialect(pool) == rustango::sql::DialectKind::Mysql {
         return; // sqlx-mysql cannot recover a connection whose statement was dropped mid-reply.
     }
     let p = one_conn(pool).await;
@@ -262,7 +262,7 @@ async fn read_with_guard_held_is_refused(pool: &Pool) {
 /// In-memory SQLite: a read after a write in the block used to wait on the
 /// block's table lock from a second connection, forever.
 async fn in_memory_sqlite_read_after_write_does_not_hang(pool: &Pool) {
-    if dialect(pool) != "sqlite" {
+    if dialect(pool) != rustango::sql::DialectKind::Sqlite {
         return;
     }
     let q = pool.clone();
@@ -307,7 +307,7 @@ async fn mysql_ddl_via_pool_is_refused(pool: &Pool) {
         let r = run_ddl_idempotent(&q, "CREATE TABLE ajr_ddl_probe (id INT)").await;
         *ddl.lock().unwrap() = r.err().map(|e| e.to_string());
         // PG: a re-run's caught "already exists" must not abort the block.
-        if q.dialect().name() == "postgres" {
+        if q.dialect().kind() == rustango::sql::DialectKind::Postgres {
             run_ddl_idempotent(&q, "CREATE TABLE ajr_ddl_probe (id INT)")
                 .await
                 .expect("idempotent re-run");
@@ -324,7 +324,7 @@ async fn mysql_ddl_via_pool_is_refused(pool: &Pool) {
         matches!(res, Err(ExecError::Sql(SqlError::EmptyInList))),
         "the block failed early: {res:?}"
     );
-    if dialect(pool) == "mysql" {
+    if dialect(pool) == rustango::sql::DialectKind::Mysql {
         let err = ddl_err.expect("MySQL DDL in a block is refused");
         assert!(err.contains("refused inside an atomic block"), "got {err}");
     } else {
@@ -336,7 +336,7 @@ async fn mysql_ddl_via_pool_is_refused(pool: &Pool) {
 
 /// The schema helpers refuse DDL in a MySQL block too.
 async fn mysql_schema_helpers_are_refused(pool: &Pool) {
-    if dialect(pool) != "mysql" {
+    if dialect(pool) != rustango::sql::DialectKind::Mysql {
         return;
     }
     let p = one_conn(pool).await;
@@ -359,9 +359,11 @@ async fn mysql_schema_helpers_are_refused(pool: &Pool) {
 /// Statements no transaction can hold are refused by the server.
 async fn non_transactional_statements_are_refused(pool: &Pool) {
     let sql = match dialect(pool) {
-        "postgres" => "CREATE INDEX CONCURRENTLY ajr_label_idx ON ajr_note (label)",
-        "sqlite" => "VACUUM",
-        _ => return, // MySQL: every DDL is refused, see above.
+        rustango::sql::DialectKind::Postgres => {
+            "CREATE INDEX CONCURRENTLY ajr_label_idx ON ajr_note (label)"
+        }
+        rustango::sql::DialectKind::Sqlite => "VACUUM",
+        rustango::sql::DialectKind::Mysql => return, // MySQL: every DDL is refused, see above.
     };
     let p = one_conn(pool).await;
     let q = p.clone();
@@ -374,7 +376,7 @@ async fn non_transactional_statements_are_refused(pool: &Pool) {
     }))
     .await;
     // PG aborts the block on the failed statement; SQLite undoes only it.
-    if dialect(pool) == "postgres" {
+    if dialect(pool) == rustango::sql::DialectKind::Postgres {
         assert!(matches!(res, Err(ExecError::AtomicAborted)), "got {res:?}");
         assert_eq!(ids(pool).await, Vec::<i64>::new());
     } else {

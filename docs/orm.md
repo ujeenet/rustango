@@ -122,6 +122,11 @@ Post::objects().where_(Post::deleted_at.is_null()).fetch(&pool).await?;
 Post::objects().where_(Post::published_at.between(start, end)).fetch(&pool).await?;
 ```
 
+On an enum field (`text_enum`, see [models](models.md#enum-fields-stored-as-text)) a
+filter takes the enum, not a string: `Post::stage.eq(Stage::Live)`,
+`Post::stage.is_in([Stage::Draft, Stage::Live])`. It binds the stored name.
+`pluck::<Stage>("stage")` reads the enum too.
+
 ### Sorting results
 
 Sort rows by one or more columns, by an expression, or with explicit control over where NULLs land. Beyond the basic `.order_by(&[("col", desc)])`, you get three extra dimensions:
@@ -1213,7 +1218,7 @@ HAVING COUNT(*) FILTER (WHERE "status" = $2) > $3
               -- "published" bound twice (once at $1, once at $2)
 ```
 
-SQL semantic is unchanged (the same row counts come back), but `stmt.params.len()` grows per `.filter()` call that targets a non-trivial alias. For `COUNT(*)` aliases (no inner literals) the bloat is zero. Document if your test suite pins param counts.
+SQL semantic is unchanged (the same row counts come back), but `stmt.params().len()` grows per `.filter()` call that targets a non-trivial alias. For `COUNT(*)` aliases (no inner literals) the bloat is zero. Document if your test suite pins param counts.
 
 ---
 

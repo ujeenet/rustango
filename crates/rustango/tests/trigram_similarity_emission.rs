@@ -49,11 +49,11 @@ fn pg_emits_similarity_call() {
     );
     // Pattern bound as the only string param.
     assert!(
-        stmt.params
+        stmt.params()
             .iter()
             .any(|p| matches!(p, SqlValue::String(s) if s == "rust orm")),
         "pattern bound as param: {:?}",
-        stmt.params
+        stmt.params()
     );
 }
 

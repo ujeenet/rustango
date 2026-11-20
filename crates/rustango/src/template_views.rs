@@ -1162,9 +1162,9 @@ impl ExtraContext {
     /// Merge into `ctx` without letting it clobber what the view set.
     fn merge_into(parts: Option<&Self>, ctx: &mut Context) {
         let Some(extra) = parts else { return };
-        let mut merged = extra.0.clone();
-        merged.extend(ctx.clone());
-        *ctx = merged;
+        let view = std::mem::take(ctx);
+        *ctx = extra.0.clone();
+        ctx.extend(view);
     }
 }
 
@@ -1227,7 +1227,7 @@ async fn handle_list(
 
     let mut ctx = list_context(
         &state.vs,
-        &object_list,
+        object_list,
         total,
         page,
         page_size,
@@ -1280,7 +1280,7 @@ async fn list_queries(
 /// The list page context; both the static and the tenant handler build it here.
 fn list_context(
     vs: &ListView,
-    object_list: &[Value],
+    object_list: Vec<Value>,
     total: i64,
     page: i64,
     page_size: i64,
@@ -1291,11 +1291,17 @@ fn list_context(
     let mut ctx = Context::new();
     // `1 … 7 8 9 … 42` rather than one link per page.
     ctx.insert("page_marks", &page_marks(total, page_size, page));
-    ctx.insert("object_list", object_list);
+    // Moved in: `insert` would serialize a copy of every row.
+    let mut rows = serde_json::Map::new();
     // `context_object_name` adds a second binding, `{{ posts }}`.
     if !vs.context_object_name.is_empty() {
-        ctx.insert(&vs.context_object_name, object_list);
+        rows.insert(
+            vs.context_object_name.clone(),
+            Value::Array(object_list.clone()),
+        );
     }
+    rows.insert("object_list".to_owned(), Value::Array(object_list));
+    ctx.extend(Context::from_value(Value::Object(rows)).expect("an object"));
     ctx.insert("page", &page);
     ctx.insert("page_size", &page_size);
     ctx.insert("total", &total);
@@ -4378,7 +4384,7 @@ mod tenant {
 
         let mut ctx = super::list_context(
             &state.vs,
-            &object_list,
+            object_list,
             total,
             page,
             page_size,

@@ -25,8 +25,9 @@
 //!
 //! * `slug` carries `#[rustango(unique)]` so the DDL writer emits the
 //!   `UNIQUE` constraint inline.
-//! * `storage_mode` is a raw `String`; the [`StorageMode`] helper enum
-//!   in this module wraps the conversion.
+//! * `storage_mode` and `backend_kind` are [`StorageMode`] and
+//!   [`BackendKind`], stored as text. An unknown stored value fails the
+//!   read of that row; [`Org::fetch_reporting`] skips and reports it.
 
 use crate::Model;
 
@@ -43,7 +44,6 @@ use crate::Model;
     display = "slug",
     scope = "registry"
 )]
-#[allow(dead_code)] // Slices 2+ wire these fields into resolvers / pools / migrations.
 #[non_exhaustive]
 pub struct Org {
     #[rustango(primary_key)]
@@ -63,27 +63,22 @@ pub struct Org {
     #[rustango(verbose_name = "Display name")]
     pub display_name: String,
 
-    /// `"schema"` or `"database"`. See [`StorageMode`].
-    #[rustango(max_length = 16)]
+    /// Where the tenant's data lives. See [`StorageMode`].
+    #[rustango(text_enum, max_length = 16)]
     #[rustango(
         help_text = "`database`: the tenant has its own database. `schema`: a Postgres schema in the registry database. Set at creation; changing it does not move data."
     )]
     #[rustango(verbose_name = "Storage mode")]
-    pub storage_mode: String,
+    pub storage_mode: StorageMode,
 
-    /// Backend driver for this tenant. `"postgres"` (default),
-    /// `"mysql"`, or `"sqlite"`. See [`BackendKind`]. v0.33
-    /// constrains `storage_mode = "schema" ⟹ backend_kind = "postgres"`
-    /// — see [`BackendKind::validate_storage_mode`].
-    ///
-    /// Defaults to `"postgres"` for orgs created before v0.33; the
-    /// migration backfills the column with that value.
-    #[rustango(max_length = 16, default = "'postgres'")]
+    /// Backend driver for this tenant. Schema mode needs
+    /// [`BackendKind::Postgres`]; see [`BackendKind::validate_storage_mode`].
+    #[rustango(text_enum, max_length = 16, default = "'postgres'")]
     #[rustango(
         help_text = "The tenant database's driver: `postgres`, `mysql` or `sqlite`. Always the registry's backend. `schema` mode needs `postgres`."
     )]
     #[rustango(verbose_name = "Backend")]
-    pub backend_kind: String,
+    pub backend_kind: BackendKind,
 
     /// Secret reference resolved by `SecretsResolver` at pool-build
     /// time. For `storage_mode = "schema"` this is `None` (the
@@ -256,8 +251,8 @@ impl Org {
             id: crate::sql::Auto::Unset,
             display_name: slug.clone(),
             slug,
-            storage_mode: StorageMode::Database.as_str().to_owned(),
-            backend_kind: BackendKind::Postgres.as_str().to_owned(),
+            storage_mode: StorageMode::Database,
+            backend_kind: BackendKind::Postgres,
             database_url: None,
             schema_name: None,
             host_pattern: None,
@@ -281,11 +276,7 @@ impl Org {
 
     /// [`Self::effective_schema`] for a schema-mode tenant; `None` otherwise.
     pub(crate) fn own_schema(&self) -> Option<&str> {
-        matches!(
-            StorageMode::parse(&self.storage_mode),
-            Ok(StorageMode::Schema)
-        )
-        .then(|| self.effective_schema())
+        (self.storage_mode == StorageMode::Schema).then(|| self.effective_schema())
     }
 
     /// The name people see: `display_name`, else the slug.
@@ -310,22 +301,179 @@ impl Org {
     }
 }
 
+/// A `rustango_orgs` cell whose stored text no variant reads (or, from
+/// [`Org::check_stored_values`], an alias). Sweeps skip such a row and report it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BadOrgRow {
+    /// The row's primary key.
+    pub id: i64,
+    /// The row's slug.
+    pub slug: String,
+    /// `storage_mode` or `backend_kind`.
+    pub column: &'static str,
+    /// The stored text, cut to 64 bytes with control characters escaped.
+    pub value: String,
+}
+
+impl std::fmt::Display for BadOrgRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "tenant `{}` cannot be read: its {} holds `{}`; `manage check-tenants` lists it \
+             and `manage repair-tenant` fixes it",
+            self.slug, self.column, self.value
+        )
+    }
+}
+
+impl From<BadOrgRow> for super::TenancyError {
+    fn from(row: BadOrgRow) -> Self {
+        Self::Validation(row.to_string())
+    }
+}
+
+/// [`Org::check_stored_values`]: rows to fix, and rows still on an alias.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct StoredValueCheck {
+    /// Cells no variant reads; the row fails every read until fixed.
+    pub bad: Vec<BadOrgRow>,
+    /// Cells on an older spelling such as `pg`; they read fine.
+    pub aliases: Vec<BadOrgRow>,
+}
+
+impl Org {
+    /// Fetch `qs`, skipping rows whose storage mode or backend no variant
+    /// reads, and return those rows too. One query when every row reads.
+    ///
+    /// # Errors
+    /// Driver failures; a row turning bad between the two reads.
+    pub async fn fetch_reporting(
+        qs: crate::query::QuerySet<Org>,
+        pool: &crate::sql::Pool,
+    ) -> Result<(Vec<Org>, Vec<BadOrgRow>), crate::sql::ExecError> {
+        use crate::core::Column as _;
+        use crate::sql::FetcherPool as _;
+        match qs.clone().fetch(pool).await {
+            Err(e) if e.is_row_decode() => {}
+            other => return other.map(|orgs| (orgs, Vec::new())),
+        }
+        let bad = scan_stored_values(qs.clone(), pool).await?.bad;
+        for row in &bad {
+            tracing::error!(target: "rustango::tenancy", id = row.id, "{row}");
+        }
+        let mut ids: Vec<i64> = bad.iter().map(|b| b.id).collect();
+        ids.dedup();
+        let orgs = qs.where_(Org::id.not_in(ids)).fetch(pool).await?;
+        Ok((orgs, bad))
+    }
+
+    /// Every row's stored storage mode and backend, read as raw text: the
+    /// cells no variant reads, and the cells on an alias.
+    ///
+    /// # Errors
+    /// Driver failures.
+    pub async fn check_stored_values(
+        pool: &crate::sql::Pool,
+    ) -> Result<StoredValueCheck, crate::sql::ExecError> {
+        scan_stored_values(Org::objects(), pool).await
+    }
+}
+
+/// `qs`'s storage mode and backend cells, read as text so a bad row decodes.
+async fn scan_stored_values(
+    qs: crate::query::QuerySet<Org>,
+    pool: &crate::sql::Pool,
+) -> Result<StoredValueCheck, crate::sql::ExecError> {
+    use crate::core::SqlValue;
+    let rows = qs
+        .order_by(&[("id", false)])
+        .values_list(&["id", "slug", "storage_mode", "backend_kind"])
+        .fetch(pool)
+        .await?;
+    let mut out = StoredValueCheck::default();
+    for row in rows {
+        let [id, SqlValue::String(slug), mode, backend] = row.as_slice() else {
+            continue;
+        };
+        let id = match id {
+            SqlValue::I64(n) => *n,
+            SqlValue::I32(n) => i64::from(*n),
+            _ => continue,
+        };
+        let cells = [
+            ("storage_mode", stored_value::<StorageMode>(mode)),
+            ("backend_kind", stored_value::<BackendKind>(backend)),
+        ];
+        for (column, found) in cells {
+            let Some((value, alias)) = found else {
+                continue;
+            };
+            let row = BadOrgRow {
+                id,
+                slug: slug.clone(),
+                column,
+                value,
+            };
+            if alias {
+                out.aliases.push(row);
+            } else {
+                out.bad.push(row);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `Some((shown text, is_alias))` for a cell that is not a stored name.
+fn stored_value<E: crate::core::TextEnum>(cell: &crate::core::SqlValue) -> Option<(String, bool)> {
+    use crate::core::SqlValue;
+    let text = match cell {
+        SqlValue::String(s) => s.as_str(),
+        SqlValue::Null => "",
+        other => return Some((format!("{other:?}"), false)),
+    };
+    match E::from_db(text) {
+        Err(e) => Some((e.value, false)),
+        Ok(_) if crate::core::text_enum::is_alias::<E>(text) => Some((text.to_owned(), true)),
+        Ok(_) => None,
+    }
+}
+
 /// The one home of the "`schema_name`, else the slug" rule.
 pub(crate) fn effective_schema<'a>(schema_name: Option<&'a str>, slug: &'a str) -> &'a str {
     schema_name.unwrap_or(slug)
 }
 
-/// Convenience enum for [`Org::storage_mode`]. The model field stays
-/// a raw `String` because rustango doesn't yet carry custom enums in
-/// the schema layer; this wrapper bridges to/from `&str`.
+/// Where a tenant's data lives: [`Org::storage_mode`], stored as text.
 ///
 /// ```
+/// use rustango::core::TextEnum as _;
 /// use rustango::tenancy::StorageMode;
 /// assert_eq!(StorageMode::Schema.as_str(), "schema");
 /// assert_eq!(StorageMode::Database.as_str(), "database");
-/// assert_eq!(StorageMode::parse("schema").unwrap(), StorageMode::Schema);
+/// assert_eq!(StorageMode::from_db("schema").unwrap(), StorageMode::Schema);
+/// assert!(StorageMode::from_db("Schema").is_err());
+///
+/// use rustango::core::Column as _;
+/// use rustango::tenancy::Org;
+/// let _ = Org::storage_mode.eq(StorageMode::Schema);
+/// assert!(Org::new("acme").storage_mode == StorageMode::Database);
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// The field is no string, in a filter or a comparison:
+///
+/// ```compile_fail
+/// use rustango::core::Column as _;
+/// let _ = rustango::tenancy::Org::storage_mode.eq("schema");
+/// ```
+///
+/// ```compile_fail
+/// let _ = rustango::tenancy::Org::new("acme").storage_mode == "schema";
+/// ```
+#[derive(crate::TextEnum, Debug, Clone, Copy, PartialEq, Eq)]
+#[text_enum(rename_all = "snake_case")]
 pub enum StorageMode {
     /// Tenant data lives in a dedicated schema in the **registry**
     /// Postgres database. Cheap (one connection pool for all
@@ -337,42 +485,8 @@ pub enum StorageMode {
     Database,
 }
 
-impl StorageMode {
-    /// Stable string form persisted to `Org.storage_mode`.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Schema => "schema",
-            Self::Database => "database",
-        }
-    }
-
-    /// Parse the string form. Errors are returned as
-    /// [`super::TenancyError::Validation`] by the caller — this
-    /// returns a static `&str` so the error message can name the
-    /// allowed values without an alloc.
-    ///
-    /// # Errors
-    /// Returns `Err(unrecognized_value)` when `s` doesn't match a
-    /// known variant — caller wraps in `TenancyError::Validation`.
-    pub fn parse(s: &str) -> Result<Self, &str> {
-        match s {
-            "schema" => Ok(Self::Schema),
-            "database" => Ok(Self::Database),
-            other => Err(other),
-        }
-    }
-}
-
-impl core::fmt::Display for StorageMode {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// Backend driver for a tenant's storage. Mirrors [`StorageMode`]'s
-/// string-on-the-row pattern — the column is a raw `String`, this
-/// enum is the typed bridge.
+/// Backend driver for a tenant's storage: [`Org::backend_kind`], stored as
+/// text. Reads also accept `pg`, `postgresql`, `mariadb` and `sqlite3`.
 ///
 /// **Storage-mode constraint:** `StorageMode::Schema` is only valid
 /// for `BackendKind::Postgres`. MySQL "schema" ≡ "database" with
@@ -381,48 +495,30 @@ impl core::fmt::Display for StorageMode {
 /// console and the `manage create-tenant` CLI call it before persisting.
 ///
 /// ```
+/// use rustango::core::TextEnum as _;
 /// use rustango::tenancy::{BackendKind, StorageMode};
 /// assert_eq!(BackendKind::Postgres.as_str(), "postgres");
+/// assert_eq!("pg".parse::<BackendKind>().unwrap(), BackendKind::Postgres);
 /// assert!(BackendKind::Postgres.validate_storage_mode(StorageMode::Schema).is_ok());
 /// assert!(BackendKind::Sqlite.validate_storage_mode(StorageMode::Schema).is_err());
 /// assert!(BackendKind::MySql.validate_storage_mode(StorageMode::Database).is_ok());
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(crate::TextEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[text_enum(rename_all = "snake_case")]
 pub enum BackendKind {
     /// Postgres — the v0.5+ default. Supports schema-mode + database-mode.
     #[default]
+    #[text_enum(alias = "pg", alias = "postgresql")]
     Postgres,
     /// MySQL — database-mode only (schema-mode rejected at validation time).
+    #[text_enum(rename = "mysql", alias = "mariadb", label = "MySQL")]
     MySql,
     /// SQLite — database-mode only. Each tenant gets its own file.
+    #[text_enum(alias = "sqlite3", label = "SQLite")]
     Sqlite,
 }
 
 impl BackendKind {
-    /// Stable string form persisted to `Org.backend_kind`.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Postgres => "postgres",
-            Self::MySql => "mysql",
-            Self::Sqlite => "sqlite",
-        }
-    }
-
-    /// Parse the string form.
-    ///
-    /// # Errors
-    /// Returns `Err(unrecognized_value)` when `s` doesn't match a
-    /// known variant — caller wraps in `TenancyError::Validation`.
-    pub fn parse(s: &str) -> Result<Self, &str> {
-        match s {
-            "postgres" | "postgresql" | "pg" => Ok(Self::Postgres),
-            "mysql" | "mariadb" => Ok(Self::MySql),
-            "sqlite" | "sqlite3" => Ok(Self::Sqlite),
-            other => Err(other),
-        }
-    }
-
     /// The backend a URL's scheme selects, read as `Pool::connect` reads
     /// it: no `pg://` or `sqlite3://` aliases, which it refuses.
     #[must_use]
@@ -470,12 +566,6 @@ impl BackendKind {
                  which gives each tenant its own file",
             ),
         }
-    }
-}
-
-impl core::fmt::Display for BackendKind {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(self.as_str())
     }
 }
 
@@ -578,6 +668,7 @@ pub async fn generation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::TextEnum;
 
     #[test]
     fn org_debug_masks_the_database_password() {
@@ -604,27 +695,83 @@ mod tests {
         assert_eq!(org.brand_label(), "shufoundation");
     }
 
+    /// The stored names stay the strings the hand-written `as_str` wrote.
     #[test]
-    fn parse_accepts_aliases() {
+    fn stored_names_are_unchanged() {
+        fn names<E: TextEnum>() -> Vec<&'static str> {
+            E::VARIANTS.iter().map(|(_, s, _)| *s).collect()
+        }
+        assert_eq!(names::<StorageMode>(), ["schema", "database"]);
+        assert_eq!(names::<BackendKind>(), ["postgres", "mysql", "sqlite"]);
+        assert_eq!(BackendKind::MySql.to_string(), "mysql");
         assert_eq!(
-            BackendKind::parse("postgres").unwrap(),
-            BackendKind::Postgres
+            serde_json::to_value(BackendKind::MySql).unwrap(),
+            serde_json::json!("mysql")
         );
-        assert_eq!(
-            BackendKind::parse("postgresql").unwrap(),
-            BackendKind::Postgres
-        );
-        assert_eq!(BackendKind::parse("pg").unwrap(), BackendKind::Postgres);
-        assert_eq!(BackendKind::parse("mysql").unwrap(), BackendKind::MySql);
-        assert_eq!(BackendKind::parse("mariadb").unwrap(), BackendKind::MySql);
-        assert_eq!(BackendKind::parse("sqlite").unwrap(), BackendKind::Sqlite);
-        assert_eq!(BackendKind::parse("sqlite3").unwrap(), BackendKind::Sqlite);
+        let back: BackendKind = serde_json::from_value(serde_json::json!("sqlite")).unwrap();
+        assert_eq!(back, BackendKind::Sqlite);
+    }
+
+    /// The two columns as they were declared when they were `String`s.
+    #[derive(crate::Model)]
+    #[rustango(table = "org_old_shape", managed = false)]
+    pub struct OldShape {
+        #[rustango(primary_key)]
+        pub id: crate::sql::Auto<i64>,
+        #[rustango(max_length = 16)]
+        pub storage_mode: String,
+        #[rustango(max_length = 16, default = "'postgres'")]
+        pub backend_kind: String,
+    }
+
+    /// The enum columns snapshot exactly as the `String` ones did, so no
+    /// migration is generated for them.
+    #[test]
+    fn enum_columns_snapshot_as_before() {
+        use crate::core::Model as _;
+        use crate::migrate::SchemaSnapshot;
+        let field = |schema, column: &str| {
+            let snap = SchemaSnapshot::from_models_forced(&[schema]);
+            let f = snap.tables[0]
+                .fields
+                .iter()
+                .find(|f| f.column == column)
+                .cloned()
+                .expect("column");
+            serde_json::to_string(&f).unwrap()
+        };
+        for column in ["storage_mode", "backend_kind"] {
+            assert_eq!(field(Org::SCHEMA, column), field(OldShape::SCHEMA, column));
+        }
     }
 
     #[test]
-    fn parse_rejects_unknown() {
-        assert!(BackendKind::parse("oracle").is_err());
-        assert!(BackendKind::parse("").is_err());
+    fn from_db_accepts_aliases() {
+        for (s, want) in [
+            ("postgres", BackendKind::Postgres),
+            ("postgresql", BackendKind::Postgres),
+            ("pg", BackendKind::Postgres),
+            ("mysql", BackendKind::MySql),
+            ("mariadb", BackendKind::MySql),
+            ("sqlite", BackendKind::Sqlite),
+            ("sqlite3", BackendKind::Sqlite),
+        ] {
+            assert_eq!(BackendKind::from_db(s).unwrap(), want, "{s}");
+            assert_eq!(s.parse::<BackendKind>().unwrap(), want, "{s}");
+        }
+        // Writes stay canonical.
+        assert_eq!(BackendKind::from_db("pg").unwrap().as_str(), "postgres");
+    }
+
+    #[test]
+    fn from_db_rejects_unknown() {
+        assert!(BackendKind::from_db("oracle").is_err());
+        assert!(BackendKind::from_db("").is_err());
+        assert!(BackendKind::from_db("Postgres").is_err());
+        assert_eq!(
+            StorageMode::from_db("shard").unwrap_err().to_string(),
+            "unknown value `shard` for StorageMode; expected one of `schema`, `database`"
+        );
     }
 
     #[test]

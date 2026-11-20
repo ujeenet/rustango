@@ -188,7 +188,7 @@ async fn run(pool: &Pool, stmts: &[String]) {
 /// Insert a widget through the ORM.
 ///
 /// This hand-wrote its own `INSERT`, including a
-/// `if d.name() == "postgres" { "$1" } else { "?" }` placeholder branch
+/// `if d.kind() == rustango::sql::DialectKind::Postgres { "$1" } else { "?" }` placeholder branch
 /// — a fourth copy of a rule the dialect already owns, inside the file
 /// whose subject is that exact class of mistake. `insert_pool` picks the
 /// placeholder, quotes the identifiers and binds the value.
@@ -468,7 +468,7 @@ fn an_existing_bigint_junction_does_not_churn() {
 /// MySQL's 3072-byte key cap, checked against the server: the widest
 /// junction the renderer allows is created, one char more gets 1071.
 async fn mysql_junction_key_limit_matches_the_server(pool: &Pool) {
-    if pool.dialect().name() != "mysql" {
+    if pool.dialect().kind() != rustango::sql::DialectKind::Mysql {
         return;
     }
     let snap = |len: u32| -> SchemaSnapshot {

@@ -59,10 +59,10 @@ fn templates() -> &'static tera::Tera {
 /// Render a bundled template with a serializable context.
 ///
 /// # Panics
-/// If the template is missing or the context does not serialize. Both
+/// If the template is missing or the context is not an object. Both
 /// are bugs the tests catch.
-pub(crate) fn render_template(template: &str, ctx: &serde_json::Value) -> String {
-    let mut tera_ctx = tera::Context::from_serialize(ctx).expect("admin context serializes");
+pub(crate) fn render_template(template: &str, ctx: serde_json::Value) -> String {
+    let mut tera_ctx = tera::Context::from_value(ctx).expect("admin context is an object");
     // Inline tags carry it so a strict `[security] csp` runs them (#1703).
     tera_ctx.insert(
         "csp_nonce",
@@ -78,12 +78,12 @@ pub(crate) fn render_template(template: &str, ctx: &serde_json::Value) -> String
 /// having to know the keys. An existing key in `ctx` wins.
 pub(crate) fn render_with_chrome(
     template: &str,
-    ctx: &mut serde_json::Value,
+    mut ctx: serde_json::Value,
     chrome: serde_json::Value,
 ) -> String {
-    if let (Some(map), Some(extra)) = (ctx.as_object_mut(), chrome.as_object()) {
+    if let (Some(map), serde_json::Value::Object(extra)) = (ctx.as_object_mut(), chrome) {
         for (k, v) in extra {
-            map.entry(k.clone()).or_insert_with(|| v.clone());
+            map.entry(k).or_insert(v);
         }
     }
     render_template(template, ctx)

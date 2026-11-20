@@ -421,8 +421,8 @@ async fn failed_resolution(app: &Router, registry: impl std::future::Future<Outp
 
 fn org(slug: &str, storage: &str, backend: &str, url: Option<String>) -> Org {
     let mut o = Org::new(slug.to_owned());
-    o.storage_mode = storage.into();
-    o.backend_kind = backend.into();
+    o.storage_mode = storage.parse().unwrap();
+    o.backend_kind = backend.parse().unwrap();
     o.database_url = url;
     o.schema_name = (storage == "schema").then(|| slug.to_owned());
     o.host_pattern = Some(format!("{slug}.localhost"));

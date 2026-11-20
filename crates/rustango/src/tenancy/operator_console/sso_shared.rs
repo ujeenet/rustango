@@ -313,11 +313,11 @@ async fn render_list(
             Err(e) => return server_error("operator_console", &e),
         };
     rows.sort_by_key(|p| p.sort_order);
-    let view: Vec<_> = rows
+    let view = rows
         .into_iter()
         .map(|p| {
-            serde_json::json!({
-                "id": p.id.get().copied().unwrap_or_default(),
+            Ok(serde_json::json!({
+                "id": p.id.require()?,
                 "callback": callbacks.view(&p.slug),
                 "slug": p.slug,
                 "label": p.label,
@@ -327,9 +327,13 @@ async fn render_list(
                 "enabled": p.enabled,
                 "allow_email_link": p.allow_email_link,
                 "sort_order": p.sort_order,
-            })
+            }))
         })
-        .collect();
+        .collect::<Result<_, crate::sql::UnsavedRow>>();
+    let view: Vec<_> = match view {
+        Ok(v) => v,
+        Err(e) => return super::unsaved_response(e),
+    };
     let mut ctx = base_ctx(state, op);
     ctx.insert("providers", &view);
     ctx.insert("creating", &true);
@@ -449,7 +453,10 @@ pub(super) async fn create(
             .await;
         }
     }
-    let id = row.id.get().copied().unwrap_or_default();
+    let id = match row.id.require() {
+        Ok(id) => id,
+        Err(e) => return super::unsaved_response(e),
+    };
     audit(&state, &op, id, "sso_shared_create", detail(&row, None)).await;
     redirect(
         "/sso-shared",
@@ -598,7 +605,7 @@ async fn audit(
         &state.registry,
         SharedSsoProvider::SCHEMA.table,
         &id.to_string(),
-        op.id.get().copied().unwrap_or(0),
+        op,
         verb,
         detail,
     )

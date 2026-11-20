@@ -43,5 +43,5 @@ fn query_returns_chainable_queryset() {
     let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
     assert!(stmt.sql.contains(r#""title" = $1"#));
     assert!(stmt.sql.contains("LIMIT 5"));
-    assert_eq!(stmt.params, vec![SqlValue::String("x".into())]);
+    assert_eq!(stmt.params(), vec![SqlValue::String("x".into())]);
 }

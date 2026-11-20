@@ -122,7 +122,7 @@ async fn tx_rollback_discards_writes() {
 async fn pool_tx_dialect_returns_sqlite() {
     let pool = fresh_pool().await;
     let tx = transaction_pool(&pool).await.expect("begin tx");
-    assert_eq!(tx.dialect().name(), "sqlite");
+    assert_eq!(tx.dialect().kind(), rustango::sql::DialectKind::Sqlite);
     assert_eq!(tx.dialect().placeholder(1), "?");
     tx.rollback().await.expect("rollback");
 }

@@ -17,8 +17,8 @@ fn fake_db_org(slug: &str, url: &str) -> Org {
         o.id = Auto::default();
         o.slug = slug.to_owned();
         o.display_name = slug.to_owned();
-        o.storage_mode = "database".into();
-        o.backend_kind = "sqlite".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Database;
+        o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
         o.database_url = Some(url.to_owned());
     })
 }
@@ -30,7 +30,10 @@ async fn tenant_pools_sqlite_constructs_and_acquires() {
         .expect("registry pool");
     let pools: TenantPools<sqlx::Sqlite> = TenantPools::new(registry);
     // Generic registry_pool returns Pool::Sqlite.
-    assert_eq!(pools.registry_pool().dialect().name(), "sqlite");
+    assert_eq!(
+        pools.registry_pool().dialect().kind(),
+        rustango::sql::DialectKind::Sqlite
+    );
 
     let org = fake_db_org(
         "acme",
@@ -55,7 +58,7 @@ async fn tenant_pools_sqlite_rejects_schema_mode() {
     let pools: TenantPools<sqlx::Sqlite> = TenantPools::new(registry);
 
     let mut org = fake_db_org("schemy", "sqlite::memory:");
-    org.storage_mode = "schema".into();
+    org.storage_mode = rustango::tenancy::StorageMode::Schema;
     org.schema_name = Some("schemy".into());
 
     let err = pools.database_pool_for_org(&org).await;

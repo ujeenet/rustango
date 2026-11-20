@@ -63,6 +63,7 @@ mod server;
 mod sso_check;
 #[cfg(feature = "sso")]
 mod sso_idle;
+mod stored_values;
 mod tenants;
 mod users;
 mod wizard;
@@ -288,6 +289,11 @@ where
             args::no_args(&args[1..], "list-tenants")?;
             tenants::list_tenants(pools, writer).await
         }
+        "check-tenants" => {
+            args::no_args(&args[1..], "check-tenants")?;
+            stored_values::check_tenants(pools, writer).await
+        }
+        "repair-tenant" => stored_values::repair_tenant(pools, &args[1..], writer).await,
         // #1344 — routing and display config were console-only to change.
         "edit-tenant" => edit::edit_tenant(pools, &args[1..], writer).await,
         "reseal-tenant-secrets" => reseal::reseal_tenant_secrets(pools, &args[1..], writer).await,
@@ -630,6 +636,18 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(
         w,
         "  list-tenants         Print every Org row in the registry."
+    )?;
+    writeln!(
+        w,
+        "  check-tenants        List rows whose storage mode or backend cannot be read."
+    )?;
+    writeln!(
+        w,
+        "  repair-tenant <slug> [--storage-mode <m>] [--backend <b>]"
+    )?;
+    writeln!(
+        w,
+        "                       Rewrite an unreadable or alias value; moves no data."
     )?;
     writeln!(
         w,
@@ -1183,10 +1201,7 @@ async fn role_schema_audit(
         use crate::core::Column as _;
         use crate::sql::FetcherPool as _;
         let orgs: Vec<crate::tenancy::Org> = match crate::tenancy::Org::objects()
-            .where_(
-                crate::tenancy::Org::storage_mode
-                    .eq(crate::tenancy::StorageMode::Schema.as_str().to_owned()),
-            )
+            .where_(crate::tenancy::Org::storage_mode.eq(crate::tenancy::StorageMode::Schema))
             .fetch(registry)
             .await
         {

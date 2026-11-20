@@ -158,7 +158,9 @@ Konsole nutzt, keine Tenant-Seiten.
 
 ## Speichermodi
 
-Jeder Tenant hat einen `storage_mode`: `schema` oder `database`.
+Jeder Tenant hat einen `storage_mode`: `schema` oder `database`. In Rust ist
+`Org.storage_mode` ein `StorageMode` und `Org.backend_kind` ein `BackendKind`,
+beide als Text gespeichert (siehe [Enum-Felder](models.md#enum-felder-als-text-gespeichert)).
 
 [![Schema-Modus: eine Postgres-Datenbank mit einem Schema pro Tenant, der search_path ist das Tenant-Schema plus Schemas nur mit Erweiterungen, und der Pool lehnt ein fehlendes Schema, ein nach einer Rolle benanntes Schema oder ein public mit einer fehlenden Tenant-Tabelle ab. Datenbank-Modus: jeder Tenant hat seine eigene Datenbank auf demselben Backend wie die Registry](../img/tenancy-storage-modes.png)](../img/tenancy-storage-modes.png)
 
@@ -357,3 +359,21 @@ Server löscht er auch den Login des Tenants; siehe
 
 Details: [die Operator-Konsole](operator-console.md) und
 [Tenancy-Befehle](manage.md#tenancy-befehle).
+
+### Eine Zeile, die sich nicht lesen lässt
+
+Ist der gespeicherte `storage_mode` oder `backend_kind` eines Tenants kein Wert,
+den diese Version kennt (ein von Hand geschriebener Tippfehler, etwa `Schema`),
+scheitert die Auflösung dieses Tenants mit einem klaren Fehler. Andere Tenants
+laufen weiter, und eine schlechte Zeile öffnet nie den Schutzschalter der
+Registry. Durchläufe (alle Tenants migrieren, Pre-Warm, die Tenant-Liste in
+Konsole und CLI, die Job-Schleife pro Tenant) überspringen die Zeile und melden sie.
+
+```bash
+cargo run -- check-tenants                                # listet unlesbare Zeilen (Fehler) und alte Schreibweisen
+cargo run -- repair-tenant acme --storage-mode schema     # schreibt den falschen Wert neu
+cargo run -- repair-tenant globex                         # schreibt eine alte Schreibweise wie `pg` neu
+```
+
+`repair-tenant` liest die Zeile als Rohtext und korrigiert nur einen unlesbaren
+Wert oder eine alte Schreibweise; es verschiebt nie einen Tenant in einen anderen Modus.

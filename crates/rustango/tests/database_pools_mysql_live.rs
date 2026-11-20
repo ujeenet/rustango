@@ -25,7 +25,7 @@ fn fake_mysql_org(slug: &str, url: &str) -> Org {
     rustango::testkit::org_with(|o| {
         o.slug = slug.to_owned();
         o.display_name = slug.to_owned();
-        o.backend_kind = "mysql".into();
+        o.backend_kind = rustango::tenancy::BackendKind::MySql;
         o.database_url = Some(url.to_owned());
     })
 }
@@ -148,7 +148,7 @@ async fn rejects_postgres_org() {
     // without MYSQL_TEST_URL.
     let pools: DatabasePools<sqlx::MySql> = DatabasePools::new(BackendKind::MySql);
     let mut org = fake_mysql_org("acme", "mysql://nobody:nothing@127.0.0.1:0/none");
-    org.backend_kind = "postgres".into();
+    org.backend_kind = rustango::tenancy::BackendKind::Postgres;
 
     let err = pools.pool_for_org(&org).await.expect_err("should reject");
     assert!(
@@ -162,7 +162,7 @@ async fn rejects_schema_mode() {
     // Same — no DB needed.
     let pools: DatabasePools<sqlx::MySql> = DatabasePools::new(BackendKind::MySql);
     let mut org = fake_mysql_org("acme", "mysql://nobody:nothing@127.0.0.1:0/none");
-    org.storage_mode = "schema".into();
+    org.storage_mode = rustango::tenancy::StorageMode::Schema;
 
     let err = pools.pool_for_org(&org).await.expect_err("should reject");
     let msg = err.to_string();

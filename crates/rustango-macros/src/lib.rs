@@ -46,6 +46,18 @@ fn rustango_root() -> TokenStream2 {
     }
 }
 
+mod text_enum;
+
+/// Derive `rustango::core::TextEnum` on a fieldless enum: stored as text,
+/// with `Display`, `FromStr` and serde as the stored value.
+#[proc_macro_derive(TextEnum, attributes(text_enum))]
+pub fn derive_text_enum(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    text_enum::expand(&input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
 /// Derive a `Model` impl. See crate docs for the supported attributes.
 #[proc_macro_derive(Model, attributes(rustango, rgo))]
 pub fn derive_model(input: TokenStream) -> TokenStream {
@@ -507,8 +519,7 @@ struct MainArgs {
 /// The smallest `stack_size` `#[rustango::main]` accepts: 64 KiB.
 const MIN_STACK_SIZE: usize = 64 * 1024;
 
-const MAIN_ARGS_HELP: &str =
-    "supported: `flavor = \"current_thread\" | \"multi_thread\"`, `logging = true | false`, `stack_size = <bytes>`";
+const MAIN_ARGS_HELP: &str = "supported: `flavor = \"current_thread\" | \"multi_thread\"`, `logging = true | false`, `stack_size = <bytes>`";
 
 /// Parse `#[rustango::main(...)]`; an unknown or misspelt argument is an error.
 fn parse_main_args(args: &TokenStream2) -> syn::Result<MainArgs> {
@@ -545,7 +556,9 @@ fn parse_main_args(args: &TokenStream2) -> syn::Result<MainArgs> {
                 if bytes < MIN_STACK_SIZE {
                     return Err(syn::Error::new(
                         n.span(),
-                        format!("#[rustango::main]: `stack_size` must be at least {MIN_STACK_SIZE} bytes"),
+                        format!(
+                            "#[rustango::main]: `stack_size` must be at least {MIN_STACK_SIZE} bytes"
+                        ),
                     ));
                 }
                 out.stack_size = Some(bytes);
@@ -554,7 +567,7 @@ fn parse_main_args(args: &TokenStream2) -> syn::Result<MainArgs> {
                 return Err(syn::Error::new(
                     meta.span(),
                     format!("#[rustango::main]: unsupported argument; {MAIN_ARGS_HELP}"),
-                ))
+                ));
             }
         }
     }
@@ -1074,7 +1087,10 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     }
     // An unbounded String is LONGTEXT on MySQL, which no key can hold (1170, #2575).
     for field in &named.named {
-        let (Ok(fa), Ok(det)) = (parse_field_attrs(field), detect_type(&field.ty)) else {
+        let Ok(fa) = parse_field_attrs(field) else {
+            continue;
+        };
+        let Ok(det) = detect_field(field, &fa) else {
             continue;
         };
         if det.kind != DetectedKind::String || fa.max_length.is_some() {
@@ -4028,7 +4044,7 @@ fn inherent_impl_tokens(
                 mk_before_pairs(&|_| quote!(#root::sql::try_get_returning_sqlite));
             let tracked_cols: Vec<&str> = tracked.iter().map(|c| c.column.as_str()).collect();
             let pk_value_for_bind = if fields.pk_is_auto {
-                quote!(self.#pk_ident.get().copied().unwrap_or_default())
+                quote!(self.#pk_ident.require()?)
             } else {
                 quote!(::core::clone::Clone::clone(&self.#pk_ident))
             };
@@ -10858,6 +10874,8 @@ struct FieldAttrs {
     validators: Vec<syn::Ident>,
     /// `#[rustango(secret)]` / `secret = false`; `None` defers to the name rules.
     secret: Option<bool>,
+    /// `#[rustango(text_enum)]` — the field's type is a `TextEnum`, stored as text.
+    text_enum: bool,
 }
 
 /// Keys `parse_field_attrs` accepts, listed in its unknown-key error.
@@ -10892,6 +10910,7 @@ const FIELD_ATTR_KEYS: &[&str] = &[
     "soft_delete",
     "unique",
     "index",
+    "text_enum",
 ];
 
 /// Keys `parse_container_attrs` accepts, listed in its unknown-key error.
@@ -11027,6 +11046,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
         case_insensitive: false,
         validators: Vec::new(),
         secret: None,
+        text_enum: false,
     };
     for attr in model_attrs(&field.attrs)? {
         attr.parse_nested_meta(|meta| {
@@ -11040,6 +11060,11 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
             if meta.path.is_ident("primary_key") {
                 parse_flag(&meta, "primary_key")?;
                 out.primary_key = true;
+                return Ok(());
+            }
+            if meta.path.is_ident("text_enum") {
+                parse_flag(&meta, "text_enum")?;
+                out.text_enum = true;
                 return Ok(());
             }
             if meta.path.is_ident("fk") {
@@ -11546,7 +11571,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
         nullable,
         auto: detected_auto,
         fk_inner,
-    } = detect_type(&field.ty)?;
+    } = detect_field(field, &attrs)?;
     check_bound_compatibility(field, &attrs, kind)?;
     let auto = detected_auto;
     // Mixin attributes piggyback on the existing `Auto<T>` skip-on-
@@ -11707,7 +11732,8 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
     let unique = attrs.unique;
     let generated_as = optional_str(attrs.generated_as.as_deref());
     let help_text = optional_str(attrs.help_text.as_deref());
-    let choices = optional_choices(attrs.choices.as_deref());
+    let choices = field_choices(field, &attrs);
+    let text_enum_guard = text_enum_guard(field, &attrs);
     let db_comment = optional_str(attrs.db_comment.as_deref());
     let verbose_name = optional_str(attrs.verbose_name.as_deref());
     let editable = attrs.editable;
@@ -11770,6 +11796,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
     };
     let schema = quote! {{
         #sealed_guard
+        #text_enum_guard
         #root::core::FieldSchema::from_parts(#root::core::FieldSchemaParts {
             name: #name,
             column: #column_lit,
@@ -11869,6 +11896,9 @@ fn check_bound_compatibility(
     attrs: &FieldAttrs,
     kind: DetectedKind,
 ) -> syn::Result<()> {
+    if attrs.text_enum {
+        check_text_enum_attrs(field, attrs)?;
+    }
     if attrs.max_length.is_some() && kind != DetectedKind::String {
         return Err(syn::Error::new_spanned(
             field,
@@ -11927,6 +11957,118 @@ fn check_bound_compatibility(
         check_default_expr(default, kind).map_err(|msg| syn::Error::new_spanned(field, msg))?;
     }
     Ok(())
+}
+
+/// What a `text_enum` field refuses: the enum owns its values, so form
+/// knobs over free text do not apply, and MySQL needs a bounded column.
+fn check_text_enum_attrs(field: &syn::Field, attrs: &FieldAttrs) -> syn::Result<()> {
+    let refused = [
+        (
+            attrs.choices.is_some(),
+            "choices",
+            "the choices come from the enum's variants",
+        ),
+        (attrs.blank, "blank", "an empty value names no variant"),
+        (
+            attrs.case_insensitive,
+            "citext",
+            "reads match the stored name exactly",
+        ),
+        (
+            !attrs.validators.is_empty(),
+            "validators",
+            "the enum already limits the values",
+        ),
+        (
+            attrs.fk.is_some() || attrs.o2o.is_some(),
+            "fk",
+            "an enum is not a reference",
+        ),
+    ];
+    if let Some((_, key, why)) = refused.iter().find(|(on, _, _)| *on) {
+        return Err(syn::Error::new_spanned(
+            field,
+            format!("`{key}` does not apply to a `text_enum` field: {why}"),
+        ));
+    }
+    if attrs.max_length.is_none() {
+        return Err(syn::Error::new_spanned(
+            field,
+            "a `text_enum` field needs `max_length`, at least its longest stored value \
+             (MySQL cannot index an unbounded column)",
+        ));
+    }
+    if let Some(default) = &attrs.default {
+        if text_enum_default_value(default).is_none() {
+            return Err(syn::Error::new_spanned(
+                field,
+                format!(
+                    "`default = \"{default}\"` on a `text_enum` field must be a quoted \
+                     stored name, e.g. `default = \"'draft'\"`"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The stored name a `text_enum` default spells: `'draft'` → `draft`.
+fn text_enum_default_value(default: &str) -> Option<&str> {
+    default
+        .trim()
+        .strip_prefix('\'')?
+        .strip_suffix('\'')
+        .filter(|v| !v.is_empty() && !v.contains('\''))
+}
+
+/// Compile-time checks on a `text_enum` field, against the enum's `VARIANTS`.
+fn text_enum_guard(field: &syn::Field, attrs: &FieldAttrs) -> TokenStream2 {
+    if !attrs.text_enum {
+        return quote!();
+    }
+    let root = rustango_root();
+    let ty = option_inner(&field.ty).unwrap_or(&field.ty);
+    let fname = field.ident.as_ref().map(ident_name).unwrap_or_default();
+    let max_length = attrs.max_length.unwrap_or(0) as usize;
+    let too_short = format!(
+        "field `{fname}`: `max_length` is shorter than the longest stored value of its `TextEnum`"
+    );
+    let default_check = attrs
+        .default
+        .as_deref()
+        .and_then(text_enum_default_value)
+        .map(|v| {
+            let msg = format!("field `{fname}`: `default` names no variant of its `TextEnum`");
+            quote! {
+                const _: () = ::core::assert!(
+                    #root::core::text_enum::has_value(<#ty as #root::core::TextEnum>::VARIANTS, #v),
+                    #msg,
+                );
+            }
+        });
+    quote! {
+        const _: () = ::core::assert!(
+            <#ty as #root::core::TextEnum>::MAX_LEN <= #max_length,
+            #too_short,
+        );
+        #default_check
+    }
+}
+
+/// `FieldSchema::choices` for a field: the enum's `(value, label)` pairs
+/// on a `text_enum` field, else the `choices` attribute.
+fn field_choices(field: &syn::Field, attrs: &FieldAttrs) -> TokenStream2 {
+    if !attrs.text_enum {
+        return optional_choices(attrs.choices.as_deref());
+    }
+    let root = rustango_root();
+    let ty = option_inner(&field.ty).unwrap_or(&field.ty);
+    quote!({
+        const N: usize = <#ty as #root::core::TextEnum>::VARIANTS.len();
+        const PAIRS: [(&str, &str); N] = #root::core::text_enum::choices::<#ty, N>();
+        const CHOICES: &[(&str, &str)] = &PAIRS;
+        ::core::option::Option::Some(CHOICES)
+    })
 }
 
 /// SQL words a `default` may be on its own; any other bare word is a
@@ -12259,6 +12401,54 @@ fn cast_type(ty: &syn::Type) -> Option<&syn::Type> {
     }
 }
 
+/// The one place a field's kind is decided: a `text_enum` field is text
+/// whatever its type, so `detect_type` never sees the enum.
+fn detect_field<'a>(field: &'a syn::Field, attrs: &FieldAttrs) -> syn::Result<DetectedType<'a>> {
+    if !attrs.text_enum {
+        return detect_type(&field.ty);
+    }
+    let (inner, nullable) = match option_inner(&field.ty) {
+        Some(inner) => (inner, true),
+        None => (&field.ty, false),
+    };
+    let wrapper = match inner {
+        Type::Path(TypePath { path, qself: None }) => {
+            path.segments.last().map(|s| s.ident.to_string())
+        }
+        _ => None,
+    };
+    if let Some(w @ ("Option" | "Auto" | "ForeignKey" | "Cast")) = wrapper.as_deref() {
+        return Err(syn::Error::new_spanned(
+            &field.ty,
+            format!("`text_enum` takes the enum itself or `Option<Enum>`, not `{w}<…>`"),
+        ));
+    }
+    Ok(DetectedType {
+        kind: DetectedKind::String,
+        nullable,
+        auto: false,
+        fk_inner: None,
+    })
+}
+
+/// The `T` of an `Option<T>` field type.
+fn option_inner(ty: &syn::Type) -> Option<&syn::Type> {
+    let Type::Path(TypePath { path, qself: None }) = ty else {
+        return None;
+    };
+    let last = path.segments.last()?;
+    if last.ident != "Option" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+        return None;
+    };
+    match (args.args.len(), args.args.first()?) {
+        (1, syn::GenericArgument::Type(inner)) => Some(inner),
+        _ => None,
+    }
+}
+
 fn detect_type(ty: &syn::Type) -> syn::Result<DetectedType<'_>> {
     let Type::Path(TypePath { path, qself: None }) = ty else {
         return Err(syn::Error::new_spanned(ty, "unsupported field type"));
@@ -12490,7 +12680,9 @@ fn detect_type(ty: &syn::Type) -> syn::Result<DetectedType<'_>> {
         other => {
             return Err(syn::Error::new_spanned(
                 ty,
-                format!("unsupported field type `{other}`; supports i16/i32/i64/f32/f64/bool/String/DateTime/NaiveDate/NaiveTime/Uuid/serde_json::Value/Decimal/Vec<u8>, optionally wrapped in Option or Auto (Auto only on integers/Uuid/DateTime)"),
+                format!(
+                    "unsupported field type `{other}`; supports i16/i32/i64/f32/f64/bool/String/DateTime/NaiveDate/NaiveTime/Uuid/serde_json::Value/Decimal/Vec<u8>, optionally wrapped in Option or Auto (Auto only on integers/Uuid/DateTime); for an enum stored as text, derive `TextEnum` and add `#[rustango(text_enum)]`"
+                ),
             ));
         }
     };
@@ -13546,7 +13738,7 @@ impl SerdeRenameRule {
                 return Err(syn::Error::new_spanned(
                     s,
                     "unknown serde `rename_all` rule",
-                ))
+                ));
             }
         })
     }
@@ -14663,10 +14855,56 @@ mod field_attr_tests {
 
     fn error_for(field: syn::Field) -> Option<String> {
         let attrs = parse_field_attrs(&field).unwrap();
-        let kind = detect_type(&field.ty).unwrap().kind;
+        let kind = detect_field(&field, &attrs).unwrap().kind;
         check_bound_compatibility(&field, &attrs, kind)
             .err()
             .map(|e| e.to_string())
+    }
+
+    /// A `text_enum` field is text whatever its type, needs `max_length`,
+    /// and refuses the knobs that only fit free text.
+    #[test]
+    fn text_enum_fields_are_text_and_refuse_free_text_knobs() {
+        let f: syn::FieldsNamed = syn::parse_quote!({
+            #[rustango(text_enum, max_length = 16)] a: Mode,
+            #[rustango(text_enum, max_length = 16)] b: Option<Mode>,
+            #[rustango(text_enum)] c: Mode,
+            #[rustango(text_enum, max_length = 16, choices = "a")] d: Mode,
+            #[rustango(text_enum, max_length = 16, blank)] e: Mode,
+            #[rustango(text_enum, max_length = 16, citext)] g: Mode,
+            #[rustango(text_enum, max_length = 16, validators = "email")] h: Mode,
+            #[rustango(text_enum, max_length = 16, default = "draft")] i: Mode,
+            #[rustango(text_enum, max_length = 16, default = "'draft'")] j: Mode,
+        });
+        let fields: Vec<syn::Field> = f.named.into_iter().collect();
+        let attrs = parse_field_attrs(&fields[1]).unwrap();
+        let det = detect_field(&fields[1], &attrs).unwrap();
+        assert!(det.kind == DetectedKind::String && det.nullable);
+        let errs: Vec<_> = fields.into_iter().map(error_for).collect();
+        assert_eq!(errs[0], None);
+        assert_eq!(errs[1], None);
+        assert!(
+            errs[2].as_deref().unwrap().contains("needs `max_length`"),
+            "{errs:?}"
+        );
+        for (i, key) in [
+            (3, "choices"),
+            (4, "blank"),
+            (5, "citext"),
+            (6, "validators"),
+        ] {
+            let e = errs[i].as_deref().unwrap();
+            assert!(e.contains(&format!("`{key}` does not apply")), "{e}");
+        }
+        assert!(
+            errs[7].as_deref().unwrap().contains("quoted stored name"),
+            "{errs:?}"
+        );
+        assert_eq!(errs[8], None);
+        // Without the flag the enum is an unsupported type, with a hint.
+        let ty: syn::Type = syn::parse_quote!(Mode);
+        let e = detect_type(&ty).err().unwrap().to_string();
+        assert!(e.contains("#[rustango(text_enum)]"), "{e}");
     }
 
     /// `citext`, `vector` and `geometry` on the wrong type are errors, not no-ops (#1937).

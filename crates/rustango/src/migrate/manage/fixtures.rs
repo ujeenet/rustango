@@ -914,7 +914,9 @@ pub(crate) async fn loaddata_cmd<W: Write>(
         };
         // MySQL hands back only an AUTO_INCREMENT id; refuse before the write.
         if let Some(pk) = pk_field.filter(|pk| {
-            pool.dialect().name() == "mysql" && !returning.is_empty() && !pk.is_serial()
+            pool.dialect().kind() == crate::sql::DialectKind::Mysql
+                && !returning.is_empty()
+                && !pk.is_serial()
         }) {
             let msg = format!(
                 "loaddata: entry #{line} (`{model_name}`): MySQL cannot return the \

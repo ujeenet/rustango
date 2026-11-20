@@ -227,7 +227,7 @@ fn op_in_against_alias_emits_having_in() {
         "PG: HAVING aggregate = ANY(...): {}",
         stmt.sql
     );
-    assert_eq!(stmt.params.len(), 1);
+    assert_eq!(stmt.params().len(), 1);
 }
 
 #[test]
@@ -272,7 +272,7 @@ fn op_between_against_alias_emits_having_between() {
         "PG: HAVING aggregate BETWEEN ...: {}",
         stmt.sql
     );
-    assert_eq!(stmt.params.len(), 2);
+    assert_eq!(stmt.params().len(), 2);
 }
 
 #[test]
@@ -292,7 +292,7 @@ fn op_isnull_against_alias_emits_having_is_null() {
         stmt.sql
     );
     // No params for IS NULL.
-    assert!(stmt.params.is_empty());
+    assert!(stmt.params().is_empty());
 }
 
 #[test]
@@ -425,7 +425,7 @@ fn ilike_alias_param_order_preserved_for_positional_dialects() {
         .unwrap();
     let stmt = MySql.compile_aggregate(&q).unwrap();
     // Two params total; WHERE first, HAVING ILIKE last.
-    assert_eq!(stmt.params.len(), 2);
+    assert_eq!(stmt.params().len(), 2);
     // The `=` placeholder for WHERE appears before the `LIKE LOWER(...)`
     // placeholder for HAVING in the SQL text.
     let where_pos = stmt.sql.find("`status` = ?").unwrap();

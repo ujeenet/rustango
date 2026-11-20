@@ -40,12 +40,12 @@ pub use writers::DeletePlan;
 pub(crate) use writers::{compile_date_buckets, compile_delete_plan, DateBucket};
 
 pub use array::Array;
-pub use auto::Auto;
+pub use auto::{Auto, UnsavedRow};
 pub use backend::{
     apply_auto_pk, try_get_returning, try_get_returning_my, try_get_returning_sqlite,
     AssignAutoPkPool, MyReturningRow, MysqlAutoIdSet, PgReturningRow, SqliteReturningRow,
 };
-pub use compiled::CompiledStatement;
+pub use compiled::{BindParams, CompiledStatement};
 pub use connect_diagnosis::{ConnectDiagnosis, ConnectFault};
 pub(crate) use dialect::is_uuid_expr;
 #[cfg(any(feature = "cache", feature = "postgres"))]
@@ -56,9 +56,8 @@ pub(crate) use mysql::ByServer;
 // Its callers are feature-gated (PG schemas, SQLite inspectdb).
 #[allow(unused_imports)]
 pub(crate) use dialect::quote_with;
-pub(crate) use dialect::refuse_unbindable_values;
 pub(crate) use dialect::split_qualified;
-pub use dialect::{Dialect, TableTarget};
+pub use dialect::{Dialect, DialectKind, TableTarget};
 pub use error::{is_mysql_dup_index_error, is_pg_dup_object_error, ExecError, SqlError};
 #[cfg(any(feature = "template_views", feature = "admin", feature = "tenancy"))]
 pub(crate) use error::{Refusal, STILL_REFERENCED};
@@ -71,10 +70,14 @@ pub use server::{
 };
 pub use vector::Vector;
 // Always-on: tri-dialect entry points + traits that don't pin on PG.
-#[cfg(any(feature = "cache", feature = "tenancy"))]
-pub(crate) use executor::detached;
-#[cfg(feature = "jobs")]
+#[cfg(feature = "_axum")]
+pub(crate) use executor::atomic_request;
+#[cfg(any(feature = "jobs", all(feature = "admin", feature = "cache")))]
 pub(crate) use executor::in_any_block;
+#[cfg(feature = "tenancy")]
+pub(crate) use executor::lock_on;
+#[cfg(any(feature = "admin", feature = "tenancy"))]
+pub(crate) use executor::outside_atomic_on;
 #[cfg(feature = "jobs-postgres")]
 pub(crate) use executor::raw_insert_id;
 #[cfg(any(feature = "jobs-postgres", all(feature = "sse", feature = "postgres")))]
@@ -96,20 +99,20 @@ pub(crate) use executor::{
 pub(crate) use executor::{caught, in_block, refuse_ddl_in_block, Ddl};
 #[allow(deprecated)]
 pub use executor::{
-    AtomicOptions, AtomicTx, CounterPool, ExistsPool, ExplainFormat, ExplainOptions, FetcherPool,
-    FetcherTx, FkPkAccess, FlatScalar, HasPkValue, InsertReturningPool, Isolation, LoadRelated,
-    MaybeMyFromRow, MaybeMyLoadRelated, MaybeMyScalar, MaybePgFromRow, MaybePgScalar,
+    AtomicOptions, AtomicTx, CounterPool, DecodeModel, ExistsPool, ExplainFormat, ExplainOptions,
+    FetcherPool, FetcherTx, FkPkAccess, FlatScalar, HasPkValue, InsertReturningPool, Isolation,
+    LoadRelated, MaybeMyFromRow, MaybeMyLoadRelated, MaybeMyScalar, MaybePgFromRow, MaybePgScalar,
     MaybeSqliteFromRow, MaybeSqliteLoadRelated, MaybeSqliteScalar, Page, PoolConn, PoolTx,
     PooledConn, ReusableExecutor, SqlExecutor, TxConn, TxGuard, TxSetting, UpdaterPool,
     __reverse_fk_key, __rustango_dedupe_by_pk, __rustango_delete_all_or_none,
-    __rustango_in_batches, __rustango_one_in_list, __rustango_require_join, atomic,
-    atomic_immediate, atomic_with, bulk_insert_pool, bulk_insert_tx, bulk_update_pool,
-    count_rows_pool, count_tx, delete_pool, delete_tx, explain_pool, fetch_aggregate_dict,
-    fetch_aggregate_pool, fetch_dates_pool, fetch_datetimes_pool, fetch_paginated_pool,
-    fetch_with_prefetch_filtered, fetch_with_prefetch_pool, fetch_with_prefetch_related,
-    fetch_with_prefetch_related_filtered, get_or_create, get_or_create_tx, in_atomic,
-    insert_or_ignore, insert_pool, insert_returning_pool, insert_returning_tx, insert_tx,
-    on_commit, on_commit_pending, raw_execute_pool, raw_execute_tx, raw_query_pool, raw_query_tx,
+    __rustango_in_batches, __rustango_one_in_list, __rustango_require_join, atomic, atomic_with,
+    bulk_insert_pool, bulk_insert_tx, bulk_update_pool, count_rows_pool, count_tx, delete_pool,
+    delete_tx, explain_pool, fetch_aggregate_dict, fetch_aggregate_pool, fetch_dates_pool,
+    fetch_datetimes_pool, fetch_paginated_pool, fetch_with_prefetch_filtered,
+    fetch_with_prefetch_pool, fetch_with_prefetch_related, fetch_with_prefetch_related_filtered,
+    get_or_create, get_or_create_tx, in_atomic, insert_or_ignore, insert_pool,
+    insert_returning_pool, insert_returning_tx, insert_tx, on_commit, on_commit_pending,
+    outside_atomic, raw_execute_pool, raw_execute_tx, raw_query_pool, raw_query_tx,
     run_ddl_idempotent, select_one_row_as_json, select_one_row_pool, select_rows_as_json,
     select_rows_pool, select_rows_pool_with_related, select_rows_tx_with_related, transaction_pool,
     try_get_flat, try_get_flat_my, try_get_flat_sqlite, update_or_create, update_or_create_tx,
@@ -157,22 +160,19 @@ pub mod __macro_internals {
     pub use super::executor::{row_saved, write_tx, WriteTx};
 }
 
-/// The per-dialect `SqlValue` binders, so nothing outside `executor`
-/// has to hand-copy what `bind_match_*!` expands to.
-///
-/// `audit` carried 116 lines of exactly that copy across three
-/// dialects, and the SQLite one silently missed #1464's encoding change
-/// because a copy cannot track the macro it was copied from.
-#[cfg(feature = "postgres")]
-pub(crate) use executor::bind_query;
+/// The per-dialect binders, so nothing outside `executor` copies them.
 #[cfg(feature = "mysql")]
-pub(crate) use executor::bind_query_my;
+pub(crate) use executor::bind_my;
+#[cfg(feature = "postgres")]
+pub(crate) use executor::bind_pg;
 #[cfg(feature = "sqlite")]
-pub(crate) use executor::bind_query_sqlite;
+pub(crate) use executor::bind_sqlite;
 #[cfg(feature = "mysql")]
 pub use executor::LoadRelatedMy;
 #[cfg(feature = "sqlite")]
 pub use executor::LoadRelatedSqlite;
+/// Raw runners for a statement already checked when it was built.
+pub(crate) use executor::{raw_execute_stmt_tx, raw_query_stmt};
 pub use foreign_key::ForeignKey;
 pub use m2m::{GenericM2MManager, M2MManager};
 pub use mysql::MySql;

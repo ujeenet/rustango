@@ -86,9 +86,9 @@ fn ntile_args_embeds_bucket_count_literal() {
         stmt.sql
     );
     assert!(
-        stmt.params.is_empty(),
+        stmt.params().is_empty(),
         "NTILE arg should be inline, not bound: {:?}",
-        stmt.params
+        stmt.params()
     );
 }
 
@@ -104,7 +104,7 @@ fn lag_without_default_emits_two_args() {
         "got: {}",
         stmt.sql
     );
-    assert!(stmt.params.is_empty());
+    assert!(stmt.params().is_empty());
 }
 
 #[test]
@@ -118,7 +118,7 @@ fn lag_with_default_emits_three_args() {
         "got: {}",
         stmt.sql
     );
-    assert_eq!(stmt.params, vec![SqlValue::I64(0)]);
+    assert_eq!(stmt.params(), vec![SqlValue::I64(0)]);
 }
 
 #[test]

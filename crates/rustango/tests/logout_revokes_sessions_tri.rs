@@ -350,7 +350,7 @@ async fn a_bare_admin_login_db_error_is_503_and_not_a_failure(pool: &Pool) {
         rustango::testkit::matrix::Backend::Sqlite,
     ]
     .into_iter()
-    .find(|b| b.dialect_name() == pool.dialect().name())
+    .find(|b| b.kind() == pool.dialect().kind())
     .unwrap();
     let broken_pool = backend.pool().await.unwrap();
     broken_pool.close().await;
@@ -449,8 +449,8 @@ async fn tenancy(pool: &Pool) -> Tenancy {
     let host = format!("{slug}.app.test");
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = slug.clone();
-        o.storage_mode = "database".into();
-        o.backend_kind = kind.into();
+        o.storage_mode = rustango::tenancy::StorageMode::Database;
+        o.backend_kind = kind.parse().unwrap();
         o.database_url = Some(url.clone());
         o.host_pattern = Some(host.clone());
     });

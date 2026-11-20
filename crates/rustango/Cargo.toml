@@ -674,6 +674,9 @@ dotenvy        = { workspace = true }
 # Signs id_tokens for the fake IdP in the SSO tests.
 ring           = { workspace = true }
 tempfile       = "3"
+# The row-copy bench (`benches/row_copies.rs`).
+criterion      = { version = "0.5", default-features = false }
+stats_alloc    = "0.1"
 
 # All example crates removed. Single-file examples are auto-detected
 # by Cargo; multi-file or required-features examples are declared
@@ -723,3 +726,14 @@ required-features = ["sqlite", "admin", "runserver"]
 name              = "sqlite_tenant_demo"
 path              = "examples/sqlite_tenant_demo.rs"
 required-features = ["sqlite", "tenancy", "runtime", "postgres"]
+
+# Row copies on read paths; in-memory SQLite.
+[[bench]]
+name              = "atomic_request"
+harness           = false
+required-features = ["sqlite", "postgres", "runserver"]
+
+[[bench]]
+name              = "row_copies"
+harness           = false
+required-features = ["sqlite", "admin", "template_views", "serializer"]

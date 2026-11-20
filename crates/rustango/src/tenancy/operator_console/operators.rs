@@ -144,7 +144,10 @@ async fn page(
             return super::server_error("could not read the operator list", &e);
         }
     };
-    let me = id_of(op);
+    let me = match super::operator_id(op) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
 
     // Counted across the whole table, not this page. "Is this the last
     // active operator?" is a question about the registry, and a page of
@@ -161,11 +164,11 @@ async fn page(
         Err(e) => return super::server_error("operator_console", &e),
     };
 
-    let view: Vec<_> = rows
+    let view = rows
         .iter()
         .map(|o| {
-            let id = o.id.get().copied().unwrap_or_default();
-            serde_json::json!({
+            let id = o.id.require()?;
+            Ok(serde_json::json!({
                 "id": id,
                 "username": o.username,
                 "active": o.active,
@@ -176,9 +179,13 @@ async fn page(
                 // Why the control is absent, so the page can say it
                 // rather than just omit a button.
                 "last_active": o.active && active_count <= 1,
-            })
+            }))
         })
-        .collect();
+        .collect::<Result<_, crate::sql::UnsavedRow>>();
+    let view: Vec<_> = match view {
+        Ok(v) => v,
+        Err(e) => return super::unsaved_response(e),
+    };
 
     let mut ctx = Context::new();
     inject_op_brand(&mut ctx, &state.op_brand);
@@ -285,7 +292,11 @@ pub(super) async fn operator_create(
         return back_err(&state, &op, &msg).await;
     }
 
-    audit(&state, &op, id_of(&row), "operator_create", &username).await;
+    let new_id = match row.id.require() {
+        Ok(id) => id,
+        Err(e) => return super::unsaved_response(e),
+    };
+    audit(&state, &op, new_id, "operator_create", &username).await;
 
     if generated {
         // Rendered here, not redirected to — see the module docs.
@@ -313,7 +324,11 @@ pub(super) async fn operator_set_active(
     // The rules — no-op first, then self-deactivation, then last-active —
     // live in `tenancy::operators` so the CLI enforces the same ones (#1344).
     // Ordering is load-bearing and documented there.
-    match ops::set_active(&state.registry, &mut target, activate, Some(id_of(&op))).await {
+    let me = match super::operator_id(&op) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    match ops::set_active(&state.registry, &mut target, activate, Some(me)).await {
         Ok(ops::Outcome::AlreadySo) => {
             return back_ok(&format!(
                 "`{}` was already {}",
@@ -350,7 +365,11 @@ pub(super) async fn operator_reset_password(
     Form(form): Form<ResetForm>,
 ) -> Response<Body> {
     // Your own password needs the current one, and the login throttle.
-    if id == id_of(&op) {
+    let me = match super::operator_id(&op) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    if id == me {
         return back_err(
             &state,
             &op,
@@ -421,7 +440,11 @@ pub(super) async fn operator_reset_totp(
     Path(id): Path<i64>,
 ) -> Response<Body> {
     use crate::tenancy::operator_totp;
-    if id == id_of(&op) {
+    let me = match super::operator_id(&op) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    if id == me {
         return back_err(
             &state,
             &op,
@@ -497,10 +520,6 @@ fn withheld(op: &auth::Operator, what: &str, e: &dyn std::fmt::Display) -> Strin
     )
 }
 
-fn id_of(op: &auth::Operator) -> i64 {
-    op.id.get().copied().unwrap_or_default()
-}
-
 /// Capitalize an engine message so it reads as a sentence in the flash bar.
 /// The engine wording is shared with the CLI, which prints it lowercase
 /// after a `error: ` prefix.
@@ -538,7 +557,7 @@ async fn audit(
         &state.registry,
         "rustango_operators",
         &subject_id.to_string(),
-        id_of(actor),
+        actor,
         verb,
         extra,
     )

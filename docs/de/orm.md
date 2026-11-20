@@ -122,6 +122,11 @@ Post::objects().where_(Post::deleted_at.is_null()).fetch(&pool).await?;
 Post::objects().where_(Post::published_at.between(start, end)).fetch(&pool).await?;
 ```
 
+Auf einem Enum-Feld (`text_enum`, siehe [Modelle](models.md#enum-felder-als-text-gespeichert))
+nimmt ein Filter das Enum, keinen String: `Post::stage.eq(Stage::Live)`,
+`Post::stage.is_in([Stage::Draft, Stage::Live])`. Er bindet den gespeicherten Namen.
+`pluck::<Stage>("stage")` liest ebenfalls das Enum.
+
 ### Ergebnisse sortieren
 
 Sortiere Zeilen nach einer oder mehreren Spalten, nach einem Ausdruck oder mit expliziter Kontrolle darüber, wo NULLs landen. Über das grundlegende `.order_by(&[("col", desc)])` hinaus bekommst du drei zusätzliche Dimensionen:
@@ -1211,7 +1216,7 @@ HAVING COUNT(*) FILTER (WHERE "status" = $2) > $3
               -- "published" bound twice (once at $1, once at $2)
 ```
 
-Die SQL-Semantik ist unverändert (dieselben Zeilenzahlen kommen zurück), aber `stmt.params.len()` wächst pro `.filter()`-Aufruf, der einen nicht-trivialen Alias anvisiert. Für `COUNT(*)`-Aliase (keine inneren Literale) ist die Aufblähung null. Dokumentiere das, wenn deine Testsuite Parameterzählungen festnagelt.
+Die SQL-Semantik ist unverändert (dieselben Zeilenzahlen kommen zurück), aber `stmt.params().len()` wächst pro `.filter()`-Aufruf, der einen nicht-trivialen Alias anvisiert. Für `COUNT(*)`-Aliase (keine inneren Literale) ist die Aufblähung null. Dokumentiere das, wenn deine Testsuite Parameterzählungen festnagelt.
 
 ---
 

@@ -13,10 +13,21 @@ use super::render;
 use super::templates::render_template;
 use super::urls::AppState;
 
-/// Map of `(target_table, source_value_string) → display_value_html`.
-/// Populated from joined rows so list/detail rendering needs no extra
-/// per-FK queries.
-pub(crate) type FkMap = HashMap<(String, String), String>;
+/// `target_table → source_value_string → display_value_html`, from
+/// joined rows so list/detail rendering needs no extra per-FK queries.
+/// Keyed by table first, so a cell looks up without building a key.
+#[derive(Debug, Default)]
+pub(crate) struct FkMap(HashMap<&'static str, HashMap<String, String>>);
+
+impl FkMap {
+    pub(crate) fn insert(&mut self, to: &'static str, raw: String, display: String) {
+        self.0.entry(to).or_default().insert(raw, display);
+    }
+
+    pub(crate) fn get(&self, to: &str, raw: &str) -> Option<&str> {
+        self.0.get(to)?.get(raw).map(String::as_str)
+    }
+}
 
 /// Iterate the model inventory, deduplicating entries that share a SQL
 /// table name. When two models point at the same `table`, the one with
@@ -640,7 +651,7 @@ pub(crate) fn fk_map_from_joined_rows_json(
     model: &'static ModelSchema,
     rows: &[serde_json::Value],
 ) -> FkMap {
-    let mut map: FkMap = HashMap::new();
+    let mut map = FkMap::default();
     for field in model.scalar_fields() {
         let Some(rel) = field.relation else { continue };
         let to = match rel {
@@ -661,7 +672,7 @@ pub(crate) fn fk_map_from_joined_rows_json(
             else {
                 continue;
             };
-            map.insert((to.to_owned(), source), display);
+            map.insert(to, source, display);
         }
     }
     map
@@ -683,11 +694,11 @@ pub(crate) fn render_cell_json(
         let Some(raw_value) = render::read_value_as_string_json(row, field) else {
             return "<em>NULL</em>".to_owned();
         };
-        let to_esc = render::escape(to);
-        return match fk_map.get(&(to.to_owned(), raw_value.clone())) {
+        return match fk_map.get(to, &raw_value) {
             Some(display) => format!(
                 r#"<a href="{prefix}/{to_esc}/{pk}">{display}</a>"#,
                 prefix = render::escape(admin_prefix),
+                to_esc = render::escape(to),
                 pk = url_encode(&raw_value),
             ),
             None => render::escape(&raw_value),
@@ -953,7 +964,7 @@ pub(crate) fn render_form_with_inlines_and_picker(
         })
         .collect();
 
-    let mut ctx = serde_json::json!({
+    let ctx = serde_json::json!({
         "model": {
             "name": model.name,
             "table": model.table,
@@ -974,11 +985,7 @@ pub(crate) fn render_form_with_inlines_and_picker(
         // a `prepopulated_active` flag the template can branch on.
         "prepopulated_active": !pk_locked && !prepopulated_ctx.is_empty(),
     });
-    super::templates::render_with_chrome(
-        "form.html",
-        &mut ctx,
-        chrome_context(state, Some(model.table)),
-    )
+    super::templates::render_with_chrome("form.html", ctx, chrome_context(state, Some(model.table)))
 }
 
 /// The fields the admin form renders, grouped by fieldset. The renderer
@@ -1087,8 +1094,8 @@ mod tests {
             on: "id",
         });
         let row = serde_json::json!({ "author": 7 });
-        let mut fk_map = FkMap::new();
-        fk_map.insert(("author".into(), "7".into()), "Ann".into());
+        let mut fk_map = FkMap::default();
+        fk_map.insert("author", "7".into(), "Ann".into());
         assert_eq!(
             render_cell_json(&row, &f, &fk_map, "/adm"),
             r#"<a href="/adm/author/7">Ann</a>"#

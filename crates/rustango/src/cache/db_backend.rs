@@ -54,12 +54,15 @@ use async_trait::async_trait;
 
 use super::{Cache, CacheError};
 use crate::core::SqlValue;
-use crate::sql::{detached, ExecError, MaybeMyFromRow, MaybePgFromRow, MaybeSqliteFromRow, Pool};
+use crate::sql::{
+    outside_atomic, DialectKind, ExecError, MaybeMyFromRow, MaybePgFromRow, MaybeSqliteFromRow,
+    Pool,
+};
 
 // The cache stays independent of the caller's `atomic` block on the same
 // pool: its writes commit on their own. In-memory SQLite can then deadlock.
 async fn raw_execute_pool(pool: &Pool, sql: &str, binds: Vec<SqlValue>) -> Result<u64, ExecError> {
-    detached(crate::sql::raw_execute_pool(pool, sql, binds)).await
+    outside_atomic(crate::sql::raw_execute_pool(pool, sql, binds)).await
 }
 
 async fn raw_query_pool<T>(
@@ -70,11 +73,11 @@ async fn raw_query_pool<T>(
 where
     T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
-    detached(crate::sql::raw_query_pool(sql, binds, pool)).await
+    outside_atomic(crate::sql::raw_query_pool(sql, binds, pool)).await
 }
 
 async fn run_ddl_idempotent(pool: &Pool, ddl: &str) -> Result<(), sqlx::Error> {
-    detached(crate::sql::run_ddl_idempotent(pool, ddl)).await
+    outside_atomic(crate::sql::run_ddl_idempotent(pool, ddl)).await
 }
 
 /// Longest key stored as-is: MySQL's `VARBINARY(255)` column.
@@ -176,15 +179,15 @@ impl DatabaseCache {
     pub async fn ensure_table(&self) -> Result<(), CacheError> {
         let dialect = self.pool.dialect();
         let table = crate::sql::quote_qualified(dialect, &self.table);
-        let sql = match dialect.name() {
-            "postgres" => format!(
+        let sql = match dialect.kind() {
+            DialectKind::Postgres => format!(
                 "CREATE TABLE IF NOT EXISTS {table} (\
                  cache_key TEXT PRIMARY KEY, \
                  value TEXT NOT NULL, \
                  expires BIGINT NOT NULL DEFAULT 0\
                  )"
             ),
-            "mysql" => format!(
+            DialectKind::Mysql => format!(
                 "CREATE TABLE IF NOT EXISTS {table} (\
                  cache_key VARBINARY(255) PRIMARY KEY, \
                  value LONGTEXT NOT NULL, \
@@ -192,7 +195,7 @@ impl DatabaseCache {
                  )"
             ),
             // SQLite, and a reasonable default for anything else.
-            _ => format!(
+            DialectKind::Sqlite => format!(
                 "CREATE TABLE IF NOT EXISTS {table} (\
                  cache_key TEXT PRIMARY KEY, \
                  value TEXT NOT NULL, \
@@ -201,7 +204,7 @@ impl DatabaseCache {
             ),
         };
         // PG's `IF NOT EXISTS` is not atomic: a racing boot loses on a catalog row.
-        detached(crate::migrate::ensure::run_statements(
+        outside_atomic(crate::migrate::ensure::run_statements(
             &self.pool,
             std::slice::from_ref(&sql),
         ))
@@ -216,8 +219,8 @@ impl DatabaseCache {
         };
         // SQLite puts the schema on the index name and takes a bare table.
         let mut on = table;
-        if let ("sqlite", (Some(schema), bare)) =
-            (dialect.name(), crate::sql::split_qualified(&self.table))
+        if let (DialectKind::Sqlite, (Some(schema), bare)) =
+            (dialect.kind(), crate::sql::split_qualified(&self.table))
         {
             index = format!("{}.{index}", dialect.quote_ident(schema));
             on = dialect.quote_ident(bare);
@@ -304,7 +307,7 @@ impl DatabaseCache {
         // agree on what "expired" means.
         let expired = format!("expires <> 0 AND expires < {p1}");
         // MySQL rejects LIMIT inside IN (…); PG has no DELETE … LIMIT.
-        let sql = if dialect.name() == "mysql" {
+        let sql = if dialect.kind() == DialectKind::Mysql {
             format!("DELETE FROM {table} WHERE {expired} LIMIT {PURGE_BATCH}")
         } else {
             format!(
@@ -399,13 +402,13 @@ impl Cache for DatabaseCache {
         let p3 = dialect.placeholder(3);
         let expires = Self::expires_for(ttl);
         // Per-dialect upsert. MySQL has no ON CONFLICT clause.
-        let sql = match dialect.name() {
-            "mysql" => format!(
+        let sql = match dialect.kind() {
+            DialectKind::Mysql => format!(
                 "INSERT INTO {table} (cache_key, value, expires) \
                  VALUES ({p1}, {p2}, {p3}) \
                  ON DUPLICATE KEY UPDATE value = VALUES(value), expires = VALUES(expires)"
             ),
-            _ => format!(
+            DialectKind::Postgres | DialectKind::Sqlite => format!(
                 "INSERT INTO {table} (cache_key, value, expires) \
                  VALUES ({p1}, {p2}, {p3}) \
                  ON CONFLICT (cache_key) DO UPDATE SET value = EXCLUDED.value, expires = EXCLUDED.expires"
@@ -453,7 +456,7 @@ impl Cache for DatabaseCache {
         // MySQL and SQLite use positional `?`. Postgres' `$n` would
         // accept any order, which is how a MySQL-only mismatch hides
         // until a MySQL test runs.
-        if dialect.name() == "mysql" {
+        if dialect.kind() == DialectKind::Mysql {
             // MySQL's `ON DUPLICATE KEY UPDATE` takes no WHERE, so
             // this needs two statements. Still race-free: the INSERT
             // covers the absent case, and the UPDATE's own predicate
@@ -552,7 +555,7 @@ impl Cache for DatabaseCache {
             }
             CacheError::Connection(format!("incr: {e}"))
         };
-        let mysql = dialect.name() == "mysql";
+        let mysql = dialect.kind() == DialectKind::Mysql;
         let excluded = |col: &str| {
             if mysql {
                 format!("VALUES({col})")
@@ -581,10 +584,10 @@ impl Cache for DatabaseCache {
                 i64::MAX
             )
         };
-        let (not_int, int) = match dialect.name() {
-            "mysql" => (in_i64("REGEXP", "DECIMAL(20,0)"), "SIGNED"),
-            "postgres" => (in_i64("~", "NUMERIC"), "BIGINT"),
-            _ => (
+        let (not_int, int) = match dialect.kind() {
+            DialectKind::Mysql => (in_i64("REGEXP", "DECIMAL(20,0)"), "SIGNED"),
+            DialectKind::Postgres => (in_i64("~", "NUMERIC"), "BIGINT"),
+            DialectKind::Sqlite => (
                 format!("CAST(CAST({table}.value AS INTEGER) AS TEXT) <> {table}.value"),
                 "INTEGER",
             ),
@@ -602,7 +605,7 @@ impl Cache for DatabaseCache {
         let insert =
             format!("INSERT INTO {table} (cache_key, value, expires) VALUES ({p1}, {p2}, {p3})");
         self.after_write().await;
-        let value: String = if dialect.name() == "mysql" {
+        let value: String = if dialect.kind() == DialectKind::Mysql {
             // No RETURNING: read back in the same transaction, which still
             // holds the row lock the upsert took.
             // The cache's own transaction: it never rolls back with a caller.
@@ -628,7 +631,7 @@ impl Cache for DatabaseCache {
         } else {
             // SQLite turns an overflowing sum into a REAL; skip that update
             // instead, and report it as PG and MySQL do.
-            let guard = if dialect.name() == "sqlite" {
+            let guard = if dialect.kind() == DialectKind::Sqlite {
                 binds.push(SqlValue::I64(now));
                 format!(
                     " WHERE ({}) OR {not_int} OR typeof(CAST({table}.value AS INTEGER) + \
@@ -728,7 +731,7 @@ impl Cache for DatabaseCache {
         // drift between the cache and the ORM's LIKE lookups.
         // A hashed key keeps only its head, so a longer prefix matches on that
         // head: this may drop extra entries, never fewer.
-        let (sql, arg) = if dialect.name() == "sqlite" {
+        let (sql, arg) = if dialect.kind() == DialectKind::Sqlite {
             (
                 format!("DELETE FROM {table} WHERE instr(cache_key, {p}) = 1"),
                 head(prefix).to_owned(),

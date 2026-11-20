@@ -100,8 +100,8 @@ fn org(slug: &str, name: &str) -> Org {
         o.id = rustango::sql::Auto::Set(id);
         o.slug = slug.to_owned();
         o.display_name = "Acme".into();
-        o.storage_mode = "database".into();
-        o.backend_kind = "sqlite".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Database;
+        o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
         o.database_url = Some(db_url(name));
     })
 }

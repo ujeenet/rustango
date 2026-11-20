@@ -451,7 +451,7 @@ async fn long_named_fk_column_drops(pool: &Pool) {
         .step(pool, with(vec![id(), col(&long, "i64", fk(a))]))
         .await
         .expect("initial");
-    if pool.dialect().name() == "mysql" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Mysql {
         let short = rustango::migrate::ddl::fk_constraint_name(b, &long);
         let full = format!("{b}_{long}_fkey");
         assert_eq!(full.len(), 64);
@@ -1525,13 +1525,13 @@ async fn hand_named_and_composite_fks_survive(pool: &Pool) {
     };
     if renamed.value {
         let fk = format!("{b}_author_id_fkey");
-        let rename = match pool.dialect().name() {
-            "postgres" => vec![q(
+        let rename = match pool.dialect().kind() {
+            rustango::sql::DialectKind::Postgres => vec![q(
                 pool,
                 "ALTER TABLE {} RENAME CONSTRAINT {} TO {}",
                 &[b, &fk, "hand_fk"],
             )],
-            _ => vec![
+            rustango::sql::DialectKind::Mysql | rustango::sql::DialectKind::Sqlite => vec![
                 q(pool, "ALTER TABLE {} DROP FOREIGN KEY {}", &[b, &fk]),
                 q(
                     pool,
@@ -2262,8 +2262,8 @@ async fn split_sqlite_migration_fails_partially(pool: &Pool) {
     let has_x = exec(pool, "SELECT {}.{} FROM {}", &[b, "x", b])
         .await
         .is_ok();
-    match pool.dialect().name() {
-        "sqlite" => {
+    match pool.dialect().kind() {
+        rustango::sql::DialectKind::Sqlite => {
             assert!(
                 matches!(
                     err,
@@ -2278,8 +2278,8 @@ async fn split_sqlite_migration_fails_partially(pool: &Pool) {
             );
             assert!(has_x, "the first range committed");
         }
-        "postgres" => assert!(!has_x, "rolled back: {err:?}"),
-        _ => {}
+        rustango::sql::DialectKind::Postgres => assert!(!has_x, "rolled back: {err:?}"),
+        rustango::sql::DialectKind::Mysql => {}
     }
 }
 
@@ -2728,7 +2728,7 @@ async fn alter_column_unapplies(pool: &Pool) {
 
 /// A new PG database, which has no `citext` yet; `None` elsewhere.
 async fn fresh_pg(pool: &Pool, tag: &str) -> Option<(Pool, String)> {
-    if pool.dialect().name() != "postgres" {
+    if pool.dialect().kind() != rustango::sql::DialectKind::Postgres {
         return None;
     }
     let nanos = std::time::SystemTime::now()
@@ -2920,17 +2920,17 @@ async fn case_insensitive_change_applies(pool: &Pool) {
 
 /// The column comment the catalog holds; `None` on SQLite.
 async fn column_comment(pool: &Pool, t: &str, column: &str) -> Option<String> {
-    let sql = match pool.dialect().name() {
-        "postgres" => format!(
+    let sql = match pool.dialect().kind() {
+        rustango::sql::DialectKind::Postgres => format!(
             "SELECT COALESCE(col_description('{t}'::regclass, ordinal_position::int), '') \
              FROM information_schema.columns WHERE table_name = '{t}' AND column_name = '{column}' \
              AND table_schema = current_schema()"
         ),
-        "mysql" => format!(
+        rustango::sql::DialectKind::Mysql => format!(
             "SELECT CAST(COLUMN_COMMENT AS CHAR) FROM information_schema.COLUMNS \
              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{t}' AND COLUMN_NAME = '{column}'"
         ),
-        _ => return None,
+        rustango::sql::DialectKind::Sqlite => return None,
     };
     let got: Vec<(String,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
         .await
@@ -2943,7 +2943,9 @@ async fn db_comment_change_applies(pool: &Pool) {
     let t = "mad_cm_item";
     let chain = Chain::new(pool, "cm", &[t]).await;
     let with = |comment: Option<&str>| json!({"tables": [table(t, vec![id(), col("c", "i64", json!({"db_comment": comment}))])]});
-    let expect = |s: &str| (pool.dialect().name() != "sqlite").then(|| s.to_owned());
+    let expect = |s: &str| {
+        (pool.dialect().kind() != rustango::sql::DialectKind::Sqlite).then(|| s.to_owned())
+    };
     chain.step(pool, with(None)).await.expect("initial");
     chain.step(pool, with(Some("first"))).await.expect("added");
     assert_eq!(column_comment(pool, t, "c").await, expect("first"));
@@ -2969,13 +2971,15 @@ pub struct TcNote {
 
 /// The table comment the catalog holds; `None` on SQLite.
 async fn table_comment(pool: &Pool, t: &str) -> Option<String> {
-    let sql = match pool.dialect().name() {
-        "postgres" => format!("SELECT COALESCE(obj_description('{t}'::regclass, 'pg_class'), '')"),
-        "mysql" => format!(
+    let sql = match pool.dialect().kind() {
+        rustango::sql::DialectKind::Postgres => {
+            format!("SELECT COALESCE(obj_description('{t}'::regclass, 'pg_class'), '')")
+        }
+        rustango::sql::DialectKind::Mysql => format!(
             "SELECT CAST(TABLE_COMMENT AS CHAR) FROM information_schema.TABLES \
              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{t}'"
         ),
-        _ => return None,
+        rustango::sql::DialectKind::Sqlite => return None,
     };
     let got: Vec<(String,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
         .await
@@ -2993,7 +2997,9 @@ async fn db_table_comment_applies(pool: &Pool) {
         v["db_table_comment"] = json!(comment);
         json!({ "tables": [v] })
     };
-    let expect = |s: &str| (pool.dialect().name() != "sqlite").then(|| s.to_owned());
+    let expect = |s: &str| {
+        (pool.dialect().kind() != rustango::sql::DialectKind::Sqlite).then(|| s.to_owned())
+    };
     let model = serde_json::to_value(SchemaSnapshot::from_models(&[TcNote::SCHEMA])).unwrap();
     chain.step(pool, model).await.expect("created");
     assert_eq!(table_comment(pool, t).await, expect("first"));
@@ -3024,7 +3030,7 @@ async fn fk_index_drops(pool: &Pool) {
     // A failed run left the FK dropped; the step still brings it back.
     let (a, b) = ("mad_fk_author", "mad_fk_book");
     let chain = fk_index_chain(pool, "fk", a, b, false).await;
-    if pool.dialect().name() == "mysql" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Mysql {
         let fk_name = rustango::migrate::ddl::fk_constraint_name(b, "author_id");
         exec(pool, "ALTER TABLE {} DROP FOREIGN KEY {}", &[b, &fk_name])
             .await
@@ -3148,7 +3154,7 @@ async fn fk_index_drop_then_rename(pool: &Pool) {
 /// A shape the runner cannot rebuild at the DropIndex is an error, not a
 /// reason to drop the FK for good (#2244).
 async fn fk_index_drop_refuses_an_unknown_shape(pool: &Pool) {
-    if pool.dialect().name() != "mysql" {
+    if pool.dialect().kind() != rustango::sql::DialectKind::Mysql {
         return; // Only MySQL takes FKs off for an index drop.
     }
     let (a, b) = ("mad_fu_author", "mad_fu_book");
@@ -3176,7 +3182,7 @@ async fn fk_index_drop_refuses_an_unknown_shape(pool: &Pool) {
 /// `None` elsewhere.
 async fn composite_fks_needing(pool: &Pool, t: &str, index: &str) -> Option<Vec<(String,)>> {
     use rustango::sql::Dialect as _;
-    if pool.dialect().name() != "mysql" {
+    if pool.dialect().kind() != rustango::sql::DialectKind::Mysql {
         return None;
     }
     let sql = rustango::sql::MySql.composite_fks_needing_index_sql()?;
@@ -3225,7 +3231,7 @@ async fn composite_fk_index_drops(pool: &Pool) {
     };
     let needing = |index: &'static str| composite_fks_needing(pool, b, index);
     let mysql = |names: &[&str]| {
-        (pool.dialect().name() == "mysql")
+        (pool.dialect().kind() == rustango::sql::DialectKind::Mysql)
             .then(|| names.iter().map(|n| ((*n).to_owned(),)).collect::<Vec<_>>())
     };
     chain.step(pool, with(true, true)).await.expect("initial");
@@ -3415,18 +3421,18 @@ async fn m2m_column_rename_keeps_rows(pool: &Pool) {
 /// Each FK column of `t` with its live FK's name, sorted; `None` on SQLite,
 /// whose names are never looked up.
 async fn fk_names(pool: &Pool, t: &str) -> Option<Vec<(String, String)>> {
-    let sql = match pool.dialect().name() {
-        "postgres" => format!(
+    let sql = match pool.dialect().kind() {
+        rustango::sql::DialectKind::Postgres => format!(
             "SELECT a.attname::text, c.conname::text FROM pg_constraint c \
              JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1] \
              WHERE c.conrelid = '{t}'::regclass AND c.contype = 'f' ORDER BY 1"
         ),
-        "mysql" => format!(
+        rustango::sql::DialectKind::Mysql => format!(
             "SELECT CAST(COLUMN_NAME AS CHAR), CAST(CONSTRAINT_NAME AS CHAR) \
              FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = DATABASE() \
              AND TABLE_NAME = '{t}' AND REFERENCED_TABLE_NAME IS NOT NULL ORDER BY 1"
         ),
-        _ => return None,
+        rustango::sql::DialectKind::Sqlite => return None,
     };
     Some(
         rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
@@ -3445,7 +3451,7 @@ fn fks_named(pool: &Pool, t: &str, cols: &[&str]) -> Option<Vec<(String, String)
         })
         .collect();
     v.sort();
-    (pool.dialect().name() != "sqlite").then_some(v)
+    (pool.dialect().kind() != rustango::sql::DialectKind::Sqlite).then_some(v)
 }
 
 /// A renamed junction column's FK takes the new column's name, through a
@@ -3597,7 +3603,9 @@ async fn db_comment_on_create_and_add_column(pool: &Pool) {
     let chain = Chain::new(pool, "cc", &[t]).await;
     let a = col("a", "i64", json!({"db_comment": "on create"}));
     let b = col("b", "i64", json!({"db_comment": "on add"}));
-    let expect = |s: &str| (pool.dialect().name() != "sqlite").then(|| s.to_owned());
+    let expect = |s: &str| {
+        (pool.dialect().kind() != rustango::sql::DialectKind::Sqlite).then(|| s.to_owned())
+    };
     chain
         .step(pool, json!({"tables": [table(t, vec![id(), a.clone()])]}))
         .await
@@ -3643,7 +3651,7 @@ async fn dropped_exclude_unapplies(pool: &Pool) {
     chain.step(pool, with(true)).await.expect("initial");
     let name = chain.step(pool, with(false)).await.expect("dropped");
     chain.undo(pool, &name).await.expect("unapply");
-    if pool.dialect().name() != "postgres" {
+    if pool.dialect().kind() != rustango::sql::DialectKind::Postgres {
         return;
     }
     for id in [1, 2] {

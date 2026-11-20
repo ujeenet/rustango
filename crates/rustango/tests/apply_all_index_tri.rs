@@ -37,7 +37,7 @@ pub struct WideKey {
 /// Every registered table gone, so `apply_all_pool` starts clean.
 async fn setup(pool: &Pool) {
     use rustango::sql::raw_execute_pool;
-    let mysql = pool.dialect().name() == "mysql";
+    let mysql = pool.dialect().kind() == rustango::sql::DialectKind::Mysql;
     if mysql {
         let _ = raw_execute_pool(pool, "SET FOREIGN_KEY_CHECKS = 0", vec![]).await;
     }
@@ -50,7 +50,7 @@ async fn setup(pool: &Pool) {
 }
 
 async fn an_index_that_cannot_be_built_fails_the_run(pool: &Pool) {
-    let (model, index) = if pool.dialect().name() == "mysql" {
+    let (model, index) = if pool.dialect().kind() == rustango::sql::DialectKind::Mysql {
         ("WideKey", "aaidx_tri_wide_body_idx")
     } else {
         ("BadWhere", "aaidx_bad_where_idx")

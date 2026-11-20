@@ -75,7 +75,7 @@ async fn boot(edit: bool) -> Booted {
         let slug = unique(&format!("t{i}"));
         let db = tmp.path().join(format!("{slug}.db"));
         let mut org = Org::new(slug.clone());
-        org.backend_kind = "sqlite".into();
+        org.backend_kind = rustango::tenancy::BackendKind::Sqlite;
         org.database_url = Some(format!("sqlite://{}?mode=rwc", db.display()));
         org.insert(&registry).await.expect("seed org");
     }

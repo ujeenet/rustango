@@ -135,8 +135,8 @@ async fn seed_org(pool: &sqlx::PgPool, slug: &str, mode: StorageMode, db_url: Op
         o.id = Auto::default();
         o.slug = slug.to_owned();
         o.display_name = format!("display for {slug}");
-        o.storage_mode = mode.as_str().into();
-        o.backend_kind = "postgres".to_owned();
+        o.storage_mode = mode;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = db_url.map(str::to_owned);
         o.schema_name = None;
         o.host_pattern = Some(format!("{slug}.example.com"));
@@ -265,7 +265,7 @@ async fn post_edit_updates_only_editable_fields() {
     assert!(row.active);
     // Locked fields untouched.
     assert_eq!(row.slug, slug);
-    assert_eq!(row.storage_mode, StorageMode::Schema.as_str());
+    assert_eq!(row.storage_mode, StorageMode::Schema);
 }
 
 #[tokio::test]

@@ -48,8 +48,8 @@ async fn org_round_trip_insert_and_fetch() {
         o.id = Auto::default();
         o.slug = "acme".into();
         o.display_name = "ACME Corp".into();
-        o.storage_mode = StorageMode::Schema.as_str().into();
-        o.backend_kind = "postgres".to_owned();
+        o.storage_mode = StorageMode::Schema;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = None;
         o.schema_name = Some("acme".into());
         o.host_pattern = Some("acme.app.test".into());
@@ -63,7 +63,7 @@ async fn org_round_trip_insert_and_fetch() {
     let fetched: Vec<Org> = Org::objects().fetch_on(&pool).await.unwrap();
     assert_eq!(fetched.len(), 1);
     assert_eq!(fetched[0].slug, "acme");
-    assert_eq!(fetched[0].storage_mode, "schema");
+    assert_eq!(fetched[0].storage_mode, StorageMode::Schema);
     assert_eq!(fetched[0].host_pattern.as_deref(), Some("acme.app.test"));
 
     migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
@@ -84,8 +84,8 @@ async fn org_filter_by_slug_returns_single_match() {
             o.id = Auto::default();
             o.slug = slug.into();
             o.display_name = slug.to_uppercase();
-            o.storage_mode = StorageMode::Database.as_str().into();
-            o.backend_kind = "postgres".to_owned();
+            o.storage_mode = StorageMode::Database;
+            o.backend_kind = rustango::tenancy::BackendKind::Postgres;
             o.database_url = Some(format!("env://TENANT_{}_DB_URL", slug.to_uppercase()));
             o.schema_name = None;
             o.host_pattern = Some(format!("{slug}.app.test"));
@@ -102,7 +102,7 @@ async fn org_filter_by_slug_returns_single_match() {
         .unwrap();
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].slug, "globex");
-    assert_eq!(matches[0].storage_mode, "database");
+    assert_eq!(matches[0].storage_mode, StorageMode::Database);
     assert_eq!(
         matches[0].database_url.as_deref(),
         Some("env://TENANT_GLOBEX_DB_URL"),
@@ -135,8 +135,8 @@ async fn org_inactive_orgs_are_persistable_and_queryable() {
         o.id = Auto::default();
         o.slug = "frozen".into();
         o.display_name = "Frozen Tenant".into();
-        o.storage_mode = StorageMode::Schema.as_str().into();
-        o.backend_kind = "postgres".to_owned();
+        o.storage_mode = StorageMode::Schema;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = None;
         o.schema_name = Some("frozen".into());
         o.host_pattern = Some("frozen.app.test".into());
@@ -159,12 +159,13 @@ async fn org_inactive_orgs_are_persistable_and_queryable() {
 
 #[test]
 fn storage_mode_string_round_trip() {
+    use rustango::core::TextEnum as _;
     assert_eq!(StorageMode::Schema.as_str(), "schema");
     assert_eq!(StorageMode::Database.as_str(), "database");
-    assert_eq!(StorageMode::parse("schema").unwrap(), StorageMode::Schema);
+    assert_eq!(StorageMode::from_db("schema").unwrap(), StorageMode::Schema);
     assert_eq!(
-        StorageMode::parse("database").unwrap(),
+        StorageMode::from_db("database").unwrap(),
         StorageMode::Database
     );
-    assert!(StorageMode::parse("nope").is_err());
+    assert!(StorageMode::from_db("nope").is_err());
 }

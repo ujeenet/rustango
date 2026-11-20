@@ -160,8 +160,8 @@ impl rustango::tenancy::OrgResolver for CookbookTenant {
             o.id = rustango::sql::Auto::Set(1);
             o.slug = TENANT.to_owned();
             o.display_name = TENANT.to_owned();
-            o.storage_mode = "schema".into();
-            o.backend_kind = "postgres".into();
+            o.storage_mode = rustango::tenancy::StorageMode::Schema;
+            o.backend_kind = rustango::tenancy::BackendKind::Postgres;
             o.database_url = None;
         })))
     }

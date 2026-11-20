@@ -6,7 +6,7 @@ use sqlx::query::Query;
 
 use std::borrow::Cow;
 
-use super::bind_query;
+use super::bind_pg;
 use super::ExecError;
 use super::Postgres;
 use crate::core::InsertQuery;
@@ -30,10 +30,8 @@ where
     }
     query.validate()?;
     let stmt = Postgres.compile_insert_cow(query)?;
-    let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
-    for value in stmt.params {
-        q = bind_query(q, value);
-    }
+    let q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
+    let q = bind_pg(q, stmt.params)?;
     let row = q.fetch_one(executor).await?;
     Ok(row)
 }

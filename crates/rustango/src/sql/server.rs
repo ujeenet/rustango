@@ -403,7 +403,7 @@ mod tests {
             exists.sql,
             "SELECT count(*) FROM pg_roles WHERE rolname = $1"
         );
-        assert_eq!(exists.params.len(), 1);
+        assert_eq!(exists.params().len(), 1);
         assert_eq!(
             d.drop_login_sql(&login("u")).unwrap(),
             r#"DROP ROLE IF EXISTS "u""#
@@ -428,7 +428,7 @@ mod tests {
         assert!(d.discard_old_password_sql(&login("u")).is_none());
         let rights = d.tenant_rights_sql(&db("acme-shop"), &login("u")).unwrap();
         assert!(rights.sql.contains("ADMIN OPTION") && rights.sql.contains("pg_signal_backend"));
-        assert_eq!(rights.params.len(), 2);
+        assert_eq!(rights.params().len(), 2);
         let sessions = d
             .database_sessions_sql(&db("a"), "rustango-tenant:7")
             .unwrap();
@@ -521,7 +521,7 @@ mod tests {
             exists.sql,
             "SELECT count(*) FROM mysql.user WHERE User = ? AND Host = ?"
         );
-        assert_eq!(exists.params.len(), 2);
+        assert_eq!(exists.params().len(), 2);
         // A backtick in a host is doubled, not a way out of the quotes.
         let odd = login("u").with_host("a`b").unwrap();
         assert_eq!(

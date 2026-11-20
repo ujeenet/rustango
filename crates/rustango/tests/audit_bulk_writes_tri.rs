@@ -112,7 +112,7 @@ async fn audited_bulk_insert_names_every_pk(pool: &Pool) {
         },
     ];
     let res = Item::bulk_insert(&mut rows, pool).await;
-    if pool.dialect().name() == "mysql" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Mysql {
         assert!(
             matches!(res, Err(rustango::sql::ExecError::AuditUnsupported { .. })),
             "{res:?}"
@@ -293,7 +293,7 @@ async fn unauditable_bulk_writes_are_refused(pool: &Pool) {
             "{r:?}"
         );
     };
-    if pool.dialect().name() == "mysql" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Mysql {
         refused(Tag::bulk_insert_or_ignore_pool(&tags, pool).await);
         refused(Tag::bulk_upsert_pool(&tags, &["slug"], &["label"], pool).await);
     }
@@ -313,7 +313,7 @@ fn tag(slug: &str, label: &str) -> Tag {
 /// `bulk_upsert_pool` / `bulk_insert_or_ignore_pool` audit each row they
 /// wrote, as `create` or `update` (#1795).
 async fn conflict_bulk_inserts_audit_each_written_row(pool: &Pool) {
-    if pool.dialect().name() == "mysql" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Mysql {
         return;
     }
     tag("a", "one").insert(pool).await.expect("seed");
@@ -343,7 +343,7 @@ async fn conflict_bulk_inserts_audit_each_written_row(pool: &Pool) {
 
 /// A target that never matches (an unset `Auto` PK) inserts each row once.
 async fn bulk_upsert_on_unmatched_target_inserts_once(pool: &Pool) {
-    if pool.dialect().name() == "mysql" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Mysql {
         return;
     }
     let item = |name: &str| Item {
@@ -520,7 +520,7 @@ async fn bounded_update_writes_only_its_rows(pool: &Pool) {
 /// A failed audit insert rolls the data write back. SQLite only:
 /// dropping the shared audit table would break other live suites.
 async fn failed_audit_insert_rolls_back_the_write(pool: &Pool) {
-    if pool.dialect().name() != "sqlite" {
+    if pool.dialect().kind() != rustango::sql::DialectKind::Sqlite {
         return;
     }
     seed_many(pool, 3).await;

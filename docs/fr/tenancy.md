@@ -161,7 +161,9 @@ n'ouvrez pas de pages de tenant dans le navigateur utilisé pour la console.
 
 ## Modes de stockage
 
-Chaque tenant a un `storage_mode` : `schema` ou `database`.
+Chaque tenant a un `storage_mode` : `schema` ou `database`. En Rust,
+`Org.storage_mode` est un `StorageMode` et `Org.backend_kind` un `BackendKind`,
+tous deux stockés en texte (voir [champs enum](models.md#champs-enum-stockés-en-texte)).
 
 [![Mode schéma : une base Postgres avec un schéma par tenant, le search_path est le schéma du tenant plus les schémas qui ne contiennent que des extensions, et le pool refuse un schéma manquant, un schéma au nom d'un rôle ou un public qui contient une table de tenant absente du schéma. Mode base : chaque tenant a sa propre base sur le même backend que le registry](../img/tenancy-storage-modes.png)](../img/tenancy-storage-modes.png)
 
@@ -358,3 +360,21 @@ du tenant ; voir [purger un tenant](tenant-databases.md#6-purger-un-tenant).
 
 Détails : [la console opérateur](operator-console.md) et
 [les commandes de tenancy](manage.md#commandes-de-tenancy).
+
+### Une ligne illisible
+
+Si le `storage_mode` ou le `backend_kind` stocké d'un tenant n'est pas une valeur
+connue de cette version (une faute écrite à la main, par exemple `Schema`), ce
+tenant échoue à la résolution avec une erreur claire. Les autres tenants
+continuent, et une mauvaise ligne n'ouvre jamais le disjoncteur du registre. Les
+balayages (migrer tous les tenants, pré-chauffage, la liste des tenants dans la
+console et la CLI, la boucle de tâches par tenant) sautent la ligne et la signalent.
+
+```bash
+cargo run -- check-tenants                                # liste les lignes illisibles (échec) et les anciennes graphies
+cargo run -- repair-tenant acme --storage-mode schema     # réécrit la mauvaise valeur
+cargo run -- repair-tenant globex                         # réécrit une ancienne graphie comme `pg`
+```
+
+`repair-tenant` lit la ligne en texte brut et ne corrige qu'une valeur illisible
+ou une ancienne graphie ; il ne déplace jamais un tenant vers un autre mode.

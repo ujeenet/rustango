@@ -123,10 +123,10 @@ async fn keys_compare_exactly(pool: &Pool) {
 
 /// The schema (database on MySQL) the pool's unqualified names land in.
 async fn home_schema(pool: &Pool) -> String {
-    match pool.dialect().name() {
-        "postgres" => "public".into(),
-        "sqlite" => "main".into(),
-        _ => {
+    match pool.dialect().kind() {
+        rustango::sql::DialectKind::Postgres => "public".into(),
+        rustango::sql::DialectKind::Sqlite => "main".into(),
+        rustango::sql::DialectKind::Mysql => {
             let rows: Vec<(String,)> =
                 rustango::sql::raw_query_pool("SELECT DATABASE()", Vec::new(), pool)
                     .await

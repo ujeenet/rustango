@@ -616,16 +616,7 @@ pub async fn prefetch_soft<C, F>(
     extract: F,
 ) -> Result<::std::collections::HashMap<i64, Vec<C>>, ExecError>
 where
-    C: crate::core::Model
-        + crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + Send
-        + Unpin
-        + 'static,
+    C: crate::core::Model + crate::sql::DecodeModel + 'static,
     F: Fn(&C) -> i64,
 {
     use crate::sql::FetcherPool as _;
@@ -681,17 +672,7 @@ pub async fn prefetch_generic<C>(
     pairs: &[(i64, i64)],
 ) -> Result<::std::collections::HashMap<(i64, i64), C>, ExecError>
 where
-    C: crate::core::Model
-        + crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + crate::sql::HasPkValue
-        + Send
-        + Unpin
-        + 'static,
+    C: crate::core::Model + crate::sql::DecodeModel + crate::sql::HasPkValue + 'static,
 {
     use crate::sql::FetcherPool as _;
     if pairs.is_empty() {
@@ -1015,7 +996,10 @@ pub async fn ensure_table(pool: &crate::sql::Pool) -> Result<(), crate::sql::sql
     let idx_q = dialect.quote_ident("rustango_content_types_natural_key");
     let col_app = dialect.quote_ident("app_label");
     let col_name = dialect.quote_ident("model_name");
-    let supports_if_not_exists = matches!(dialect.name(), "postgres" | "sqlite");
+    let supports_if_not_exists = matches!(
+        dialect.kind(),
+        crate::sql::DialectKind::Postgres | crate::sql::DialectKind::Sqlite
+    );
     let index_ddl = if supports_if_not_exists {
         format!("CREATE UNIQUE INDEX IF NOT EXISTS {idx_q} ON {table_q} ({col_app}, {col_name})")
     } else {

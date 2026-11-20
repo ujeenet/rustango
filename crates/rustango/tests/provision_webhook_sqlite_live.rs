@@ -708,7 +708,7 @@ async fn half_made_at(b: &Booted, url: &str, slug: &str, key: &str, own: bool) -
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = slug.to_owned();
         o.display_name = slug.to_owned();
-        o.backend_kind = "sqlite".into();
+        o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
         o.database_url = Some(url.to_owned());
         o.active = false;
         o.host_pattern = Some(format!("{slug}.localhost"));
@@ -845,7 +845,7 @@ async fn a_purged_tenant_is_not_resumed_through_a_reused_id() {
     org.id = rustango::sql::Auto::Set(old_id);
     org.slug = slug.clone();
     org.display_name = slug.clone();
-    org.backend_kind = "sqlite".into();
+    org.backend_kind = rustango::tenancy::BackendKind::Sqlite;
     org.database_url = Some(format!(
         "sqlite://{}/t_{slug}.db?mode=rwc",
         holder.path().display()
@@ -981,7 +981,7 @@ async fn a_reaped_run_does_not_revive_a_deactivated_tenant() {
     let mut org = rustango::testkit::org();
     org.slug = slug.clone();
     org.display_name = slug.clone();
-    org.backend_kind = "sqlite".into();
+    org.backend_kind = rustango::tenancy::BackendKind::Sqlite;
     org.database_url = Some(format!(
         "sqlite://{}/t_{slug}.db?mode=rwc",
         holder.path().display()

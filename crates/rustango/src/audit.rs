@@ -32,12 +32,6 @@ pub(crate) mod cascade;
 
 use crate::sql::sqlx;
 
-// The PG-typed helpers below use PgRow / PgPool / Row directly. SQLite and
-// MySQL go through the `*_pool` helpers further down, which dispatch per
-// backend.
-#[cfg(feature = "postgres")]
-use crate::sql::sqlx::{postgres::PgRow, Row};
-
 /// Source of the change recorded in the audit log.
 ///
 /// `System` is the default: jobs, seed scripts, framework internals.
@@ -412,31 +406,6 @@ pub fn snapshot_changes(after: &[(&str, Value)]) -> Value {
     Value::Object(out)
 }
 
-/// Render the audit-log SELECT used by [`fetch_for_entity_pool`] through
-/// the dialect emitters, so no SQL here is hand-written per backend.
-fn audit_select_sql(dialect: &dyn crate::sql::Dialect) -> String {
-    use std::fmt::Write as _;
-    let t = dialect.quote_ident("rustango_audit_log");
-    let id = dialect.quote_ident("id");
-    let et = dialect.quote_ident("entity_table");
-    let ek = dialect.quote_ident("entity_pk");
-    let op = dialect.quote_ident("operation");
-    let src = dialect.quote_ident("source");
-    let ch = dialect.quote_ident("changes");
-    let oa = dialect.quote_ident("occurred_at");
-    let p1 = dialect.placeholder(1);
-    let p2 = dialect.placeholder(2);
-    let mut sql = String::new();
-    let _ = write!(
-        sql,
-        "SELECT {id}, {et}, {ek}, {op}, {src}, {ch}, {oa} \
-         FROM {t} \
-         WHERE {et} = {p1} AND {ek} = {p2} \
-         ORDER BY {oa} DESC, {id} DESC",
-    );
-    sql
-}
-
 /// Render the `DELETE … WHERE occurred_at < $1` used by
 /// [`cleanup_older_than_pool`] through the dialect emitter.
 ///
@@ -465,7 +434,7 @@ fn audit_cleanup_older_than_sql(dialect: &dyn crate::sql::Dialect) -> String {
     let t = dialect.quote_ident("rustango_audit_log");
     let oa = dialect.quote_ident("occurred_at");
     let p1 = dialect.placeholder(1);
-    if dialect.name() == "sqlite" {
+    if dialect.kind() == crate::sql::DialectKind::Sqlite {
         let fmt = crate::sql::SQLITE_DATETIME_FORMAT;
         let p2 = dialect.placeholder(2);
         return format!(
@@ -522,7 +491,6 @@ fn audit_cleanup_keep_last_n_sql(dialect: &dyn crate::sql::Dialect) -> String {
     access = "open",
     index_together = "entity_table, entity_pk"
 )]
-#[allow(dead_code)]
 pub struct AuditLog {
     #[rustango(primary_key)]
     pub id: crate::sql::Auto<i64>,
@@ -568,60 +536,18 @@ pub struct AuditEntry {
     pub occurred_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[cfg(feature = "postgres")]
-impl AuditEntry {
-    fn from_row(row: &PgRow) -> Result<Self, sqlx::Error> {
-        Ok(Self {
-            id: row.try_get("id")?,
-            entity_table: row.try_get("entity_table")?,
-            entity_pk: row.try_get("entity_pk")?,
-            operation: row.try_get("operation")?,
-            source: row.try_get("source")?,
-            changes: row.try_get("changes")?,
-            occurred_at: row.try_get("occurred_at")?,
-        })
-    }
-}
+impl TryFrom<AuditLog> for AuditEntry {
+    type Error = crate::sql::UnsavedRow;
 
-/// Per-backend row decoder. The `changes` column is JSONB on PG (decodes
-/// straight to `Value`), JSON on MySQL (via `sqlx::types::Json<Value>`)
-/// and TEXT on SQLite (parsed with `serde_json::from_str`).
-#[cfg(feature = "mysql")]
-impl AuditEntry {
-    fn from_my_row(row: &sqlx::mysql::MySqlRow) -> Result<Self, sqlx::Error> {
-        use sqlx::Row as _;
-        let changes: sqlx::types::Json<Value> = row.try_get("changes")?;
+    fn try_from(r: AuditLog) -> Result<Self, Self::Error> {
         Ok(Self {
-            id: row.try_get("id")?,
-            entity_table: row.try_get("entity_table")?,
-            entity_pk: row.try_get("entity_pk")?,
-            operation: row.try_get("operation")?,
-            source: row.try_get("source")?,
-            changes: changes.0,
-            occurred_at: row.try_get("occurred_at")?,
-        })
-    }
-}
-
-#[cfg(feature = "sqlite")]
-impl AuditEntry {
-    fn from_sq_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        use sqlx::Row as _;
-        let changes_text: String = row.try_get("changes")?;
-        let changes: Value = serde_json::from_str(&changes_text).map_err(|e| {
-            sqlx::Error::Decode(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("audit `changes` is not valid JSON: {e}"),
-            )))
-        })?;
-        Ok(Self {
-            id: row.try_get("id")?,
-            entity_table: row.try_get("entity_table")?,
-            entity_pk: row.try_get("entity_pk")?,
-            operation: row.try_get("operation")?,
-            source: row.try_get("source")?,
-            changes,
-            occurred_at: row.try_get("occurred_at")?,
+            id: r.id.require()?,
+            entity_table: r.entity_table,
+            entity_pk: r.entity_pk,
+            operation: r.operation,
+            source: r.source,
+            changes: r.changes,
+            occurred_at: r.occurred_at,
         })
     }
 }
@@ -748,6 +674,17 @@ pub async fn emit_one(pool: &crate::sql::Pool, entry: &PendingEntry) -> Result<(
     }
 }
 
+/// [`emit_one`] for a security event (a second factor, an SSO account change,
+/// an agent's action): outside any `atomic` block, so it is kept when the
+/// request around it rolls back. In a SQLite block it joins the block.
+#[cfg(any(feature = "admin", feature = "sso", feature = "mcp"))]
+pub(crate) async fn emit_security(
+    pool: &crate::sql::Pool,
+    entry: &PendingEntry,
+) -> Result<(), sqlx::Error> {
+    crate::sql::outside_atomic_on(pool, emit_one(pool, entry)).await
+}
+
 /// Codename a non-superuser needs to read the admin audit feed. Rows
 /// are still limited to tables they hold `{table}.view` on. Not a CRUD
 /// action, so no table's `{table}.view` grants it (#1979).
@@ -839,8 +776,8 @@ impl AuditFilter {
 /// any backend.
 ///
 /// # Errors
-/// Driver / SQL failures from the SELECT, or a JSON decode failure on
-/// SQLite when the `changes` TEXT column is not valid JSON.
+/// Driver / SQL failures from the SELECT, or a decode failure, for
+/// example SQLite `changes` TEXT that is not valid JSON.
 pub async fn list(
     pool: &crate::sql::Pool,
     filter: &AuditFilter,
@@ -848,6 +785,24 @@ pub async fn list(
     offset: i64,
 ) -> Result<Vec<AuditEntry>, sqlx::Error> {
     list_in(pool, filter, None, page_size, offset).await
+}
+
+/// The rows `filter` (and the optional `tables` scope) selects.
+fn audit_scope(
+    filter: &AuditFilter,
+    tables: Option<&[String]>,
+) -> crate::query::QuerySet<AuditLog> {
+    let mut qs = AuditLog::objects();
+    for (col, v) in filter.active_pairs() {
+        qs = qs.filter(col, v.to_owned());
+    }
+    if let Some(tables) = tables {
+        qs = qs.where_(crate::core::Column::is_in(
+            AuditLog::entity_table,
+            tables.to_vec(),
+        ));
+    }
+    qs
 }
 
 /// [`list`] limited to rows whose `entity_table` is in `tables`
@@ -859,47 +814,21 @@ pub(crate) async fn list_in(
     page_size: i64,
     offset: i64,
 ) -> Result<Vec<AuditEntry>, sqlx::Error> {
+    use crate::sql::FetcherPool as _;
     if tables.is_some_and(<[String]>::is_empty) {
         return Ok(Vec::new());
     }
-    let pairs = filter.active_pairs();
-    let sql = audit_list_sql(pool.dialect(), &pairs, tables);
-    let binds: Vec<&str> = pairs
-        .iter()
-        .map(|(_, v)| *v)
-        .chain(tables.unwrap_or_default().iter().map(String::as_str))
-        .collect();
-    // bind+fetch cannot be shared: `sqlx::Executor` is bound per Database.
-    // Only the decode is shared, via the `AuditEntry::from_*_row` helpers.
-    match pool {
-        #[cfg(feature = "postgres")]
-        crate::sql::Pool::Postgres(pg) => {
-            let mut q = sqlx::query(&sql);
-            for v in &binds {
-                q = q.bind(*v);
-            }
-            let rows = q.bind(page_size).bind(offset).fetch_all(pg).await?;
-            rows.iter().map(AuditEntry::from_row).collect()
-        }
-        #[cfg(feature = "mysql")]
-        crate::sql::Pool::Mysql(my) => {
-            let mut q = sqlx::query(&sql);
-            for v in &binds {
-                q = q.bind(*v);
-            }
-            let rows = q.bind(page_size).bind(offset).fetch_all(my).await?;
-            rows.iter().map(AuditEntry::from_my_row).collect()
-        }
-        #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(sq) => {
-            let mut q = sqlx::query(&sql);
-            for v in &binds {
-                q = q.bind(*v);
-            }
-            let rows = q.bind(page_size).bind(offset).fetch_all(sq).await?;
-            rows.iter().map(AuditEntry::from_sq_row).collect()
-        }
-    }
+    let rows = audit_scope(filter, tables)
+        .order_by(&[("occurred_at", true), ("id", true)])
+        .limit(page_size)
+        .offset(offset)
+        .fetch(pool)
+        .await
+        .map_err(exec_to_sqlx)?;
+    rows.into_iter()
+        .map(AuditEntry::try_from)
+        .collect::<Result<_, _>>()
+        .map_err(|e: crate::sql::UnsavedRow| exec_to_sqlx(e.into()))
 }
 
 /// Total row count for the audit-log pager, using the same
@@ -917,36 +846,14 @@ pub(crate) async fn count_in(
     filter: &AuditFilter,
     tables: Option<&[String]>,
 ) -> Result<i64, sqlx::Error> {
-    use crate::core::SqlValue;
+    use crate::sql::CounterPool as _;
     if tables.is_some_and(<[String]>::is_empty) {
         return Ok(0);
     }
-    let pairs = filter.active_pairs();
-    let t = pool.dialect().quote_ident("rustango_audit_log");
-    let sql = format!(
-        "SELECT COUNT(*) FROM {t}{}",
-        audit_where_sql(pool.dialect(), &pairs, tables)
-    );
-    let binds: Vec<SqlValue> = pairs
-        .iter()
-        .map(|(_, v)| SqlValue::String((*v).to_owned()))
-        .chain(
-            tables
-                .unwrap_or_default()
-                .iter()
-                .map(|t| SqlValue::String(t.clone())),
-        )
-        .collect();
-    // `raw_query_pool::<(i64,)>` decodes the single COUNT column the same
-    // way on every backend, so no per-backend arm is needed.
-    let rows: Vec<(i64,)> = crate::sql::raw_query_pool(&sql, binds, pool)
+    audit_scope(filter, tables)
+        .count(pool)
         .await
-        .map_err(|e| match e {
-            crate::sql::ExecError::Driver(err) => err,
-            other => sqlx::Error::Protocol(format!("{other}")),
-        })?;
-    // COUNT(*) always returns exactly one row.
-    Ok(rows.into_iter().next().map_or(0, |t| t.0))
+        .map_err(exec_to_sqlx)
 }
 
 /// `(value, count)` facets for the audit-log side panel, ordered by count
@@ -960,90 +867,36 @@ pub async fn facet_counts(
     pool: &crate::sql::Pool,
     column: &str,
 ) -> Result<Vec<(String, i64)>, sqlx::Error> {
-    // `column` is interpolated into the SQL, so it must be allowlisted.
-    if !matches!(column, "entity_table" | "operation" | "source") {
-        return Err(sqlx::Error::ColumnNotFound(column.to_owned()));
-    }
-    let sql = audit_facet_sql(pool.dialect(), column);
-    // The `(String, i64)` tuple decodes positionally, so it matches the
-    // `facet_value, facet_count` column order in `audit_facet_sql`.
-    crate::sql::raw_query_pool::<(String, i64)>(&sql, Vec::new(), pool)
+    use crate::core::{AggregateExpr, SqlValue};
+    let col: &'static str = match column {
+        "entity_table" => "entity_table",
+        "operation" => "operation",
+        "source" => "source",
+        _ => return Err(sqlx::Error::ColumnNotFound(column.to_owned())),
+    };
+    let rows = AuditLog::objects()
+        .values(&[col])
+        .annotate("facet_count", AggregateExpr::Count(None))
+        .order_by(&[("facet_count", true), (col, false)])
+        .fetch(pool)
         .await
-        .map_err(|e| match e {
-            crate::sql::ExecError::Driver(err) => err,
-            other => sqlx::Error::Protocol(format!("{other}")),
+        .map_err(exec_to_sqlx)?;
+    rows.into_iter()
+        .map(|mut r| match (r.remove(col), r.remove("facet_count")) {
+            (Some(SqlValue::String(v)), Some(SqlValue::I64(n))) => Ok((v, n)),
+            _ => Err(sqlx::Error::Protocol(
+                "audit facet: unexpected column type".into(),
+            )),
         })
+        .collect()
 }
 
-/// `WHERE col = ? AND … AND entity_table IN (?, …)`. Binds go `pairs`
-/// values first, then `tables`, matching the text order on every dialect.
-fn audit_where_sql(
-    dialect: &dyn crate::sql::Dialect,
-    pairs: &[(&'static str, &str)],
-    tables: Option<&[String]>,
-) -> String {
-    use std::fmt::Write as _;
-    let mut sql = String::new();
-    let mut idx = 1usize;
-    for (col, _) in pairs {
-        let prefix = if idx == 1 { " WHERE " } else { " AND " };
-        let _ = write!(
-            sql,
-            "{prefix}{} = {}",
-            dialect.quote_ident(col),
-            dialect.placeholder(idx)
-        );
-        idx += 1;
+/// Driver errors as-is; anything else travels as its message.
+fn exec_to_sqlx(e: crate::sql::ExecError) -> sqlx::Error {
+    match e {
+        crate::sql::ExecError::Driver(err) => err,
+        other => sqlx::Error::Protocol(other.to_string()),
     }
-    if let Some(tables) = tables {
-        let prefix = if idx == 1 { " WHERE " } else { " AND " };
-        let phs: Vec<String> = (idx..idx + tables.len())
-            .map(|i| dialect.placeholder(i))
-            .collect();
-        let _ = write!(
-            sql,
-            "{prefix}{} IN ({})",
-            dialect.quote_ident("entity_table"),
-            phs.join(", ")
-        );
-    }
-    sql
-}
-
-/// Render the paginated activity-feed SELECT. `pairs` gives the active
-/// filter columns in a stable order, so placeholder numbering is fixed.
-fn audit_list_sql(
-    dialect: &dyn crate::sql::Dialect,
-    pairs: &[(&'static str, &str)],
-    tables: Option<&[String]>,
-) -> String {
-    let t = dialect.quote_ident("rustango_audit_log");
-    let id = dialect.quote_ident("id");
-    let et = dialect.quote_ident("entity_table");
-    let ek = dialect.quote_ident("entity_pk");
-    let op = dialect.quote_ident("operation");
-    let src = dialect.quote_ident("source");
-    let ch = dialect.quote_ident("changes");
-    let oa = dialect.quote_ident("occurred_at");
-    let bind_idx = 1 + pairs.len() + tables.map_or(0, <[String]>::len);
-    let p_limit = dialect.placeholder(bind_idx);
-    let p_offset = dialect.placeholder(bind_idx + 1);
-    format!(
-        "SELECT {id}, {et}, {ek}, {op}, {src}, {ch}, {oa} FROM {t}{} \
-         ORDER BY {oa} DESC, {id} DESC LIMIT {p_limit} OFFSET {p_offset}",
-        audit_where_sql(dialect, pairs, tables)
-    )
-}
-
-/// Render the facet group-by. `column` must already be allowlisted by
-/// [`facet_counts`].
-fn audit_facet_sql(dialect: &dyn crate::sql::Dialect, column: &str) -> String {
-    let t = dialect.quote_ident("rustango_audit_log");
-    let col = dialect.quote_ident(column);
-    format!(
-        "SELECT {col} AS facet_value, COUNT(*) AS facet_count \
-         FROM {t} GROUP BY {col} ORDER BY facet_count DESC, {col}"
-    )
 }
 
 /// Batched audit emit on any backend: chunked multi-row INSERTs, all in
@@ -1060,13 +913,9 @@ pub async fn emit_many(
     if entries.is_empty() {
         return Ok(());
     }
-    let to_sqlx = |e: crate::sql::ExecError| match e {
-        crate::sql::ExecError::Driver(err) => err,
-        other => sqlx::Error::Protocol(format!("{other}")),
-    };
-    let mut tx = crate::sql::write_tx(pool).await.map_err(to_sqlx)?;
-    emit_many_tx(&mut tx, entries).await.map_err(to_sqlx)?;
-    tx.commit().await.map_err(to_sqlx)
+    let mut tx = crate::sql::write_tx(pool).await.map_err(exec_to_sqlx)?;
+    emit_many_tx(&mut tx, entries).await.map_err(exec_to_sqlx)?;
+    tx.commit().await.map_err(exec_to_sqlx)
 }
 
 /// Old name of [`emit_one`].
@@ -1107,38 +956,18 @@ pub async fn fetch_for_entity_pool(
     entity_table: &str,
     entity_pk: &str,
 ) -> Result<Vec<AuditEntry>, sqlx::Error> {
-    // One SELECT template for every backend; only quoting and
-    // placeholders differ. Decode uses the per-backend `from_*_row`.
-    let sql = audit_select_sql(pool.dialect());
-    match pool {
-        #[cfg(feature = "postgres")]
-        crate::sql::Pool::Postgres(pg) => {
-            let rows = sqlx::query(&sql)
-                .bind(entity_table)
-                .bind(entity_pk)
-                .fetch_all(pg)
-                .await?;
-            rows.iter().map(AuditEntry::from_row).collect()
-        }
-        #[cfg(feature = "mysql")]
-        crate::sql::Pool::Mysql(my) => {
-            let rows = sqlx::query(&sql)
-                .bind(entity_table)
-                .bind(entity_pk)
-                .fetch_all(my)
-                .await?;
-            rows.iter().map(AuditEntry::from_my_row).collect()
-        }
-        #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(sq) => {
-            let rows = sqlx::query(&sql)
-                .bind(entity_table)
-                .bind(entity_pk)
-                .fetch_all(sq)
-                .await?;
-            rows.iter().map(AuditEntry::from_sq_row).collect()
-        }
-    }
+    use crate::sql::FetcherPool as _;
+    let rows = AuditLog::objects()
+        .filter("entity_table", entity_table.to_owned())
+        .filter("entity_pk", entity_pk.to_owned())
+        .order_by(&[("occurred_at", true), ("id", true)])
+        .fetch(pool)
+        .await
+        .map_err(exec_to_sqlx)?;
+    rows.into_iter()
+        .map(AuditEntry::try_from)
+        .collect::<Result<_, _>>()
+        .map_err(|e: crate::sql::UnsavedRow| exec_to_sqlx(e.into()))
 }
 
 /// Delete audit entries older than a cutoff, on every backend.
@@ -1170,15 +999,12 @@ pub async fn cleanup_older_than_pool(
     // normalises the stored column, not the cutoff, so no legacy-shaped
     // value is ever bound here.
     let mut binds = vec![SqlValue::DateTime(cutoff_ts)];
-    if pool.dialect().name() == "sqlite" {
+    if pool.dialect().kind() == crate::sql::DialectKind::Sqlite {
         binds.push(SqlValue::DateTime(cutoff_ts));
     }
     crate::sql::raw_execute_pool(pool, &sql, binds)
         .await
-        .map_err(|e| match e {
-            crate::sql::ExecError::Driver(err) => err,
-            other => sqlx::Error::Protocol(format!("{other}")),
-        })
+        .map_err(exec_to_sqlx)
 }
 
 /// Keep only the newest `keep` audit entries per row, on every backend.
@@ -1201,10 +1027,7 @@ pub async fn cleanup_keep_last_n_pool(
     let sql = audit_cleanup_keep_last_n_sql(pool.dialect());
     crate::sql::raw_execute_pool(pool, &sql, vec![SqlValue::I64(keep)])
         .await
-        .map_err(|e| match e {
-            crate::sql::ExecError::Driver(err) => err,
-            other => sqlx::Error::Protocol(format!("{other}")),
-        })
+        .map_err(exec_to_sqlx)
 }
 
 /// One `audit-cleanup` rule, shared by the single-database and tenancy verbs.
@@ -1335,7 +1158,7 @@ pub async fn save_one_with_audit(
     query.validate()?;
     let stmt = pool.dialect().compile_update(query)?;
     let mut tx = crate::sql::write_tx(pool).await?;
-    let affected = crate::sql::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
+    let affected = crate::sql::raw_execute_stmt_tx(&mut tx, stmt).await?;
     if affected > 0 {
         emit_one_tx(&mut tx, entry).await?;
     }
@@ -1413,7 +1236,7 @@ pub(crate) async fn update_one_with_row_diff_tx(
     };
     let entry = entry_of(&row);
     let affected = match stmt {
-        Some(stmt) => crate::sql::raw_execute_tx(tx, &stmt.sql, stmt.params).await?,
+        Some(stmt) => crate::sql::raw_execute_stmt_tx(tx, stmt).await?,
         None => 0,
     };
     let entry = entry.filter(|_| affected > 0);
@@ -1556,14 +1379,7 @@ async fn rows_in_tx<M>(
     lock: bool,
 ) -> Result<Vec<M>, crate::sql::ExecError>
 where
-    M: crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    M: crate::sql::DecodeModel,
 {
     let mut select = crate::core::SelectQuery::new(model).where_clause(where_clause);
     if lock {
@@ -1603,15 +1419,7 @@ enum Pages<M> {
 
 impl<M> Pages<M>
 where
-    M: crate::sql::HasPkValue
-        + crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    M: crate::sql::HasPkValue + crate::sql::DecodeModel,
 {
     async fn start(
         tx: &mut crate::sql::PoolTx<'_>,
@@ -1683,15 +1491,7 @@ pub async fn delete_many_with_audit<M>(
     entry: impl Fn(&M) -> PendingEntry,
 ) -> Result<u64, crate::sql::ExecError>
 where
-    M: crate::sql::HasPkValue
-        + crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    M: crate::sql::HasPkValue + crate::sql::DecodeModel,
 {
     delete_each_with_audit(pool, std::slice::from_ref(query), entry).await
 }
@@ -1708,15 +1508,7 @@ pub async fn delete_each_with_audit<M>(
     entry: impl Fn(&M) -> PendingEntry,
 ) -> Result<u64, crate::sql::ExecError>
 where
-    M: crate::sql::HasPkValue
-        + crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    M: crate::sql::HasPkValue + crate::sql::DecodeModel,
 {
     let mut tx = crate::sql::write_tx(pool).await?;
     let mut affected = 0;
@@ -1753,15 +1545,7 @@ pub async fn update_many_with_audit<M>(
     entry: impl Fn(&M) -> PendingEntry,
 ) -> Result<u64, crate::sql::ExecError>
 where
-    M: crate::sql::HasPkValue
-        + crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    M: crate::sql::HasPkValue + crate::sql::DecodeModel,
 {
     let pk = query
         .model
@@ -1847,15 +1631,7 @@ pub async fn cascade_rows<M>(
     entry: impl Fn(&M) -> PendingEntry,
 ) -> Result<Vec<(crate::core::SqlValue, PendingEntry)>, crate::sql::ExecError>
 where
-    M: crate::sql::HasPkValue
-        + crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    M: crate::sql::HasPkValue + crate::sql::DecodeModel,
 {
     let found: Vec<M> = rows_in_tx(tx, model, rows, true).await?;
     Ok(found
@@ -2000,14 +1776,7 @@ pub async fn record_create<M>(
     entry: impl Fn(&M) -> PendingEntry,
 ) -> Result<(), crate::sql::ExecError>
 where
-    M: crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    M: crate::sql::DecodeModel,
 {
     record_by_pk(
         tx,
@@ -2032,14 +1801,7 @@ pub async fn record_update<M>(
     entry: impl Fn(&M) -> PendingEntry,
 ) -> Result<(), crate::sql::ExecError>
 where
-    M: crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    M: crate::sql::DecodeModel,
 {
     record_by_pk(
         tx,
@@ -2059,14 +1821,7 @@ async fn record_by_pk<M>(
     missing: &'static str,
 ) -> Result<(), crate::sql::ExecError>
 where
-    M: crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    M: crate::sql::DecodeModel,
 {
     let rows: Vec<M> = rows_in_tx(tx, model, pk_in(model, vec![pk])?, false).await?;
     if rows.len() != 1 {
@@ -2225,14 +1980,7 @@ pub async fn bulk_update_with_audit<M>(
     entry: impl Fn(&M) -> PendingEntry,
 ) -> Result<u64, crate::sql::ExecError>
 where
-    M: crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    M: crate::sql::DecodeModel,
 {
     if query.rows.is_empty() {
         return Ok(0);
@@ -2284,14 +2032,7 @@ pub async fn bulk_insert_with_audit<M>(
     entry: impl Fn(&M, AuditOp) -> PendingEntry,
 ) -> Result<(), crate::sql::ExecError>
 where
-    M: crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    M: crate::sql::DecodeModel,
 {
     if !pool.dialect().supports_returning() {
         return Err(crate::sql::ExecError::AuditUnsupported {
@@ -2379,38 +2120,6 @@ pub async fn truncate_with_audit(
     Ok(affected)
 }
 
-/// Postgres bind helper, exposed so generated bodies on the audited
-/// `save_pool` diff path can bind `SqlValue` arguments to a transaction.
-/// Not part of the public API.
-#[doc(hidden)]
-#[cfg(feature = "postgres")]
-pub fn __bind_value_pg(
-    q: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments>,
-    value: crate::core::SqlValue,
-) -> sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments> {
-    crate::sql::bind_query(q, value)
-}
-
-/// MySQL counterpart of [`__bind_value_pg`].
-#[doc(hidden)]
-#[cfg(feature = "mysql")]
-pub fn __bind_value_my(
-    q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments>,
-    value: crate::core::SqlValue,
-) -> sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> {
-    crate::sql::bind_query_my(q, value)
-}
-
-/// SQLite counterpart of [`__bind_value_pg`].
-#[doc(hidden)]
-#[cfg(feature = "sqlite")]
-pub fn __bind_value_sqlite<'q>(
-    q: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>,
-    value: crate::core::SqlValue,
-) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>> {
-    crate::sql::bind_query_sqlite(q, value)
-}
-
 /// The BEFORE read of an audited update: `columns` of the row at `pk_value`.
 #[doc(hidden)]
 #[must_use]
@@ -2465,7 +2174,7 @@ where
     let _ = (&decode_before_pg, &decode_before_my, &decode_before_sqlite);
     update_query.validate()?;
     let stmt = pool.dialect().compile_update(update_query)?;
-    let before = pool.dialect().compile_select(before_query)?;
+    let (before_sql, before_params) = pool.dialect().compile_select(before_query)?.into_parts();
     // SQLite's write lock at BEGIN: a deferred read-then-write fails at
     // once if another connection commits in between.
     let mut tx = crate::sql::write_tx(pool).await?;
@@ -2474,36 +2183,30 @@ where
     // A failed pre-read must not let the UPDATE commit unaudited.
     let before_pairs: Option<Vec<(&'static str, serde_json::Value)>> = match &mut tx.conn {
         #[cfg(feature = "postgres")]
-        crate::sql::TxConn::Postgres(t) => before
-            .params
-            .iter()
-            .cloned()
-            .fold(sqlx::query(&before.sql), crate::sql::bind_query)
-            .fetch_optional(&mut **t)
-            .await?
-            .map(|row| decode_before_pg(&row)),
+        crate::sql::TxConn::Postgres(t) => {
+            crate::sql::bind_pg(sqlx::query(&before_sql), before_params)?
+                .fetch_optional(&mut **t)
+                .await?
+                .map(|row| decode_before_pg(&row))
+        }
         #[cfg(feature = "mysql")]
-        crate::sql::TxConn::Mysql(t) => before
-            .params
-            .iter()
-            .cloned()
-            .fold(sqlx::query(&before.sql), crate::sql::bind_query_my)
-            .fetch_optional(&mut **t)
-            .await?
-            .map(|row| decode_before_my(&row)),
+        crate::sql::TxConn::Mysql(t) => {
+            crate::sql::bind_my(sqlx::query(&before_sql), before_params)?
+                .fetch_optional(&mut **t)
+                .await?
+                .map(|row| decode_before_my(&row))
+        }
         #[cfg(feature = "sqlite")]
-        crate::sql::TxConn::Sqlite(t) => before
-            .params
-            .iter()
-            .cloned()
-            .fold(sqlx::query(&before.sql), crate::sql::bind_query_sqlite)
-            .fetch_optional(&mut **t)
-            .await?
-            .map(|row| decode_before_sqlite(&row)),
+        crate::sql::TxConn::Sqlite(t) => {
+            crate::sql::bind_sqlite(sqlx::query(&before_sql), before_params)?
+                .fetch_optional(&mut **t)
+                .await?
+                .map(|row| decode_before_sqlite(&row))
+        }
     };
     let affected = finish_update_with_audit_diff(
         &mut tx,
-        &stmt,
+        stmt,
         before_pairs,
         &after_pairs,
         entity_table,
@@ -2518,14 +2221,14 @@ where
 /// UPDATE, then emit the audit row if a BEFORE snapshot was captured.
 async fn finish_update_with_audit_diff(
     tx: &mut crate::sql::PoolTx<'_>,
-    stmt: &crate::sql::CompiledStatement,
+    stmt: crate::sql::CompiledStatement,
     before_pairs: Option<Vec<(&'static str, serde_json::Value)>>,
     after_pairs: &[(&'static str, serde_json::Value)],
     entity_table: &'static str,
     entity_pk: &str,
 ) -> Result<u64, crate::sql::ExecError> {
     // Return rows-affected: 0 means the PK no longer exists.
-    let _affected = crate::sql::raw_execute_tx(tx, &stmt.sql, stmt.params.clone()).await?;
+    let _affected = crate::sql::raw_execute_stmt_tx(tx, stmt).await?;
     let entry = before_pairs.and_then(|before| {
         PendingEntry::update_diff(entity_table, entity_pk.to_owned(), &before, after_pairs)
     });

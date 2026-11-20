@@ -50,7 +50,7 @@ async fn items(pool: &Pool) -> Vec<i64> {
 /// SQLite takes the write lock for the whole block, so a write of its own
 /// on the same database waits for the block: there is nothing to survive.
 fn one_writer(pool: &Pool) -> bool {
-    pool.dialect().name() == "sqlite"
+    pool.dialect().kind() == rustango::sql::DialectKind::Sqlite
 }
 
 /// `load_all_pool` joins the caller's block and rolls back with it.

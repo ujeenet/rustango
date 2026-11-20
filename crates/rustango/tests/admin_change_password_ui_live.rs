@@ -71,8 +71,8 @@ async fn change_password_anonymous_redirects_to_login() {
         o.id = Auto::default();
         o.slug = slug.clone();
         o.display_name = "Test".into();
-        o.storage_mode = StorageMode::Database.as_str().into();
-        o.backend_kind = "postgres".to_owned();
+        o.storage_mode = StorageMode::Database;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = Some(url.clone());
         o.schema_name = None;
         o.host_pattern = Some(host_pattern.clone());
@@ -128,8 +128,8 @@ async fn change_password_authenticated_get_renders_form() {
         o.id = Auto::default();
         o.slug = slug.clone();
         o.display_name = "Test".into();
-        o.storage_mode = StorageMode::Database.as_str().into();
-        o.backend_kind = "postgres".to_owned();
+        o.storage_mode = StorageMode::Database;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = Some(url.clone());
         o.schema_name = None;
         o.host_pattern = Some(host_pattern.clone());
@@ -215,8 +215,8 @@ async fn change_password_post_updates_stored_hash_when_current_matches() {
         o.id = Auto::default();
         o.slug = slug.clone();
         o.display_name = "Test".into();
-        o.storage_mode = StorageMode::Database.as_str().into();
-        o.backend_kind = "postgres".to_owned();
+        o.storage_mode = StorageMode::Database;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = Some(url.clone());
         o.schema_name = None;
         o.host_pattern = Some(host_pattern.clone());
@@ -305,8 +305,8 @@ async fn change_password_post_rejects_wrong_current() {
         o.id = Auto::default();
         o.slug = slug.clone();
         o.display_name = "Test".into();
-        o.storage_mode = StorageMode::Database.as_str().into();
-        o.backend_kind = "postgres".to_owned();
+        o.storage_mode = StorageMode::Database;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = Some(url.clone());
         o.schema_name = None;
         o.host_pattern = Some(host_pattern.clone());
@@ -407,8 +407,8 @@ async fn session_minted_before_password_rotation_is_rejected() {
         o.id = Auto::default();
         o.slug = slug.clone();
         o.display_name = "Test".into();
-        o.storage_mode = StorageMode::Database.as_str().into();
-        o.backend_kind = "postgres".to_owned();
+        o.storage_mode = StorageMode::Database;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = Some(url.clone());
         o.schema_name = None;
         o.host_pattern = Some(host_pattern.clone());

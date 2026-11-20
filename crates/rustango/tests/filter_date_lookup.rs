@@ -39,7 +39,7 @@ fn year_lookup_emits_extract_year_eq() {
         stmt.sql
     );
     assert!(stmt.sql.contains(" = $1"), "year=$1: {}", stmt.sql);
-    assert_eq!(stmt.params, vec![SqlValue::I64(2026)]);
+    assert_eq!(stmt.params(), vec![SqlValue::I64(2026)]);
 }
 
 #[test]

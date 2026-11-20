@@ -78,10 +78,10 @@ fn pg_binds_array_as_single_param() {
     let stmt = Postgres.compile_select(&q).unwrap();
     // Single parameter — three elements bundled into one Array value,
     // not three placeholders.
-    assert_eq!(stmt.params.len(), 1, "single PG array parameter");
+    assert_eq!(stmt.params().len(), 1, "single PG array parameter");
     use rustango::core::SqlValue;
-    let SqlValue::Array(elems) = &stmt.params[0] else {
-        panic!("expected SqlValue::Array, got {:?}", stmt.params[0]);
+    let SqlValue::Array(elems) = &stmt.params()[0] else {
+        panic!("expected SqlValue::Array, got {:?}", stmt.params()[0]);
     };
     assert_eq!(elems.len(), 3);
 }
@@ -210,10 +210,10 @@ fn parser_promotes_list_to_array_so_writer_accepts_it() {
         .unwrap();
     let stmt = Postgres.compile_select(&q).unwrap();
     assert!(stmt.sql.contains("@>"));
-    assert_eq!(stmt.params.len(), 1);
+    assert_eq!(stmt.params().len(), 1);
     assert!(
-        matches!(&stmt.params[0], SqlValue::Array(_)),
+        matches!(&stmt.params()[0], SqlValue::Array(_)),
         "parser must promote List → Array for writer; got {:?}",
-        stmt.params[0]
+        stmt.params()[0]
     );
 }

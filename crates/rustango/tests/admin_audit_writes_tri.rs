@@ -191,7 +191,7 @@ async fn setup(pool: &Pool) {
 /// Make the next audit write fail: a too-long key on PG and MySQL, which
 /// check `entity_pk`'s length; no audit table on the private SQLite pool.
 async fn break_audit(pool: &Pool) -> String {
-    if pool.backend_name() == "sqlite" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Sqlite {
         rustango::testkit::matrix::drop_table(pool, "rustango_audit_log").await;
     }
     "k".repeat(300)
@@ -567,7 +567,7 @@ async fn deletes_and_bulk_actions_are_audited(pool: &Pool) {
 /// The status a refused write answers with: the missing-table page on
 /// SQLite (no audit table), a 500 on PG and MySQL (an overlong key).
 fn refusal_status(pool: &Pool) -> StatusCode {
-    if pool.backend_name() == "sqlite" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Sqlite {
         StatusCode::SERVICE_UNAVAILABLE
     } else {
         StatusCode::INTERNAL_SERVER_ERROR

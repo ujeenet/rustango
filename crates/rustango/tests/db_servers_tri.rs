@@ -115,7 +115,7 @@ impl Env {
     }
 
     fn backend(&self) -> BackendKind {
-        BackendKind::parse(self.registry.dialect().name()).unwrap()
+        BackendKind::of_pool(&self.registry)
     }
 
     fn dir(&self) -> PathBuf {
@@ -467,7 +467,7 @@ async fn a_server_in_use_is_not_removed(pool: &Pool) {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = "acme".into();
         o.display_name = "acme".into();
-        o.backend_kind = env.backend().as_str().into();
+        o.backend_kind = env.backend();
         o.database_url = Some(tenant_url);
     });
     org.save(&env.registry).await.expect("insert org");
@@ -516,7 +516,7 @@ async fn an_unknown_tenant_url_blocks_removal(pool: &Pool) {
         let mut org = rustango::testkit::org_with(|o| {
             o.slug = slug.into();
             o.display_name = slug.into();
-            o.backend_kind = env.backend().as_str().into();
+            o.backend_kind = env.backend();
             o.database_url = url;
         });
         org.save(&env.registry).await.expect("insert org");

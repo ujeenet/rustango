@@ -415,7 +415,7 @@ fn render() -> String {
         for d in dialects {
             out.push_str(&format!("== {name} / {} ==\n", d.name()));
             match f(d) {
-                Ok(s) => out.push_str(&format!("{}\n{:?}\n", s.sql, s.params)),
+                Ok(s) => out.push_str(&format!("{}\n{:?}\n", s.sql, s.params())),
                 Err(e) => out.push_str(&format!("ERR {e}\n")),
             }
         }

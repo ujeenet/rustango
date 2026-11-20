@@ -21,6 +21,7 @@ mod schema;
 pub mod subquery;
 #[cfg(any(feature = "admin", feature = "template_views"))]
 pub(crate) mod table_policy;
+pub mod text_enum;
 mod validate;
 mod value;
 pub mod window;
@@ -47,6 +48,7 @@ pub use schema::{
 };
 #[doc(hidden)]
 pub use schema::{AdminConfigParts, FieldSchemaParts, GenericM2MEntry, ModelSchemaParts};
+pub use text_enum::{TextEnum, UnknownVariant};
 #[doc(hidden)]
 pub use validate::names as __validator_names;
 pub use validate::validate_value;

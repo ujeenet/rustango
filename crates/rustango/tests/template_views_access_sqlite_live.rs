@@ -473,8 +473,8 @@ mod tenant {
         let org = rustango::testkit::org_with(|o| {
             o.id = Auto::Set(1);
             o.slug = "acme".into();
-            o.storage_mode = "database".into();
-            o.backend_kind = "sqlite".into();
+            o.storage_mode = rustango::tenancy::StorageMode::Database;
+            o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
             o.database_url = Some(url);
         });
         let ctx = context(org).await;

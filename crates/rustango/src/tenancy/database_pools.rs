@@ -234,13 +234,7 @@ impl<DB: Database> DatabasePools<DB> {
     pub async fn pool_for_org(&self, org: &Org) -> Result<DatabasePool<DB>, TenancyError> {
         // Backend-kind match — refuse to silently build the wrong
         // backend's pool for a mis-routed tenant.
-        let want = BackendKind::parse(&org.backend_kind).map_err(|got| {
-            TenancyError::Validation(format!(
-                "org `{}` has unknown backend_kind `{got}` \
-                 (expected `postgres`, `mysql`, or `sqlite`)",
-                org.slug
-            ))
-        })?;
+        let want = org.backend_kind;
         if want != self.backend {
             return Err(TenancyError::Validation(format!(
                 "org `{}` is configured for backend `{want}` \
@@ -251,13 +245,7 @@ impl<DB: Database> DatabasePools<DB> {
             )));
         }
 
-        let mode = StorageMode::parse(&org.storage_mode).map_err(|got| {
-            TenancyError::Validation(format!(
-                "org `{}` has unknown storage_mode `{got}` \
-                 (expected `schema` or `database`)",
-                org.slug
-            ))
-        })?;
+        let mode = org.storage_mode;
         if mode != StorageMode::Database {
             return Err(TenancyError::Validation(format!(
                 "org `{}` storage_mode is `{mode}` but DatabasePools \
@@ -443,7 +431,7 @@ mod tests {
             let org = |slug: &str| {
                 crate::testkit::org_with(|o| {
                     o.slug = slug.into();
-                    o.backend_kind = "sqlite".into();
+                    o.backend_kind = crate::tenancy::BackendKind::Sqlite;
                     o.database_url = Some("sqlite::memory:".into());
                 })
             };

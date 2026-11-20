@@ -499,7 +499,7 @@ async fn replace(
     let mut tx = crate::sql::write_tx(pool).await?;
     for lock in locks {
         let stmt = pool.dialect().compile_select(&lock)?;
-        super::executor::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
+        super::executor::raw_execute_stmt_tx(&mut tx, stmt).await?;
     }
     let mut old = SelectQuery::new(junction).where_clause(WhereExpr::and_predicates(owner.clone()));
     old.projection = Some(vec![dst_col]);

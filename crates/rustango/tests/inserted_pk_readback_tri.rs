@@ -221,7 +221,7 @@ async fn db_default_pk_is_read_or_refused_before_the_insert(pool: &Pool) {
         .expect("valid");
     let committed = form.commit_pool(pool).await;
     let rows = Coupon::objects().count(pool).await.expect("count");
-    if pool.dialect().name() == "mysql" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Mysql {
         assert_eq!(loc, None, "MySQL cannot know the new PK");
         assert!(committed.is_err(), "{committed:?}");
         assert_eq!(rows, 0, "refused before the INSERT");
@@ -239,7 +239,7 @@ async fn db_default_integer_pk_is_read_or_refused(pool: &Pool) {
         .returning(vec!["id"]);
     let inserted = rustango::sql::insert_returning_pool(pool, &q).await;
     let rows = Ticket::objects().count(pool).await.expect("count");
-    if pool.dialect().name() == "mysql" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Mysql {
         assert!(inserted.is_err(), "{inserted:?}");
         assert_eq!(rows, 0, "refused before the INSERT");
     } else {
@@ -270,7 +270,7 @@ async fn integer_pk_inserts_beside_non_integer_returning_columns(pool: &Pool) {
     );
     assert_eq!(Line::objects().count(pool).await.expect("count"), 1);
     // MySQL has no RETURNING, so the placeholder stays until a re-read.
-    let want = if pool.dialect().name() == "mysql" {
+    let want = if pool.dialect().kind() == rustango::sql::DialectKind::Mysql {
         0.0
     } else {
         3.0
@@ -367,7 +367,7 @@ async fn an_insert_of_only_defaults_writes_them(pool: &Pool) {
     );
 
     // Bulk reads the ids back, which MySQL has no RETURNING for.
-    if pool.dialect().name() != "mysql" {
+    if pool.dialect().kind() != rustango::sql::DialectKind::Mysql {
         let q = rustango::core::BulkInsertQuery::new(Flag::SCHEMA, vec![], vec![vec![], vec![]])
             .returning(vec!["id"]);
         rustango::sql::bulk_insert_pool(pool, &q)

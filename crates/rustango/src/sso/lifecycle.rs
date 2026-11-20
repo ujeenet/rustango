@@ -362,15 +362,16 @@ async fn deactivate(
         .values_list_flat("user_id")
         .compile()
         .map_err(|e| e.to_string())?;
-    let n = User::objects()
+    let deactivate = User::objects()
         .filter("id", user_id)
         .filter("is_superuser", false)
         .filter("active", true)
         .where_not_in_subquery("id", used_since)
         .update()
         .set("active", false)
-        .set("sessions_revoked_at", now)
-        .execute_pool(pool)
+        .set("sessions_revoked_at", now);
+    // Commits with its audit row, whatever block the caller runs.
+    let n = crate::sql::outside_atomic_on(pool, deactivate.execute_pool(pool))
         .await
         .map_err(|e| format!("deactivate user {user_id}: {e}"))?;
     if n == 0 {
@@ -383,7 +384,7 @@ async fn deactivate(
         source: crate::audit::AuditSource::Custom("sso".into()),
         changes: serde_json::json!({"event": "sso_deactivated_idle", "active": false}),
     };
-    if let Err(e) = crate::audit::emit_one(pool, &entry).await {
+    if let Err(e) = crate::audit::emit_security(pool, &entry).await {
         tracing::error!(target: "rustango::sso", user_id, error = %e, "an idle deactivation was NOT written to the audit log");
     }
     Ok(true)

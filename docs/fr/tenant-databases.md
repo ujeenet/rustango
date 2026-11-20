@@ -161,6 +161,11 @@ nouveau login, enregistre le tenant, lance ses migrations et l'active. Un échec
 après la création de la base supprime ce que l'exécution a créé. L'URL du
 tenant contient le mot de passe du nouveau login et est stockée scellée.
 
+Le `backend_kind` du tenant est le backend du registre, stocké en `postgres`,
+`mysql` ou `sqlite`. Les anciennes lignes qui disent `pg`, `postgresql`, `mariadb`
+ou `sqlite3` se lisent encore ; `check-tenants` les liste et `repair-tenant` les
+réécrit.
+
 Pour donner au tenant son premier administrateur, remplissez l'e-mail
 d'administrateur dans le formulaire (nom d'utilisateur facultatif ; par défaut
 l'e-mail), ou en CLI :

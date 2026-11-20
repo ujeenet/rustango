@@ -174,7 +174,7 @@ pub async fn set_active(
     active: bool,
     actor: Option<i64>,
 ) -> Result<Outcome, OperatorError> {
-    let id = target.id.get().copied().unwrap_or_default();
+    let id = target.id.require()?;
 
     if target.active == active {
         return Ok(Outcome::AlreadySo);
@@ -239,6 +239,12 @@ async fn deactivate_unless_last(
     tx.commit().await.map_err(crate::sql::ExecError::from)?;
     target.active = false;
     Ok(Outcome::Changed)
+}
+
+impl From<crate::sql::UnsavedRow> for OperatorError {
+    fn from(e: crate::sql::UnsavedRow) -> Self {
+        Self::Driver(e.into())
+    }
 }
 
 #[cfg(all(test, feature = "sqlite", feature = "testkit"))]

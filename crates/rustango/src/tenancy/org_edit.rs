@@ -200,7 +200,7 @@ pub(crate) async fn apply_values_if(
     expected: Option<&str>,
 ) -> Result<Option<Applied>, TenancyError> {
     // A registry edit commits on its own, never with a caller's block.
-    crate::sql::detached(apply_values_if_alone(
+    crate::sql::outside_atomic(apply_values_if_alone(
         registry, secrets, slug, values, expected,
     ))
     .await
@@ -221,7 +221,7 @@ async fn apply_values_if_alone(
         .into_iter()
         .next()
         .ok_or_else(|| TenancyError::Validation(format!("tenant `{slug}` not found")))?;
-    let existing_id = existing.id.get().copied().unwrap_or_default();
+    let existing_id = existing.id.require()?;
 
     // The same validators provisioning uses, so a value the console or
     // the CLI can set is a value `create-tenant` would have accepted.
@@ -245,7 +245,7 @@ async fn apply_values_if_alone(
         if let Some(run) =
             crate::tenancy::provision_store::failed_creator_run(registry, existing_id).await?
         {
-            let run_id = run.id.get().copied().unwrap_or_default();
+            let run_id = run.id.require()?;
             return Err(TenancyError::Validation(format!(
                 "tenant `{slug}` was left inactive by failed provision run #{run_id}; \
                  resume that run (console run page, or `create-tenant {slug} --resume`) \
@@ -258,12 +258,7 @@ async fn apply_values_if_alone(
             // Blank keeps the current URL; it is a credential, never cleared here.
             ("database_url", v) if blank(&v) => continue,
             // Nothing reads it in schema mode; moving storage is migrate-tenant-storage.
-            ("database_url", _)
-                if matches!(
-                    super::org::StorageMode::parse(&existing.storage_mode),
-                    Ok(super::org::StorageMode::Schema)
-                ) =>
-            {
+            ("database_url", _) if existing.storage_mode == super::org::StorageMode::Schema => {
                 return Err(TenancyError::Validation(format!(
                     "tenant `{slug}` is in schema mode, which reads no database URL; \
                      move it to database mode first"
@@ -405,7 +400,7 @@ mod tests {
         let first = "sqlite:///tmp/first.db?mode=rwc";
         let mut org = crate::testkit::org_with(|o| {
             o.slug = "cas".into();
-            o.backend_kind = "sqlite".into();
+            o.backend_kind = crate::tenancy::BackendKind::Sqlite;
             o.database_url = Some(first.into());
             o.host_pattern = Some("cas.localhost".into());
         });

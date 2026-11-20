@@ -44,7 +44,7 @@ async fn tenant_with_host(pool: &Pool, tag: &str) -> (String, i64) {
         o.display_name = slug.clone();
         // A database-mode org with a non-Postgres backend drops nothing;
         // the registry side is what this suite is about.
-        o.backend_kind = "sqlite".into();
+        o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
         o.database_url = Some("sqlite::memory:".into());
     });
     org.save(pool).await.expect("insert org");
@@ -141,7 +141,7 @@ async fn purge_deletes_the_tenants_media_objects() {
             let mut org = rustango::testkit::org_with(|o| {
                 o.slug = slug.clone();
                 o.display_name = slug.clone();
-                o.backend_kind = "sqlite".into();
+                o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
                 o.database_url = Some(url);
             });
             org.save(&reg).await.unwrap();
@@ -279,7 +279,7 @@ async fn mysql_purge_sees_through_a_host_alias() {
             let mut org = rustango::testkit::org_with(|o| {
                 o.slug = slug.clone();
                 o.display_name = slug.clone();
-                o.backend_kind = "mysql".into();
+                o.backend_kind = rustango::tenancy::BackendKind::MySql;
                 o.database_url = Some(url);
             });
             org.save(&pool).await.unwrap();
@@ -431,7 +431,7 @@ async fn schema_purge_deletes_only_the_tenant_schemas_media() {
         rustango::testkit::org_with(|o| {
             o.slug = slug.replace('_', "-");
             o.display_name = slug.clone();
-            o.storage_mode = "schema".into();
+            o.storage_mode = rustango::tenancy::StorageMode::Schema;
             o.schema_name = Some(slug);
         })
     };
@@ -536,7 +536,7 @@ async fn schema_purge_evicts_the_scoped_pool() {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = slug.clone();
         o.display_name = slug.clone();
-        o.storage_mode = "schema".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Schema;
         o.schema_name = Some(slug.clone());
     });
     org.save(&pool).await.expect("insert org");
@@ -581,7 +581,7 @@ async fn org_with_database(pool: &Pool, tag: &str) -> (Org, String) {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = slug;
         o.display_name = tag.into();
-        o.backend_kind = "postgres".into();
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = Some(format!("{}/{db}", url.rsplit_once('/').unwrap().0));
     });
     org.save(pool).await.expect("insert org");
@@ -751,7 +751,7 @@ async fn database_purge_refuses_the_registry_database() {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = slug.clone();
         o.display_name = slug.clone();
-        o.backend_kind = "postgres".into();
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = Some(rustango::testkit::matrix::Backend::Postgres.url().unwrap());
     });
     org.save(&pool).await.expect("insert org");
@@ -796,7 +796,7 @@ async fn schema_purge_refuses_a_shared_or_reserved_schema() {
     let mut owner = rustango::testkit::org_with(|o| {
         o.slug = shared.replace('_', "-");
         o.display_name = "owner".into();
-        o.storage_mode = "schema".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Schema;
         o.schema_name = Some(shared.clone());
     });
     owner.save(&pool).await.unwrap();
@@ -814,7 +814,7 @@ async fn schema_purge_refuses_a_shared_or_reserved_schema() {
     let mut legacy = rustango::testkit::org_with(|o| {
         o.slug = format!("{}-legacy", owner.slug);
         o.display_name = "legacy".into();
-        o.storage_mode = "schema".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Schema;
         o.schema_name = Some(shared.clone());
     });
     legacy.save(&pool).await.unwrap();
@@ -878,7 +878,7 @@ async fn schema_purge_refuses_a_reserved_schema() {
     let mut reserved = rustango::testkit::org_with(|o| {
         o.slug = "reserved".into();
         o.display_name = "public".into();
-        o.storage_mode = "schema".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Schema;
         o.schema_name = Some("public".into());
     });
     reserved.save(&registry).await.unwrap();
@@ -948,7 +948,7 @@ where
         let mut org = rustango::testkit::org_with(|o| {
             o.slug = slug.into();
             o.display_name = name.into();
-            o.storage_mode = "schema".into();
+            o.storage_mode = rustango::tenancy::StorageMode::Schema;
             o.schema_name = Some(name.into());
         });
         org.save(&registry).await.unwrap();
@@ -1104,7 +1104,7 @@ async fn database_purge_refuses_a_database_another_tenant_shares() {
     let mut b = rustango::testkit::org_with(|o| {
         o.slug = format!("{}-b", a.slug);
         o.display_name = "b".into();
-        o.backend_kind = "postgres".into();
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = Some(url.clone());
     });
     b.save(&pool).await.unwrap();
@@ -1165,7 +1165,7 @@ async fn database_purge_refuses_an_idle_tenant_on_a_host_alias() {
     let mut b = rustango::testkit::org_with(|o| {
         o.slug = format!("{}-b", a.slug);
         o.display_name = "b".into();
-        o.backend_kind = "postgres".into();
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = Some(alias);
     });
     b.save(&pool).await.unwrap();
@@ -1207,7 +1207,7 @@ async fn database_purge_skips_a_tenant_whose_url_does_not_resolve() {
     let mut b = rustango::testkit::org_with(|o| {
         o.slug = format!("{}-b", a.slug);
         o.display_name = "b".into();
-        o.backend_kind = "mysql".into();
+        o.backend_kind = rustango::tenancy::BackendKind::MySql;
         o.database_url = Some("env://RUSTANGO_PURGE_TEST_UNSET_URL".into());
     });
     b.save(&pool).await.unwrap();
@@ -1243,7 +1243,7 @@ async fn database_purge_refuses_the_registry_under_another_host_name() {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = slug.clone();
         o.display_name = slug.clone();
-        o.backend_kind = "postgres".into();
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = Some(alias);
     });
     org.save(&pool).await.unwrap();

@@ -192,13 +192,17 @@ async fn row_count(pool: &Pool, table: &str) -> i64 {
 }
 
 async fn index_count(pool: &Pool, index: String) -> i64 {
-    let sql = match pool.dialect().name() {
-        "postgres" => "SELECT COUNT(*) FROM pg_indexes WHERE indexname = $1",
-        "mysql" => {
+    let sql = match pool.dialect().kind() {
+        rustango::sql::DialectKind::Postgres => {
+            "SELECT COUNT(*) FROM pg_indexes WHERE indexname = $1"
+        }
+        rustango::sql::DialectKind::Mysql => {
             "SELECT COUNT(*) FROM information_schema.statistics \
              WHERE table_schema = DATABASE() AND index_name = ?"
         }
-        _ => "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?",
+        rustango::sql::DialectKind::Sqlite => {
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?"
+        }
     };
     let rows: Vec<(i64,)> = raw_query_pool(sql, vec![SqlValue::String(index)], pool)
         .await

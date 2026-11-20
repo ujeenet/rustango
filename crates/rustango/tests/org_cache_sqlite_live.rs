@@ -59,8 +59,8 @@ async fn add_org(pool: &Pool, slug: &str, host: &str) {
         o.id = rustango::sql::Auto::Unset;
         o.slug = slug.into();
         o.display_name = slug.into();
-        o.storage_mode = "database".into();
-        o.backend_kind = "sqlite".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Database;
+        o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
         o.database_url = Some("sqlite::memory:".into());
         o.host_pattern = Some(host.into());
     });

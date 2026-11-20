@@ -1408,7 +1408,7 @@ async fn create_tenant_refuses_a_schema_another_tenant_uses() {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = null_slug.clone();
         o.display_name = null_slug.clone();
-        o.storage_mode = "schema".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Schema;
         o.schema_name = None;
     });
     org.save(&rustango::sql::Pool::from(pool.clone()))
@@ -1473,7 +1473,7 @@ async fn console_create_refuses_a_schema_another_tenant_uses() {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = unique("clegacy");
         o.display_name = "legacy".into();
-        o.storage_mode = "schema".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Schema;
         o.schema_name = Some(shared.clone());
     });
     org.save(&registry).await.unwrap();
@@ -1582,7 +1582,7 @@ async fn create_tenant_allows_a_schema_no_tenant_lives_in() {
     let mut schema_org = rustango::testkit::org_with(|o| {
         o.slug = moved.clone();
         o.display_name = moved.clone();
-        o.storage_mode = "schema".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Schema;
         o.schema_name = Some(elsewhere.clone());
     });
     schema_org.save(&registry).await.unwrap();
@@ -1700,7 +1700,7 @@ async fn check_deploy_reads_a_schema_mode_tenant_in_its_schema() {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = slug.clone();
         o.display_name = slug.clone();
-        o.storage_mode = "schema".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Schema;
         o.schema_name = Some(slug.clone());
     });
     org.save(&rustango::sql::Pool::from(pool.clone()))
@@ -1800,7 +1800,7 @@ async fn check_deploy_skips_a_schema_mode_tenant_without_its_schema() {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = ghost.clone();
         o.display_name = ghost.clone();
-        o.storage_mode = "schema".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Schema;
         o.schema_name = Some(ghost.clone());
     });
     org.save(&rustango::sql::Pool::from(pool.clone()))

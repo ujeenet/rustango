@@ -447,14 +447,19 @@ where
     // A schema-mode PG tenant gets a short-lived pool with
     // `search_path` already set; a database-mode tenant gets a cheap
     // clone of its cached pool. Schema mode on another backend errors.
-    let pool = match pools.scoped_pool_dyn(&org).await {
-        Ok(p) => p,
-        Err(e) => {
-            // Before the session check, and the text can name the tenant DB host.
-            let body = crate::error::server_error_body("tenancy::admin::pool", &e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, body).into_response();
-        }
-    };
+    // The request's stored pool when the dispatcher resolved this org.
+    let lookup = pools.scoped_pool_dyn(&org);
+    let pool =
+        match super::request_tenant::RequestPool::get_or_lookup(&parts.extensions, &org, lookup)
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                // Before the session check, and the text can name the tenant DB host.
+                let body = crate::error::server_error_body("tenancy::admin::pool", &e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, body).into_response();
+            }
+        };
 
     // Per-tenant auth is opt-in. Without `with_session`, every request
     // goes straight to the inner admin.
@@ -1314,7 +1319,9 @@ async fn login_submit(
     if let Err(refused) = attempt.resolve(super::login_key(field, &user)).await {
         return refused.into_response();
     }
-    let uid: i64 = user.id.get().copied().unwrap_or(0);
+    let Ok(uid) = user.id.require() else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "user has no id").into_response();
+    };
 
     // Verify before the active check so active vs inactive accounts take
     // the same time (audit H1).
@@ -1361,7 +1368,14 @@ async fn login_submit(
     let mut resp = Redirect::to(&landing).into_response();
     resp.headers_mut().append(
         header::SET_COOKIE,
-        user_session_cookie(&cfg.secret, &tenant, cookie_path, &user, route_ttl(routes)),
+        user_session_cookie(
+            &cfg.secret,
+            &tenant,
+            uid,
+            cookie_path,
+            &user,
+            route_ttl(routes),
+        ),
     );
     send_user_logged_in(UserLoggedInContext {
         source: "tenant_admin",
@@ -1379,12 +1393,13 @@ async fn login_submit(
 fn user_session_cookie(
     secret: &tenant_console::SessionSecret,
     tenant: &TenantSlug,
+    uid: i64,
     cookie_path: &str,
     user: &super::auth::User,
     ttl_secs: i64,
 ) -> HeaderValue {
     let mut payload = TenantSessionPayload::new(
-        user.id.get().copied().unwrap_or_default(),
+        uid,
         tenant,
         ttl_secs,
         super::session::PasswordFingerprint::of(secret, &user.password_hash),
@@ -1853,6 +1868,7 @@ async fn change_password_submit(
         user_session_cookie(
             secret,
             &tenant,
+            user_id,
             cookie_path,
             &user,
             route_ttl(routes)
