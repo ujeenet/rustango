@@ -218,15 +218,17 @@ async fn like_against_a_column(pool: &Pool) {
         .order_by(&[("id", false)])
         .fetch(pool)
         .await;
-    match pool.dialect().name() {
-        "sqlite" => assert!(
+    match pool.dialect().kind() {
+        rustango::sql::DialectKind::Sqlite => assert!(
             matches!(
                 got,
                 Err(ExecError::Sql(SqlError::OpNotSupportedInDialect { .. }))
             ),
             "SQLite LIKE ignores case: {got:?}"
         ),
-        _ => assert_eq!(ids(&got.expect("like")), [2, 3]),
+        rustango::sql::DialectKind::Postgres | rustango::sql::DialectKind::Mysql => {
+            assert_eq!(ids(&got.expect("like")), [2, 3])
+        }
     }
 }
 

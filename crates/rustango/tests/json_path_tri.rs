@@ -243,7 +243,7 @@ async fn seed_counts(pool: &Pool) {
 
 /// SQLite compared the as_text path with a number as text vs integer.
 async fn json_as_text_compares_with_a_number(pool: &Pool) {
-    if pool.dialect().name() == "postgres" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Postgres {
         return; // PG has no `text > bigint`.
     }
     seed_counts(pool).await;
@@ -418,10 +418,14 @@ async fn json_text_search_agrees_inside_a_value(pool: &Pool) {
     // Outside the subset: PG and MySQL 8 print `": "`, SQLite (and MariaDB,
     // which keeps the text as sent) `":"`.
     let spaced = count_like(pool, "contains", "\"name\": \"Alice").await;
-    match pool.dialect().name() {
-        "postgres" => assert_eq!(spaced, 1, "documented spacing difference"),
-        "sqlite" => assert_eq!(spaced, 0, "documented spacing difference"),
-        _ => {}
+    match pool.dialect().kind() {
+        rustango::sql::DialectKind::Postgres => {
+            assert_eq!(spaced, 1, "documented spacing difference")
+        }
+        rustango::sql::DialectKind::Sqlite => {
+            assert_eq!(spaced, 0, "documented spacing difference")
+        }
+        rustango::sql::DialectKind::Mysql => {}
     }
 }
 
@@ -445,7 +449,7 @@ async fn json_containment_agrees_on_matching_shapes(pool: &Pool) {
     .insert(pool)
     .await
     .expect("seed");
-    if pool.dialect().name() == "sqlite" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Sqlite {
         let err = count_contains(pool, serde_json::json!({"n": 1})).await;
         assert!(err.is_err(), "SQLite refuses containment: {err:?}");
         return;
@@ -462,7 +466,7 @@ async fn json_containment_agrees_on_matching_shapes(pool: &Pool) {
     }
     // Outside the subset: MySQL matches a scalar inside an array, PG does not.
     let loose = count_contains(pool, serde_json::json!({"tags": "a"})).await;
-    let want = i64::from(pool.dialect().name() == "mysql");
+    let want = i64::from(pool.dialect().kind() == rustango::sql::DialectKind::Mysql);
     assert_eq!(loose, Ok(want), "documented MySQL difference");
 }
 
@@ -494,7 +498,7 @@ async fn string_contains_lookup_on_a_json_column(pool: &Pool) {
     );
     let json = SqlValue::Json(serde_json::json!({"tags": ["red"]}));
     let contained = count("data__contains", json).await;
-    if pool.dialect().name() == "sqlite" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Sqlite {
         assert!(
             contained.is_err(),
             "SQLite refuses containment: {contained:?}"

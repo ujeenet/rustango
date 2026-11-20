@@ -87,7 +87,7 @@ async fn loser_collided(waiting: &Waiting) {
 }
 
 fn sqlite(pool: &Pool) -> bool {
-    pool.dialect().name() == "sqlite"
+    pool.dialect().kind() == rustango::sql::DialectKind::Sqlite
 }
 
 async fn put(tx: &AtomicTx, id: i64) -> Result<(), ExecError> {
@@ -480,7 +480,7 @@ async fn create_error_wins_over_a_failed_rollback(pool: &Pool) {
 /// PG repeatable read: no read sees the winner's row, so the unique
 /// violation is returned, as documented.
 async fn pg_repeatable_read_returns_the_unique_violation(pool: &Pool) {
-    if pool.dialect().name() != "postgres" {
+    if pool.dialect().kind() != rustango::sql::DialectKind::Postgres {
         eprintln!("skipped: the repeatable-read rule is PG's");
         return;
     }

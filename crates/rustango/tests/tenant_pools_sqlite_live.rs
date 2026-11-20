@@ -30,7 +30,10 @@ async fn tenant_pools_sqlite_constructs_and_acquires() {
         .expect("registry pool");
     let pools: TenantPools<sqlx::Sqlite> = TenantPools::new(registry);
     // Generic registry_pool returns Pool::Sqlite.
-    assert_eq!(pools.registry_pool().dialect().name(), "sqlite");
+    assert_eq!(
+        pools.registry_pool().dialect().kind(),
+        rustango::sql::DialectKind::Sqlite
+    );
 
     let org = fake_db_org(
         "acme",

@@ -312,7 +312,12 @@ async fn nested_same_table_exists_dml(pool: &Pool) {
             assert_eq!(n, want);
             false
         }
-        Err(e) if pool.dialect().name() == "mysql" && e.to_string().contains("1093") => true,
+        Err(e)
+            if pool.dialect().kind() == rustango::sql::DialectKind::Mysql
+                && e.to_string().contains("1093") =>
+        {
+            true
+        }
         Err(e) => panic!("{e}"),
     };
     // Raises rank: a read that saw its own writes would pick other rows.
@@ -368,13 +373,13 @@ async fn correlated_same_table_in_dml(pool: &Pool) {
             .unwrap();
         rows.iter().map(|r| r.rank).collect::<Vec<i64>>()
     };
-    let mariadb = pool.dialect().name() == "mysql" && {
+    let mariadb = pool.dialect().kind() == rustango::sql::DialectKind::Mysql && {
         let v: Vec<(String,)> = rustango::sql::raw_query_pool("SELECT VERSION()", Vec::new(), pool)
             .await
             .unwrap();
         v[0].0.contains("MariaDB")
     };
-    if pool.dialect().name() == "mysql" && !mariadb {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Mysql && !mariadb {
         let e = r.expect_err("MySQL refuses a correlated IN over the target");
         assert!(e.to_string().contains("1093"), "{e}");
         assert_eq!(ranks().await, vec![50, 10, 40, 20, 30]);

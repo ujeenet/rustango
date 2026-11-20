@@ -13,12 +13,14 @@ use crate::core::{
     FieldSchema, FieldType, InsertQuery, ModelSchema, SelectQuery, UpdateQuery,
 };
 
+use super::dialect::datetime_bucket_mask;
 use super::server::{AdminRight, Collation, DatabaseName, Login, LoginPassword, ServerAccount};
 use super::writers::{
     write_aggregate, write_bulk_insert, write_count, write_delete, write_insert, write_select,
     write_update, Sql,
 };
-use super::{CompiledStatement, Dialect, SqlError, TableTarget};
+use super::{CompiledStatement, Dialect, DialectKind, SqlError, TableTarget};
+use crate::query::{DateKind, DateTimeKind};
 
 /// The insert id a skipped `DoNothing` insert reports. No auto-increment
 /// column reaches it: a signed BIGINT stops at 2^63 - 1.
@@ -111,8 +113,8 @@ impl MySql {
 impl super::dialect::sealed::Sealed for MySql {}
 
 impl Dialect for MySql {
-    fn name(&self) -> &'static str {
-        "mysql"
+    fn kind(&self) -> DialectKind {
+        DialectKind::Mysql
     }
 
     fn binds_pg_only_values(&self) -> bool {
@@ -132,6 +134,20 @@ impl Dialect for MySql {
     /// MySQL spells the random function `RAND()`.
     fn random_fn(&self) -> &'static str {
         "RAND"
+    }
+
+    fn date_bucket_sql(&self, kind: DateKind, col: &str) -> String {
+        match kind {
+            DateKind::Year => format!("DATE(DATE_FORMAT({col}, '%Y-01-01'))"),
+            DateKind::Month => format!("DATE(DATE_FORMAT({col}, '%Y-%m-01'))"),
+            DateKind::Day => format!("DATE({col})"),
+        }
+    }
+
+    /// CAST back so the decoder sees a DATETIME.
+    fn datetime_bucket_sql(&self, kind: DateTimeKind, col: &str, _utc: bool) -> String {
+        let fmt = datetime_bucket_mask(kind, "%i", "%s");
+        format!("CAST(DATE_FORMAT({col}, '{fmt}') AS DATETIME)")
     }
 
     /// MySQL rejects an `OFFSET` with no `LIMIT`, so pair it with

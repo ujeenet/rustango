@@ -332,10 +332,10 @@ pub(crate) async fn flush_cmd<W: Write>(
     }
 
     // Execute. Per-dialect strategy:
-    let dialect = pool.dialect().name();
+    let dialect = pool.dialect().kind();
     let mut cleared = 0_usize;
     let mut failures: Vec<(String, String)> = Vec::new();
-    if dialect == "postgres" {
+    if dialect == crate::sql::DialectKind::Postgres {
         // One big TRUNCATE — atomic, FK-aware, sequence-resetting.
         let d = pool.dialect();
         let prefix = match scope {

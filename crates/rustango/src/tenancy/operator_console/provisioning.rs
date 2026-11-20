@@ -93,7 +93,7 @@ async fn render_form(
     // only fail, so the form does not.
     ctx.insert(
         "schema_mode_available",
-        &(state.registry.dialect().name() == "postgres"),
+        &(state.registry.dialect().kind() == crate::sql::DialectKind::Postgres),
     );
     // A tenant always uses the registry's backend.
     ctx.insert("backend", BackendKind::of_pool(&state.registry).as_str());
@@ -573,7 +573,7 @@ pub(super) async fn test_connection(
 
     // Schema mode: the registry's own login creates the schema.
     if field("storage_mode") == Some("schema") {
-        if state.registry.dialect().name() != "postgres" {
+        if state.registry.dialect().kind() != crate::sql::DialectKind::Postgres {
             return probe_bad("Schema mode needs a Postgres registry; choose database mode.");
         }
         let rights = crate::tenancy::rights::RightsReport::for_new_schema(&state.registry).await;

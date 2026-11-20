@@ -240,7 +240,7 @@ async fn email_match_is_exact(pool: &Pool) {
     // database would call the same.
     let p = profile("g-accent", &format!("josé{n}@example.com"));
     let got = find_or_provision_member(pool, &key, true, &p, true).await;
-    if pool.dialect().name() == "mysql" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Mysql {
         assert_eq!(got, Ok(MemberSignIn::NotLinked), "ai_ci collides");
     } else {
         assert!(
@@ -890,14 +890,18 @@ async fn check_warns_about_risky_settings(pool: &Pool) {
 async fn subject_lookup_has_an_index(pool: &Pool) {
     use rustango::core::SqlValue;
     const NAME: &str = "rustango_sso_links_provider_source_provider_id_subject_idx";
-    let sql = match pool.backend_name() {
-        "postgres" => "SELECT indexdef FROM pg_indexes WHERE indexname = $1",
-        "mysql" => {
+    let sql = match pool.dialect().kind() {
+        rustango::sql::DialectKind::Postgres => {
+            "SELECT indexdef FROM pg_indexes WHERE indexname = $1"
+        }
+        rustango::sql::DialectKind::Mysql => {
             "SELECT CAST(GROUP_CONCAT(column_name ORDER BY seq_in_index) AS CHAR) \
              FROM information_schema.statistics \
              WHERE table_schema = DATABASE() AND index_name = ?"
         }
-        _ => "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+        rustango::sql::DialectKind::Sqlite => {
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?"
+        }
     };
     let rows: Vec<(Option<String>,)> =
         rustango::sql::raw_query_pool(sql, vec![SqlValue::String(NAME.into())], pool)
@@ -916,7 +920,7 @@ async fn subject_lookup_has_an_index(pool: &Pool) {
         at.iter().all(Option::is_some) && at.windows(2).all(|w| w[0] < w[1]),
         "no (provider_source, provider_id, subject) index: {def:?}"
     );
-    if pool.backend_name() == "sqlite" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Sqlite {
         let query = SsoLink::objects()
             .filter("provider_source", "admin")
             .filter("provider_id", 1_i64)

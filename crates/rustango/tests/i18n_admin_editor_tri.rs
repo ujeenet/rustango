@@ -93,7 +93,7 @@ async fn keys_compare_case_sensitively(pool: &Pool) {
 
 /// MySQL: a table an older release made under a `_ci` collation is moved.
 async fn an_older_case_insensitive_table_is_upgraded(pool: &Pool) {
-    if pool.dialect().name() != "mysql" {
+    if pool.dialect().kind() != rustango::sql::DialectKind::Mysql {
         return;
     }
     let old = "ALTER TABLE `rustango_translations` MODIFY COLUMN `key` VARCHAR(200) \
@@ -120,7 +120,7 @@ async fn key_collation(pool: &Pool) -> String {
 /// the pool does not retry, a new one does.
 async fn a_refused_upgrade_only_warns(pool: &Pool) {
     use rustango::sql::raw_execute_pool as exec;
-    if pool.dialect().name() != "mysql" {
+    if pool.dialect().kind() != rustango::sql::DialectKind::Mysql {
         return;
     }
     let old = "ALTER TABLE `rustango_translations` MODIFY COLUMN `key` VARCHAR(200) \

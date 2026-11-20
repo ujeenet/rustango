@@ -1146,7 +1146,10 @@ mod tests {
                 _: &Parts,
                 registry: &TenantRegistry,
             ) -> Result<Option<Org>, TenancyError> {
-                assert_eq!(registry.pool().dialect().name(), "sqlite");
+                assert_eq!(
+                    registry.pool().dialect().kind(),
+                    crate::sql::DialectKind::Sqlite
+                );
                 self.0.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(None)
             }

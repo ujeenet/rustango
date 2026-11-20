@@ -235,7 +235,7 @@ where
 /// the winner's row, so it reads with a lock (`share`, else for update). A
 /// lock the caller set is kept.
 fn winner_read(mut select: SelectQuery, dialect: &dyn super::Dialect, share: bool) -> SelectQuery {
-    if dialect.name() == "mysql" && select.lock_mode.is_none() {
+    if dialect.kind() == crate::sql::DialectKind::Mysql && select.lock_mode.is_none() {
         let mut lock = crate::core::LockMode::default();
         lock.share = share;
         lock.of = vec![select.model.table];

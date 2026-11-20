@@ -541,19 +541,19 @@ impl ServerAdmin {
                 crate::sql::raw_query_pool(sql, Vec::new(), pool).await.ok();
             report.account = rows
                 .and_then(|r| r.into_iter().next())
-                .map(|(a,)| split_account(&a, d.name() == "mysql"));
+                .map(|(a,)| split_account(&a, d.kind() == crate::sql::DialectKind::Mysql));
         }
         if let Some(sql) = d.server_version_sql() {
             let rows: Vec<(String,)> = crate::sql::raw_query_pool(sql, Vec::new(), pool).await?;
             report.server_version = rows.into_iter().next().map(|(v,)| v);
         }
-        if d.name() == "postgres" {
+        if d.kind() == crate::sql::DialectKind::Postgres {
             report.pg_major = report.server_version.as_deref().and_then(pg_major);
         }
         let Some(sql) = d.login_grants_sql().or_else(|| d.login_privileges_sql()) else {
             return Ok(report);
         };
-        if d.name() == "postgres" {
+        if d.kind() == crate::sql::DialectKind::Postgres {
             let rows: Vec<(bool, bool, bool)> =
                 crate::sql::raw_query_pool(sql, Vec::new(), pool).await?;
             if let Some((sup, createdb, createrole)) = rows.into_iter().next() {

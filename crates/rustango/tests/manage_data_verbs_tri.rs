@@ -372,10 +372,10 @@ async fn dumpdata_refuses_an_undecodable_cell(pool: &Pool) {
 /// NaN and infinity have no JSON form: dumpdata refuses them, not `null`.
 async fn dumpdata_refuses_a_non_finite_float(pool: &Pool) {
     // MySQL stores neither.
-    let score = match pool.dialect().name() {
-        "postgres" => f64::NAN,
-        "sqlite" => f64::INFINITY,
-        _ => return,
+    let score = match pool.dialect().kind() {
+        rustango::sql::DialectKind::Postgres => f64::NAN,
+        rustango::sql::DialectKind::Sqlite => f64::INFINITY,
+        rustango::sql::DialectKind::Mysql => return,
     };
     rustango::testkit::matrix::fresh_table::<Measure>(pool).await;
     let mut m = Measure {
@@ -708,7 +708,7 @@ async fn flush_refuses_when_an_unmanaged_table_references_a_target(pool: &Pool) 
     );
     let err = out.expect_err("flush must fail");
     // SQLite reports a deferred FK failure at COMMIT, with no table name.
-    if pool.dialect().name() != "sqlite" {
+    if pool.dialect().kind() != rustango::sql::DialectKind::Sqlite {
         assert!(
             err.contains("cli2315_ref"),
             "name the blocking table: {err}"
@@ -821,7 +821,7 @@ async fn fresh_pair(pool: &Pool, a: &'static ModelSchema, b: &'static ModelSchem
     // PG and MySQL drop the pair together; SQLite takes one table at a time.
     // MariaDB refuses a pair that references each other unless FK checks are off.
     let q = |t| pool.dialect().quote_ident(t);
-    let maria = if pool.dialect().name() == "mysql" {
+    let maria = if pool.dialect().kind() == rustango::sql::DialectKind::Mysql {
         "/*M! SET STATEMENT foreign_key_checks=0 FOR */ "
     } else {
         ""
@@ -982,12 +982,12 @@ async fn loaddata_keeps_an_orderable_fixture_inline(pool: &Pool) {
     fresh_pair(pool, CkLeft::SCHEMA, CkRight::SCHEMA).await;
     let table = pool.dialect().quote_ident(CkLeft::SCHEMA.table);
     let col = pool.dialect().quote_ident("right_id");
-    let rule = match pool.dialect().name() {
-        "sqlite" => format!(
+    let rule = match pool.dialect().kind() {
+        rustango::sql::DialectKind::Sqlite => format!(
             "CREATE TRIGGER mdv_ck_left_set BEFORE INSERT ON {table} \
              WHEN NEW.{col} IS NULL BEGIN SELECT RAISE(ABORT, 'right_id required'); END"
         ),
-        _ => {
+        rustango::sql::DialectKind::Postgres | rustango::sql::DialectKind::Mysql => {
             format!("ALTER TABLE {table} ADD CONSTRAINT mdv_ck_left_set CHECK ({col} IS NOT NULL)")
         }
     };

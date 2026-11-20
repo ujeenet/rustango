@@ -19,7 +19,7 @@ use crate::core::{
     WhereExpr, LIKE_ESCAPE_CLAUSE,
 };
 
-use super::{CompiledStatement, Dialect, SqlError};
+use super::{CompiledStatement, Dialect, DialectKind, SqlError};
 
 /// The SQL buffer and bind list every writer appends to. It carries
 /// the [`Dialect`], so helpers can ask for the right quoting,
@@ -1149,12 +1149,12 @@ fn write_subquery_joins(
         b.sql.push_str(kind_kw);
         if sj.lateral {
             // PG + MySQL ≥ 8.0.14 only; SQLite has no LATERAL.
-            if b.d.name() == "sqlite" {
+            if b.d.kind() == DialectKind::Sqlite {
                 return Err(SqlError::LateralJoinNotSupported {
                     dialect: b.d.name(),
                 });
             }
-            if b.d.name() == "mysql" {
+            if b.d.kind() == DialectKind::Mysql {
                 // MariaDB has no LATERAL: its syntax error names the reason.
                 b.sql.push(' ');
                 super::mysql::ByServer {
@@ -1250,7 +1250,7 @@ fn write_select_body_qualified(
     // `.distinct_on(cols)` is native on PG. Elsewhere the window
     // fallback emits the whole statement, so return early.
     if let Some(crate::core::DistinctMode::On(cols)) = &query.distinct {
-        if b.d.name() != "postgres" {
+        if b.d.kind() != DialectKind::Postgres {
             return write_distinct_on_via_window(b, query, cols);
         }
     }
@@ -1456,7 +1456,7 @@ fn helper_expr(item: &crate::core::OrderItem) -> Option<&crate::core::Expr> {
 /// `SKIP LOCKED` wins over `NOWAIT` when both are set. They cannot
 /// both appear in one statement.
 fn write_lock_clause(b: &mut Sql<'_>, lock: &crate::core::LockMode) {
-    if b.d.name() == "sqlite" {
+    if b.d.kind() == DialectKind::Sqlite {
         // Warn so someone debugging concurrency against a SQLite
         // fixture sees that the clause did nothing. Apps that rely on
         // SQLite's single-writer lock can silence it.
@@ -1485,7 +1485,7 @@ fn write_lock_clause(b: &mut Sql<'_>, lock: &crate::core::LockMode) {
             b.d.push_quoted_ident(&mut list, t);
         }
         b.sql.push(' ');
-        if b.d.name() == "mysql" {
+        if b.d.kind() == DialectKind::Mysql {
             // MariaDB has no `OF`: it locks every table the query reads.
             super::mysql::ByServer {
                 mysql: &list,
@@ -1501,13 +1501,13 @@ fn write_lock_clause(b: &mut Sql<'_>, lock: &crate::core::LockMode) {
             b.sql.push_str(suffix);
         }
         // MySQL's `LOCK IN SHARE MODE` takes no `OF`.
-        if b.d.name() == "postgres" {
+        if b.d.kind() == DialectKind::Postgres {
             of(b);
         }
         return;
     }
     b.sql.push_str(" FOR ");
-    if lock.no_key && b.d.name() == "postgres" {
+    if lock.no_key && b.d.kind() == DialectKind::Postgres {
         b.sql.push_str("NO KEY UPDATE");
     } else {
         b.sql.push_str("UPDATE");
@@ -1571,18 +1571,18 @@ fn write_model_joins(b: &mut Sql<'_>, joins: &[crate::core::Join]) -> Result<(),
         // anything, so the user gets a clear error instead of a
         // driver parse failure. PG has all four; MySQL has no FULL;
         // SQLite has neither RIGHT nor FULL.
-        let kind_kw = match (join.kind, b.d.name()) {
+        let kind_kw = match (join.kind, b.d.kind()) {
             (JoinKind::Inner, _) => "INNER JOIN",
             (JoinKind::Left, _) => "LEFT JOIN",
-            (JoinKind::Right, "sqlite") => {
+            (JoinKind::Right, DialectKind::Sqlite) => {
                 return Err(SqlError::JoinKindNotSupported {
                     kind: "RIGHT",
                     dialect: b.d.name(),
                 });
             }
-            (JoinKind::Right, _) => "RIGHT JOIN",
-            (JoinKind::Full, "postgres") => "FULL OUTER JOIN",
-            (JoinKind::Full, _) => {
+            (JoinKind::Right, DialectKind::Postgres | DialectKind::Mysql) => "RIGHT JOIN",
+            (JoinKind::Full, DialectKind::Postgres) => "FULL OUTER JOIN",
+            (JoinKind::Full, DialectKind::Mysql | DialectKind::Sqlite) => {
                 return Err(SqlError::JoinKindNotSupported {
                     kind: "FULL",
                     dialect: b.d.name(),
@@ -1857,8 +1857,8 @@ fn any_value_call(b: &Sql<'_>, arg: &str, kind: AnyValueArg) -> String {
     if let AnyValueArg::FilterCase = kind {
         return format!("MIN({arg})");
     }
-    match b.d.name() {
-        "mysql" => {
+    match b.d.kind() {
+        DialectKind::Mysql => {
             let mut sql = String::new();
             super::mysql::ByServer {
                 mysql: &format!("ANY_VALUE({arg})"),
@@ -1867,8 +1867,8 @@ fn any_value_call(b: &Sql<'_>, arg: &str, kind: AnyValueArg) -> String {
             .write(&mut sql);
             sql
         }
-        "sqlite" => format!("min({arg})"),
-        _ => format!("any_value({arg})"),
+        DialectKind::Sqlite => format!("min({arg})"),
+        DialectKind::Postgres => format!("any_value({arg})"),
     }
 }
 
@@ -1892,7 +1892,7 @@ fn format_bare_aggregate(b: &Sql<'_>, expr: &AggregateExpr) -> Result<String, Sq
         | AggregateExpr::StdDevPop(col)
         | AggregateExpr::Variance(col)
         | AggregateExpr::VariancePop(col) => {
-            if b.d.name() == "sqlite" {
+            if b.d.kind() == DialectKind::Sqlite {
                 return Err(SqlError::AggregateNotSupported {
                     aggregate: stddev_variance_name(expr),
                     dialect: b.d.name(),
@@ -1975,7 +1975,7 @@ fn write_aggregate_expr(
                 });
             }
             // MySQL has no FILTER keyword; use CASE WHEN.
-            if b.d.name() == "mysql" {
+            if b.d.kind() == DialectKind::Mysql {
                 return write_aggregate_as_case_when(b, inner, filter);
             }
             // PG and SQLite 3.30+ have FILTER. The cast goes around
@@ -1997,7 +1997,7 @@ fn write_aggregate_expr(
         }
         AggregateExpr::Window(w) => write_window_expr(b, w),
         AggregateExpr::ArrayAgg { column, distinct } => {
-            if b.d.name() != "postgres" {
+            if b.d.kind() != DialectKind::Postgres {
                 return Err(SqlError::AggregateNotSupportedInDialect {
                     aggregate: "array_agg",
                     dialect: b.d.name(),
@@ -2028,8 +2028,8 @@ fn write_aggregate_expr(
             let order_sql = render_agg_order_by(b, order_by);
             // `string_agg` on PG, `GROUP_CONCAT` on MySQL,
             // `group_concat` on SQLite.
-            match b.d.name() {
-                "mysql" => {
+            match b.d.kind() {
+                DialectKind::Mysql => {
                     // `SEPARATOR` takes no bound parameter, so the
                     // delimiter is inlined as a quoted literal.
                     // ORDER BY goes before SEPARATOR.
@@ -2044,7 +2044,7 @@ fn write_aggregate_expr(
                     b.sql.push_str(&b.d.quote_literal(delimiter));
                     b.sql.push(')');
                 }
-                "sqlite" => {
+                DialectKind::Sqlite => {
                     // A SQLite DISTINCT aggregate takes exactly one
                     // argument, so DISTINCT works only with the
                     // default ',' separator. ORDER BY inside the
@@ -2069,9 +2069,9 @@ fn write_aggregate_expr(
                         b.sql.push(')');
                     }
                 }
-                // Postgres (+ any future dialect): the standard form. ORDER
-                // BY goes after the delimiter, inside the parens.
-                _ => {
+                // Postgres: the standard form. ORDER BY goes after the
+                // delimiter, inside the parens.
+                DialectKind::Postgres => {
                     b.sql.push_str("string_agg(");
                     if *distinct {
                         b.sql.push_str("DISTINCT ");
@@ -2086,7 +2086,7 @@ fn write_aggregate_expr(
             Ok(())
         }
         AggregateExpr::JsonbAgg { column } => {
-            if b.d.name() != "postgres" {
+            if b.d.kind() != DialectKind::Postgres {
                 return Err(SqlError::AggregateNotSupportedInDialect {
                     aggregate: "jsonb_agg",
                     dialect: b.d.name(),
@@ -2469,7 +2469,7 @@ fn write_expr(
         }
         Expr::BinOp { left, op, right } => {
             // SQLite has no bitwise XOR.
-            if matches!(op, BO::BitXor) && b.d.name() == "sqlite" {
+            if matches!(op, BO::BitXor) && b.d.kind() == DialectKind::Sqlite {
                 return Err(SqlError::OpNotSupportedInDialect {
                     op: "BitXor",
                     dialect: b.d.name(),
@@ -2477,7 +2477,7 @@ fn write_expr(
             }
             // pgvector distance operators are Postgres-only.
             if matches!(op, BO::L2Distance | BO::CosineDistance | BO::InnerProduct)
-                && b.d.name() != "postgres"
+                && b.d.kind() != DialectKind::Postgres
             {
                 return Err(SqlError::OpNotSupportedInDialect {
                     op: match op {
@@ -2498,14 +2498,14 @@ fn write_expr(
                 BO::Sub => "-",
                 BO::Mul => "*",
                 // MySQL's `/` returns a decimal even for two integers.
-                BO::Div if b.d.name() == "mysql" && is_int_expr(b, expr) => "DIV",
+                BO::Div if b.d.kind() == DialectKind::Mysql && is_int_expr(b, expr) => "DIV",
                 BO::Div => "/",
                 BO::Mod => "%",
                 BO::BitAnd => "&",
                 BO::BitOr => "|",
                 // PG spells XOR `#`, MySQL `^`.
                 BO::BitXor => {
-                    if b.d.name() == "postgres" {
+                    if b.d.kind() == DialectKind::Postgres {
                         "#"
                     } else {
                         "^"
@@ -2733,9 +2733,9 @@ fn write_json_path(
     as_text: bool,
 ) -> Result<(), SqlError> {
     use crate::core::{JsonPathStep, SqlValue};
-    let dialect = b.d.name();
-    if dialect == "postgres" {
-        check_json_path(path, dialect)?;
+    let kind = b.d.kind();
+    if kind == DialectKind::Postgres {
+        check_json_path(path, kind.name())?;
         // Chained `->` … `->>`. PG counts a negative index from the
         // end on its own.
         write_expr(b, source, None)?;
@@ -2758,8 +2758,8 @@ fn write_json_path(
         }
         return Ok(());
     }
-    let json_path = json_path_text(path, dialect)?;
-    if dialect == "mysql" {
+    let json_path = json_path_text(path, kind)?;
+    if kind == DialectKind::Mysql {
         if as_text {
             // A JSON null reads as SQL NULL, as PG's `->>` gives.
             b.sql.push_str("JSON_UNQUOTE(NULLIF(JSON_EXTRACT(");
@@ -2833,15 +2833,16 @@ fn check_json_path(
 /// The checked MySQL `$."<k>"[<n>]` / SQLite `$.<k>[<n>]` path string.
 fn json_path_text(
     path: &[crate::core::JsonPathStep],
-    dialect: &'static str,
+    kind: DialectKind,
 ) -> Result<String, SqlError> {
     use crate::core::JsonPathStep;
+    let dialect = kind.name();
     check_json_path(path, dialect)?;
     let mut json_path = String::from("$");
     for step in path {
         match step {
             // MySQL rejects a bare `$.2fa`; SQLite takes it. The safe set keeps `"` out.
-            JsonPathStep::Key(k) if dialect == "mysql" => {
+            JsonPathStep::Key(k) if kind == DialectKind::Mysql => {
                 json_path.push_str(".\"");
                 json_path.push_str(k);
                 json_path.push('"');
@@ -2854,7 +2855,7 @@ fn json_path_text(
                 if *n < 0 {
                     // SQLite 3.31+ counts from the end with `$[#-1]`.
                     // MySQL's path grammar has no negative form.
-                    if dialect == "sqlite" {
+                    if kind == DialectKind::Sqlite {
                         json_path.push_str("[#");
                         json_path.push_str(&n.to_string());
                         json_path.push(']');
@@ -2894,15 +2895,15 @@ fn write_sqlite_json_value_eq(
         },
         Expr::Literal(SqlValue::Json(v)),
         Op::Eq | Op::Ne,
-        "sqlite",
-    ) = (lhs, rhs, op, b.d.name())
+        DialectKind::Sqlite,
+    ) = (lhs, rhs, op, b.d.kind())
     else {
         return Ok(false);
     };
     if !(v.is_null() || v.is_object() || v.is_array()) {
         return Ok(false);
     }
-    let p = json_path_text(path, "sqlite")?;
+    let p = json_path_text(path, DialectKind::Sqlite)?;
     let ne = matches!(op, Op::Ne);
     if !v.is_null() {
         b.sql.push('(');
@@ -2944,7 +2945,7 @@ fn write_window_expr(b: &mut Sql<'_>, w: &crate::core::WindowExpr) -> Result<(),
     let start = b.sql.len();
     let p0 = b.params.len();
     write_window_call(b, w)?;
-    if b.d.name() == "mysql" {
+    if b.d.kind() == DialectKind::Mysql {
         write_mariadb_lag_default(b, w, start, p0)?;
     }
     Ok(())
@@ -3218,12 +3219,12 @@ fn write_function(
                     got: 0,
                 });
             }
-            if b.d.name() == "mysql" {
+            if b.d.kind() == DialectKind::Mysql {
                 return write_call(b, "CONCAT", args);
             }
             // A `||` chain, in parens to keep precedence clear. PG's
             // CONCAT skips NULLs; `||` returns NULL, as MySQL's CONCAT.
-            let pg = b.d.name() == "postgres";
+            let pg = b.d.kind() == DialectKind::Postgres;
             b.sql.push('(');
             for (i, a) in args.iter().enumerate() {
                 if i > 0 {
@@ -3250,7 +3251,7 @@ fn write_function(
                     got: args.len(),
                 });
             }
-            if b.d.name() == "postgres" {
+            if b.d.kind() == DialectKind::Postgres {
                 b.sql.push_str("SUBSTRING(");
                 write_expr(b, &args[0], None)?;
                 b.sql.push_str(" FROM ");
@@ -3262,7 +3263,7 @@ fn write_function(
             } else {
                 // MySQL spells it SUBSTRING; SQLite spells it substr.
                 // Both accept the comma form.
-                let name = if b.d.name() == "mysql" {
+                let name = if b.d.kind() == DialectKind::Mysql {
                     "SUBSTRING"
                 } else {
                     "SUBSTR"
@@ -3293,7 +3294,7 @@ fn write_function(
                 _ => None,
             };
             match float {
-                Some(ty) if args.len() == 2 && b.d.name() == "postgres" => {
+                Some(ty) if args.len() == 2 && b.d.kind() == DialectKind::Postgres => {
                     b.sql.push_str("CAST(ROUND(CAST(");
                     write_expr(b, &args[0], None)?;
                     b.sql.push_str(" AS NUMERIC), CAST(");
@@ -3329,13 +3330,13 @@ fn write_function(
             // SQLite has no GREATEST; its scalar `MAX(a, b, …)` needs
             // two or more arguments. With one, SQLite reads `MAX(x)`
             // as the aggregate, which means something else entirely.
-            if b.d.name() == "sqlite" && args.len() == 1 {
+            if b.d.kind() == DialectKind::Sqlite && args.len() == 1 {
                 return Err(SqlError::OpNotSupportedInDialect {
                     op: "GREATEST with 1 argument (SQLite collides with the aggregate MAX)",
                     dialect: "sqlite",
                 });
             }
-            let name = if b.d.name() == "sqlite" {
+            let name = if b.d.kind() == DialectKind::Sqlite {
                 "MAX"
             } else {
                 "GREATEST"
@@ -3351,13 +3352,13 @@ fn write_function(
                 });
             }
             // Same one-argument problem as `Greatest` above.
-            if b.d.name() == "sqlite" && args.len() == 1 {
+            if b.d.kind() == DialectKind::Sqlite && args.len() == 1 {
                 return Err(SqlError::OpNotSupportedInDialect {
                     op: "LEAST with 1 argument (SQLite collides with the aggregate MIN)",
                     dialect: "sqlite",
                 });
             }
-            let name = if b.d.name() == "sqlite" {
+            let name = if b.d.kind() == DialectKind::Sqlite {
                 "MIN"
             } else {
                 "LEAST"
@@ -3391,13 +3392,13 @@ fn write_function(
             // so a bare `CURRENT_TIMESTAMP` would put a second shape
             // in the column and break both `SET col = now()` and
             // `WHERE col < now()`.
-            if b.d.name() == "sqlite" {
+            if b.d.kind() == DialectKind::Sqlite {
                 let _ = write!(
                     b.sql,
                     "strftime('{}','now')",
                     crate::sql::SQLITE_DATETIME_FORMAT
                 );
-            } else if b.d.name() == "mysql" {
+            } else if b.d.kind() == DialectKind::Mysql {
                 b.sql.push_str("NOW(6)");
             } else {
                 b.sql.push_str("NOW()");
@@ -3420,7 +3421,7 @@ fn write_function(
                     got: args.len(),
                 });
             }
-            if b.d.name() == "sqlite" {
+            if b.d.kind() == DialectKind::Sqlite {
                 // strftime has no quarter token, so derive it from
                 // the month.
                 write_extract_quarter_sqlite(b, &args[0])
@@ -3438,7 +3439,7 @@ fn write_function(
             }
             // Every dialect spells this `DATE(x)`.
             b.sql.push_str("DATE(");
-            if b.d.name() == "postgres" {
+            if b.d.kind() == DialectKind::Postgres {
                 write_pg_utc_arg(b, &args[0])?;
             } else {
                 write_expr(b, &args[0], None)?;
@@ -3455,11 +3456,11 @@ fn write_function(
                     got: args.len(),
                 });
             }
-            let fname = match b.d.name() {
-                "postgres" => "jsonb_array_length",
-                "mysql" => "JSON_LENGTH",
+            let fname = match b.d.kind() {
+                DialectKind::Postgres => "jsonb_array_length",
+                DialectKind::Mysql => "JSON_LENGTH",
                 // SQLite 3.38+.
-                _ => "json_array_length",
+                DialectKind::Sqlite => "json_array_length",
             };
             b.sql.push_str(fname);
             b.sql.push('(');
@@ -3486,7 +3487,7 @@ fn write_function(
                     got: args.len(),
                 });
             }
-            if b.d.name() != "postgres" {
+            if b.d.kind() != DialectKind::Postgres {
                 return Err(SqlError::OpNotSupportedInDialect {
                     op: if matches!(kind, F::TrigramWordSimilarity) {
                         "WORD_SIMILARITY (pg_trgm) is Postgres-only"
@@ -3523,7 +3524,7 @@ fn write_function(
                     got: args.len(),
                 });
             }
-            if b.d.name() != "postgres" {
+            if b.d.kind() != DialectKind::Postgres {
                 return Err(SqlError::OpNotSupportedInDialect {
                     op: if matches!(kind, F::ToTsVector) {
                         "to_tsvector (FTS) is Postgres-only"
@@ -3547,7 +3548,7 @@ fn write_function(
                     got: args.len(),
                 });
             }
-            if b.d.name() != "postgres" {
+            if b.d.kind() != DialectKind::Postgres {
                 return Err(SqlError::OpNotSupportedInDialect {
                     op: "ts_rank (FTS) is Postgres-only",
                     dialect: b.d.name(),
@@ -3568,7 +3569,7 @@ fn write_function(
                     got: args.len(),
                 });
             }
-            if b.d.name() != "postgres" {
+            if b.d.kind() != DialectKind::Postgres {
                 return Err(SqlError::OpNotSupportedInDialect {
                     op: "ts_headline (FTS) is Postgres-only",
                     dialect: b.d.name(),
@@ -3598,7 +3599,7 @@ fn write_function(
                     got: args.len(),
                 });
             }
-            if b.d.name() != "postgres" {
+            if b.d.kind() != DialectKind::Postgres {
                 return Err(SqlError::OpNotSupportedInDialect {
                     op: match kind {
                         F::PhraseToTsQuery => "phraseto_tsquery (FTS) is Postgres-only",
@@ -3623,7 +3624,7 @@ fn write_function(
                     got: args.len(),
                 });
             }
-            if b.d.name() != "postgres" {
+            if b.d.kind() != DialectKind::Postgres {
                 return Err(SqlError::OpNotSupportedInDialect {
                     op: "ts_rank_cd (FTS) is Postgres-only",
                     dialect: b.d.name(),
@@ -3650,7 +3651,7 @@ fn write_function(
                     got: args.len(),
                 });
             }
-            if b.d.name() == "sqlite" {
+            if b.d.kind() == DialectKind::Sqlite {
                 return Err(SqlError::OpNotSupportedInDialect {
                     op: "REVERSE (SQLite has no built-in; reverse the string in Rust before binding)",
                     dialect: b.d.name(),
@@ -3670,7 +3671,7 @@ fn write_function(
             // SQLite only has POWER and SQRT when built with
             // SQLITE_ENABLE_MATH_FUNCTIONS, which sqlx's default
             // build does not set.
-            if b.d.name() == "sqlite" {
+            if b.d.kind() == DialectKind::Sqlite {
                 return Err(SqlError::OpNotSupportedInDialect {
                     op: "POWER (SQLite needs SQLITE_ENABLE_MATH_FUNCTIONS at build time; not enabled in sqlx-sqlite default build)",
                     dialect: b.d.name(),
@@ -3679,7 +3680,7 @@ fn write_function(
             write_call(b, "POWER", args)
         }
         F::Sqrt => {
-            if b.d.name() == "sqlite" {
+            if b.d.kind() == DialectKind::Sqlite {
                 return Err(SqlError::OpNotSupportedInDialect {
                     op: "SQRT (SQLite needs SQLITE_ENABLE_MATH_FUNCTIONS at build time; not enabled in sqlx-sqlite default build)",
                     dialect: b.d.name(),
@@ -3733,7 +3734,7 @@ fn write_spatial_fn(
             got: args.len(),
         });
     }
-    if b.d.name() != "postgres" {
+    if b.d.kind() != DialectKind::Postgres {
         return Err(SqlError::OpNotSupportedInDialect {
             op: match kind {
                 F::StDistance => "ST_Distance (PostGIS) is Postgres-only",
@@ -3770,7 +3771,7 @@ fn write_pad(
         F::LPad => "LPAD",
         _ => "RPAD",
     };
-    if b.d.name() != "sqlite" {
+    if b.d.kind() != DialectKind::Sqlite {
         return write_call(b, name, args);
     }
     // SQLite has no LPAD or RPAD, so build one from `len` copies of
@@ -3837,7 +3838,7 @@ fn write_hash(
             got: args.len(),
         });
     }
-    if b.d.name() == "sqlite" {
+    if b.d.kind() == DialectKind::Sqlite {
         return Err(SqlError::OpNotSupportedInDialect {
             op: match kind {
                 F::Md5 => "MD5 (SQLite has no built-in hash; hash before binding)",
@@ -3847,7 +3848,7 @@ fn write_hash(
             dialect: b.d.name(),
         });
     }
-    if b.d.name() == "postgres" {
+    if b.d.kind() == DialectKind::Postgres {
         // `md5()` is built in and returns hex; SHA1 and SHA256 need
         // pgcrypto's `digest()`.
         match kind {
@@ -3894,22 +3895,22 @@ fn write_position(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), Sql
     }
     let needle = &args[0];
     let hay = &args[1];
-    match b.d.name() {
-        "postgres" => {
+    match b.d.kind() {
+        DialectKind::Postgres => {
             b.sql.push_str("POSITION(");
             write_expr(b, needle, None)?;
             b.sql.push_str(" IN ");
             write_expr(b, hay, None)?;
             b.sql.push(')');
         }
-        "mysql" => {
+        DialectKind::Mysql => {
             b.sql.push_str("LOCATE(");
             write_expr(b, needle, None)?;
             b.sql.push_str(", ");
             write_expr(b, hay, None)?;
             b.sql.push(')');
         }
-        _ => {
+        DialectKind::Sqlite => {
             // SQLite: INSTR(hay, needle) — argument order is reversed.
             b.sql.push_str("INSTR(");
             write_expr(b, hay, None)?;
@@ -3931,7 +3932,7 @@ fn write_repeat(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlEr
             got: args.len(),
         });
     }
-    if b.d.name() == "sqlite" {
+    if b.d.kind() == DialectKind::Sqlite {
         // `printf('%.*c', n, '_')` makes `n` underscores, and
         // `replace` swaps each for `s`. If `s` itself contains `_`,
         // this breaks; repeat the string in Rust instead.
@@ -3954,7 +3955,7 @@ fn write_sign(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlErro
             got: args.len(),
         });
     }
-    if b.d.name() != "sqlite" {
+    if b.d.kind() != DialectKind::Sqlite {
         return write_call(b, "SIGN", args);
     }
     // The `0`, `1` and `-1` are inlined rather than bound, to keep
@@ -3978,7 +3979,7 @@ fn write_log(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError
             got: args.len(),
         });
     }
-    if b.d.name() == "sqlite" {
+    if b.d.kind() == DialectKind::Sqlite {
         return Err(SqlError::OpNotSupportedInDialect {
             op: "LN (SQLite needs SQLITE_ENABLE_MATH_FUNCTIONS at build time; not enabled in sqlx-sqlite default build)",
             dialect: b.d.name(),
@@ -3997,7 +3998,7 @@ fn write_log_with_base(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<()
             got: args.len(),
         });
     }
-    if b.d.name() == "sqlite" {
+    if b.d.kind() == DialectKind::Sqlite {
         return Err(SqlError::OpNotSupportedInDialect {
             op: "LOG(base, x) (SQLite needs SQLITE_ENABLE_MATH_FUNCTIONS at build time)",
             dialect: b.d.name(),
@@ -4016,7 +4017,7 @@ fn write_exp(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError
             got: args.len(),
         });
     }
-    if b.d.name() == "sqlite" {
+    if b.d.kind() == DialectKind::Sqlite {
         return Err(SqlError::OpNotSupportedInDialect {
             op: "EXP (SQLite needs SQLITE_ENABLE_MATH_FUNCTIONS at build time; not enabled in sqlx-sqlite default build)",
             dialect: b.d.name(),
@@ -4034,7 +4035,7 @@ fn write_pi(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError>
             got: args.len(),
         });
     }
-    if b.d.name() == "sqlite" {
+    if b.d.kind() == DialectKind::Sqlite {
         b.sql.push_str("3.141592653589793");
     } else {
         b.sql.push_str("PI()");
@@ -4052,11 +4053,11 @@ fn write_random(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlEr
             got: args.len(),
         });
     }
-    match b.d.name() {
-        "postgres" => b.sql.push_str("random()"),
-        "mysql" => b.sql.push_str("RAND()"),
+    match b.d.kind() {
+        DialectKind::Postgres => b.sql.push_str("random()"),
+        DialectKind::Mysql => b.sql.push_str("RAND()"),
         // SQLite returns a signed 64-bit integer, not a 0..1 float.
-        _ => b.sql.push_str("random()"),
+        DialectKind::Sqlite => b.sql.push_str("random()"),
     }
     Ok(())
 }
@@ -4070,7 +4071,7 @@ fn write_make_interval(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<()
             got: args.len(),
         });
     }
-    if b.d.name() != "postgres" {
+    if b.d.kind() != DialectKind::Postgres {
         return Err(SqlError::OpNotSupportedInDialect {
             op: "MAKE_INTERVAL (PG-only; MySQL/SQLite have no native interval type — compute the duration app-side)",
             dialect: b.d.name(),
@@ -4100,15 +4101,15 @@ fn write_age(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError
             got: args.len(),
         });
     }
-    match b.d.name() {
-        "postgres" => {
+    match b.d.kind() {
+        DialectKind::Postgres => {
             b.sql.push_str("age(");
             write_expr(b, &args[0], None)?;
             b.sql.push_str(", ");
             write_expr(b, &args[1], None)?;
             b.sql.push(')');
         }
-        "mysql" => {
+        DialectKind::Mysql => {
             // TIMESTAMPDIFF(a, b) returns b - a, so swap the args to
             // match PG's `age(ts1, ts2)` = ts1 - ts2 sign.
             b.sql.push_str("TIMESTAMPDIFF(SECOND, ");
@@ -4117,7 +4118,7 @@ fn write_age(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError
             write_expr(b, &args[0], None)?;
             b.sql.push(')');
         }
-        _ => {
+        DialectKind::Sqlite => {
             b.sql.push_str("((julianday(");
             write_expr(b, &args[0], None)?;
             b.sql.push_str(") - julianday(");
@@ -4175,8 +4176,8 @@ fn write_trunc_with_tz(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<()
             dialect: b.d.name(),
         });
     }
-    match b.d.name() {
-        "postgres" => {
+    match b.d.kind() {
+        DialectKind::Postgres => {
             b.sql.push_str("date_trunc('");
             b.sql.push_str(&unit_lc);
             b.sql.push_str("', ");
@@ -4185,7 +4186,7 @@ fn write_trunc_with_tz(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<()
             b.sql.push_str(tz);
             b.sql.push_str("')");
         }
-        "mysql" => {
+        DialectKind::Mysql => {
             // CONVERT_TZ needs a from/to pair; stored timestamps are
             // UTC. The DATE_FORMAT mask does the truncation.
             let mask = mysql_trunc_mask(&unit_lc);
@@ -4197,7 +4198,7 @@ fn write_trunc_with_tz(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<()
             b.sql.push_str(mask);
             b.sql.push_str("')");
         }
-        _ => {
+        DialectKind::Sqlite => {
             // SQLite has no timezone database, so `tz` is passed to
             // strftime as a modifier, usually a `±HH:MM` offset.
             let mask = sqlite_trunc_mask(&unit_lc);
@@ -4248,7 +4249,7 @@ fn write_setweight(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), Sq
             got: args.len(),
         });
     }
-    if b.d.name() != "postgres" {
+    if b.d.kind() != DialectKind::Postgres {
         return Err(SqlError::OpNotSupportedInDialect {
             op: "setweight (FTS) is Postgres-only",
             dialect: b.d.name(),
@@ -4288,7 +4289,7 @@ fn write_ts_concat(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), Sq
             got: args.len(),
         });
     }
-    if b.d.name() != "postgres" {
+    if b.d.kind() != DialectKind::Postgres {
         return Err(SqlError::OpNotSupportedInDialect {
             op: "tsvector `||` concatenation (FTS) is Postgres-only",
             dialect: b.d.name(),
@@ -4342,52 +4343,56 @@ fn write_extract_int(
         F::ExtractQuarter => "QUARTER",
         _ => unreachable!("write_extract_int called with non-extract kind: {kind:?}"),
     };
-    let dialect = b.d.name();
-    if dialect == "postgres" {
-        // EXTRACT returns NUMERIC; cast to INTEGER for return-type
-        // parity with MySQL's per-field functions. SECOND has a
-        // fraction the cast would round (59.7 to 60), so FLOOR it.
-        let floor = field == "SECOND";
-        b.sql.push_str(if floor {
-            "CAST(FLOOR(EXTRACT("
-        } else {
-            "CAST(EXTRACT("
-        });
-        b.sql.push_str(field);
-        b.sql.push_str(" FROM ");
-        write_pg_utc_arg(b, &args[0])?;
-        b.sql.push_str(if floor {
-            ")) AS INTEGER)"
-        } else {
-            ") AS INTEGER)"
-        });
-    } else if dialect == "mysql" {
-        b.sql.push_str(field);
-        b.sql.push('(');
-        write_expr(b, &args[0], None)?;
-        // Mode 3 is ISO 8601, as PG's EXTRACT(WEEK).
-        b.sql.push_str(if field == "WEEK" { ", 3)" } else { ")" });
-    } else if field == "WEEK" {
-        // ISO week: the day of year of this week's Thursday, over seven.
-        b.sql.push_str("((CAST(strftime('%j', date(");
-        write_expr(b, &args[0], None)?;
-        b.sql
-            .push_str(", '-3 days', 'weekday 4')) AS INTEGER) - 1) / 7 + 1)");
-    } else {
-        let token = match field {
-            "YEAR" => "%Y",
-            "MONTH" => "%m",
-            "DAY" => "%d",
-            "HOUR" => "%H",
-            "MINUTE" => "%M",
-            "SECOND" => "%S",
-            _ => unreachable!("sqlite extract: {field}"),
-        };
-        b.sql.push_str("CAST(strftime('");
-        b.sql.push_str(token);
-        b.sql.push_str("', ");
-        write_expr(b, &args[0], None)?;
-        b.sql.push_str(") AS INTEGER)");
+    match b.d.kind() {
+        DialectKind::Postgres => {
+            // EXTRACT returns NUMERIC; cast to INTEGER for return-type
+            // parity with MySQL's per-field functions. SECOND has a
+            // fraction the cast would round (59.7 to 60), so FLOOR it.
+            let floor = field == "SECOND";
+            b.sql.push_str(if floor {
+                "CAST(FLOOR(EXTRACT("
+            } else {
+                "CAST(EXTRACT("
+            });
+            b.sql.push_str(field);
+            b.sql.push_str(" FROM ");
+            write_pg_utc_arg(b, &args[0])?;
+            b.sql.push_str(if floor {
+                ")) AS INTEGER)"
+            } else {
+                ") AS INTEGER)"
+            });
+        }
+        DialectKind::Mysql => {
+            b.sql.push_str(field);
+            b.sql.push('(');
+            write_expr(b, &args[0], None)?;
+            // Mode 3 is ISO 8601, as PG's EXTRACT(WEEK).
+            b.sql.push_str(if field == "WEEK" { ", 3)" } else { ")" });
+        }
+        DialectKind::Sqlite if field == "WEEK" => {
+            // ISO week: the day of year of this week's Thursday, over seven.
+            b.sql.push_str("((CAST(strftime('%j', date(");
+            write_expr(b, &args[0], None)?;
+            b.sql
+                .push_str(", '-3 days', 'weekday 4')) AS INTEGER) - 1) / 7 + 1)");
+        }
+        DialectKind::Sqlite => {
+            let token = match field {
+                "YEAR" => "%Y",
+                "MONTH" => "%m",
+                "DAY" => "%d",
+                "HOUR" => "%H",
+                "MINUTE" => "%M",
+                "SECOND" => "%S",
+                _ => unreachable!("sqlite extract: {field}"),
+            };
+            b.sql.push_str("CAST(strftime('");
+            b.sql.push_str(token);
+            b.sql.push_str("', ");
+            write_expr(b, &args[0], None)?;
+            b.sql.push_str(") AS INTEGER)");
+        }
     }
     Ok(())
 }
@@ -4403,19 +4408,22 @@ fn write_extract_weekday(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<
             got: args.len(),
         });
     }
-    let dialect = b.d.name();
-    if dialect == "postgres" {
-        b.sql.push_str("CAST(EXTRACT(DOW FROM ");
-        write_pg_utc_arg(b, &args[0])?;
-        b.sql.push_str(") AS INTEGER)");
-    } else if dialect == "mysql" {
-        b.sql.push_str("(DAYOFWEEK(");
-        write_expr(b, &args[0], None)?;
-        b.sql.push_str(") - 1)");
-    } else {
-        b.sql.push_str("CAST(strftime('%w', ");
-        write_expr(b, &args[0], None)?;
-        b.sql.push_str(") AS INTEGER)");
+    match b.d.kind() {
+        DialectKind::Postgres => {
+            b.sql.push_str("CAST(EXTRACT(DOW FROM ");
+            write_pg_utc_arg(b, &args[0])?;
+            b.sql.push_str(") AS INTEGER)");
+        }
+        DialectKind::Mysql => {
+            b.sql.push_str("(DAYOFWEEK(");
+            write_expr(b, &args[0], None)?;
+            b.sql.push_str(") - 1)");
+        }
+        DialectKind::Sqlite => {
+            b.sql.push_str("CAST(strftime('%w', ");
+            write_expr(b, &args[0], None)?;
+            b.sql.push_str(") AS INTEGER)");
+        }
     }
     Ok(())
 }
@@ -4436,7 +4444,6 @@ fn write_trunc(
             got: args.len(),
         });
     }
-    let dialect = b.d.name();
     let pg_unit = match kind {
         F::TruncYear => "year",
         F::TruncMonth => "month",
@@ -4449,39 +4456,43 @@ fn write_trunc(
         F::TruncDay => "%Y-%m-%d",
         _ => unreachable!(),
     };
-    if dialect == "postgres" {
-        b.sql.push_str("DATE_TRUNC('");
-        b.sql.push_str(pg_unit);
-        b.sql.push_str("', ");
-        write_expr(b, &args[0], None)?;
-        // Truncate a timestamptz in UTC, not the session TimeZone.
-        if expr_type(b, &args[0]) == Some(crate::core::FieldType::DateTime) {
-            b.sql.push_str(", 'UTC'");
-        }
-        b.sql.push(')');
-    } else if dialect == "mysql" {
-        if matches!(kind, F::TruncDay) {
-            b.sql.push_str("DATE(");
-            write_expr(b, &args[0], None)?;
-            b.sql.push(')');
-        } else {
-            b.sql.push_str("DATE_FORMAT(");
-            write_expr(b, &args[0], None)?;
-            b.sql.push_str(", '");
-            b.sql.push_str(format_str);
-            b.sql.push_str("')");
-        }
-    } else {
-        if matches!(kind, F::TruncDay) {
-            b.sql.push_str("date(");
-            write_expr(b, &args[0], None)?;
-            b.sql.push(')');
-        } else {
-            b.sql.push_str("strftime('");
-            b.sql.push_str(format_str);
+    match b.d.kind() {
+        DialectKind::Postgres => {
+            b.sql.push_str("DATE_TRUNC('");
+            b.sql.push_str(pg_unit);
             b.sql.push_str("', ");
             write_expr(b, &args[0], None)?;
+            // Truncate a timestamptz in UTC, not the session TimeZone.
+            if expr_type(b, &args[0]) == Some(crate::core::FieldType::DateTime) {
+                b.sql.push_str(", 'UTC'");
+            }
             b.sql.push(')');
+        }
+        DialectKind::Mysql => {
+            if matches!(kind, F::TruncDay) {
+                b.sql.push_str("DATE(");
+                write_expr(b, &args[0], None)?;
+                b.sql.push(')');
+            } else {
+                b.sql.push_str("DATE_FORMAT(");
+                write_expr(b, &args[0], None)?;
+                b.sql.push_str(", '");
+                b.sql.push_str(format_str);
+                b.sql.push_str("')");
+            }
+        }
+        DialectKind::Sqlite => {
+            if matches!(kind, F::TruncDay) {
+                b.sql.push_str("date(");
+                write_expr(b, &args[0], None)?;
+                b.sql.push(')');
+            } else {
+                b.sql.push_str("strftime('");
+                b.sql.push_str(format_str);
+                b.sql.push_str("', ");
+                write_expr(b, &args[0], None)?;
+                b.sql.push(')');
+            }
         }
     }
     Ok(())
@@ -4832,7 +4843,7 @@ fn write_like(
     negated: bool,
     escaped: bool,
 ) {
-    if b.d.name() == "sqlite" {
+    if b.d.kind() == DialectKind::Sqlite {
         if let SqlValue::String(pattern) = &value {
             let p = b.bind(SqlValue::String(like_to_glob(pattern, escaped)));
             b.sql.push_str(&b.d.like_operand(col, ty));
@@ -5113,7 +5124,7 @@ fn write_expr_compare(
         let start = b.sql.len();
         write_expr(b, lhs, None)?;
         // A SQLite JSON path reads an SQL value, compared via `json_extract`.
-        let sqlite_path = b.d.name() == "sqlite" && matches!(lhs, Expr::JsonPath { .. });
+        let sqlite_path = b.d.kind() == DialectKind::Sqlite && matches!(lhs, Expr::JsonPath { .. });
         if let (Expr::Literal(v @ SqlValue::Json(_)), false) = (rhs, sqlite_path) {
             let lhs_sql = b.sql.split_off(start);
             if try_json_eq(b, &lhs_sql, op, v) {
@@ -5137,7 +5148,7 @@ fn write_expr_compare(
             return Ok(());
         }
         // SQLite's LIKE ignores case, and only a literal can become a GLOB.
-        if b.d.name() == "sqlite" {
+        if b.d.kind() == DialectKind::Sqlite {
             return Err(SqlError::OpNotSupportedInDialect {
                 op: "case-sensitive LIKE with non-literal RHS",
                 dialect: b.d.name(),
@@ -5267,7 +5278,7 @@ fn write_compare_rhs(
         return write_expr(b, rhs, cast);
     };
     let (open, close) = match (as_text, v) {
-        _ if b.d.name() != "sqlite" => return write_expr(b, rhs, None),
+        _ if b.d.kind() != DialectKind::Sqlite => return write_expr(b, rhs, None),
         (false, SqlValue::Json(_)) => ("json_extract(", ", '$')"),
         (
             true,
@@ -5988,15 +5999,15 @@ pub(crate) fn compile_date_buckets(
     b.sql.push_str("SELECT DISTINCT ");
     let col = d.quote_ident(column);
     // PG buckets a TIMESTAMPTZ in the session zone; the others store UTC.
-    let pg_utc = d.name() == "postgres"
+    let pg_utc = d.kind() == DialectKind::Postgres
         && select.model.field_by_column(column).map(|f| f.ty)
             == Some(crate::core::FieldType::DateTime);
     b.sql.push_str(&match bucket {
         DateBucket::Date(kind) if pg_utc => {
-            date_trunc_sql(kind, d.name(), &format!("({col} AT TIME ZONE 'UTC')"))
+            d.date_bucket_sql(kind, &format!("({col} AT TIME ZONE 'UTC')"))
         }
-        DateBucket::Date(kind) => date_trunc_sql(kind, d.name(), &col),
-        DateBucket::DateTime(kind) => datetime_trunc_sql(kind, d.name(), &col, pg_utc),
+        DateBucket::Date(kind) => d.date_bucket_sql(kind, &col),
+        DateBucket::DateTime(kind) => d.datetime_bucket_sql(kind, &col, pg_utc),
     });
     b.sql.push_str(" AS ");
     b.write_ident("rs_bucket");
@@ -6012,61 +6023,4 @@ pub(crate) fn compile_date_buckets(
     b.write_ident("rs_bucket");
     b.sql.push_str(if descending { " DESC" } else { " ASC" });
     b.finish()
-}
-
-/// Truncate `col_quoted` to a date bucket, typed as a `DATE`.
-fn date_trunc_sql(kind: crate::query::DateKind, dialect_name: &str, col_quoted: &str) -> String {
-    use crate::query::DateKind;
-    match (dialect_name, kind) {
-        ("postgres", DateKind::Year) => format!("DATE_TRUNC('year', {col_quoted})::date"),
-        ("postgres", DateKind::Month) => format!("DATE_TRUNC('month', {col_quoted})::date"),
-        ("mysql", DateKind::Year) => format!("DATE(DATE_FORMAT({col_quoted}, '%Y-01-01'))"),
-        ("mysql", DateKind::Month) => format!("DATE(DATE_FORMAT({col_quoted}, '%Y-%m-01'))"),
-        ("postgres" | "mysql", DateKind::Day) => format!("DATE({col_quoted})"),
-        (_, DateKind::Year) => format!("date(strftime('%Y-01-01', {col_quoted}))"),
-        (_, DateKind::Month) => format!("date(strftime('%Y-%m-01', {col_quoted}))"),
-        (_, DateKind::Day) => format!("date({col_quoted})"),
-    }
-}
-
-/// Truncate `col_quoted` to a timestamp bucket that decodes as `DateTime<Utc>`.
-fn datetime_trunc_sql(
-    kind: crate::query::DateTimeKind,
-    dialect_name: &str,
-    col_quoted: &str,
-    pg_utc: bool,
-) -> String {
-    use crate::query::DateTimeKind as K;
-    if dialect_name == "postgres" {
-        let unit = match kind {
-            K::Year => "year",
-            K::Month => "month",
-            K::Day => "day",
-            K::Hour => "hour",
-            K::Minute => "minute",
-            K::Second => "second",
-        };
-        let zone = if pg_utc { ", 'UTC'" } else { "" };
-        return format!("DATE_TRUNC('{unit}', {col_quoted}{zone})");
-    }
-    // MySQL spells minutes `%i` and seconds `%s`; SQLite `%M` / `%S`.
-    let (min, sec) = if dialect_name == "mysql" {
-        ("%i", "%s")
-    } else {
-        ("%M", "%S")
-    };
-    let fmt = match kind {
-        K::Year => "%Y-01-01 00:00:00".to_owned(),
-        K::Month => "%Y-%m-01 00:00:00".to_owned(),
-        K::Day => "%Y-%m-%d 00:00:00".to_owned(),
-        K::Hour => "%Y-%m-%d %H:00:00".to_owned(),
-        K::Minute => format!("%Y-%m-%d %H:{min}:00"),
-        K::Second => format!("%Y-%m-%d %H:{min}:{sec}"),
-    };
-    if dialect_name == "mysql" {
-        // CAST back so the decoder sees a DATETIME.
-        format!("CAST(DATE_FORMAT({col_quoted}, '{fmt}') AS DATETIME)")
-    } else {
-        format!("strftime('{fmt}', {col_quoted})")
-    }
 }

@@ -249,7 +249,7 @@ async fn deleting_a_referenced_row_is_a_409(pool: &Pool) {
         let (status, body) = post(pool, &uri, &form).await;
         assert_eq!(status, StatusCode::CONFLICT, "{uri}: {body}");
         // Only PG's error names the table; elsewhere the 409 hedges.
-        let by = if pool.backend_name() == "postgres" {
+        let by = if pool.dialect().kind() == rustango::sql::DialectKind::Postgres {
             "by rows in wrerr_child"
         } else {
             "by other rows, possibly in wrerr_child"

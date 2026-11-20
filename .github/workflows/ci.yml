@@ -379,6 +379,7 @@ jobs:
           cargo nextest run --profile ci -p rustango --features tenancy \
             --test branding_urls_are_escaped \
             --test database_url_one_resolver \
+            --test dialect_branches_use_kind \
             --test docs_links \
             --test docs_contract \
             --test doctest_ignore_budget \

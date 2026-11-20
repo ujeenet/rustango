@@ -16,11 +16,13 @@ use crate::core::{
     FieldType, InsertQuery, ModelSchema, Op, SelectQuery, UpdateQuery,
 };
 
+use super::dialect::datetime_bucket_mask;
 use super::writers::{
     write_aggregate, write_bulk_insert, write_bulk_update_sqlite, write_count, write_delete,
     write_insert, write_select, write_update, Sql,
 };
-use super::{CompiledStatement, Dialect, SqlError, TableTarget};
+use super::{CompiledStatement, Dialect, DialectKind, SqlError, TableTarget};
+use crate::query::{DateKind, DateTimeKind};
 
 /// The `strftime` format for the one text shape a SQLite datetime
 /// column may hold.
@@ -114,11 +116,24 @@ pub static DIALECT: &Sqlite = &Sqlite;
 impl super::dialect::sealed::Sealed for Sqlite {}
 
 impl Dialect for Sqlite {
-    fn name(&self) -> &'static str {
-        "sqlite"
+    fn kind(&self) -> DialectKind {
+        DialectKind::Sqlite
     }
 
     /// SQLite's grammar has no bare `OFFSET`; `LIMIT -1` means no limit.
+    fn date_bucket_sql(&self, kind: DateKind, col: &str) -> String {
+        match kind {
+            DateKind::Year => format!("date(strftime('%Y-01-01', {col}))"),
+            DateKind::Month => format!("date(strftime('%Y-%m-01', {col}))"),
+            DateKind::Day => format!("date({col})"),
+        }
+    }
+
+    fn datetime_bucket_sql(&self, kind: DateTimeKind, col: &str, _utc: bool) -> String {
+        let fmt = datetime_bucket_mask(kind, "%M", "%S");
+        format!("strftime('{fmt}', {col})")
+    }
+
     fn offset_without_limit_clause(&self) -> Option<&'static str> {
         Some(" LIMIT -1")
     }

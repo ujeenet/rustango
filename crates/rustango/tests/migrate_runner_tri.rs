@@ -201,7 +201,7 @@ async fn composite_referenced_key_widens(pool: &Pool) {
     let d = pool.dialect();
     let (qa, qb) = (d.quote_ident(a), d.quote_ident(b));
     // A live FK the snapshot does not know comes back as it was.
-    let mysql = d.name() == "mysql";
+    let mysql = d.kind() == rustango::sql::DialectKind::Mysql;
     if mysql {
         exec(
             pool,
@@ -462,7 +462,7 @@ async fn keys_over_the_mysql_byte_cap_are_refused_up_front(pool: &Pool) {
         let created = exec(pool, &format!("SELECT 1 FROM {}", d.quote_ident(t)))
             .await
             .is_ok();
-        if d.name() == "mysql" {
+        if d.kind() == rustango::sql::DialectKind::Mysql {
             let err = ran.expect_err("over 3072 bytes").to_string();
             assert!(err.contains("3072") && err.contains(t), "{err}");
             assert!(!created, "nothing ran on MySQL");
@@ -554,8 +554,8 @@ async fn composite_fk_drop_finds_the_live_name(pool: &Pool) {
         .await
         .unwrap_or_else(|e| panic!("initial on {}: {e}", d.name()));
     // What an older migration left: the FK under the bare relation name.
-    if d.name() != "sqlite" {
-        let (name, schema) = if d.name() == "mysql" {
+    if d.kind() != rustango::sql::DialectKind::Sqlite {
+        let (name, schema) = if d.kind() == rustango::sql::DialectKind::Mysql {
             ("CAST(constraint_name AS CHAR)", "DATABASE()")
         } else {
             ("constraint_name::text", "current_schema()")
@@ -663,14 +663,16 @@ async fn composite_fk_unapply_after_a_rename(pool: &Pool) {
 
 /// FKs on `t`, from the catalog.
 async fn fk_count(pool: &Pool, t: &str) -> i64 {
-    let sql = match pool.dialect().name() {
+    let sql = match pool.dialect().kind() {
         // One row per key column; `id` is the FK.
-        "sqlite" => format!("SELECT COUNT(DISTINCT id) FROM pragma_foreign_key_list('{t}')"),
+        rustango::sql::DialectKind::Sqlite => {
+            format!("SELECT COUNT(DISTINCT id) FROM pragma_foreign_key_list('{t}')")
+        }
         name => format!(
             "SELECT COUNT(*) FROM information_schema.table_constraints \
              WHERE table_schema = {} AND table_name = '{t}' \
              AND constraint_type = 'FOREIGN KEY'",
-            if name == "mysql" {
+            if name == rustango::sql::DialectKind::Mysql {
                 "DATABASE()"
             } else {
                 "current_schema()"
@@ -739,7 +741,7 @@ async fn referenced_key_widens_beside_new_fks(pool: &Pool) {
         ..initial
     };
     write(dir.path(), &mig);
-    let name = pool.dialect().name();
+    let name = pool.dialect().kind();
     migrate_pool_with_ledger(pool, dir.path(), ledger)
         .await
         .unwrap_or_else(|e| panic!("widening on {name}: {e}"));
@@ -791,7 +793,7 @@ async fn referenced_key_widens_its_junction(pool: &Pool) {
         .await
         .expect("initial");
     let widen = step("i64");
-    let name = pool.dialect().name();
+    let name = pool.dialect().kind();
     migrate_pool_with_ledger(pool, dir.path(), ledger)
         .await
         .unwrap_or_else(|e| panic!("widening on {name}: {e}"));
@@ -847,7 +849,7 @@ async fn rollback_after_rename_restores_check_and_partial_index(pool: &Pool) {
     let t = "mr_rn_item";
     let ledger = "mr_rn_ledger";
     let dir = fresh(pool, &[t], ledger).await;
-    let name = pool.dialect().name();
+    let name = pool.dialect().kind();
     // MySQL refuses to rename a column a CHECK reads (3959): the drop goes first.
     let check = true;
     let mut before = json!({
@@ -858,7 +860,7 @@ async fn rollback_after_rename_restores_check_and_partial_index(pool: &Pool) {
     if check {
         before["checks"] = json!([{"name": "mr_rn_ck", "table": t, "expr": "n >= 0"}]);
     }
-    let exclude = name == "postgres";
+    let exclude = name == rustango::sql::DialectKind::Postgres;
     if exclude {
         before["excludes"] = json!([{"name": "mr_rn_ex", "table": t, "using": "btree",
             "elements": [["n", "="]], "where_clause": "n > 100"}]);
@@ -938,8 +940,8 @@ async fn rollback_after_rename_restores_check_and_partial_index(pool: &Pool) {
 async fn rollback_of_a_renamed_dropped_table_restores_its_check_once(pool: &Pool) {
     let (t, u) = ("mr_rt_item", "mr_rt_moved");
     let ledger = "mr_rt_ledger";
-    let name = pool.dialect().name();
-    if name == "sqlite" {
+    let name = pool.dialect().kind();
+    if name == rustango::sql::DialectKind::Sqlite {
         return; // Its CHECK drop rebuilds the table, refused before a later DropTable.
     }
     let rename = || {
@@ -1041,7 +1043,7 @@ async fn unapplying_one_branch_keeps_the_others_column(pool: &Pool) {
             ..initial.clone()
         },
     );
-    let name = pool.dialect().name();
+    let name = pool.dialect().kind();
     migrate_pool_with_ledger(pool, dir.path(), ledger)
         .await
         .unwrap_or_else(|e| panic!("both branches on {name}: {e}"));
@@ -1116,7 +1118,7 @@ async fn applying_a_branch_keeps_the_others_column(pool: &Pool) {
             ..initial.clone()
         },
     );
-    let name = pool.dialect().name();
+    let name = pool.dialect().kind();
     migrate_pool_with_ledger(pool, dir.path(), ledger)
         .await
         .unwrap_or_else(|e| panic!("both branches on {name}: {e}"));
@@ -1461,10 +1463,10 @@ async fn unique_key_over_duplicates_is_refused(pool: &Pool) {
 
 /// The URL of `pool`'s server, or a fresh SQLite file.
 fn url_of(pool: &Pool, file: &std::path::Path) -> String {
-    match pool.dialect().name() {
-        "postgres" => Backend::Postgres.url().expect("DATABASE_URL"),
-        "mysql" => Backend::MySql.url().expect("MYSQL_TEST_URL"),
-        _ => format!("sqlite://{}?mode=rwc", file.display()),
+    match pool.dialect().kind() {
+        rustango::sql::DialectKind::Postgres => Backend::Postgres.url().expect("DATABASE_URL"),
+        rustango::sql::DialectKind::Mysql => Backend::MySql.url().expect("MYSQL_TEST_URL"),
+        rustango::sql::DialectKind::Sqlite => format!("sqlite://{}?mode=rwc", file.display()),
     }
 }
 
@@ -1571,7 +1573,7 @@ async fn concurrent_runs_apply_once(pool: &Pool) {
         migrate_pool_with_ledger(&p1, dir.path(), ledger),
         migrate_pool_with_ledger(&p2, dir.path(), ledger),
     );
-    let name = pool.dialect().name();
+    let name = pool.dialect().kind();
     let n: Vec<(i64,)> =
         rustango::sql::raw_query_pool(&format!("SELECT COUNT(*) FROM {q}"), Vec::new(), &p1)
             .await

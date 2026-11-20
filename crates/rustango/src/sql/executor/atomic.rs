@@ -516,7 +516,7 @@ impl Joined {
                     .guard
                     .tx
                     .as_ref()
-                    .is_some_and(|t| t.dialect().name() == "postgres")
+                    .is_some_and(|t| t.dialect().kind() == crate::sql::DialectKind::Postgres)
             {
                 self.slot.fatal.store(true, Ordering::SeqCst);
             }
@@ -1053,7 +1053,7 @@ async fn begin_block(
     opts: &AtomicOptions,
     top: bool,
 ) -> Result<PoolTx<'static>, ExecError> {
-    if !opts.settings.is_empty() && pool.dialect().name() != "postgres" {
+    if !opts.settings.is_empty() && pool.dialect().kind() != crate::sql::DialectKind::Postgres {
         return Err(ExecError::Sql(
             crate::sql::SqlError::OperatorNotSupportedInDialect {
                 op: "set_config",

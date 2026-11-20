@@ -1890,7 +1890,7 @@ pub(crate) fn refuse_ddl_in_block(pool: &Pool, ddl: Ddl) -> Result<(), ExecError
             "run it outside the block",
         );
     }
-    if pool.dialect().name() == "mysql" {
+    if pool.dialect().kind() == crate::sql::DialectKind::Mysql {
         return atomic::refuse_in_block(
             pool,
             "DDL on MySQL",
@@ -3729,7 +3729,7 @@ mod pool_dispatch_tests {
             .unwrap();
         let pool: Pool = my.into();
         // Guards against a refactor hard-coding Postgres.
-        assert_eq!(pool.dialect().name(), "mysql");
+        assert_eq!(pool.dialect().kind(), crate::sql::DialectKind::Mysql);
         assert_eq!(pool.dialect().quote_ident("col"), "`col`");
         assert_eq!(pool.dialect().placeholder(1), "?");
     }
@@ -3743,7 +3743,7 @@ mod pool_dispatch_tests {
             .connect_lazy("postgres://localhost:1/none")
             .unwrap();
         let pool: Pool = pg.into();
-        assert_eq!(pool.dialect().name(), "postgres");
+        assert_eq!(pool.dialect().kind(), crate::sql::DialectKind::Postgres);
         assert_eq!(pool.dialect().quote_ident("col"), "\"col\"");
         assert_eq!(pool.dialect().placeholder(1), "$1");
     }

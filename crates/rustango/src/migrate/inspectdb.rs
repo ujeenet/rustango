@@ -44,7 +44,7 @@
 
 use std::io::Write;
 
-use crate::sql::Pool;
+use crate::sql::{DialectKind, Pool};
 
 use super::error::MigrateError;
 
@@ -139,11 +139,11 @@ pub(super) async fn inspectdb_cmd<W: Write>(
     w: &mut W,
 ) -> Result<(), MigrateError> {
     let parsed = parse_inspectdb_args(args)?;
-    let dialect_name = pool.dialect().name();
+    let dialect_name = pool.dialect().kind();
     let tables = list_tables(pool, &parsed.schema, parsed.table.as_deref()).await?;
     let views = list_views(pool, &parsed.schema, parsed.table.as_deref()).await?;
     if tables.is_empty() && views.is_empty() {
-        let label = if dialect_name == "sqlite" {
+        let label = if dialect_name == DialectKind::Sqlite {
             "<database file>".to_owned()
         } else {
             parsed.schema.clone()
@@ -175,10 +175,10 @@ pub(super) async fn inspectdb_cmd<W: Write>(
 fn write_header<W: Write>(
     w: &mut W,
     schema: &str,
-    dialect: &str,
+    dialect: DialectKind,
     crate_root: &str,
 ) -> std::io::Result<()> {
-    let schema_label = if dialect == "sqlite" {
+    let schema_label = if dialect == DialectKind::Sqlite {
         "<sqlite file>".to_owned()
     } else {
         schema.to_owned()
@@ -1302,12 +1302,11 @@ pub(super) fn sqlite_type_to_rust(declared: &str) -> (&'static str, Option<&'sta
 }
 
 /// Backend-aware type dispatch used by the emit pass.
-fn dialect_type_to_rust(dialect: &str, udt: &str) -> (&'static str, Option<&'static str>) {
+fn dialect_type_to_rust(dialect: DialectKind, udt: &str) -> (&'static str, Option<&'static str>) {
     match dialect {
-        "postgres" => pg_type_to_rust(udt),
-        "mysql" => mysql_type_to_rust(udt),
-        "sqlite" => sqlite_type_to_rust(udt),
-        _ => pg_type_to_rust(udt),
+        DialectKind::Postgres => pg_type_to_rust(udt),
+        DialectKind::Mysql => mysql_type_to_rust(udt),
+        DialectKind::Sqlite => sqlite_type_to_rust(udt),
     }
 }
 
@@ -1398,7 +1397,7 @@ fn write_model<W: Write>(
     pk_columns: &[String],
     fks: &[(String, String)],
 ) -> std::io::Result<()> {
-    write_model_with_dialect(w, table, columns, pk_columns, fks, "postgres")
+    write_model_with_dialect(w, table, columns, pk_columns, fks, DialectKind::Postgres)
 }
 
 /// Emit one `#[derive(Model)]` block for a SQL view. The struct gets
@@ -1414,7 +1413,7 @@ fn write_view_model_with_dialect<W: Write>(
     view: &str,
     columns: &[ColumnRow],
     definition: Option<&str>,
-    dialect: &str,
+    dialect: DialectKind,
 ) -> std::io::Result<()> {
     let struct_name = table_to_struct_name(view);
     // A quoted identifier may hold a newline, which would end the comment.
@@ -1456,7 +1455,7 @@ fn write_model_with_dialect<W: Write>(
     columns: &[ColumnRow],
     pk_columns: &[String],
     fks: &[(String, String)],
-    dialect: &str,
+    dialect: DialectKind,
 ) -> std::io::Result<()> {
     let struct_name = table_to_struct_name(table);
     writeln!(
@@ -1489,7 +1488,7 @@ fn emit_field<W: Write>(
     col: &ColumnRow,
     pk_column: Option<&str>,
     fks: &[(String, String)],
-    dialect: &str,
+    dialect: DialectKind,
 ) -> std::io::Result<()> {
     emit_field_as(
         w,
@@ -1507,7 +1506,7 @@ fn emit_field_as<W: Write>(
     field_name: &str,
     pk_column: Option<&str>,
     fks: &[(String, String)],
-    dialect: &str,
+    dialect: DialectKind,
 ) -> std::io::Result<()> {
     let (rust_ty, todo_note) = dialect_type_to_rust(dialect, &col.udt_name);
     let is_pk = pk_column == Some(col.name.as_str());
@@ -1657,7 +1656,7 @@ mod tests {
     #[test]
     fn header_emits_default_crate_root_bit_identically() {
         let mut buf = Vec::<u8>::new();
-        write_header(&mut buf, "public", "postgres", "rustango").unwrap();
+        write_header(&mut buf, "public", DialectKind::Postgres, "rustango").unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(out.contains("use rustango::sql::Auto;"));
         assert!(out.contains("use rustango::Model;"));
@@ -1667,7 +1666,7 @@ mod tests {
     #[test]
     fn header_threads_renamed_crate_root_into_use_statements() {
         let mut buf = Vec::<u8>::new();
-        write_header(&mut buf, "public", "postgres", "rustango_orm").unwrap();
+        write_header(&mut buf, "public", DialectKind::Postgres, "rustango_orm").unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(out.contains("use rustango_orm::sql::Auto;"));
         assert!(out.contains("use rustango_orm::Model;"));
@@ -1808,7 +1807,7 @@ mod tests {
             default: Some(r#"'{"a":"\"}'::jsonb"#.into()),
             is_auto: false,
         };
-        emit_field(&mut buf, &col, None, &[], "postgres").unwrap();
+        emit_field(&mut buf, &col, None, &[], DialectKind::Postgres).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(
             out.contains(r#"default = "'{\"a\":\"\\\"}'""#),
@@ -1935,7 +1934,7 @@ mod tests {
             },
         ];
         for col in &cols {
-            emit_field(&mut buf, col, Some("id"), &[], "postgres").unwrap();
+            emit_field(&mut buf, col, Some("id"), &[], DialectKind::Postgres).unwrap();
         }
         let out = String::from_utf8(buf).unwrap();
         assert!(out.contains("pub id: Auto<i64>"), "got: {out}");
@@ -1961,7 +1960,7 @@ mod tests {
             &col,
             Some("id"),
             &[("author_id".into(), "users".into())],
-            "postgres",
+            DialectKind::Postgres,
         )
         .unwrap();
         let out = String::from_utf8(buf).unwrap();
@@ -2015,7 +2014,8 @@ mod tests {
         let pk = vec![evil.to_owned(), "b".to_owned()];
         let mut buf: Vec<u8> = Vec::new();
         write_model(&mut buf, evil, &[col("a"), col("b")], &pk, &[]).unwrap();
-        write_view_model_with_dialect(&mut buf, evil, &[col("a")], None, "postgres").unwrap();
+        write_view_model_with_dialect(&mut buf, evil, &[col("a")], None, DialectKind::Postgres)
+            .unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(
             !out.lines().any(|l| l.starts_with("pub fn injected")),
@@ -2035,7 +2035,7 @@ mod tests {
             default: Some("'pending'::character varying".into()),
             is_auto: false,
         };
-        emit_field(&mut buf, &col, None, &[], "postgres").unwrap();
+        emit_field(&mut buf, &col, None, &[], DialectKind::Postgres).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(
             out.contains(r#"default = "'pending'""#),
@@ -2058,7 +2058,7 @@ mod tests {
             default: Some("nextval('foo_id_seq')".into()),
             is_auto: true,
         };
-        emit_field(&mut buf, &col, Some("id"), &[], "postgres").unwrap();
+        emit_field(&mut buf, &col, Some("id"), &[], DialectKind::Postgres).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(
             !out.contains("default ="),

@@ -231,7 +231,7 @@ async fn insert_reads_back_a_text_uuid_key(pool: &Pool) {
         name: "k".into(),
     };
     let got = k.insert(pool).await;
-    if pool.dialect().name() == "mysql" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Mysql {
         assert!(got.is_err(), "MySQL cannot read the key back: {got:?}");
         return;
     }
@@ -817,7 +817,7 @@ fn post_rows(rows: &[(&str, &str)]) -> BulkInsertQuery {
 
 /// #2200: MySQL failed with 1869 when two rows of one batch collided.
 async fn batch_conflicts_inside_one_insert(pool: &Pool) {
-    let mysql = pool.dialect().name() == "mysql";
+    let mysql = pool.dialect().kind() == rustango::sql::DialectKind::Mysql;
     // Exact duplicates: the first row wins on every backend.
     let q = post_rows(&[("x", "1"), ("x", "2"), ("y", "3")]).on_conflict_do_nothing();
     rustango::sql::bulk_insert_pool(pool, &q)
@@ -1264,7 +1264,7 @@ async fn string_agg_delimiter_with_backslash(pool: &Pool) {
 
 /// #2232: a comment ending in `\` must create the table and read back as written.
 async fn comment_with_backslash(pool: &Pool) {
-    if pool.dialect().name() != "mysql" {
+    if pool.dialect().kind() != rustango::sql::DialectKind::Mysql {
         return; // `setup` already created the table on every backend.
     }
     let sql = format!(
@@ -1284,7 +1284,7 @@ async fn comment_with_backslash(pool: &Pool) {
 
 /// #2004: `values()` read date and timestamp cells as Null on PG and MySQL.
 async fn values_decode_dates_and_timestamps(pool: &Pool) {
-    if pool.dialect().name() == "sqlite" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Sqlite {
         return; // SQLite stores both as text.
     }
     seed_meas(pool, 0, "2024-01-06T12:30:00Z").await;
@@ -1445,7 +1445,7 @@ async fn now_and_casts_keep_fractional_seconds(pool: &Pool) {
     let n = Meas::objects().where_raw(same).count(pool).await;
     assert_eq!(n.expect("count"), 1, "CAST to DateTime keeps the fraction");
     // SQLite has no TIME type; its cast is to TEXT.
-    if pool.dialect().name() != "sqlite" {
+    if pool.dialect().kind() != rustango::sql::DialectKind::Sqlite {
         let t = chrono::NaiveTime::from_hms_micro_opt(10, 0, 0, 250_000).unwrap();
         let time = WhereExpr::ExprCompare {
             lhs: Expr::Cast {

@@ -1608,7 +1608,7 @@ mod tests {
         let pool: Pool = sqlite_pool.into();
         assert_eq!(pool.backend_name(), "sqlite");
         let d = pool.dialect();
-        assert_eq!(d.name(), "sqlite");
+        assert_eq!(d.kind(), crate::sql::DialectKind::Sqlite);
         assert!(d.supports_returning());
         assert_eq!(d.bool_literal(true), "1");
         assert!(pool.as_sqlite().is_some());
@@ -1628,7 +1628,7 @@ mod tests {
             .unwrap();
         let pool: Pool = my.into();
         let d = pool.dialect();
-        assert_eq!(d.name(), "mysql");
+        assert_eq!(d.kind(), crate::sql::DialectKind::Mysql);
         assert_eq!(d.quote_ident("col"), "`col`");
         assert_eq!(d.placeholder(1), "?");
         assert!(!d.supports_returning());

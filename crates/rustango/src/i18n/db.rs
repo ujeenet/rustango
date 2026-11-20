@@ -119,8 +119,8 @@ pub(crate) fn ddl(dialect: &dyn crate::sql::Dialect) -> String {
         dialect.cs_text_type(LOCALE_LEN),
         dialect.cs_text_type(KEY_LEN),
     );
-    match dialect.name() {
-        "mysql" => format!(
+    match dialect.kind() {
+        crate::sql::DialectKind::Mysql => format!(
             r"
 CREATE TABLE IF NOT EXISTS `rustango_translations` (
     `id`         BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -134,7 +134,7 @@ CREATE TABLE IF NOT EXISTS `rustango_translations` (
 );
 "
         ),
-        "sqlite" => format!(
+        crate::sql::DialectKind::Sqlite => format!(
             r#"
 CREATE TABLE IF NOT EXISTS "rustango_translations" (
     "id"         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -149,7 +149,7 @@ CREATE TABLE IF NOT EXISTS "rustango_translations" (
 "#
         ),
         // Postgres + any future dialect: the standard `"`-quoted DDL.
-        _ => format!(
+        crate::sql::DialectKind::Postgres => format!(
             r#"
 CREATE TABLE IF NOT EXISTS "rustango_translations" (
     "id"         BIGSERIAL PRIMARY KEY,

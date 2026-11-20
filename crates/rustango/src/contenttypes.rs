@@ -1015,7 +1015,10 @@ pub async fn ensure_table(pool: &crate::sql::Pool) -> Result<(), crate::sql::sql
     let idx_q = dialect.quote_ident("rustango_content_types_natural_key");
     let col_app = dialect.quote_ident("app_label");
     let col_name = dialect.quote_ident("model_name");
-    let supports_if_not_exists = matches!(dialect.name(), "postgres" | "sqlite");
+    let supports_if_not_exists = matches!(
+        dialect.kind(),
+        crate::sql::DialectKind::Postgres | crate::sql::DialectKind::Sqlite
+    );
     let index_ddl = if supports_if_not_exists {
         format!("CREATE UNIQUE INDEX IF NOT EXISTS {idx_q} ON {table_q} ({col_app}, {col_name})")
     } else {

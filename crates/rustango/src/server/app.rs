@@ -229,7 +229,10 @@ mod tests {
             .unwrap();
         let pool: Pool = sqlx_pool.into();
         let builder = AppBuilder::from_pool(pool);
-        assert_eq!(builder.pool().backend_name(), "sqlite");
+        assert_eq!(
+            builder.pool().dialect().kind(),
+            crate::sql::DialectKind::Sqlite
+        );
         assert!(builder.pool().as_sqlite().is_some());
     }
 

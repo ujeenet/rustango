@@ -266,10 +266,10 @@ async fn two_port_claims_at_once_one_wins(pool: &Pool) {
 }
 
 fn port_offset(pool: &Pool) -> u32 {
-    match pool.dialect().name() {
-        "postgres" => 10_000,
-        "mysql" => 20_000,
-        _ => 30_000,
+    match pool.dialect().kind() {
+        rustango::sql::DialectKind::Postgres => 10_000,
+        rustango::sql::DialectKind::Mysql => 20_000,
+        rustango::sql::DialectKind::Sqlite => 30_000,
     }
 }
 

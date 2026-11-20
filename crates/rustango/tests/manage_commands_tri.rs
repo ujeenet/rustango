@@ -395,7 +395,7 @@ async fn tenant_flag_opens_the_tenant_pool(backend: &Pool) {
             .slug,
     ];
     // Schema mode is Postgres only.
-    if env.registry.dialect().name() == "postgres" {
+    if env.registry.dialect().kind() == rustango::sql::DialectKind::Postgres {
         slugs.push(
             env.tenant(&format!("mcs{pid}"), StorageMode::Schema)
                 .await
@@ -545,10 +545,10 @@ async fn clearsessions_finds_the_cache_table_through_the_search_path(pool: &Pool
 
 /// `clearsessions --table schema.table` finds and purges that table.
 async fn clearsessions_on_a_schema_qualified_table(pool: &Pool) {
-    let schema = match pool.dialect().name() {
-        "postgres" => "public".to_owned(),
-        "sqlite" => "main".to_owned(),
-        _ => {
+    let schema = match pool.dialect().kind() {
+        rustango::sql::DialectKind::Postgres => "public".to_owned(),
+        rustango::sql::DialectKind::Sqlite => "main".to_owned(),
+        rustango::sql::DialectKind::Mysql => {
             let rows: Vec<(String,)> =
                 rustango::sql::raw_query_pool("SELECT DATABASE()", Vec::new(), pool)
                     .await

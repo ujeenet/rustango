@@ -4,8 +4,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added
+
+- `sql::DialectKind` and `Dialect::kind()`: match on the backend so the compiler checks every arm. `Dialect::date_bucket_sql` / `datetime_bucket_sql` hold the `.dates()` / `.datetimes()` truncation; `testkit::matrix::Backend::kind()`.
+
 ### Changed
 
+- Framework code branches on `Dialect::kind()` instead of comparing `name()` strings; a structural test refuses new comparisons. Emitted SQL is unchanged.
 - Audit list, count and facets, a user's roles, media get/tag reads and the notifications table insert now run through the ORM instead of per-dialect hand-built SQL. Results are unchanged.
 - `allow(dead_code)` removed from the framework models and the SQLite marker traits, so an unused field on them warns again.
 

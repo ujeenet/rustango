@@ -350,7 +350,7 @@ async fn a_bare_admin_login_db_error_is_503_and_not_a_failure(pool: &Pool) {
         rustango::testkit::matrix::Backend::Sqlite,
     ]
     .into_iter()
-    .find(|b| b.dialect_name() == pool.dialect().name())
+    .find(|b| b.kind() == pool.dialect().kind())
     .unwrap();
     let broken_pool = backend.pool().await.unwrap();
     broken_pool.close().await;

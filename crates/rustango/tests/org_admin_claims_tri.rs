@@ -43,10 +43,10 @@ async fn port(pool: &Pool, i: u32) -> i32 {
         .unwrap()
         .subsec_micros()
         % 500;
-    let backend = match pool.dialect().name() {
-        "postgres" => 0,
-        "mysql" => 1,
-        _ => 2,
+    let backend = match pool.dialect().kind() {
+        rustango::sql::DialectKind::Postgres => 0,
+        rustango::sql::DialectKind::Mysql => 1,
+        rustango::sql::DialectKind::Sqlite => 2,
     };
     let mut p = i32::try_from(1_000 + backend * 6_000 + run * 10 + i).unwrap();
     while Org::objects()

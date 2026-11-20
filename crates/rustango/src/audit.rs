@@ -434,7 +434,7 @@ fn audit_cleanup_older_than_sql(dialect: &dyn crate::sql::Dialect) -> String {
     let t = dialect.quote_ident("rustango_audit_log");
     let oa = dialect.quote_ident("occurred_at");
     let p1 = dialect.placeholder(1);
-    if dialect.name() == "sqlite" {
+    if dialect.kind() == crate::sql::DialectKind::Sqlite {
         let fmt = crate::sql::SQLITE_DATETIME_FORMAT;
         let p2 = dialect.placeholder(2);
         return format!(
@@ -980,7 +980,7 @@ pub async fn cleanup_older_than_pool(
     // normalises the stored column, not the cutoff, so no legacy-shaped
     // value is ever bound here.
     let mut binds = vec![SqlValue::DateTime(cutoff_ts)];
-    if pool.dialect().name() == "sqlite" {
+    if pool.dialect().kind() == crate::sql::DialectKind::Sqlite {
         binds.push(SqlValue::DateTime(cutoff_ts));
     }
     crate::sql::raw_execute_pool(pool, &sql, binds)

@@ -1885,7 +1885,7 @@ fn is_deadlock(e: &sqlx::Error) -> bool {
 /// `parent_id` index.
 fn descendant_walk_sql(d: &dyn crate::sql::Dialect, hint: bool, limit: usize) -> String {
     const STEP_FROM: &str = "FROM rustango_media_collections c JOIN sub";
-    let from = if hint && d.name() == "mysql" {
+    let from = if hint && d.kind() == crate::sql::DialectKind::Mysql {
         use crate::core::Model as _;
         let index = MediaCollection::SCHEMA
             .indexes

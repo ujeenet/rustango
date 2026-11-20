@@ -20,7 +20,7 @@ use super::writers::{
     write_aggregate, write_bulk_insert, write_bulk_update_pg, write_count, write_delete,
     write_insert, write_select, write_update, Sql,
 };
-use super::{CompiledStatement, Dialect, SqlError, TableTarget};
+use super::{CompiledStatement, Dialect, DialectKind, SqlError, TableTarget};
 
 /// A string literal whose meaning does not depend on
 /// `standard_conforming_strings`: `E'…'` once a `\` is present.
@@ -47,8 +47,8 @@ pub static DIALECT: &Postgres = &Postgres;
 impl super::dialect::sealed::Sealed for Postgres {}
 
 impl Dialect for Postgres {
-    fn name(&self) -> &'static str {
-        "postgres"
+    fn kind(&self) -> DialectKind {
+        DialectKind::Postgres
     }
 
     // Postgres uses ANSI-style double-quoted identifiers — same as the
