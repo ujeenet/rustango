@@ -906,7 +906,7 @@ async fn write_if_unchanged(
         column,
         value: value.into(),
     };
-    let id = row.id.get().copied().unwrap_or_default();
+    let id = row.id.require()?;
     let mut filters = vec![Filter {
         column: "id",
         op: Op::Eq,
@@ -998,6 +998,10 @@ pub(crate) async fn reseal_password(registry: &Pool, row: &DbServer, apply: bool
         Ok(s) => s,
         Err(e) => return Resealed::Failed(e.to_string()),
     };
+    let id = match row.id.require() {
+        Ok(id) => id,
+        Err(e) => return Resealed::Failed(e.to_string()),
+    };
     let query = UpdateQuery {
         model: DbServer::SCHEMA,
         set: vec![
@@ -1014,7 +1018,7 @@ pub(crate) async fn reseal_password(registry: &Pool, row: &DbServer, apply: bool
             Filter {
                 column: "id",
                 op: Op::Eq,
-                value: SqlValue::I64(row.id.get().copied().unwrap_or_default()),
+                value: SqlValue::I64(id),
             },
             Filter {
                 column: "admin_password",
@@ -1156,6 +1160,12 @@ fn validate(
         sqlite_dir,
         active: spec.active,
     })
+}
+
+impl From<crate::sql::UnsavedRow> for DbServerError {
+    fn from(e: crate::sql::UnsavedRow) -> Self {
+        Self::Exec(e.into())
+    }
 }
 
 #[cfg(test)]

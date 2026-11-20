@@ -157,7 +157,7 @@ pub async fn create_admin_cmd<W: Write + Send>(
     user.save(pool)
         .await
         .map_err(|e| MigrateError::Validation(format!("insert failed: {e}")))?;
-    let user_id = user.id.get().copied().unwrap_or_default();
+    let user_id = user.id.require()?;
 
     writeln!(
         w,

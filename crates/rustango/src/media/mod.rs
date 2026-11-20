@@ -269,6 +269,12 @@ pub enum MediaError {
     Other(String),
 }
 
+impl From<crate::sql::UnsavedRow> for MediaError {
+    fn from(e: crate::sql::UnsavedRow) -> Self {
+        Self::Other(e.to_string())
+    }
+}
+
 // =====================================================================
 // Save options
 // =====================================================================
@@ -545,10 +551,7 @@ impl MediaManager {
                 metadata: Value::Object(serde_json::Map::new()),
             })
             .await?;
-        let media_id = match row.id {
-            Auto::Set(v) => v,
-            _ => unreachable!("insert returns Set id"),
-        };
+        let media_id = row.id.require()?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());

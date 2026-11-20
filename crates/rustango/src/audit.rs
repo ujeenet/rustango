@@ -536,17 +536,19 @@ pub struct AuditEntry {
     pub occurred_at: chrono::DateTime<chrono::Utc>,
 }
 
-impl From<AuditLog> for AuditEntry {
-    fn from(r: AuditLog) -> Self {
-        Self {
-            id: r.id.get().copied().unwrap_or_default(),
+impl TryFrom<AuditLog> for AuditEntry {
+    type Error = crate::sql::UnsavedRow;
+
+    fn try_from(r: AuditLog) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: r.id.require()?,
             entity_table: r.entity_table,
             entity_pk: r.entity_pk,
             operation: r.operation,
             source: r.source,
             changes: r.changes,
             occurred_at: r.occurred_at,
-        }
+        })
     }
 }
 
@@ -812,7 +814,10 @@ pub(crate) async fn list_in(
         .fetch(pool)
         .await
         .map_err(exec_to_sqlx)?;
-    Ok(rows.into_iter().map(AuditEntry::from).collect())
+    rows.into_iter()
+        .map(AuditEntry::try_from)
+        .collect::<Result<_, _>>()
+        .map_err(|e: crate::sql::UnsavedRow| exec_to_sqlx(e.into()))
 }
 
 /// Total row count for the audit-log pager, using the same
@@ -948,7 +953,10 @@ pub async fn fetch_for_entity_pool(
         .fetch(pool)
         .await
         .map_err(exec_to_sqlx)?;
-    Ok(rows.into_iter().map(AuditEntry::from).collect())
+    rows.into_iter()
+        .map(AuditEntry::try_from)
+        .collect::<Result<_, _>>()
+        .map_err(|e: crate::sql::UnsavedRow| exec_to_sqlx(e.into()))
 }
 
 /// Delete audit entries older than a cutoff, on every backend.

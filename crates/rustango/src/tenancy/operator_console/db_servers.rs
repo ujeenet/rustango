@@ -219,8 +219,7 @@ async fn audit(state: &ConsoleState, op: &auth::Operator, name: &str, verb: &str
         .iter()
         .map(|f| ((*f).to_owned(), serde_json::Value::Bool(true)))
         .collect();
-    let operator_id = op.id.get().copied().unwrap_or_default();
-    super::emit_registry_audit(&state.registry, TABLE, name, operator_id, verb, extra).await;
+    super::emit_registry_audit(&state.registry, TABLE, name, op, verb, extra).await;
 }
 
 pub(super) async fn create(

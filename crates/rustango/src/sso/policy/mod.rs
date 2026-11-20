@@ -1321,6 +1321,12 @@ pub(crate) async fn throttle_begin(
         .map_err(crate::login_throttle::LoginRefused::into_response)
 }
 
+impl From<crate::sql::UnsavedRow> for Denied {
+    fn from(e: crate::sql::UnsavedRow) -> Self {
+        Self::Storage(e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::identity::test_identity;

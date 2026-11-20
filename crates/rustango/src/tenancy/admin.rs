@@ -1361,7 +1361,14 @@ async fn login_submit(
     let mut resp = Redirect::to(&landing).into_response();
     resp.headers_mut().append(
         header::SET_COOKIE,
-        user_session_cookie(&cfg.secret, &tenant, cookie_path, &user, route_ttl(routes)),
+        user_session_cookie(
+            &cfg.secret,
+            &tenant,
+            uid,
+            cookie_path,
+            &user,
+            route_ttl(routes),
+        ),
     );
     send_user_logged_in(UserLoggedInContext {
         source: "tenant_admin",
@@ -1379,12 +1386,13 @@ async fn login_submit(
 fn user_session_cookie(
     secret: &tenant_console::SessionSecret,
     tenant: &TenantSlug,
+    uid: i64,
     cookie_path: &str,
     user: &super::auth::User,
     ttl_secs: i64,
 ) -> HeaderValue {
     let mut payload = TenantSessionPayload::new(
-        user.id.get().copied().unwrap_or_default(),
+        uid,
         tenant,
         ttl_secs,
         super::session::PasswordFingerprint::of(secret, &user.password_hash),
@@ -1853,6 +1861,7 @@ async fn change_password_submit(
         user_session_cookie(
             secret,
             &tenant,
+            user_id,
             cookie_path,
             &user,
             route_ttl(routes)

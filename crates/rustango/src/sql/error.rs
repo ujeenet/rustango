@@ -291,7 +291,7 @@ pub enum ExecError {
     },
 
     /// A write keyed on the primary key of a row never saved (#2467).
-    #[error("`{table}` row has no primary key yet; save it first")]
+    #[error("{}", super::auto::UnsavedRow { table: *table })]
     UnsavedRow { table: &'static str },
 
     /// `insert_returning` was called with an `InsertQuery` carrying no
@@ -399,6 +399,12 @@ pub enum ExecError {
         table: &'static str,
         count: usize,
     },
+}
+
+impl From<super::auto::UnsavedRow> for ExecError {
+    fn from(e: super::auto::UnsavedRow) -> Self {
+        Self::UnsavedRow { table: e.table }
+    }
 }
 
 /// The declared constraint a database refused a write on (#2345).

@@ -122,7 +122,13 @@ impl LandingRules {
         };
         let mut rules: Vec<(i32, LandingRule)> = Vec::with_capacity(rows.len());
         for row in rows {
-            let id = row.id.get().copied().unwrap_or_default();
+            let id = match row.id.require() {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::warn!(target: "rustango::sso::landing", tenant = tenant_log, "landing rules unreadable: {e}");
+                    return Self::default();
+                }
+            };
             let parsed = LandingMatch::parse(
                 &row.match_kind,
                 row.match_name.as_deref(),

@@ -158,6 +158,9 @@ untouched.
 - `expected StorageMode, found &str` / `expected BackendKind, found String`: `Org.storage_mode` and `Org.backend_kind` are enums now. Assign `StorageMode::Schema`, compare with `== StorageMode::Database`, and filter with `Org::storage_mode.eq(StorageMode::Database)` or `.is_in([..])` (a string no longer builds). Struct literals and `Debug` output change the same way.
 - `no method named as_str found for enum StorageMode`: import the trait, `use rustango::core::TextEnum as _;` (or `rustango::prelude::*`). `no function parse found`: use `StorageMode::from_db(s)` or `s.parse::<BackendKind>()`; the error is an `UnknownVariant` (`?` turns it into `TenancyError::Validation`).
 - Reading an org row whose stored value is not a known spelling (case and spaces count) is now an error for that tenant; `pg`, `postgresql`, `mariadb` and `sqlite3` still read. Run `manage check-tenants` after upgrading and `repair-tenant` on what it lists.
+- `Auto::require()` returns the key or `UnsavedRow`; use it in place of `id.get().copied().unwrap_or_default()`, which reads `0` for a row never saved. `UnsavedRow` converts into `ExecError`; add a `From<UnsavedRow>` to your own error type to use `?`.
+- `AuditEntry: From<AuditLog>` is now `TryFrom<AuditLog>` (error `UnsavedRow`): use `AuditEntry::try_from(row)?`.
+- A model-level `save` on an audited model whose key is unset now returns `ExecError::UnsavedRow` instead of reading the key as `0`.
 - New variants of a `TextEnum` need two releases on a running system: first the code that reads them, then the code that writes them.
 
 ## 0.67.0

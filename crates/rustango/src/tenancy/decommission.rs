@@ -195,7 +195,7 @@ where
     let registry = pools.registry_pool();
     let org = tenant(&registry, slug).await?;
     let run = store::open_operation_run(&registry, RunKind::Purge, &org, requested_by).await?;
-    let run_id = run.id.get().copied().unwrap_or_default();
+    let run_id = run.id.require()?;
     let report = purge_org_in_run(pools, &org, purge_database, observer, run_id).await;
     let run = store::run_by_id(&registry, run_id).await?.unwrap_or(run);
     report.map(|r| (run, r))
@@ -612,7 +612,7 @@ async fn check_server_drop<DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    let id = org.id.get().copied().unwrap_or_default();
+    let id = org.id.require()?;
     let backend = tenant.server.backend_kind()?;
     let others: Vec<Org> = Org::objects()
         .where_(Org::storage_mode.eq(StorageMode::Database))

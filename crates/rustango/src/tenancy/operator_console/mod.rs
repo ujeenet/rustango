@@ -557,6 +557,16 @@ pub fn router_with_brand_storage(
 
 /// Handoff URL used by the constructors that do not take one.
 /// Same value as [`super::routes::RouteConfig`]'s default.
+/// The signed-in operator's id; an unsaved row is a `500`, never operator `0`.
+fn operator_id(op: &auth::Operator) -> Result<i64, Response<Body>> {
+    op.id.require().map_err(unsaved_response)
+}
+
+/// A `500` for a row read before it was saved.
+fn unsaved_response(e: crate::sql::UnsavedRow) -> Response<Body> {
+    server_error("row was never saved", &e)
+}
+
 /// A logged `500` whose body withholds the cause.
 fn server_error(context: &str, e: &dyn std::fmt::Display) -> Response<Body> {
     let body = crate::error::server_error_body(context, e);
@@ -1381,7 +1391,7 @@ async fn prewarm_pools(
         &state.registry,
         "rustango_orgs",
         "*",
-        op.id.get().copied().unwrap_or(0),
+        &op,
         "prewarm",
         detail,
     )
@@ -1575,10 +1585,13 @@ async fn start_session(
     meta: crate::signals::auth::AuthRequestMeta,
 ) -> Response<Body> {
     use crate::signals::auth::{send_user_logged_in, UserLoggedInContext};
-    let oid = op.id.get().copied().unwrap_or_default();
+    let oid = match operator_id(op) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
     let mut resp = Redirect::to(next).into_response();
     resp.headers_mut()
-        .append(header::SET_COOKIE, new_session_cookie(state, op));
+        .append(header::SET_COOKIE, new_session_cookie(state, oid, op));
     send_user_logged_in(UserLoggedInContext {
         source: "operator",
         user_id: oid,
@@ -1607,14 +1620,17 @@ async fn logout(
     let meta = meta_from_parts(&extensions, &headers, Some("/logout"));
     // End the operator's sessions everywhere, impersonation ones included.
     let revoked = match live_session(&state, &headers).await {
-        Ok(Some((op, payload))) => crate::session::revoke_sessions::<auth::Operator>(
-            &state.registry,
-            op.id.get().copied().unwrap_or_default(),
-            op.sessions_revoked_at,
-            payload.iat,
-        )
-        .await
-        .map(drop),
+        Ok(Some((op, payload))) => match operator_id(&op) {
+            Ok(id) => crate::session::revoke_sessions::<auth::Operator>(
+                &state.registry,
+                id,
+                op.sessions_revoked_at,
+                payload.iat,
+            )
+            .await
+            .map(drop),
+            Err(resp) => return resp,
+        },
         Ok(None) => Ok(()),
         // Never report a logout that did not happen.
         Err(e) => Err(e),
@@ -1650,9 +1666,9 @@ async fn logout(
 }
 
 /// A new session cookie for `op`, bound to its current hash.
-fn new_session_cookie(state: &ConsoleState, op: &auth::Operator) -> HeaderValue {
+fn new_session_cookie(state: &ConsoleState, id: i64, op: &auth::Operator) -> HeaderValue {
     let mut payload = SessionPayload::new(
-        op.id.get().copied().unwrap_or_default(),
+        id,
         SESSION_IDLE_SECS.min(state.session_lifetime),
         session::PasswordFingerprint::of(&state.session_secret, &op.password_hash),
     );
@@ -1797,10 +1813,9 @@ async fn change_password_submit(
         return redir_err(&e.message);
     }
 
-    let op_id = op.id.get().copied().unwrap_or(0);
-    if op_id <= 0 {
+    let Ok(op_id) = op.id.require() else {
         return redir_err("Session is missing an operator id; please log in again.");
-    }
+    };
 
     // `op` from the extension is a snapshot taken in `require_session`;
     // verify against the live hash.
@@ -1876,15 +1891,17 @@ async fn change_password_submit(
         &state.registry,
         "rustango_operators",
         &op_id.to_string(),
-        op_id,
+        &op_row,
         "change_password",
         serde_json::Map::new(),
     )
     .await;
     op_row.password_hash = new_hash;
     let mut resp = redir(flash::Flash::Ok("Password updated"));
-    resp.headers_mut()
-        .append(header::SET_COOKIE, new_session_cookie(&state, &op_row));
+    resp.headers_mut().append(
+        header::SET_COOKIE,
+        new_session_cookie(&state, op_id, &op_row),
+    );
     resp
 }
 
@@ -2211,7 +2228,6 @@ async fn org_edit_submit(
     // omitting `database_url` itself even on rotation (it's a
     // credentialed URL — we record the FACT of rotation, not the
     // value).
-    let operator_id = op.id.get().copied().unwrap_or(0);
     let mut detail = serde_json::Map::new();
     detail.insert(
         "action".into(),
@@ -2227,7 +2243,7 @@ async fn org_edit_submit(
     if database_url_changed {
         detail.insert("database_url_rotated".into(), serde_json::json!(true));
     }
-    emit_op_audit(&state.registry, &slug, operator_id, "edit", detail).await;
+    emit_op_audit(&state.registry, &slug, &op, "edit", detail).await;
 
     let notice = if database_url_changed {
         format!(
@@ -2259,7 +2275,7 @@ fn redirect_with_error(slug: &str, msg: &str) -> Response<Body> {
 async fn emit_op_audit(
     registry: &crate::sql::Pool,
     slug: &str,
-    operator_id: i64,
+    operator: &auth::Operator,
     verb: &str,
     extra: serde_json::Map<String, serde_json::Value>,
 ) {
@@ -2268,7 +2284,7 @@ async fn emit_op_audit(
         "tenant_slug".into(),
         serde_json::Value::String(slug.to_owned()),
     );
-    emit_registry_audit(registry, "rustango_orgs", slug, operator_id, verb, changes).await;
+    emit_registry_audit(registry, "rustango_orgs", slug, operator, verb, changes).await;
 }
 
 /// The same trail for an action whose subject is not a tenant, so the
@@ -2278,10 +2294,36 @@ async fn emit_registry_audit(
     registry: &crate::sql::Pool,
     entity_table: &'static str,
     entity_pk: &str,
-    operator_id: i64,
+    operator: &auth::Operator,
     verb: &str,
     extra: serde_json::Map<String, serde_json::Value>,
 ) {
+    if let Err(e) =
+        record_registry_audit(registry, entity_table, entity_pk, operator, verb, extra).await
+    {
+        tracing::error!(
+            target: ACTION_TARGET,
+            event = "operator_action_unrecorded",
+            action = verb,
+            entity = entity_table,
+            entity_id = entity_pk,
+            error = %e,
+            "operator action was NOT written to the audit log",
+        );
+    }
+}
+
+/// [`emit_registry_audit`] that refuses an operator never saved, rather
+/// than record the action under operator `0`.
+async fn record_registry_audit(
+    registry: &crate::sql::Pool,
+    entity_table: &'static str,
+    entity_pk: &str,
+    operator: &auth::Operator,
+    verb: &str,
+    extra: serde_json::Map<String, serde_json::Value>,
+) -> Result<(), crate::sql::UnsavedRow> {
+    let operator_id = operator.id.require()?;
     let mut changes = extra;
     changes.insert("operator_id".into(), serde_json::json!(operator_id));
 
@@ -2326,6 +2368,7 @@ async fn emit_registry_audit(
             "operator action was NOT written to the audit log",
         );
     }
+    Ok(())
 }
 
 // ----------------------------- /orgs/{slug}/edit/branding (multipart)
@@ -2453,7 +2496,6 @@ async fn org_edit_branding(
     // of a tenant; operators iterating during onboarding leave a
     // breadcrumb trail. Records which assets landed (`logo`,
     // `favicon`) without the binary blob.
-    let operator_id = op.id.get().copied().unwrap_or(0);
     let assets: Vec<String> = updates
         .iter()
         .map(|(_, col, _)| match *col {
@@ -2468,7 +2510,7 @@ async fn org_edit_branding(
         serde_json::Value::String("org.branding.upload".into()),
     );
     detail.insert("assets".into(), serde_json::json!(assets));
-    emit_op_audit(&state.registry, &slug, operator_id, "branding", detail).await;
+    emit_op_audit(&state.registry, &slug, &op, "branding", detail).await;
 
     let notice = format!("uploaded {} brand asset(s) for `{slug}`", updates.len());
     flash::redirect(
@@ -2599,7 +2641,10 @@ async fn org_impersonate(
             "this tenant is inactive; activate it before opening its admin",
         );
     }
-    let operator_id = op.id.get().copied().unwrap_or(0);
+    let operator_id = match operator_id(&op) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
 
     // Mint the short-lived URL handoff token. Includes a random
     // single-use `jti` and the slug, both checked at redemption.
@@ -2637,7 +2682,7 @@ async fn org_impersonate(
         "action".into(),
         serde_json::Value::String("impersonate.start".into()),
     );
-    emit_op_audit(&state.registry, &slug, operator_id, "impersonating", detail).await;
+    emit_op_audit(&state.registry, &slug, &op, "impersonating", detail).await;
 
     let redirect_to = format!("{handoff}?token={token}");
 
@@ -3202,5 +3247,71 @@ mod session_lifetime_tests {
             session::lifetime_secs(std::time::Duration::from_secs(7 * 86_400)),
             12 * 3600
         );
+    }
+}
+
+#[cfg(all(test, feature = "sqlite", feature = "testkit"))]
+mod unsaved_operator_tests {
+    use super::*;
+    use crate::sql::Auto;
+
+    fn operator(id: Auto<i64>) -> auth::Operator {
+        auth::Operator {
+            id,
+            username: "ghost".into(),
+            password_hash: "x".into(),
+            active: true,
+            created_at: chrono::Utc::now(),
+            password_changed_at: None,
+            sessions_revoked_at: None,
+        }
+    }
+
+    async fn audit_rows(pool: &crate::sql::Pool) -> usize {
+        use crate::sql::FetcherPool as _;
+        crate::audit::AuditLog::objects()
+            .fetch(pool)
+            .await
+            .unwrap()
+            .len()
+    }
+
+    /// An operator never saved must not leave an audit row for operator 0.
+    #[tokio::test]
+    async fn an_unsaved_operator_writes_no_audit_row() {
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        crate::testkit::create_tables_for::<crate::audit::AuditLog>(&pool)
+            .await
+            .unwrap();
+        let r = record_registry_audit(
+            &pool,
+            "rustango_orgs",
+            "acme",
+            &operator(Auto::Unset),
+            "edit",
+            serde_json::Map::new(),
+        )
+        .await;
+        assert!(matches!(r, Err(crate::sql::UnsavedRow { .. })), "{r:?}");
+        assert_eq!(audit_rows(&pool).await, 0);
+
+        record_registry_audit(
+            &pool,
+            "rustango_orgs",
+            "acme",
+            &operator(Auto::Set(3)),
+            "edit",
+            serde_json::Map::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(audit_rows(&pool).await, 1);
+    }
+
+    #[test]
+    fn an_unsaved_operator_is_a_500_not_operator_zero() {
+        let resp = operator_id(&operator(Auto::Unset)).expect_err("unsaved");
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(operator_id(&operator(Auto::Set(3))).ok(), Some(3));
     }
 }

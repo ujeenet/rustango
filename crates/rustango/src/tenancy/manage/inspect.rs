@@ -130,7 +130,7 @@ where
     )?;
     writeln!(w, "{}", "-".repeat(76))?;
     for r in &runs {
-        let id = r.id.get().copied().unwrap_or_default();
+        let id = r.id.require()?;
         writeln!(
             w,
             "{:<8} {:<10} {:<24} {:<10} {}",

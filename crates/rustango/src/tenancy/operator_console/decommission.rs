@@ -216,15 +216,14 @@ async fn open_run(
         Err(TenancyError::Validation(why)) => return Err(back_to_orgs(None, Some(&why))),
         Err(e) => return Err(super::server_error("could not open a run", &e)),
     };
-    let run_id = run.id.get().copied().unwrap_or_default();
+    let run_id = run.id.require().map_err(super::unsaved_response)?;
     let mut extra = serde_json::Map::new();
     extra.insert("run_id".into(), serde_json::json!(run_id));
     let verb = match kind {
         RunKind::RotatePassword => "tenant_rotate_password",
         _ => "tenant_purge",
     };
-    let operator_id = op.id.get().copied().unwrap_or_default();
-    super::emit_op_audit(&state.registry, slug, operator_id, verb, extra).await;
+    super::emit_op_audit(&state.registry, slug, op, verb, extra).await;
     Ok(run_id)
 }
 
@@ -252,13 +251,5 @@ fn back_to_tenant(slug: &str, error: &str) -> Response<Body> {
 }
 
 async fn audit(state: &ConsoleState, op: &auth::Operator, slug: &str, verb: &str) {
-    let operator_id = op.id.get().copied().unwrap_or_default();
-    super::emit_op_audit(
-        &state.registry,
-        slug,
-        operator_id,
-        verb,
-        serde_json::Map::new(),
-    )
-    .await;
+    super::emit_op_audit(&state.registry, slug, op, verb, serde_json::Map::new()).await;
 }

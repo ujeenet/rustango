@@ -19,6 +19,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - **Breaking:** `CompiledStatement::params` is private: read it with `params()`, build a statement with `CompiledStatement::new`. The hidden `audit::__bind_value_pg` / `_my` / `_sqlite` are gone.
 - A value a backend cannot bind (a Postgres-only value off Postgres, a raw `List`, a Postgres array of floats) returns `SqlError::ValueNotSupportedInDialect` instead of panicking in the binder.
 - **Breaking:** `Org.storage_mode` is a `StorageMode` and `Org.backend_kind` a `BackendKind` (both `TextEnum`), not `String`. Stored values and the table are unchanged. `StorageMode::parse` / `BackendKind::parse` are gone (use `from_db` or `str::parse`); `as_str` is the `TextEnum` trait method.
+- A saved row's primary key is read with `Auto::require()`, which returns `UnsavedRow` for a row never saved, where about a hundred sites read `0`. The operator console, tenant provisioning and decommission, SSO links, agents and media now refuse such a row (the console answers 500) instead of acting on id 0 or writing an audit row for operator 0. `UnsavedRow` converts into `ExecError`, `TenancyError`, `MigrateError` and the other error types those paths return.
+- **Breaking:** `AuditEntry` is built from an `AuditLog` with `TryFrom` (was `From`).
 - One `rustango_orgs` row with an unreadable storage mode or backend fails only that tenant: it no longer opens the registry breaker, and migrate-all, pre-warm, the per-tenant sweep, `list-tenants` and the console list skip and report it. Cast fields decode the cell without copying it first.
 
 ## [0.67.0] — 2026-11-19

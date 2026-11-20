@@ -344,15 +344,19 @@ impl PasswordVerified<User> {
     pub async fn complete(self, pool: &crate::sql::Pool) -> User {
         let Self { mut row, upgrade } = self;
         if let Some(new) = upgrade {
-            let id = row.id.get().copied().unwrap_or_default();
-            row.password_hash = crate::passwords::store_rehash(
-                pool,
-                <User as crate::core::Model>::SCHEMA,
-                id,
-                &row.password_hash,
-                new,
-            )
-            .await;
+            match row.id.require() {
+                Ok(id) => {
+                    row.password_hash = crate::passwords::store_rehash(
+                        pool,
+                        <User as crate::core::Model>::SCHEMA,
+                        id,
+                        &row.password_hash,
+                        new,
+                    )
+                    .await;
+                }
+                Err(e) => crate::passwords::rehash_unsaved(e),
+            }
         }
         row
     }
@@ -364,11 +368,21 @@ impl PasswordVerified<User> {
         let Self { mut row, upgrade } = self;
         if let Some(new) = upgrade {
             let model = <User as crate::core::Model>::SCHEMA;
-            let id = row.id.get().copied().unwrap_or_default();
-            let q = crate::passwords::rehash_update(model, id, &row.password_hash, &new, None);
-            let applied = crate::sql::update_on(&mut *conn, &q).await;
-            row.password_hash =
-                crate::passwords::rehash_applied(applied, model, id, &row.password_hash, new);
+            match row.id.require() {
+                Ok(id) => {
+                    let q =
+                        crate::passwords::rehash_update(model, id, &row.password_hash, &new, None);
+                    let applied = crate::sql::update_on(&mut *conn, &q).await;
+                    row.password_hash = crate::passwords::rehash_applied(
+                        applied,
+                        model,
+                        id,
+                        &row.password_hash,
+                        new,
+                    );
+                }
+                Err(e) => crate::passwords::rehash_unsaved(e),
+            }
         }
         row
     }
@@ -380,15 +394,19 @@ impl PasswordVerified<Operator> {
     pub async fn complete(self, registry: &crate::sql::Pool) -> Operator {
         let Self { mut row, upgrade } = self;
         if let Some(new) = upgrade {
-            let id = row.id.get().copied().unwrap_or_default();
-            row.password_hash = crate::passwords::store_rehash(
-                registry,
-                <Operator as crate::core::Model>::SCHEMA,
-                id,
-                &row.password_hash,
-                new,
-            )
-            .await;
+            match row.id.require() {
+                Ok(id) => {
+                    row.password_hash = crate::passwords::store_rehash(
+                        registry,
+                        <Operator as crate::core::Model>::SCHEMA,
+                        id,
+                        &row.password_hash,
+                        new,
+                    )
+                    .await;
+                }
+                Err(e) => crate::passwords::rehash_unsaved(e),
+            }
         }
         row
     }

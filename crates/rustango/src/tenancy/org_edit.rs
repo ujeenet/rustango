@@ -221,7 +221,7 @@ async fn apply_values_if_alone(
         .into_iter()
         .next()
         .ok_or_else(|| TenancyError::Validation(format!("tenant `{slug}` not found")))?;
-    let existing_id = existing.id.get().copied().unwrap_or_default();
+    let existing_id = existing.id.require()?;
 
     // The same validators provisioning uses, so a value the console or
     // the CLI can set is a value `create-tenant` would have accepted.
@@ -245,7 +245,7 @@ async fn apply_values_if_alone(
         if let Some(run) =
             crate::tenancy::provision_store::failed_creator_run(registry, existing_id).await?
         {
-            let run_id = run.id.get().copied().unwrap_or_default();
+            let run_id = run.id.require()?;
             return Err(TenancyError::Validation(format!(
                 "tenant `{slug}` was left inactive by failed provision run #{run_id}; \
                  resume that run (console run page, or `create-tenant {slug} --resume`) \

@@ -77,6 +77,12 @@ impl From<crate::core::UnknownVariant> for TenancyError {
     }
 }
 
+impl From<rustango::sql::UnsavedRow> for TenancyError {
+    fn from(e: rustango::sql::UnsavedRow) -> Self {
+        Self::Exec(e.into())
+    }
+}
+
 impl TenancyError {
     /// The 503 for [`Self::PoolBusy`], with `Retry-After`.
     pub(crate) fn pool_busy_response() -> axum::response::Response {

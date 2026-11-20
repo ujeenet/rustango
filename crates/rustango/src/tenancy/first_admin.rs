@@ -395,7 +395,7 @@ where
             )));
         }
         return Ok(CreatedAdmin {
-            user_id: user.id.get().copied().unwrap_or_default(),
+            user_id: user.id.require()?,
             username: user.username,
             email: admin.email.clone(),
             handover: None,
@@ -422,7 +422,7 @@ where
     .insert(&pool)
     .await?;
     let created = CreatedAdmin {
-        user_id: user.id.get().copied().unwrap_or_default(),
+        user_id: user.id.require()?,
         username: admin.username.clone(),
         email: admin.email.clone(),
         handover: None,
@@ -508,7 +508,7 @@ where
         String::new()
     };
     let admin = CreatedAdmin {
-        user_id: user.id.get().copied().unwrap_or_default(),
+        user_id: user.id.require()?,
         username: user.username,
         email,
         handover: None,

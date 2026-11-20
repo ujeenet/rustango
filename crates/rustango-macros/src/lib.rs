@@ -4044,7 +4044,7 @@ fn inherent_impl_tokens(
                 mk_before_pairs(&|_| quote!(#root::sql::try_get_returning_sqlite));
             let tracked_cols: Vec<&str> = tracked.iter().map(|c| c.column.as_str()).collect();
             let pk_value_for_bind = if fields.pk_is_auto {
-                quote!(self.#pk_ident.get().copied().unwrap_or_default())
+                quote!(self.#pk_ident.require()?)
             } else {
                 quote!(::core::clone::Clone::clone(&self.#pk_ident))
             };

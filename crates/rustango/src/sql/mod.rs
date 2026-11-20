@@ -40,7 +40,7 @@ pub use writers::DeletePlan;
 pub(crate) use writers::{compile_date_buckets, compile_delete_plan, DateBucket};
 
 pub use array::Array;
-pub use auto::Auto;
+pub use auto::{Auto, UnsavedRow};
 pub use backend::{
     apply_auto_pk, try_get_returning, try_get_returning_my, try_get_returning_sqlite,
     AssignAutoPkPool, MyReturningRow, MysqlAutoIdSet, PgReturningRow, SqliteReturningRow,

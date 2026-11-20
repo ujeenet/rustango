@@ -184,7 +184,7 @@ pub(crate) async fn reset(
     pool: &Pool,
     operator: &crate::tenancy::auth::Operator,
 ) -> Result<u64, ExecError> {
-    let id = operator.id.get().copied().unwrap_or_default();
+    let id = operator.id.require()?;
     // Sessions end first, so a retry after a failed write still ends them.
     crate::session::revoke_sessions::<crate::tenancy::auth::Operator>(
         pool,

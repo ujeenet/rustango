@@ -739,7 +739,7 @@ where
         idempotency_key,
     )
     .await?;
-    let run_id = run.id.get().copied().unwrap_or_default();
+    let run_id = run.id.require()?;
 
     let outcome = in_run(pools, registry_url, dir, request, observer, run_id, resume)
         .await
@@ -845,11 +845,8 @@ where
         let resumable = rep.resume
             && !org.active
             && org.storage_mode == request.mode()
-            && match super::provision_store::org_left_by_failed_run(
-                &registry,
-                org.id.get().copied().unwrap_or_default(),
-            )
-            .await
+            && match super::provision_store::org_left_by_failed_run(&registry, org.id.require()?)
+                .await
             {
                 Ok(left) => left,
                 Err(e) => return rep.fail(ProvisionStep::Validate, e).await,
@@ -874,7 +871,7 @@ where
             Progress::Skipped("resuming the tenant an earlier run left inactive"),
         )
         .await;
-        let org_id = org.id.get().copied().unwrap_or_default();
+        let org_id = org.id.require()?;
         rep.registered(org_id).await;
         return migrate_and_activate(pools, registry_url, dir, request, &org, rep).await;
     }
@@ -911,23 +908,25 @@ where
     rep.step(ProvisionStep::RegisterOrg, Progress::Started)
         .await;
     let mut org = new_org_row(&checked, schema_name, checked.stored_database_url());
-    if let Err(e) = super::org_host::insert_org(&registry, &mut org).await {
-        if let Some(schema) = org.schema_name.as_deref() {
-            release_schema(pools, schema).await;
+    let org_id = match super::org_host::insert_org(&registry, &mut org).await {
+        Ok(id) => id,
+        Err(e) => {
+            if let Some(schema) = org.schema_name.as_deref() {
+                release_schema(pools, schema).await;
+            }
+            return rep.fail(ProvisionStep::RegisterOrg, e).await;
         }
-        return rep.fail(ProvisionStep::RegisterOrg, e).await;
-    }
-    registered(&org, rep).await;
+    };
+    registered(org_id, rep).await;
 
     migrate_and_activate(pools, registry_url, dir, request, &org, rep).await
 }
 
 /// Announce a new `Org` row.
-async fn registered(org: &Org, rep: &Reporter<'_>) {
+async fn registered(org_id: i64, rep: &Reporter<'_>) {
     // This pod sees the new tenant immediately; others converge on the
     // registry fingerprint (see `resolver::sync_org_generation`).
     super::invalidate_org_cache();
-    let org_id = org.id.get().copied().unwrap_or_default();
     rep.registered(org_id).await;
     rep.step(ProvisionStep::RegisterOrg, Progress::Ok).await;
     rep.notify(ProvisionEvent::Registered { org_id });
@@ -980,14 +979,16 @@ where
         }
     };
     let mut org = new_org_row(checked, None, Some(stored));
-    if let Err(e) = super::org_host::insert_org(&registry, &mut org).await {
-        let failed: Result<ProvisionOutcome, _> = rep.fail(ProvisionStep::RegisterOrg, e).await;
-        let undone = db.roll_back(pools, None, rep).await;
-        return failed.map_err(|e| with_undone(e, &undone));
-    }
-    db.attach(&registry, org.id.get().copied().unwrap_or_default())
-        .await;
-    registered(&org, rep).await;
+    let org_id = match super::org_host::insert_org(&registry, &mut org).await {
+        Ok(id) => id,
+        Err(e) => {
+            let failed: Result<ProvisionOutcome, _> = rep.fail(ProvisionStep::RegisterOrg, e).await;
+            let undone = db.roll_back(pools, None, rep).await;
+            return failed.map_err(|e| with_undone(e, &undone));
+        }
+    };
+    db.attach(&registry, org_id).await;
+    registered(org_id, rep).await;
 
     match migrate_and_activate(pools, registry_url, dir, request, &org, rep).await {
         Ok(outcome) if !matches!(outcome.migrations, MigrationsOutcome::Failed(_)) => {
@@ -1022,7 +1023,7 @@ where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
     let registry = pools.registry_pool();
-    let org_id = org.id.get().copied().unwrap_or_default();
+    let org_id = org.id.require()?;
 
     // ---- 5. Migrate ----
     let migrations = if request.run_migrations {
@@ -2425,26 +2426,34 @@ pub(super) fn with_undone(e: TenancyError, undone: &RolledBack) -> TenancyError 
     }
 }
 
-/// Empty `org`'s database URL and keep it inactive, best effort.
-async fn forget_database(registry: &crate::sql::Pool, org: &Org) {
+/// Empty `org`'s database URL and keep it inactive. An `org` never saved
+/// is an error, not an update of id 0.
+async fn forget_database(
+    registry: &crate::sql::Pool,
+    org: &Org,
+) -> Result<(), crate::sql::ExecError> {
     use crate::sql::UpdaterPool as _;
-    let res = Org::objects()
-        .where_(Org::id.eq(org.id.get().copied().unwrap_or_default()))
+    Org::objects()
+        .where_(Org::id.eq(org.id.require()?))
         .update()
         .set("database_url", None::<String>)
         .set("active", false)
         .execute_pool(registry)
-        .await;
-    if let Err(e) = res {
-        tracing::error!(target: "rustango::tenancy::provision", org = %org.slug, error = %e, "could not empty the database URL of a rolled-back tenant");
-    }
+        .await?;
+    Ok(())
 }
 
 /// Note that the database now exists. A failure leaves `created = false`,
 /// which a retry treats with care.
 async fn mark_created(record: &mut super::TenantDatabase, registry: &crate::sql::Pool) {
     use crate::sql::UpdaterPool as _;
-    let id = record.id.get().copied().unwrap_or_default();
+    let id = match record.id.require() {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!(target: "rustango::tenancy::provision", error = %e, "could not mark the tenant database created");
+            return;
+        }
+    };
     let marked = super::TenantDatabase::objects()
         .where_(super::TenantDatabase::id.eq(id))
         .update()
@@ -2825,7 +2834,9 @@ impl ServerDatabase {
                 Ok(()) => Ok(()),
                 Err(e) => {
                     // Never leave a resumable row pointing at a dropped database.
-                    forget_database(&registry, org).await;
+                    if let Err(e) = forget_database(&registry, org).await {
+                        tracing::error!(target: "rustango::tenancy::provision", org = %org.slug, error = %e, "could not empty the database URL of a rolled-back tenant");
+                    }
                     Err(e)
                 }
             },
@@ -4120,5 +4131,24 @@ mod registry_alias_tests {
         let own_url = format!("sqlite://{}?mode=rwc", own.display());
         let _ = crate::sql::Pool::connect(&own_url).await.unwrap();
         assert!(super::registry_alias(&own_url, &registry).await.is_ok());
+    }
+}
+
+#[cfg(all(test, feature = "sqlite", feature = "testkit"))]
+mod unsaved_org_tests {
+    use super::*;
+
+    /// A rolled-back `Org` never saved is an error, not an update of id 0.
+    #[tokio::test]
+    async fn forgetting_the_database_of_an_unsaved_org_errors() {
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        crate::testkit::create_tables_for::<Org>(&pool)
+            .await
+            .unwrap();
+        let unsaved = crate::testkit::org();
+        assert!(matches!(
+            forget_database(&pool, &unsaved).await,
+            Err(crate::sql::ExecError::UnsavedRow { .. })
+        ));
     }
 }

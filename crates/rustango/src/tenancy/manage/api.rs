@@ -223,7 +223,7 @@ where
     };
     // Finish a create whose migrations failed; a suspended tenant stays as is.
     let registry = pools.registry_pool();
-    let org_id = existing.id.get().copied().unwrap_or_default();
+    let org_id = existing.id.require()?;
     if existing.active
         || !crate::tenancy::provision_store::org_left_by_failed_run(&registry, org_id).await?
     {
@@ -252,7 +252,7 @@ where
         None,
     )
     .await?;
-    let run_id = run.id.get().copied().unwrap_or_default();
+    let run_id = run.id.require()?;
     let outcome = provision::provision_tenant_in_run(
         pools,
         registry_url,

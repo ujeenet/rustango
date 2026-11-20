@@ -355,7 +355,7 @@ async fn handle(
             .map_err(|e| Refusal::Internal(e.to_string()))?;
         if !retry {
             return Ok(Accepted {
-                run_id: existing.id.get().copied().unwrap_or_default(),
+                run_id: existing.id.require()?,
                 slug: existing.slug,
                 state: existing.state,
                 duplicate: true,
@@ -402,7 +402,7 @@ async fn handle(
                 .flatten();
             return match existing {
                 Some(existing) => Ok(Accepted {
-                    run_id: existing.id.get().copied().unwrap_or_default(),
+                    run_id: existing.id.require()?,
                     slug: existing.slug,
                     state: existing.state,
                     duplicate: true,
@@ -413,7 +413,7 @@ async fn handle(
             };
         }
     };
-    let run_id = run.id.get().copied().unwrap_or_default();
+    let run_id = run.id.require()?;
 
     let provisioner = Arc::clone(&state.provisioner);
     let slug = request.slug.clone();
@@ -591,6 +591,12 @@ pub fn router(path: &str, state: WebhookState) -> axum::Router {
     axum::Router::new()
         .route(path, axum::routing::post(provision_webhook))
         .with_state(state)
+}
+
+impl From<crate::sql::UnsavedRow> for Refusal {
+    fn from(e: crate::sql::UnsavedRow) -> Self {
+        Self::Internal(e.to_string())
+    }
 }
 
 #[cfg(test)]

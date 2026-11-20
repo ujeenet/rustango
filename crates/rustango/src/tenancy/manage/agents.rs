@@ -61,7 +61,7 @@ where
     let issued = crate::tenancy::create_agent_pool(&scoped, &name)
         .await
         .map_err(|e| TenancyError::Validation(e.to_string()))?;
-    let id = issued.agent.id.get().copied().unwrap_or_default();
+    let id = issued.agent.id.require()?;
     writeln!(w, "created agent `{name}` (id {id}) in tenant `{slug}`")?;
     crate::manage_interactive::print_secret_once(w, "secret", &issued.token)?;
     Ok(())
@@ -125,7 +125,7 @@ where
     }
     writeln!(w, "agents in tenant `{slug}`:")?;
     for a in &agents {
-        let id = a.id.get().copied().unwrap_or_default();
+        let id = a.id.require()?;
         let status = if a.active { "active" } else { "disabled" };
         writeln!(
             w,
@@ -191,7 +191,7 @@ where
     )
     .await
     .map_err(|e| TenancyError::Validation(e.to_string()))?;
-    let id = skill.id.get().copied().unwrap_or_default();
+    let id = skill.id.require()?;
     writeln!(
         w,
         "created skill `{codename}` (id {id}) in tenant `{slug}` with {} tool(s)",
@@ -345,7 +345,7 @@ where
     let issued = crate::tenancy::create_user_key_pool(&scoped, uid, &label, &skills)
         .await
         .map_err(|e| TenancyError::Validation(e.to_string()))?;
-    let id = issued.agent.id.get().copied().unwrap_or_default();
+    let id = issued.agent.id.require()?;
     let scope = if skills.is_empty() {
         "full (owner's permissions)".to_owned()
     } else {
@@ -392,7 +392,7 @@ where
     }
     writeln!(w, "keys for user `{username}` in tenant `{slug}`:")?;
     for k in &keys {
-        let id = k.id.get().copied().unwrap_or_default();
+        let id = k.id.require()?;
         let label = k
             .data
             .get("label")
@@ -505,7 +505,7 @@ async fn resolve_user_id(pool: &Pool, username: &str) -> Result<i64, TenancyErro
         .into_iter()
         .next()
         .ok_or_else(|| TenancyError::Validation(format!("unknown user `{username}`")))?;
-    Ok(user.id.get().copied().unwrap_or_default())
+    Ok(user.id.require()?)
 }
 
 /// Parse exactly three positional args (`<slug> <a> <b>`) for the grant verbs.

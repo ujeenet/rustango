@@ -139,7 +139,7 @@ where
     let org = tenant(pools, slug).await?;
     let run =
         store::open_operation_run(&registry, RunKind::RotatePassword, &org, requested_by).await?;
-    let run_id = run.id.get().copied().unwrap_or_default();
+    let run_id = run.id.require()?;
     let result = rotate_in(pools, &org, observer, run_id).await;
     let run = store::run_by_id(&registry, run_id).await?.unwrap_or(run);
     result.map(|()| run)
@@ -415,8 +415,12 @@ async fn revert(registry: &crate::sql::Pool, org: &Org, r: &Rotation, rep: &OpRe
             .await;
     };
     rep.started(Step::Revert).await;
+    let org_id = match org.id.require() {
+        Ok(id) => id,
+        Err(e) => return failed(format!("{e}: {again}")).await,
+    };
     let still_old = match Org::objects()
-        .where_(Org::id.eq(org.id.get().copied().unwrap_or_default()))
+        .where_(Org::id.eq(org_id))
         .first(registry)
         .await
     {

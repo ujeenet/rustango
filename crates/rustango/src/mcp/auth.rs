@@ -236,7 +236,10 @@ pub(crate) async fn mint_agent_jwt(
             return Err(MintError::Internal);
         }
     };
-    let agent_id = agent.id.get().copied().unwrap_or_default();
+    let agent_id = agent.id.require().map_err(|e| {
+        tracing::error!(error = %e, "mcp agent row has no id");
+        MintError::Internal
+    })?;
     // A user-owned key takes its capabilities from the owner's
     // permissions. A machine agent has only its own grants.
     let grants = match agent.user_id {
@@ -336,6 +339,13 @@ impl From<AgentError> for BearerRejection {
             return Self::Refused(LoginRefused::Busy);
         }
         tracing::warn!(error = %e, "mcp raw-key check failed");
+        Self::CheckFailed
+    }
+}
+
+impl From<crate::sql::UnsavedRow> for BearerRejection {
+    fn from(e: crate::sql::UnsavedRow) -> Self {
+        tracing::error!(error = %e, "mcp agent row has no id");
         Self::CheckFailed
     }
 }
@@ -536,7 +546,7 @@ fn split_raw_credential(token: &str) -> Option<(&str, &str)> {
 
 /// [`verify_raw_agent_credential`] with the Argon2 check passed in; it
 /// is awaited only on a cache miss.
-async fn verify_raw_with<E: From<AgentError>>(
+async fn verify_raw_with<E: From<AgentError> + From<crate::sql::UnsavedRow>>(
     pool: &crate::sql::Pool,
     tenant: &TenantSlug,
     token: &str,
@@ -550,7 +560,7 @@ async fn verify_raw_with<E: From<AgentError>>(
             let Some(agent) = hash_check.await? else {
                 return Ok(None);
             };
-            let agent_id = agent.id.get().copied().unwrap_or_default();
+            let agent_id = agent.id.require()?;
             raw_key_cache_put(cache_key, agent_id);
             agent_id
         }
