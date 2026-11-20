@@ -775,7 +775,10 @@ pub(super) async fn list_tenants<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    let orgs: Vec<Org> = Org::objects().fetch(&pools.registry_pool()).await?;
+    let (orgs, bad) = Org::fetch_reporting(Org::objects(), &pools.registry_pool()).await?;
+    for row in &bad {
+        writeln!(w, "unreadable: {row}")?;
+    }
     if orgs.is_empty() {
         writeln!(w, "(no tenants)")?;
         return Ok(());

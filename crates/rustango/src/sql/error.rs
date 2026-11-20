@@ -469,6 +469,16 @@ impl ExecError {
         db.table().filter(|_| db.is_foreign_key_violation())
     }
 
+    /// A row came back but a column did not decode, such as a stored
+    /// value no `TextEnum` variant names: the row's fault, not the database's.
+    #[must_use]
+    pub fn is_row_decode(&self) -> bool {
+        matches!(
+            self,
+            Self::Driver(sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_))
+        )
+    }
+
     /// A deadlock the database broke by aborting this transaction:
     /// MySQL 1213, PG 40P01.
     pub(crate) fn is_deadlock(&self) -> bool {

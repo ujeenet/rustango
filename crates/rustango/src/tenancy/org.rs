@@ -301,6 +301,146 @@ impl Org {
     }
 }
 
+/// A `rustango_orgs` cell whose stored text no variant reads (or, from
+/// [`Org::check_stored_values`], an alias). Sweeps skip such a row and report it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BadOrgRow {
+    /// The row's primary key.
+    pub id: i64,
+    /// The row's slug.
+    pub slug: String,
+    /// `storage_mode` or `backend_kind`.
+    pub column: &'static str,
+    /// The stored text, cut to 64 bytes with control characters escaped.
+    pub value: String,
+}
+
+impl std::fmt::Display for BadOrgRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "tenant `{}` cannot be read: its {} holds `{}`; `manage check-tenants` lists it \
+             and `manage repair-tenant` fixes it",
+            self.slug, self.column, self.value
+        )
+    }
+}
+
+impl From<BadOrgRow> for super::TenancyError {
+    fn from(row: BadOrgRow) -> Self {
+        Self::Validation(row.to_string())
+    }
+}
+
+/// [`Org::check_stored_values`]: rows to fix, and rows still on an alias.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct StoredValueCheck {
+    /// Cells no variant reads; the row fails every read until fixed.
+    pub bad: Vec<BadOrgRow>,
+    /// Cells on an older spelling such as `pg`; they read fine.
+    pub aliases: Vec<BadOrgRow>,
+}
+
+impl Org {
+    /// Fetch `qs`, skipping rows whose storage mode or backend no variant
+    /// reads, and return those rows too. One query when every row reads.
+    ///
+    /// # Errors
+    /// Driver failures; a row turning bad between the two reads.
+    pub async fn fetch_reporting(
+        qs: crate::query::QuerySet<Org>,
+        pool: &crate::sql::Pool,
+    ) -> Result<(Vec<Org>, Vec<BadOrgRow>), crate::sql::ExecError> {
+        use crate::core::Column as _;
+        use crate::sql::FetcherPool as _;
+        match qs.clone().fetch(pool).await {
+            Err(e) if e.is_row_decode() => {}
+            other => return other.map(|orgs| (orgs, Vec::new())),
+        }
+        let bad = scan_stored_values(qs.clone(), pool).await?.bad;
+        for row in &bad {
+            tracing::error!(target: "rustango::tenancy", id = row.id, "{row}");
+        }
+        let mut ids: Vec<i64> = bad.iter().map(|b| b.id).collect();
+        ids.dedup();
+        let orgs = qs.where_(Org::id.not_in(ids)).fetch(pool).await?;
+        Ok((orgs, bad))
+    }
+
+    /// Every row's stored storage mode and backend, read as raw text: the
+    /// cells no variant reads, and the cells on an alias.
+    ///
+    /// # Errors
+    /// Driver failures.
+    pub async fn check_stored_values(
+        pool: &crate::sql::Pool,
+    ) -> Result<StoredValueCheck, crate::sql::ExecError> {
+        scan_stored_values(Org::objects(), pool).await
+    }
+}
+
+/// `qs`'s storage mode and backend cells, read as text so a bad row decodes.
+async fn scan_stored_values(
+    qs: crate::query::QuerySet<Org>,
+    pool: &crate::sql::Pool,
+) -> Result<StoredValueCheck, crate::sql::ExecError> {
+    use crate::core::SqlValue;
+    let rows = qs
+        .order_by(&[("id", false)])
+        .values_list(&["id", "slug", "storage_mode", "backend_kind"])
+        .fetch(pool)
+        .await?;
+    let mut out = StoredValueCheck::default();
+    for row in rows {
+        let [id, SqlValue::String(slug), mode, backend] = row.as_slice() else {
+            continue;
+        };
+        let id = match id {
+            SqlValue::I64(n) => *n,
+            SqlValue::I32(n) => i64::from(*n),
+            _ => continue,
+        };
+        let cells = [
+            ("storage_mode", stored_value::<StorageMode>(mode)),
+            ("backend_kind", stored_value::<BackendKind>(backend)),
+        ];
+        for (column, found) in cells {
+            let Some((value, alias)) = found else {
+                continue;
+            };
+            let row = BadOrgRow {
+                id,
+                slug: slug.clone(),
+                column,
+                value,
+            };
+            if alias {
+                out.aliases.push(row);
+            } else {
+                out.bad.push(row);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `Some((shown text, is_alias))` for a cell that is not a stored name.
+fn stored_value<E: crate::core::TextEnum>(cell: &crate::core::SqlValue) -> Option<(String, bool)> {
+    use crate::core::SqlValue;
+    let text = match cell {
+        SqlValue::String(s) => s.as_str(),
+        SqlValue::Null => "",
+        other => return Some((format!("{other:?}"), false)),
+    };
+    match E::from_db(text) {
+        Err(e) => Some((e.value, false)),
+        Ok(_) if crate::core::text_enum::is_alias::<E>(text) => Some((text.to_owned(), true)),
+        Ok(_) => None,
+    }
+}
+
 /// The one home of the "`schema_name`, else the slug" rule.
 pub(crate) fn effective_schema<'a>(schema_name: Option<&'a str>, slug: &'a str) -> &'a str {
     schema_name.unwrap_or(slug)

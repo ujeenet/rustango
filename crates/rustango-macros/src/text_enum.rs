@@ -194,7 +194,7 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
 
         impl ::core::fmt::Display for #name {
             fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                f.write_str(<Self as #root::core::TextEnum>::as_str(self))
+                f.pad(<Self as #root::core::TextEnum>::as_str(self))
             }
         }
 

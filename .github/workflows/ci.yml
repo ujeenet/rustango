@@ -1705,6 +1705,7 @@ jobs:
           binary(=template_views_object_permissions_tri) |
           binary(=row_to_json_nulls_tri) |
           binary(=column_types_tri) |
+          binary(=text_enum_tri) |
           binary(=m2m_non_int_pk_tri) |
           binary(=m2m_changed_noop_tri) |
           binary(=update_validation_tri) |

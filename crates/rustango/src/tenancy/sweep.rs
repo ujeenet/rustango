@@ -50,7 +50,6 @@
 
 use crate::core::Column as _;
 use crate::sql::sqlx::Database;
-use crate::sql::FetcherPool as _;
 
 use super::error::TenancyError;
 use super::org::Org;
@@ -123,6 +122,9 @@ impl<T, E> TenantSweep<T, E> {
 /// Public so a caller who wants concurrency, ordering, batching or a
 /// subset can build its own loop.
 ///
+/// A row whose stored storage mode or backend no variant reads is left
+/// out and logged.
+///
 /// # Errors
 /// Driver error reading `rustango_orgs` from the registry pool.
 pub async fn active_tenants<DB>(pools: &TenantPools<DB>) -> Result<Vec<Org>, TenancyError>
@@ -130,11 +132,18 @@ where
     DB: Database,
     crate::sql::Pool: From<crate::sql::sqlx::Pool<DB>>,
 {
-    let registry = pools.registry_pool();
-    Ok(Org::objects()
-        .where_(Org::active.eq(true))
-        .fetch(&registry)
-        .await?)
+    Ok(active_tenants_reporting(pools).await?.0)
+}
+
+async fn active_tenants_reporting<DB>(
+    pools: &TenantPools<DB>,
+) -> Result<(Vec<Org>, Vec<super::org::BadOrgRow>), TenancyError>
+where
+    DB: Database,
+    crate::sql::Pool: From<crate::sql::sqlx::Pool<DB>>,
+{
+    let active = Org::objects().where_(Org::active.eq(true));
+    Ok(Org::fetch_reporting(active, &pools.registry_pool()).await?)
 }
 
 /// Run `f` against `org`'s own pool, as one step of [`for_each_tenant`].
@@ -182,8 +191,14 @@ where
     F: Fn(Org, crate::sql::Pool) -> Fut,
     Fut: std::future::Future<Output = Result<T, E>>,
 {
-    let orgs = active_tenants(pools).await?;
-    let mut outcomes = Vec::with_capacity(orgs.len());
+    let (orgs, unreadable) = active_tenants_reporting(pools).await?;
+    let mut outcomes: Vec<_> = unreadable
+        .into_iter()
+        .map(|row| TenantOutcome {
+            slug: row.slug.clone(),
+            result: Err(SweepError::Pool(row.into())),
+        })
+        .collect();
 
     for org in orgs {
         let slug = org.slug.clone();

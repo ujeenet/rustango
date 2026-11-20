@@ -655,14 +655,16 @@ pub(crate) async fn schema_claimed(
     schema: &str,
     except_org: Option<i64>,
 ) -> Result<bool, crate::sql::ExecError> {
-    let mut rows: Vec<super::Org> = super::Org::objects()
-        .where_(
-            super::Org::schema_name
-                .eq(Some(schema.to_owned()))
-                .or(super::Org::slug.eq(schema.to_owned())),
-        )
-        .fetch(registry)
-        .await?;
+    let matching = super::Org::objects().where_(
+        super::Org::schema_name
+            .eq(Some(schema.to_owned()))
+            .or(super::Org::slug.eq(schema.to_owned())),
+    );
+    let (mut rows, bad) = super::Org::fetch_reporting(matching, registry).await?;
+    // Its mode is unknown, so it may own the schema: refuse rather than share.
+    if bad.iter().any(|b| except_org != Some(b.id)) {
+        return Ok(true);
+    }
     // Exact, and through the one rule: MySQL's `=` ignores case.
     rows.retain(|o| o.storage_mode == super::StorageMode::Schema && o.effective_schema() == schema);
     Ok(other_org(&rows, except_org))

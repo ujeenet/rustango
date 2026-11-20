@@ -67,6 +67,19 @@ pub struct TenantMigrationReport {
 }
 
 impl TenantMigrationReport {
+    /// A report that starts with one failed outcome per row the sweep could not read.
+    fn unreadable(rows: Vec<super::org::BadOrgRow>) -> Self {
+        let tenants = rows
+            .into_iter()
+            .map(|row| TenantMigrationOutcome {
+                slug: row.slug.clone(),
+                applied: Vec::new(),
+                error: Some(row.into()),
+            })
+            .collect();
+        Self { tenants }
+    }
+
     /// `true` when every tenant migrated cleanly.
     #[must_use]
     pub fn all_ok(&self) -> bool {
@@ -491,10 +504,11 @@ async fn migrate_tenants_opts(
         .map(|m| m.len())
         .unwrap_or(0);
 
-    let orgs: Vec<Org> = Org::objects()
-        .where_(Org::active.eq(true))
-        .fetch_on(pools.registry())
-        .await?;
+    let (orgs, unreadable) = Org::fetch_reporting(
+        Org::objects().where_(Org::active.eq(true)),
+        &pools.registry_pool(),
+    )
+    .await?;
 
     info!(
         target: "rustango::tenancy",
@@ -522,7 +536,7 @@ async fn migrate_tenants_opts(
         observer.on_event(TenantMigrationEvent::Planned { tenants: total });
     }
 
-    let mut report = TenantMigrationReport::default();
+    let mut report = TenantMigrationReport::unreadable(unreadable);
     for (i, org) in orgs.iter().enumerate() {
         let index = i + 1;
         if let Some(observer) = observer {
@@ -686,15 +700,12 @@ async fn migrate_tenants_db_opts<DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    use crate::sql::FetcherPool as _;
     let project = ScopedProject::of(dir, MigrationScope::Tenant).await?;
     let chain = project.system_chain(crate::core::ModelScope::Tenant)?;
 
     let registry_pool = pools.registry_pool();
-    let orgs: Vec<Org> = Org::objects()
-        .where_(Org::active.eq(true))
-        .fetch(&registry_pool)
-        .await?;
+    let (orgs, unreadable) =
+        Org::fetch_reporting(Org::objects().where_(Org::active.eq(true)), &registry_pool).await?;
 
     info!(
         target: "rustango::tenancy",
@@ -708,7 +719,7 @@ where
         observer.on_event(TenantMigrationEvent::Planned { tenants: total });
     }
 
-    let mut report = TenantMigrationReport::default();
+    let mut report = TenantMigrationReport::unreadable(unreadable);
     for (i, org) in orgs.iter().enumerate() {
         let index = i + 1;
         if let Some(observer) = observer {

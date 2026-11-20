@@ -980,6 +980,17 @@ where
             st.registry_down.close();
             Ok(rows.into_iter().next())
         }
+        // The registry answered; one tenant's row is bad. Failing every
+        // tenant fast for it would turn one bad row into an outage.
+        Err(e) if e.is_row_decode() => {
+            st.registry_down.close();
+            tracing::error!(
+                target: "rustango::tenancy::resolver",
+                error = %e,
+                "a tenant row in rustango_orgs cannot be read; `manage tenants-check` lists it",
+            );
+            Err(TenancyError::Driver(driver_from_exec(e)))
+        }
         Err(e) => {
             st.registry_down.open();
             st.registry_down.warn_once(|| {

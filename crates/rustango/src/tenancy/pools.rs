@@ -971,7 +971,12 @@ async fn any_org(registry: &PgPool, mode: Option<StorageMode>) -> Result<bool, T
     if let Some(mode) = mode {
         orgs = orgs.where_(Org::storage_mode.eq(mode));
     }
-    let found = orgs.limit(1).fetch_on(registry).await;
+    // Ids only: one unreadable row must not hide that orgs exist.
+    let found = orgs
+        .limit(1)
+        .values_list_flat("id")
+        .fetch_on::<i64>(registry)
+        .await;
     match found {
         Ok(rows) => Ok(!rows.is_empty()),
         Err(crate::sql::ExecError::Driver(sqlx::Error::Database(d)))
@@ -1551,21 +1556,19 @@ where
     /// are surfaced in [`PrewarmReport`] without aborting the loop.
     pub async fn prewarm_database_tenants(&self) -> Result<PrewarmReport, TenancyError> {
         use crate::core::Column as _;
-        use crate::sql::FetcherPool as _;
         let span = tracing::info_span!("tenant_pools_prewarm");
         async {
             let started = std::time::Instant::now();
             let registry_pool = self.registry_pool();
-            let orgs: Vec<Org> = Org::objects()
+            let active = Org::objects()
                 .where_(Org::storage_mode.eq(StorageMode::Database))
-                .where_(Org::active.eq(true))
-                .fetch(&registry_pool)
-                .await?;
-            let total = orgs.len();
+                .where_(Org::active.eq(true));
+            // An unreadable row counts as a failure; `fetch_reporting` logs it.
+            let (orgs, unreadable) = Org::fetch_reporting(active, &registry_pool).await?;
             let mut report = PrewarmReport {
-                total_active: total,
+                total_active: orgs.len() + unreadable.len(),
                 warmed: 0,
-                failed: 0,
+                failed: unreadable.len(),
                 skipped_cap: 0,
             };
             for org in orgs {

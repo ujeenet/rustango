@@ -1913,16 +1913,19 @@ async fn orgs_list(
         Ok(p) => p,
         Err(e) => return server_error("operator_console", &e),
     };
-    let rows: Vec<super::Org> = match super::Org::objects()
+    let page = super::Org::objects()
         .order_by(&[("slug", false)])
         .limit(paged.limit)
-        .offset(paged.offset)
-        .fetch(&state.registry)
-        .await
-    {
+        .offset(paged.offset);
+    // A row with a bad stored value is listed apart, raw, so it can be fixed.
+    let (rows, bad) = match super::Org::fetch_reporting(page, &state.registry).await {
         Ok(r) => r,
         Err(e) => return server_error("operator_console", &e),
     };
+    let bad_view: Vec<_> = bad
+        .iter()
+        .map(|b| serde_json::json!({ "slug": b.slug, "column": b.column, "value": b.value }))
+        .collect();
     let view: Vec<_> = rows
         .into_iter()
         .map(|o| {
@@ -1942,6 +1945,7 @@ async fn orgs_list(
     ctx.insert("section", "orgs");
     ctx.insert("operator_username", &op.username);
     ctx.insert("orgs", &view);
+    ctx.insert("bad_orgs", &bad_view);
     ctx.insert("edit_enabled", &state.pools.is_some());
     // Drives the "New tenant" button.
     ctx.insert("provisioning_enabled", &state.provisioner.is_some());
