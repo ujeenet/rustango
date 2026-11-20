@@ -305,6 +305,17 @@ pub fn list_view_app(pool: Pool) -> axum::Router {
         .router("/posts", tera(), pool)
 }
 
+/// [`list_view_app`] under middleware that adds an [`ExtraContext`].
+///
+/// [`ExtraContext`]: rustango::template_views::ExtraContext
+pub fn list_view_extra_app(pool: Pool) -> axum::Router {
+    let mut extra = tera::Context::new();
+    extra.insert("site_name", "Row copies");
+    list_view_app(pool).layer(axum::Extension(rustango::template_views::ExtraContext(
+        extra,
+    )))
+}
+
 /// A ViewSet page of [`PAGE`] posts, default projection.
 pub fn viewset_app(pool: Pool) -> axum::Router {
     rustango::viewset::ViewSet::for_model(RcPost::SCHEMA, POST_FIELDS)

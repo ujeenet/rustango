@@ -80,6 +80,10 @@ fn row_copies(c: &mut Criterion) {
     bench(c, &rt, "listview_100_fk_display", || async {
         fixture::get(&list, "/posts").await;
     });
+    let list_extra = fixture::list_view_extra_app(pool.clone());
+    bench(c, &rt, "listview_100_extra_context", || async {
+        fixture::get(&list_extra, "/posts").await;
+    });
     let api = fixture::viewset_app(pool.clone());
     bench(c, &rt, "viewset_list_100", || async {
         fixture::get(&api, "/api/posts").await;
