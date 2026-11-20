@@ -65,7 +65,7 @@ async fn org_with_host(pool: &Pool, slug: &str, host: Option<String>) -> i64 {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = slug.to_owned();
         o.display_name = slug.to_owned();
-        o.backend_kind = "sqlite".into();
+        o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
         o.database_url = Some("sqlite::memory:".into());
         o.host_pattern = host;
     });

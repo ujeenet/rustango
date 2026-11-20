@@ -176,43 +176,7 @@ impl<C: CastValue> From<Cast<C>> for crate::core::SqlValue {
 }
 
 // ---- sqlx Type + Decode (read path): the column is TEXT ----
-//
-// Decode a `String`, then run `C::from_db`. Type and `compatible`
-// defer to `String`, so this is an ordinary text column everywhere.
-
-macro_rules! cast_sqlx_impls {
-    ($db:ty) => {
-        impl<'r, C: CastValue> sqlx::Decode<'r, $db> for Cast<C>
-        where
-            String: sqlx::Decode<'r, $db>,
-        {
-            fn decode(
-                value: <$db as sqlx::Database>::ValueRef<'r>,
-            ) -> Result<Self, sqlx::error::BoxDynError> {
-                let stored = <String as sqlx::Decode<'r, $db>>::decode(value)?;
-                let v = C::from_db(&stored).map_err(|e| Box::new(e) as sqlx::error::BoxDynError)?;
-                Ok(Self::new(v))
-            }
-        }
-
-        impl<C: CastValue> sqlx::Type<$db> for Cast<C> {
-            fn type_info() -> <$db as sqlx::Database>::TypeInfo {
-                <String as sqlx::Type<$db>>::type_info()
-            }
-
-            fn compatible(ty: &<$db as sqlx::Database>::TypeInfo) -> bool {
-                <String as sqlx::Type<$db>>::compatible(ty)
-            }
-        }
-    };
-}
-
-#[cfg(feature = "postgres")]
-cast_sqlx_impls!(sqlx::Postgres);
-#[cfg(feature = "mysql")]
-cast_sqlx_impls!(sqlx::MySql);
-#[cfg(feature = "sqlite")]
-cast_sqlx_impls!(sqlx::Sqlite);
+crate::__text_column_impls!([C: CastValue] Cast<C>, |stored| C::from_db(stored).map(Cast::new));
 
 // ====================================================================
 // Built-in: EncryptedString (AEAD at rest)

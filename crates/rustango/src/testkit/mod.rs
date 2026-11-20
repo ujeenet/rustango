@@ -267,7 +267,7 @@ pub async fn migrate_schema(
 ) -> Result<(), crate::tenancy::TenancyError> {
     let org = org_with(|o| {
         o.slug = schema.to_owned();
-        o.storage_mode = crate::tenancy::StorageMode::Schema.as_str().to_owned();
+        o.storage_mode = crate::tenancy::StorageMode::Schema;
         o.schema_name = Some(schema.to_owned());
     });
     migrate_schema_tenant(pools, &org, registry_url).await
@@ -587,8 +587,8 @@ mod org_tests {
             id: crate::sql::Auto::Unset,
             slug: "acme".into(),
             display_name: "Acme".into(),
-            storage_mode: "database".into(),
-            backend_kind: "postgres".into(),
+            storage_mode: crate::tenancy::StorageMode::Database,
+            backend_kind: crate::tenancy::BackendKind::Postgres,
             database_url: None,
             schema_name: None,
             host_pattern: None,

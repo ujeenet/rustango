@@ -4,6 +4,7 @@
 //! The password never comes from argv: a hidden prompt, or the variable
 //! named by `--password-env`. No output shows it.
 
+use crate::core::TextEnum as _;
 use std::io::{IsTerminal as _, Write};
 use std::time::Duration;
 
@@ -163,9 +164,8 @@ where
     let p = parse(args, &ADD)?;
     let registry = pools.registry_pool();
     let backend = match p.value("--backend")? {
-        Some(b) => BackendKind::parse(b)
-            .map_err(|b| TenancyError::Validation(format!("unknown backend `{b}`")))?,
-        None => BackendKind::parse(registry.dialect().name()).unwrap_or_default(),
+        Some(b) => BackendKind::from_db(b)?,
+        None => BackendKind::of_pool(&registry),
     };
     let mut spec = DbServerSpec {
         name: name_arg(&p, ADD.usage)?,

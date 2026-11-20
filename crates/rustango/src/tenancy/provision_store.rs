@@ -27,6 +27,7 @@
 //! reading path that can forget it. The same goes for event messages,
 //! which carry connection diagnoses.
 
+use crate::core::TextEnum as _;
 use serde::Serialize;
 
 use crate::core::Column as _;
@@ -782,8 +783,8 @@ async fn insert_operation_run(
         slug: org.slug.clone(),
         org_id: org.id.get().copied(),
         state: RunState::Running.as_str().to_owned(),
-        storage_mode: org.storage_mode.clone(),
-        backend_kind: org.backend_kind.clone(),
+        storage_mode: org.storage_mode.as_str().to_owned(),
+        backend_kind: org.backend_kind.as_str().to_owned(),
         database_url: None,
         requested_by: requested_by.map(ToOwned::to_owned),
         idempotency_key: None,

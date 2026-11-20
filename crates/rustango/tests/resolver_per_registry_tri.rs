@@ -40,7 +40,7 @@ async fn add_org(pool: &Pool, slug: &str) -> String {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = slug.into();
         o.display_name = slug.into();
-        o.backend_kind = "sqlite".into();
+        o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
         o.database_url = Some("sqlite::memory:".into());
         o.host_pattern = Some(host.clone());
     });
@@ -164,7 +164,7 @@ async fn header_and_port_lookups_are_cached(pool: &Pool) {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = slug.clone();
         o.display_name = slug.clone();
-        o.backend_kind = "sqlite".into();
+        o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
         o.database_url = Some("sqlite::memory:".into());
         o.host_pattern = Some(format!("{slug}.app.test"));
         o.path_prefix = Some(format!("/{slug}"));

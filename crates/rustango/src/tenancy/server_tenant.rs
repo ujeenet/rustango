@@ -219,7 +219,7 @@ where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
     let slug = &org.slug;
-    if org.storage_mode != StorageMode::Database.as_str() {
+    if org.storage_mode != StorageMode::Database {
         return Err(TenancyError::Validation(format!(
             "tenant `{slug}` is not database-mode, so it has no login of its own"
         )));

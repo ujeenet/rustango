@@ -258,12 +258,7 @@ async fn apply_values_if_alone(
             // Blank keeps the current URL; it is a credential, never cleared here.
             ("database_url", v) if blank(&v) => continue,
             // Nothing reads it in schema mode; moving storage is migrate-tenant-storage.
-            ("database_url", _)
-                if matches!(
-                    super::org::StorageMode::parse(&existing.storage_mode),
-                    Ok(super::org::StorageMode::Schema)
-                ) =>
-            {
+            ("database_url", _) if existing.storage_mode == super::org::StorageMode::Schema => {
                 return Err(TenancyError::Validation(format!(
                     "tenant `{slug}` is in schema mode, which reads no database URL; \
                      move it to database mode first"
@@ -405,7 +400,7 @@ mod tests {
         let first = "sqlite:///tmp/first.db?mode=rwc";
         let mut org = crate::testkit::org_with(|o| {
             o.slug = "cas".into();
-            o.backend_kind = "sqlite".into();
+            o.backend_kind = crate::tenancy::BackendKind::Sqlite;
             o.database_url = Some(first.into());
             o.host_pattern = Some("cas.localhost".into());
         });

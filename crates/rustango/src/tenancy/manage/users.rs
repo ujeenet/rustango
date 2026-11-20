@@ -703,9 +703,7 @@ where
         .next()
         .ok_or_else(|| TenancyError::Validation(format!("no tenant with slug `{slug}`")))?;
     use crate::tenancy::org::StorageMode;
-    let mode = StorageMode::parse(&org.storage_mode).map_err(|got| {
-        TenancyError::Validation(format!("org `{slug}` has unknown storage_mode `{got}`"))
-    })?;
+    let mode = org.storage_mode;
     match mode {
         StorageMode::Schema => {
             #[cfg(feature = "postgres")]

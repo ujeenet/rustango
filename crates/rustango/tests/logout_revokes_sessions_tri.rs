@@ -449,8 +449,8 @@ async fn tenancy(pool: &Pool) -> Tenancy {
     let host = format!("{slug}.app.test");
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = slug.clone();
-        o.storage_mode = "database".into();
-        o.backend_kind = kind.into();
+        o.storage_mode = rustango::tenancy::StorageMode::Database;
+        o.backend_kind = kind.parse().unwrap();
         o.database_url = Some(url.clone());
         o.host_pattern = Some(host.clone());
     });

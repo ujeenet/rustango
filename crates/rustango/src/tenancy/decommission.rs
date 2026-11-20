@@ -25,7 +25,7 @@ use sqlx::Database;
 use super::db_identity::DbIdentity;
 use super::error::TenancyError;
 use super::operation::{OpReporter, OperationObserver, OperationStep as Step};
-use super::org::{Org, StorageMode};
+use super::org::{BackendKind, Org, StorageMode};
 use super::org_host::OrgHost;
 use super::pools::TenantPools;
 use super::provision_store::{RunKind, RunText};
@@ -442,7 +442,7 @@ where
         Err(e) => return Err(e),
     }
     let others: Vec<Org> = Org::objects()
-        .where_(Org::storage_mode.eq(StorageMode::Database.as_str().to_owned()))
+        .where_(Org::storage_mode.eq(StorageMode::Database))
         .fetch(registry)
         .await
         .map_err(|e| e.to_string())?;
@@ -549,8 +549,7 @@ where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
     let slug = &org.slug;
-    let mode = StorageMode::parse(&org.storage_mode)
-        .map_err(|e| TenancyError::Validation(e.to_owned()))?;
+    let mode = org.storage_mode;
     if mode == StorageMode::Database && !purge_database {
         return Err(TenancyError::Validation(format!(
             "tenant `{slug}` is database-mode — dropping its database is \
@@ -570,7 +569,7 @@ where
     let url = pools.resolved_database_url(org).await?;
     // A record never makes the registry's own database droppable.
     #[cfg(feature = "postgres")]
-    if org.backend_kind == "postgres" {
+    if org.backend_kind == BackendKind::Postgres {
         refuse_registry_database(pools, &parse_pg_url(org, &url)?)?;
     }
     if let Some(tenant) = ServerTenant::of(registry, org, &url).await? {
@@ -578,7 +577,7 @@ where
         return Ok((mode, id, DropPlan::Server(plan)));
     }
     #[cfg(feature = "postgres")]
-    if org.backend_kind == "postgres" {
+    if org.backend_kind == BackendKind::Postgres {
         let opts = parse_pg_url(org, &url)?;
         if let Some(other) = database_claimed(pools, registry, id, &opts).await? {
             return Err(TenancyError::Validation(format!(
@@ -616,7 +615,7 @@ where
     let id = org.id.get().copied().unwrap_or_default();
     let backend = tenant.server.backend_kind()?;
     let others: Vec<Org> = Org::objects()
-        .where_(Org::storage_mode.eq(StorageMode::Database.as_str().to_owned()))
+        .where_(Org::storage_mode.eq(StorageMode::Database))
         .fetch(registry)
         .await?;
     for other in others.iter().filter(|o| o.id.get().copied() != Some(id)) {
@@ -664,7 +663,7 @@ where
             )));
         }
         // An alias, a twin or the registry: names alone can't tell on these backends.
-        if backend != super::org::BackendKind::Postgres {
+        if backend != BackendKind::Postgres {
             let me = server_identity(&admin, &tenant)
                 .await
                 .map_err(TenancyError::Validation)?;
@@ -1113,8 +1112,8 @@ where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
     let others: Vec<Org> = Org::objects()
-        .where_(Org::storage_mode.eq(StorageMode::Database.as_str().to_owned()))
-        .where_(Org::backend_kind.eq("postgres".to_owned()))
+        .where_(Org::storage_mode.eq(StorageMode::Database))
+        .where_(Org::backend_kind.eq(BackendKind::Postgres))
         .fetch(registry)
         .await?;
     for other in others

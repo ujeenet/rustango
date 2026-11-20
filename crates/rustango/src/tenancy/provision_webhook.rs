@@ -54,6 +54,7 @@
 //! [`UrlPolicy::Template`]: crate::tenancy::provision_webhook::UrlPolicy::Template
 //! [`UrlPolicy::CallerSupplied`]: crate::tenancy::provision_webhook::UrlPolicy::CallerSupplied
 
+use crate::core::TextEnum as _;
 use std::sync::Arc;
 use std::time::Duration;
 

@@ -1183,10 +1183,7 @@ async fn role_schema_audit(
         use crate::core::Column as _;
         use crate::sql::FetcherPool as _;
         let orgs: Vec<crate::tenancy::Org> = match crate::tenancy::Org::objects()
-            .where_(
-                crate::tenancy::Org::storage_mode
-                    .eq(crate::tenancy::StorageMode::Schema.as_str().to_owned()),
-            )
+            .where_(crate::tenancy::Org::storage_mode.eq(crate::tenancy::StorageMode::Schema))
             .fetch(registry)
             .await
         {

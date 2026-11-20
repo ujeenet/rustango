@@ -70,7 +70,7 @@ async fn seed_db_mode_tenant(pool: &sqlx::PgPool, slug: &str, url: &str) -> Org 
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = slug.to_owned();
         o.display_name = slug.to_owned();
-        o.storage_mode = StorageMode::Database.as_str().into();
+        o.storage_mode = StorageMode::Database;
         o.database_url = Some(url.to_owned());
         o.host_pattern = Some(format!("{slug}.app.test"));
     });

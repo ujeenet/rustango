@@ -53,10 +53,7 @@ where
             continue;
         };
         // Nothing reads it, and the edit path refuses to write it.
-        if matches!(
-            StorageMode::parse(&org.storage_mode),
-            Ok(StorageMode::Schema)
-        ) {
+        if org.storage_mode == StorageMode::Schema {
             left_alone += 1;
             writeln!(w, "  {}: schema mode reads no URL, left alone", org.slug)?;
             continue;

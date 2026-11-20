@@ -26,6 +26,7 @@
 //! per-operator permission to check here and none is coming. What a
 //! console can do is decided when it is assembled, not per request.
 
+use crate::core::TextEnum as _;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -173,7 +174,7 @@ fn request_from_form(
     // The form shows the registry's backend; a posted one is checked
     // against it by the provisioner.
     let backend = field("backend_kind")
-        .map(|b| BackendKind::parse(b).map_err(|got| format!("Unknown backend `{got}`.")))
+        .map(|b| BackendKind::from_db(b).map_err(|_| format!("Unknown backend `{b}`.")))
         .transpose()?;
     if let Some(backend) = backend {
         backend
@@ -501,9 +502,9 @@ pub(super) async fn provision_resume(
             .await;
     }
     // Only the slug and mode matter: a resume keeps the row's storage.
-    let storage = match StorageMode::parse(&org.storage_mode) {
-        Ok(StorageMode::Schema) => provision::TenantStorage::Schema(org.schema_name.clone()),
-        _ => provision::TenantStorage::Database(DatabaseSource::Url(
+    let storage = match org.storage_mode {
+        StorageMode::Schema => provision::TenantStorage::Schema(org.schema_name.clone()),
+        StorageMode::Database => provision::TenantStorage::Database(DatabaseSource::Url(
             org.database_url.clone().unwrap_or_default(),
         )),
     };

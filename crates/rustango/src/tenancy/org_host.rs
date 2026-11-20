@@ -664,9 +664,7 @@ pub(crate) async fn schema_claimed(
         .fetch(registry)
         .await?;
     // Exact, and through the one rule: MySQL's `=` ignores case.
-    rows.retain(|o| {
-        o.storage_mode == super::StorageMode::Schema.as_str() && o.effective_schema() == schema
-    });
+    rows.retain(|o| o.storage_mode == super::StorageMode::Schema && o.effective_schema() == schema);
     Ok(other_org(&rows, except_org))
 }
 

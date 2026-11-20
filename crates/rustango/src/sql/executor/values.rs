@@ -450,6 +450,34 @@ impl FlatScalar for Option<uuid::Uuid> {
     }
 }
 
+// A `TextEnum` decodes through its own sqlx impls, which the derive emits.
+impl<E: crate::core::TextEnum> flat_sealed::Sealed for E {}
+impl<E: crate::core::TextEnum> flat_sealed::Sealed for Option<E> {}
+impl<E> FlatScalar for E
+where
+    E: crate::core::TextEnum + MaybePgScalar + MaybeMyScalar + MaybeSqliteScalar,
+{
+    type Cell = E;
+    fn from_cell(cell: E) -> Self {
+        cell
+    }
+    fn from_null(column: &str) -> Result<Self, sqlx::Error> {
+        Err(unexpected_null(column))
+    }
+}
+impl<E> FlatScalar for Option<E>
+where
+    E: crate::core::TextEnum + MaybePgScalar + MaybeMyScalar + MaybeSqliteScalar,
+{
+    type Cell = E;
+    fn from_cell(cell: E) -> Self {
+        Some(cell)
+    }
+    fn from_null(_: &str) -> Result<Self, sqlx::Error> {
+        Ok(None)
+    }
+}
+
 impl<T> flat_sealed::Sealed for sqlx::types::Json<T> {}
 impl<T> flat_sealed::Sealed for Option<sqlx::types::Json<T>> {}
 impl<T> FlatScalar for sqlx::types::Json<T>

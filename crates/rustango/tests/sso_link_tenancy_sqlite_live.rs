@@ -203,8 +203,8 @@ async fn boot_with(permissions: bool) -> Env {
         let host = format!("{slug}.app.test");
         let mut org = rustango::testkit::org_with(|o| {
             o.slug = slug.into();
-            o.storage_mode = "database".into();
-            o.backend_kind = "sqlite".into();
+            o.storage_mode = rustango::tenancy::StorageMode::Database;
+            o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
             o.database_url = Some(url.clone());
             o.host_pattern = Some(host.clone());
         });
@@ -1284,7 +1284,7 @@ async fn check_deploy_reports_an_unopenable_tenant_without_its_url() {
     // `EnvSecretsResolver` wants `env://`; its error quotes the literal URL.
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = "acme".into();
-        o.backend_kind = "sqlite".into();
+        o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
         o.database_url = Some("sqlite:///tmp/acme-hunter2.db".into());
     });
     org.insert(&pools.registry_pool()).await.unwrap();

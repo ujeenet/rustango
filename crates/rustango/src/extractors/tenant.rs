@@ -403,8 +403,8 @@ mod one_context_tests {
     fn org(slug: &str) -> Org {
         crate::testkit::org_with(|o| {
             o.slug = slug.into();
-            o.storage_mode = "database".into();
-            o.backend_kind = "sqlite".into();
+            o.storage_mode = crate::tenancy::StorageMode::Database;
+            o.backend_kind = crate::tenancy::BackendKind::Sqlite;
             o.database_url = Some("sqlite::memory:".into());
         })
     }

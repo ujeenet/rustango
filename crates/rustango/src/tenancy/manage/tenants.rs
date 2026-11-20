@@ -2,6 +2,7 @@
 //! `purge-tenant`, `list-tenants`. Plus their parsers + the
 //! database-mode admin-DROP helper.
 
+use crate::core::TextEnum as _;
 use std::io::Write;
 use std::path::Path;
 
@@ -360,19 +361,11 @@ fn parse_create_tenant_args(
         match flag.as_str() {
             "--mode" => {
                 let v = next_value(&mut iter, "--mode")?;
-                mode = Some(StorageMode::parse(&v).map_err(|got| {
-                    TenancyError::Validation(format!(
-                        "--mode must be `schema` or `database`, got `{got}`"
-                    ))
-                })?);
+                mode = Some(StorageMode::from_db(&v)?);
             }
             "--backend" => {
                 let v = next_value(&mut iter, "--backend")?;
-                out.backend = Some(BackendKind::parse(&v).map_err(|got| {
-                    TenancyError::Validation(format!(
-                        "--backend must be `postgres`, `mysql`, or `sqlite`, got `{got}`"
-                    ))
-                })?);
+                out.backend = Some(BackendKind::from_db(&v)?);
             }
             "--display-name" => out.display_name = Some(next_value(&mut iter, "--display-name")?),
             "--database-url" => database_url = Some(next_value(&mut iter, "--database-url")?),
@@ -647,9 +640,7 @@ where
             "purge-tenant: no tenant with slug `{slug}`"
         )));
     };
-    let mode = StorageMode::parse(&org.storage_mode).map_err(|got| {
-        TenancyError::Validation(format!("org `{slug}` has unknown storage_mode `{got}`"))
-    })?;
+    let mode = org.storage_mode;
     if mode == StorageMode::Database && !purge_database {
         return Err(TenancyError::Validation(format!(
             "tenant `{slug}` is database-mode — `DROP DATABASE` is unrecoverable. \
@@ -834,7 +825,7 @@ pub(crate) async fn ensure_tenant_roles<W: Write + Send>(
     }
     crate::tenancy::schema_role::check_can_create_roles(pools.registry()).await?;
     let orgs: Vec<Org> = Org::objects()
-        .where_(Org::storage_mode.eq(StorageMode::Schema.as_str()))
+        .where_(Org::storage_mode.eq(StorageMode::Schema))
         .fetch_on(pools.registry())
         .await?;
     for org in &orgs {

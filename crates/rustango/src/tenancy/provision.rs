@@ -55,6 +55,7 @@
 //! [step]: crate::tenancy::provision::ProvisionStep
 //! [`tenant_migrate::migrate_one_tenant`]: crate::tenancy::migrate::migrate_one_tenant
 
+use crate::core::TextEnum as _;
 use std::path::Path;
 
 use sqlx::Database;
@@ -843,7 +844,7 @@ where
     if let Some(org) = existing.into_iter().next() {
         let resumable = rep.resume
             && !org.active
-            && org.storage_mode == request.mode().as_str()
+            && org.storage_mode == request.mode()
             && match super::provision_store::org_left_by_failed_run(
                 &registry,
                 org.id.get().copied().unwrap_or_default(),
@@ -2166,8 +2167,8 @@ fn new_org_row(
         .display_name
         .clone()
         .unwrap_or_else(|| request.slug.clone());
-    o.storage_mode = request.mode().as_str().into();
-    o.backend_kind = checked.backend.as_str().into();
+    o.storage_mode = request.mode();
+    o.backend_kind = checked.backend;
     o.database_url = database_url;
     o.schema_name = schema_name;
     // `validate_fields` already filled in the `<slug>.<APEX>` default.

@@ -57,7 +57,7 @@ async fn org(reg: &Registry, display_name: &str) -> String {
     );
     let mut org = Org::new(slug.clone());
     org.display_name = display_name.to_owned();
-    org.backend_kind = "sqlite".into();
+    org.backend_kind = rustango::tenancy::BackendKind::Sqlite;
     org.database_url = Some(tenant_url);
     org.host_pattern = Some(format!("{slug}.localhost"));
     org.insert(&reg.pools.registry_pool())

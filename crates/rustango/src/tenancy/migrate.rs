@@ -661,10 +661,7 @@ where
     // how to build a `search_path`-scoped pool for it. Route the same
     // way the batch does.
     #[cfg(feature = "postgres")]
-    if matches!(
-        StorageMode::parse(&org.storage_mode),
-        Ok(StorageMode::Schema)
-    ) {
+    if org.storage_mode == StorageMode::Schema {
         let pg_pools = (pools as &dyn std::any::Any)
             .downcast_ref::<TenantPools<sqlx::Postgres>>()
             .ok_or_else(|| {
@@ -771,12 +768,7 @@ async fn run_for_one_tenant_db<DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    let mode = StorageMode::parse(&org.storage_mode).map_err(|got| {
-        TenancyError::Validation(format!(
-            "org `{}` has unknown storage_mode `{got}`",
-            org.slug
-        ))
-    })?;
+    let mode = org.storage_mode;
     if !matches!(mode, StorageMode::Database) {
         return Err(TenancyError::Validation(format!(
             "org `{}` is schema-mode but migrate_tenants_db only handles \
@@ -974,12 +966,7 @@ async fn run_for_one_tenant(
         .as_ref()
         .map(|o| o as &dyn crate::migrate::MigrationObserver);
     let project_progress = chain_observer(observer, &org.slug, Chain::Project);
-    let mode = StorageMode::parse(&org.storage_mode).map_err(|got| {
-        TenancyError::Validation(format!(
-            "org `{}` has unknown storage_mode `{got}`",
-            org.slug
-        ))
-    })?;
+    let mode = org.storage_mode;
     match mode {
         StorageMode::Schema => {
             let schema = org.effective_schema().to_owned();

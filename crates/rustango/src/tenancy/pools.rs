@@ -969,7 +969,7 @@ async fn any_org(registry: &PgPool, mode: Option<StorageMode>) -> Result<bool, T
     use crate::core::Column as _;
     let mut orgs = Org::objects();
     if let Some(mode) = mode {
-        orgs = orgs.where_(Org::storage_mode.eq(mode.as_str()));
+        orgs = orgs.where_(Org::storage_mode.eq(mode));
     }
     let found = orgs.limit(1).fetch_on(registry).await;
     match found {
@@ -1018,12 +1018,7 @@ impl<DB: Database> TenantPools<DB> {
     /// * [`TenancyError::Secrets`] / [`TenancyError::Driver`] from
     ///   the secret resolve + pool build path.
     pub async fn database_pool_for_org(&self, org: &Org) -> Result<TenantPool<DB>, TenancyError> {
-        let mode = StorageMode::parse(&org.storage_mode).map_err(|got| {
-            TenancyError::Validation(format!(
-                "org `{}` has unknown storage_mode `{got}` (expected `schema` or `database`)",
-                org.slug
-            ))
-        })?;
+        let mode = org.storage_mode;
         match mode {
             StorageMode::Schema => Err(TenancyError::Validation(format!(
                 "org `{}` has `storage_mode = 'schema'` but TenantPools<{dbname}> is non-Postgres. \
@@ -1467,12 +1462,7 @@ where
     /// # Errors
     /// As [`Self::database_pool_for_org`].
     pub async fn scoped_pool_dyn(&self, org: &Org) -> Result<crate::sql::Pool, TenancyError> {
-        let mode = StorageMode::parse(&org.storage_mode).map_err(|got| {
-            TenancyError::Validation(format!(
-                "org `{}` has unknown storage_mode `{got}` (expected `schema` or `database`)",
-                org.slug
-            ))
-        })?;
+        let mode = org.storage_mode;
         match mode {
             StorageMode::Schema => {
                 #[cfg(feature = "postgres")]
@@ -1514,14 +1504,14 @@ where
         org: &Org,
     ) -> Result<(crate::sql::Pool, bool), TenancyError> {
         #[cfg(feature = "postgres")]
-        if self.config.schema_tenant_roles && org.storage_mode == StorageMode::Schema.as_str() {
+        if self.config.schema_tenant_roles && org.storage_mode == StorageMode::Schema {
             if let Some(pg) =
                 (self as &dyn std::any::Any).downcast_ref::<TenantPools<sqlx::Postgres>>()
             {
                 return Ok((pg.registry_scoped_pool(org).await?.into(), true));
             }
         }
-        if org.storage_mode == "database" && org.database_url.is_some() {
+        if org.storage_mode == StorageMode::Database && org.database_url.is_some() {
             let url = self.resolved_database_url(org).await?;
             if url.starts_with("sqlite:") {
                 let pool = crate::sql::Pool::connect(&sqlite_without_create(&url))
@@ -1567,7 +1557,7 @@ where
             let started = std::time::Instant::now();
             let registry_pool = self.registry_pool();
             let orgs: Vec<Org> = Org::objects()
-                .where_(Org::storage_mode.eq("database".to_owned()))
+                .where_(Org::storage_mode.eq(StorageMode::Database))
                 .where_(Org::active.eq(true))
                 .fetch(&registry_pool)
                 .await?;
@@ -1641,12 +1631,7 @@ impl TenantPools<sqlx::Postgres> {
         &self,
         org: &Org,
     ) -> Result<TenantPool<sqlx::Postgres>, TenancyError> {
-        let mode = StorageMode::parse(&org.storage_mode).map_err(|got| {
-            TenancyError::Validation(format!(
-                "org `{}` has unknown storage_mode `{got}` (expected `schema` or `database`)",
-                org.slug
-            ))
-        })?;
+        let mode = org.storage_mode;
         match mode {
             StorageMode::Schema => {
                 let schema = org.effective_schema().to_owned();
@@ -2855,8 +2840,8 @@ mod tests {
     fn cold_sqlite_org() -> Org {
         crate::testkit::org_with(|o| {
             o.slug = "cold".into();
-            o.storage_mode = "database".into();
-            o.backend_kind = "sqlite".into();
+            o.storage_mode = crate::tenancy::StorageMode::Database;
+            o.backend_kind = crate::tenancy::BackendKind::Sqlite;
             o.database_url = Some("sqlite::memory:".into());
         })
     }
@@ -3090,7 +3075,7 @@ mod tests {
     fn cold_schema_org() -> Org {
         crate::testkit::org_with(|o| {
             o.slug = "cold".into();
-            o.storage_mode = "schema".into();
+            o.storage_mode = crate::tenancy::StorageMode::Schema;
             o.schema_name = Some("cold".into());
         })
     }
@@ -3185,7 +3170,7 @@ mod tests {
         );
         let org = crate::testkit::org_with(|o| {
             o.slug = "leaky".into();
-            o.storage_mode = "database".into();
+            o.storage_mode = crate::tenancy::StorageMode::Database;
             o.database_url = Some("ref".into());
         });
         let (res, ()) = tokio::join!(pools.pool_for_database_mode(&org), async {

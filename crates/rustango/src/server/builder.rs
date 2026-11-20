@@ -1618,7 +1618,7 @@ pub(crate) mod resolver_tests {
         let mut org = crate::testkit::org_with(|o| {
             o.slug = "acme".into();
             o.display_name = "acme".into();
-            o.backend_kind = "sqlite".into();
+            o.backend_kind = crate::tenancy::BackendKind::Sqlite;
         });
         org.insert(&pool).await.expect("insert org");
         (tmp, sq, url)
@@ -1659,7 +1659,7 @@ pub(crate) mod resolver_tests {
             .expect("orgs");
         if with_org {
             let mut org = crate::testkit::org_with(|o| {
-                o.backend_kind = "sqlite".into();
+                o.backend_kind = crate::tenancy::BackendKind::Sqlite;
                 o.host_pattern = Some("acme.localhost".into());
             });
             org.insert(&pool).await.expect("insert org");
@@ -2225,7 +2225,7 @@ mod prefix_tests {
         let tenant_url = format!("sqlite://{}?mode=rwc", tmp.path().join("t.db").display());
         let mut org = crate::tenancy::Org::new("pfx-acme");
         org.display_name = "Acme".into();
-        org.backend_kind = "sqlite".into();
+        org.backend_kind = crate::tenancy::BackendKind::Sqlite;
         org.database_url = Some(tenant_url);
         org.path_prefix = Some("/acme".into());
         org.logo_path = logo_path;

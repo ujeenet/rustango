@@ -391,7 +391,7 @@ async fn an_unreachable_tenant_fails_prewarm_and_audit_cleanup() {
     // The parent dir does not exist, so SQLite cannot open the file.
     let gone = b._tmp.path().join("no-such-dir").join("gone.db");
     let mut org = rustango::tenancy::Org::new("gone");
-    org.backend_kind = "sqlite".into();
+    org.backend_kind = rustango::tenancy::BackendKind::Sqlite;
     org.database_url = Some(format!("sqlite://{}?mode=rwc", gone.display()));
     org.insert(&b.pools.registry_pool())
         .await
