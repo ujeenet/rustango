@@ -76,6 +76,8 @@ pub(crate) use executor::atomic_request;
 pub(crate) use executor::in_any_block;
 #[cfg(feature = "tenancy")]
 pub(crate) use executor::lock_on;
+#[cfg(any(feature = "admin", feature = "tenancy"))]
+pub(crate) use executor::outside_atomic_on;
 #[cfg(feature = "jobs-postgres")]
 pub(crate) use executor::raw_insert_id;
 #[cfg(any(feature = "jobs-postgres", all(feature = "sse", feature = "postgres")))]

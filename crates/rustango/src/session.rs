@@ -671,7 +671,7 @@ pub(crate) async fn revoke_sessions<T: crate::core::Model + Send>(
         .update()
         .set(SESSIONS_REVOKED_AT, cutoff);
     // A logout stands even when the request around it rolls back.
-    crate::sql::outside_atomic(stamp.execute_pool(pool)).await
+    crate::sql::outside_atomic_on(pool, stamp.execute_pool(pool)).await
 }
 
 /// Deactivate row `id` of a session principal (`AdminUser`, `Operator`, a

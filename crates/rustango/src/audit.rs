@@ -676,13 +676,13 @@ pub async fn emit_one(pool: &crate::sql::Pool, entry: &PendingEntry) -> Result<(
 
 /// [`emit_one`] for a security event (a second factor, an SSO account change,
 /// an agent's action): outside any `atomic` block, so it is kept when the
-/// request around it rolls back.
+/// request around it rolls back. In a SQLite block it joins the block.
 #[cfg(any(feature = "admin", feature = "sso", feature = "mcp"))]
 pub(crate) async fn emit_security(
     pool: &crate::sql::Pool,
     entry: &PendingEntry,
 ) -> Result<(), sqlx::Error> {
-    crate::sql::outside_atomic(emit_one(pool, entry)).await
+    crate::sql::outside_atomic_on(pool, emit_one(pool, entry)).await
 }
 
 /// Codename a non-superuser needs to read the admin audit feed. Rows

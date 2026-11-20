@@ -168,7 +168,9 @@ impl TxState {
 async fn in_background<T: Send + 'static>(
     fut: impl Future<Output = Result<T, ExecError>> + Send + 'static,
 ) -> Result<T, ExecError> {
-    match tokio::spawn(fut).await {
+    use tracing::instrument::{Instrument as _, WithSubscriber as _};
+    // The caller's span and subscriber follow, so the work logs as its own.
+    match tokio::spawn(fut.in_current_span().with_current_subscriber()).await {
         Ok(r) => r,
         Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
         Err(_) => Err(ExecError::AtomicAborted),
@@ -331,6 +333,17 @@ fn current() -> Option<Arc<Block>> {
 /// for the block's write lock; on PG it can wait on a row the block locked.
 pub async fn outside_atomic<F: Future>(fut: F) -> F::Output {
     BLOCK.scope(None, fut).await
+}
+
+/// [`outside_atomic`] for a framework write on `pool`, except inside a
+/// SQLite block on it: one writer, so a second connection would wait for
+/// the block (forever in memory). There the write joins the block.
+#[cfg(any(feature = "admin", feature = "tenancy"))]
+pub(crate) async fn outside_atomic_on<F: Future>(pool: &Pool, fut: F) -> F::Output {
+    if pool.dialect().kind() == crate::sql::DialectKind::Sqlite && in_block(pool) {
+        return fut.await;
+    }
+    outside_atomic(fut).await
 }
 
 /// Handle an [`atomic`] block gets. Lock it for each statement; drop

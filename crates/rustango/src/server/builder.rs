@@ -227,7 +227,7 @@ impl<DB: Database> Builder<DB> {
     /// back every write it made there. See [`crate::atomic_request`].
     ///
     /// Each write request holds one tenant pool connection until it ends;
-    /// boot warns when `scoped_pool_max_connections` is below 8.
+    /// on Postgres boot warns when `scoped_pool_max_connections` is below 8.
     ///
     /// # Errors (at [`Self::into_router`])
     /// A tenant pool cache cap of 0, which would rebuild a pool per lookup.
@@ -809,7 +809,7 @@ impl<DB: Database> Builder<DB> {
         #[cfg(feature = "postgres")]
         crate::tenancy::boot_checks(self.pools.as_ref()).await?;
         if self.atomic_requests.is_some() {
-            check_atomic_requests(self.pools.pool_config())?;
+            check_atomic_requests(self.pools.pool_config(), schema_tenants::<DB>())?;
         }
         let resolver_for_admin = self.resolver();
         // Picks the prefixed admin routes for a path under its tenant's prefix.
@@ -1309,17 +1309,27 @@ impl<DB: Database> Builder<DB> {
 }
 
 /// The standard chain plus path-prefix tenants on the apex; `run-server` uses it too.
+/// Whether `DB` can serve schema-mode tenants (Postgres only).
+fn schema_tenants<DB: Database>() -> bool {
+    #[cfg(feature = "postgres")]
+    if std::any::TypeId::of::<DB>() == std::any::TypeId::of::<sqlx::Postgres>() {
+        return true;
+    }
+    false
+}
+
 /// Refuse uncached tenant pools under [`Builder::atomic_requests`]; warn on a
 /// schema pool too small for one connection per concurrent write request.
 fn check_atomic_requests(
     cfg: &crate::tenancy::TenantPoolsConfig,
+    schema_tenants: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if cfg.max_cached_scoped_pools == 0 || cfg.max_cached_database_pools == 0 {
+    if cfg.max_cached_database_pools == 0 || (schema_tenants && cfg.max_cached_scoped_pools == 0) {
         return Err("atomic_requests needs cached tenant pools: set \
                     max_cached_scoped_pools and max_cached_database_pools above 0"
             .into());
     }
-    if cfg.scoped_pool_max_connections < 8 {
+    if schema_tenants && cfg.scoped_pool_max_connections < 8 {
         tracing::warn!(
             target: "rustango::server",
             scoped_pool_max_connections = cfg.scoped_pool_max_connections,

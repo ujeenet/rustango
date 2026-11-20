@@ -166,6 +166,7 @@ untouched.
 - `atomic_immediate` is removed: call `atomic`, which begins SQLite blocks with `BEGIN IMMEDIATE`.
 - Inside an `atomic` block on `t.pool()`, `t.conn()` now returns the block's connection: its writes roll back with the block, and ORM calls on the pool return `NestedAtomic` until `t.pool()` is called again. `t.pool_conn()` and `t.into_conn()` there return `TenancyError::Exec(ExecError::InAtomic)`: use `t.conn()`, or move the work out of the block.
 - `AtomicOptions::deferred()` on a nested block is refused with `InAtomic`, like an isolation level.
+- `on_commit` callbacks now run on their own task after the COMMIT: a task-local the block's caller set is not visible in them. Capture the value in the closure instead.
 
 ## 0.67.0
 

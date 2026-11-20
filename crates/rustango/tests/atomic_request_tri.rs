@@ -462,7 +462,8 @@ async fn an_outside_write_survives_a_500(pool: &Pool) {
 }
 
 /// `session::deactivate` stamps the logout outside the block: a 500 keeps
-/// the account active and its sessions ended.
+/// the account active and its sessions ended. SQLite has one writer, so the
+/// stamp joins the block there and rolls back with it.
 #[cfg(feature = "tenancy")]
 async fn a_logout_stamp_survives_a_500(pool: &Pool) {
     use rustango::tenancy::Operator;
@@ -490,9 +491,11 @@ async fn a_logout_stamp_survives_a_500(pool: &Pool) {
         .await
         .unwrap();
     assert!(got[0].active, "the deactivation committed");
-    assert!(
+    let kept = kind(pool) != DialectKind::Sqlite;
+    assert_eq!(
         got[0].sessions_revoked_at.is_some(),
-        "the logout rolled back"
+        kept,
+        "the logout stamp"
     );
 }
 

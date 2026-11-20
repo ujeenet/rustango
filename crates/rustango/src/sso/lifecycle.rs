@@ -371,7 +371,7 @@ async fn deactivate(
         .set("active", false)
         .set("sessions_revoked_at", now);
     // Commits with its audit row, whatever block the caller runs.
-    let n = crate::sql::outside_atomic(deactivate.execute_pool(pool))
+    let n = crate::sql::outside_atomic_on(pool, deactivate.execute_pool(pool))
         .await
         .map_err(|e| format!("deactivate user {user_id}: {e}"))?;
     if n == 0 {
