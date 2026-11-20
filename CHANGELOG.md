@@ -22,6 +22,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - A saved row's primary key is read with `Auto::require()`, which returns `UnsavedRow` for a row never saved, where about a hundred sites read `0`. The operator console, tenant provisioning and decommission, SSO links, agents and media now refuse such a row (the console answers 500) instead of acting on id 0 or writing an audit row for operator 0. `UnsavedRow` converts into `ExecError`, `TenancyError`, `MigrateError` and the other error types those paths return.
 - **Breaking:** `AuditEntry` is built from an `AuditLog` with `TryFrom` (was `From`). `JwtBackend::issue_for_user` and `issue_for_tenant_user` return `Result<String, UnsavedRow>`: a user never saved gets no token, instead of one with `sub` 0. Login and role paths read a user or role id the same way.
 - One `rustango_orgs` row with an unreadable storage mode or backend fails only that tenant: it no longer opens the registry breaker, and migrate-all, pre-warm, the per-tenant sweep, `list-tenants` and the console list skip and report it. Cast fields decode the cell without copying it first.
+- List pages and prefetch copy rows less (100-row pages on SQLite): admin list 15% faster with 30% fewer allocations, ListView 11% (18% with an `ExtraContext`), ViewSet lists 11–15%; prefetch stitching makes 17–20% fewer allocations. Output is unchanged.
 
 ## [0.67.0] — 2026-11-19
 
