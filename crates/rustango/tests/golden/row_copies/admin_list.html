@@ -1,0 +1,1533 @@
+<!doctype html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<title>RcPosts — rustango admin</title>
+
+<link rel="icon" type="image/png" href="&#x2F;__static__/icon.png">
+<script nonce="">
+// No-flash theme application — runs before any CSS so the page never
+// paints the wrong theme. localStorage overrides the server-supplied
+// data-theme attribute set above.
+(function(){try{var t=localStorage.getItem('rustango-theme');if(t==='light'||t==='dark'||t==='auto'){document.documentElement.dataset.theme=t;}}catch(e){}})();
+// Delegated handlers: a strict CSP blocks inline on* attributes.
+document.addEventListener('submit',function(e){var m=e.target.getAttribute('data-confirm');if(m&&!confirm(m))e.preventDefault();});
+document.addEventListener('click',function(e){var b=e.target.closest&&e.target.closest('button[data-confirm]');if(b&&!confirm(b.getAttribute('data-confirm')))e.preventDefault();});
+document.addEventListener('change',function(e){var s=e.target;if(s.matches&&s.matches('select[data-nav]')){location.href=s.options[s.selectedIndex].dataset.href;}});
+</script>
+<style nonce="">
+/* rustango theme tokens — shared by tenant admin + operator console.
+   Override any variable in a per-tenant style block to retheme without
+   touching component CSS. The data-theme attribute on <html> picks the
+   active scheme: "light" (forced light), "dark" (forced dark), or "auto"
+   / unset (follow prefers-color-scheme). */
+:root {
+  /* surfaces */
+  --color-bg: #fafafa;
+  --color-bg-surface: #ffffff;
+  --color-bg-sidebar: #f5f0eb;
+  --color-bg-input: #ffffff;
+  --color-bg-hover: rgba(0, 0, 0, 0.04);
+  --color-bg-code: #f7f4ee;
+
+  /* foreground */
+  --color-fg: #222222;
+  --color-fg-muted: #666666;
+  --color-fg-subtle: #888888;
+  --color-fg-on-accent: #ffffff;
+
+  /* border */
+  --color-border: #e0d8cc;
+  --color-border-strong: #d0d0d0;
+
+  /* link */
+  --color-link: #0a4d2c;
+  --color-link-hover: var(--color-accent);
+
+  /* accent (per-tenant override target) */
+  --color-accent: #b04a2c;
+  --color-accent-hover: #993f25;
+  --color-accent-bg-soft: #f7e9e1;
+
+  /* status */
+  --color-success-bg: #e6f4ea;
+  --color-success-fg: #1d6a30;
+  --color-error-bg: #fde7e7;
+  --color-error-fg: #b03a2e;
+  --color-error-border: #d9534f;
+  --color-warning-bg: #fff4e0;
+  --color-warning-fg: #8a5a00;
+  --color-info-bg: #e7eefb;
+  --color-info-fg: #1f3c80;
+
+  /* audit-op badges (alias to status) */
+  --color-audit-create-bg: var(--color-success-bg);
+  --color-audit-create-fg: var(--color-success-fg);
+  --color-audit-update-bg: var(--color-warning-bg);
+  --color-audit-update-fg: var(--color-warning-fg);
+  --color-audit-delete-bg: var(--color-error-bg);
+  --color-audit-delete-fg: var(--color-error-fg);
+  --color-audit-restore-bg: var(--color-success-bg);
+  --color-audit-restore-fg: var(--color-success-fg);
+  --color-audit-action-bg: var(--color-info-bg);
+  --color-audit-action-fg: var(--color-info-fg);
+
+  /* typography */
+  --font-family-base: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+  --font-family-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-size-xs: 11px;
+  --font-size-sm: 12px;
+  --font-size-base: 14px;
+  --font-size-md: 14px;
+  --font-size-lg: 16px;
+  --font-weight-normal: 400;
+  --font-weight-bold: 600;
+  --line-height-base: 1.45;
+
+  /* spacing scale */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+
+  /* radius + shadow */
+  --radius-sm: 3px;
+  --radius-md: 4px;
+  --radius-lg: 8px;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+/* explicit dark — set when html[data-theme="dark"] */
+[data-theme="dark"] {
+  --color-bg: #18171a;
+  --color-bg-surface: #1f1e22;
+  --color-bg-sidebar: #16151a;
+  --color-bg-input: #25232a;
+  --color-bg-hover: rgba(255, 255, 255, 0.04);
+  --color-bg-code: #25232a;
+  --color-fg: #eaeaea;
+  --color-fg-muted: #a8a8a8;
+  --color-fg-subtle: #888888;
+  --color-fg-on-accent: #ffffff;
+  --color-border: #2e2c30;
+  --color-border-strong: #3e3c40;
+  --color-link: #6fb38c;
+  --color-accent: #d97552;
+  --color-accent-hover: #e88a6a;
+  --color-accent-bg-soft: #2c1e1a;
+  --color-success-bg: #1a2e22;
+  --color-success-fg: #6fb38c;
+  --color-error-bg: #2e1a1a;
+  --color-error-fg: #e8826f;
+  --color-error-border: #c25a47;
+  --color-warning-bg: #2e2618;
+  --color-warning-fg: #d4b376;
+  --color-info-bg: #1a1f2e;
+  --color-info-fg: #8fa6d4;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+
+/* auto / unset — follow OS preference, but never override an explicit "light" */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]) {
+    --color-bg: #18171a;
+    --color-bg-surface: #1f1e22;
+    --color-bg-sidebar: #16151a;
+    --color-bg-input: #25232a;
+    --color-bg-hover: rgba(255, 255, 255, 0.04);
+    --color-bg-code: #25232a;
+    --color-fg: #eaeaea;
+    --color-fg-muted: #a8a8a8;
+    --color-fg-subtle: #888888;
+    --color-fg-on-accent: #ffffff;
+    --color-border: #2e2c30;
+    --color-border-strong: #3e3c40;
+    --color-link: #6fb38c;
+    --color-accent: #d97552;
+    --color-accent-hover: #e88a6a;
+    --color-accent-bg-soft: #2c1e1a;
+    --color-success-bg: #1a2e22;
+    --color-success-fg: #6fb38c;
+    --color-error-bg: #2e1a1a;
+    --color-error-fg: #e8826f;
+    --color-error-border: #c25a47;
+    --color-warning-bg: #2e2618;
+    --color-warning-fg: #d4b376;
+    --color-info-bg: #1a1f2e;
+    --color-info-fg: #8fa6d4;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.5);
+  }
+}
+</style>
+
+<style nonce="">
+* { box-sizing: border-box; }
+body {
+  font-family: var(--font-family-base);
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-base);
+  margin: 0;
+  min-height: 100vh;
+  background: var(--color-bg);
+  color: var(--color-fg);
+}
+.layout { display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }
+aside.sidebar {
+  background: var(--color-bg-sidebar);
+  border-right: 1px solid var(--color-border);
+  padding: var(--space-5) var(--space-4);
+  font-size: 0.9em;
+}
+/* Compact header: square logo beside the name, the tagline as a badge. */
+aside.sidebar .brand-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-5) 0;
+}
+aside.sidebar img.brand-logo {
+  /* Fixed box: see _op_styles.html for the flex `min-size` rationale (#73). */
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  object-fit: contain;
+}
+aside.sidebar .brand-text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+aside.sidebar h2 {
+  margin: 0;
+  font-size: 1.1rem;
+  line-height: 1.2;
+  color: var(--color-accent);
+  letter-spacing: 0.03em;
+}
+aside.sidebar p.subtitle {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--color-fg-muted);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  padding: 0 6px;
+}
+aside.sidebar h3 {
+  margin: var(--space-4) 0 0.35rem 0;
+  font-size: 0.8em;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-fg-subtle);
+  font-weight: var(--font-weight-bold);
+}
+aside.sidebar ul { list-style: none; padding: 0; margin: 0; }
+aside.sidebar li { margin: 0.15rem 0; }
+/* Sidebar nav links — Home / Activity / model items. The
+   `:not(.btn)` carve-out keeps `.btn` / `.btn-link` family
+   members (Change password, Logout's POST button, etc.) from
+   inheriting the block layout + neutral color, so they render
+   with their own variant styling instead. */
+aside.sidebar a:not(.btn):not(.btn-link):not(.btn-row-action) {
+  display: block;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  color: var(--color-fg);
+  text-decoration: none;
+}
+aside.sidebar a:not(.btn):not(.btn-link):not(.btn-row-action):hover {
+  background: var(--color-bg-hover);
+}
+aside.sidebar a.active {
+  background: var(--color-bg-surface);
+  color: var(--color-accent);
+  font-weight: var(--font-weight-bold);
+  box-shadow: var(--shadow-sm);
+}
+aside.sidebar .empty {
+  color: var(--color-fg-subtle);
+  font-style: italic;
+  font-size: 0.85em;
+}
+main.content { padding: var(--space-5) var(--space-6); }
+nav.breadcrumb ol {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 var(--space-4) 0;
+  display: flex;
+  gap: 0.35rem;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 0.9em;
+  color: var(--color-fg-subtle);
+}
+nav.breadcrumb li + li::before { content: "›"; margin-right: 0.35rem; color: var(--color-border-strong); }
+nav.breadcrumb a { color: var(--color-fg-subtle); }
+nav.breadcrumb a:hover { color: var(--color-accent); text-decoration: none; }
+nav.breadcrumb strong { color: var(--color-fg); }
+table { border-collapse: collapse; width: 100%; background: var(--color-bg-surface); }
+th, td {
+  border: 1px solid var(--color-border);
+  padding: 0.35rem 0.6rem;
+  text-align: left;
+  vertical-align: top;
+}
+th { background: var(--color-bg-sidebar); }
+a { color: var(--color-link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+small { color: var(--color-fg-subtle); font-weight: var(--font-weight-normal); }
+em { color: var(--color-fg-subtle); }
+input[type=text],
+input[type=number],
+input[type=date],
+input[type=datetime-local],
+input[type=search],
+textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--space-1) 0.4rem;
+  font: inherit;
+  background: var(--color-bg-input);
+  color: var(--color-fg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+textarea { min-height: 4rem; }
+input:invalid, textarea:invalid { border-color: var(--color-error-border); outline-color: var(--color-error-border); }
+input:invalid + small, textarea:invalid + small { color: var(--color-error-fg); }
+.error {
+  background: var(--color-error-bg);
+  border: 1px solid var(--color-error-border);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  color: var(--color-error-fg);
+}
+.muted { color: var(--color-fg-subtle); }
+.search { display: flex; gap: var(--space-2); align-items: center; margin: var(--space-2) 0; }
+.search input[type=search] { flex: 1; }
+.active-filters { color: var(--color-fg-muted); font-size: 0.9em; margin: var(--space-2) 0; }
+.active-filters code {
+  background: var(--color-info-bg);
+  color: var(--color-info-fg);
+  padding: 0.1rem 0.35rem;
+  border-radius: var(--radius-sm);
+}
+.pager { margin-top: var(--space-4); }
+
+/* --------------------------------------------------------------------
+   Button + link-button system (#253 follow-up — admin UX
+   consolidation). Mirrors the operator console's `.btn` family in
+   `_op_styles.html` so both surfaces feel coherent. Works on both
+   <a> and <button> so links rendered next to form-submit buttons
+   (e.g. detail-page "Edit / Delete" row) look like siblings.
+
+   - `.btn`           — baseline (padding, border, hover, accessible focus ring)
+   - `.btn-primary`   — accent fill, white text (primary CTA)
+   - `.btn-secondary` — surface fill, accent border (secondary action)
+   - `.btn-danger`    — red border/text, red fill on hover (destructive)
+   - `.btn-link`      — text-style, no border (subtle nav)
+   - `.btn-row-action`— pill-shaped accent-tinted (per-row table actions)
+
+   Bare `<button>` inherits the baseline via the default selector
+   below; templates that want a colored variant add `.btn` plus a
+   modifier class.
+   ------------------------------------------------------------------ */
+
+/* Button + button-like-anchor baseline. `.btn, button` as a
+   selector list — each selector takes its own specificity
+   (`button` = 0,0,1; `.btn` = 0,1,0). The variant classes below
+   are also 0,1,0 and declared later, so they win by source order
+   for any property they re-declare. No `:not()` negations needed
+   (and the previous `button:not(.theme-toggle)` shape was the bug
+   that out-specified `.btn-secondary`). `.theme-toggle` (0,1,0)
+   declared later in the file overrides this for the theme switcher. */
+.btn, button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font: inherit;
+  padding: 0.4rem var(--space-4);
+  cursor: pointer;
+  background: var(--color-bg-surface);
+  color: var(--color-fg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  text-decoration: none;
+  line-height: 1.2;
+}
+.btn:hover, button:hover { background: var(--color-bg-hover); }
+.btn:focus-visible, button:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* Variants — same specificity as `.btn` (0,1,0), declared later so
+   source order wins. Each variant overrides the surface color +
+   border-color + text color. */
+.btn-primary {
+  background: var(--color-accent);
+  color: var(--color-fg-on-accent, #fff);
+  border-color: var(--color-accent);
+}
+.btn-primary:hover {
+  background: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
+  color: var(--color-fg-on-accent, #fff);
+}
+.btn-secondary {
+  background: transparent;
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+.btn-secondary:hover {
+  background: var(--color-accent-bg-soft);
+  color: var(--color-accent);
+}
+.btn-danger {
+  background: transparent;
+  color: var(--color-error-fg, #b04141);
+  border-color: var(--color-error-fg, #b04141);
+}
+.btn-danger:hover {
+  background: var(--color-error-fg, #b04141);
+  color: #fff;
+}
+.btn-link {
+  background: transparent;
+  border: 0;
+  padding: 0.4rem 0;
+  /* Use accent for high contrast in both themes. Previously used
+     `--color-link` which is too muted on the warm beige sidebar
+     surface, and `--color-fg-muted` (op console's prior shape) was
+     even worse. Accent is the same color the rest of the chrome
+     uses for active links. */
+  color: var(--color-accent);
+  text-decoration: none;
+  font-weight: var(--font-weight-medium, 500);
+}
+.btn-link:hover { color: var(--color-accent-hover); text-decoration: underline; }
+.btn-row-action {
+  display: inline-block;
+  padding: 0.2rem 0.7rem;
+  border-radius: var(--radius-sm);
+  background: var(--color-accent-bg-soft);
+  color: var(--color-accent);
+  font-size: 0.85em;
+  text-decoration: none;
+  border: 1px solid transparent;
+  line-height: 1.4;
+}
+.btn-row-action:hover {
+  background: var(--color-accent);
+  color: var(--color-fg-on-accent, #fff);
+  text-decoration: none;
+}
+
+/* Container for a row of action buttons (detail page, form submit
+   row, sidebar Logout). Flex-row, consistent gap, wraps on small
+   screens. */
+.action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  margin: var(--space-3) 0;
+}
+
+/* `help_text` caption rendered under each form input when
+   `#[rustango(help_text = "...")]` is set on the field. */
+.help-text {
+  margin: var(--space-1) 0 0;
+  color: var(--color-fg-muted);
+  font-size: 0.85em;
+  line-height: 1.4;
+  max-width: 42em;
+}
+dl { display: grid; grid-template-columns: max-content 1fr; gap: var(--space-1) var(--space-4); }
+dt { font-weight: var(--font-weight-bold); }
+.audit-cleanup {
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  margin: var(--space-3) 0;
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 0.9em;
+}
+.audit-cleanup label { display: inline-flex; gap: 0.35rem; align-items: center; }
+.audit-cleanup small.muted { font-size: 0.85em; }
+.user-roles-panel { margin-top: var(--space-6); padding-top: var(--space-4); border-top: 1px solid var(--color-border); }
+.user-roles-panel h2 {
+  font-size: 1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-fg-subtle);
+  margin-bottom: var(--space-2);
+}
+.user-roles-panel h3 {
+  font-size: 0.9em;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-fg-subtle);
+  margin: 0 0 var(--space-2) 0;
+}
+.user-roles-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-4);
+}
+.user-roles-list, .user-perms-list { padding-left: 0; list-style: none; margin: 0; }
+.user-roles-list li, .user-perms-list li {
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-2);
+  margin-bottom: var(--space-1);
+  font-size: 0.9em;
+}
+.user-perms-list code { font-family: var(--font-family-mono); font-size: 0.95em; }
+.user-roles-help { margin-top: var(--space-3); color: var(--color-fg-subtle); }
+.audit-trail { margin-top: var(--space-6); padding-top: var(--space-4); border-top: 1px solid var(--color-border); }
+.audit-trail h2 {
+  font-size: 1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-fg-subtle);
+  margin-bottom: var(--space-2);
+}
+.audit-trail ol { padding-left: 0; list-style: none; }
+.audit-trail li {
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-2);
+}
+.audit-op {
+  display: inline-block;
+  padding: 0.1rem 0.4rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.75em;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: var(--font-weight-bold);
+}
+.audit-op-create { background: var(--color-audit-create-bg); color: var(--color-audit-create-fg); }
+.audit-op-update { background: var(--color-audit-update-bg); color: var(--color-audit-update-fg); }
+.audit-op-delete { background: var(--color-audit-delete-bg); color: var(--color-audit-delete-fg); }
+.audit-op-soft_delete { background: var(--color-audit-delete-bg); color: var(--color-audit-delete-fg); }
+.audit-op-restore { background: var(--color-audit-restore-bg); color: var(--color-audit-restore-fg); }
+.audit-op-action { background: var(--color-audit-action-bg); color: var(--color-audit-action-fg); }
+.audit-changes {
+  font-family: var(--font-family-mono);
+  font-size: 0.8em;
+  background: var(--color-bg-code);
+  padding: 0.35rem var(--space-2);
+  border-radius: var(--radius-sm);
+  margin: 0.35rem 0 0 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.form-fieldset {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  margin: 0 0 var(--space-4) 0;
+  padding: var(--space-2) var(--space-4) var(--space-4);
+  background: var(--color-bg-surface);
+}
+.form-fieldset legend {
+  padding: 0 var(--space-2);
+  font-weight: var(--font-weight-bold);
+  color: var(--color-fg-muted);
+  font-size: 0.9em;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.form-fieldset > table { background: transparent; }
+.form-fieldset > table th,
+.form-fieldset > table td {
+  border: none;
+  border-bottom: 1px solid var(--color-border);
+  padding: 0.35rem 0.4rem;
+}
+.list-form { margin: 0; }
+.action-bar {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  padding: 0.35rem var(--space-2);
+  background: var(--color-bg-sidebar);
+  border: 1px solid var(--color-border);
+  border-bottom: none;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  font-size: 0.9em;
+}
+.action-bar select { padding: var(--space-1) 0.35rem; font: inherit; }
+.checkbox-col { width: 28px; text-align: center; padding: 0.15rem var(--space-1) !important; }
+.list-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px;
+  gap: var(--space-5);
+  align-items: start;
+}
+.list-shell.no-rail { grid-template-columns: 1fr; }
+.list-rail { font-size: 0.9em; }
+.list-rail .facet {
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-3);
+}
+.list-rail .facet h4 {
+  margin: 0 0 0.35rem 0;
+  font-size: 0.8em;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--color-fg-subtle);
+  font-weight: var(--font-weight-bold);
+}
+.list-rail .facet ul { list-style: none; padding: 0; margin: 0; }
+.list-rail .facet li { margin: 0.15rem 0; line-height: 1.4; }
+.list-rail .facet a { color: var(--color-fg); }
+.list-rail .facet a.active { color: var(--color-accent); font-weight: var(--font-weight-bold); }
+.list-rail .facet .count { color: var(--color-fg-subtle); font-size: 0.85em; }
+.list-rail .facet .facet-more a { color: var(--color-fg-subtle); font-style: italic; }
+.list-rail .facet .facet-more a:hover { color: var(--color-accent); }
+.theme-toggle {
+  position: fixed;
+  bottom: var(--space-4);
+  right: var(--space-4);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-bg-surface);
+  color: var(--color-fg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+  z-index: 100;
+}
+.theme-toggle:hover { border-color: var(--color-accent); color: var(--color-accent); }
+/* v0.27.8 (#78) — operator impersonation banner. Bright,
+   high-contrast, sticky at the top so it can't be missed
+   while scrolling the admin. */
+.impersonation-banner {
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+  padding: 0.6rem 1rem;
+  background: var(--color-warning-bg, #fff4cc);
+  color: var(--color-warning-fg, #6b4500);
+  border-bottom: 2px solid var(--color-warning-fg, #6b4500);
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.impersonation-banner code {
+  background: rgba(0, 0, 0, 0.08);
+  padding: 0.05em 0.35em;
+  border-radius: 0.2em;
+  font-size: 12px;
+}
+.impersonation-banner .btn-end-impersonation {
+  margin-left: auto;
+  padding: 0.3rem 0.8rem;
+  border-radius: var(--radius-sm, 4px);
+  background: var(--color-warning-fg, #6b4500);
+  color: var(--color-bg-surface, #fff);
+  border: 0;
+  font: inherit;
+  font-weight: var(--font-weight-bold, 600);
+  cursor: pointer;
+}
+.impersonation-banner .btn-end-impersonation:hover {
+  filter: brightness(1.15);
+}
+.theme-toggle:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+
+/* Boolean column rendering — replaces literal "true"/"false" text
+   with a checkbox glyph. Filled ☑ in the accent color when true,
+   empty ☐ in muted color otherwise. Lets eyes scan tens of rows
+   in a single sweep. */
+.rcms-bool { font-size: 1.2em; line-height: 1; }
+.rcms-bool.yes { color: var(--color-accent); }
+.rcms-bool.no { color: var(--color-text-muted); }
+@media (max-width: 1000px) {
+  .list-shell { grid-template-columns: 1fr; }
+}
+@media (max-width: 720px) {
+  .layout { grid-template-columns: 1fr; }
+  aside.sidebar { border-right: none; border-bottom: 1px solid var(--color-border); }
+  main.content { padding: var(--space-4); }
+}
+/* Classes, not inline style attributes: a strict CSP blocks those (#1703). */
+.inline-form { display: inline; }
+.history-link { font-weight: normal; text-transform: none; letter-spacing: 0; }
+.filter-select { width: 100%; margin-bottom: .4rem; }
+.num-input { width: 5rem; }
+.mono { font-family: monospace; }
+p.flash { padding: var(--space-2) var(--space-3); border-radius: var(--radius); }
+p.flash.success { background: color-mix(in srgb, var(--color-success, #2a7) 14%, transparent); border: 1px solid var(--color-success, #2a7); color: var(--color-success, #2a7); }
+p.flash.error { background: color-mix(in srgb, var(--color-danger, #d33) 14%, transparent); border: 1px solid var(--color-danger, #d33); color: var(--color-danger, #d33); }
+</style>
+
+
+</head>
+<body>
+
+
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand-head">
+        
+        <div class="brand-text">
+            <h2>Rustango Admin</h2>
+            
+        </div>
+    </div>
+    <p>
+        <a href="&#x2F;"
+           class="">Home</a>
+    </p>
+    
+    <p>
+        <a href="&#x2F;__audit"
+           class="">Activity</a>
+    </p>
+    
+    <p>
+        
+        <a href="/__docs"
+           class="">Model reference</a>
+    </p>
+    
+    
+        
+            <h3>audit</h3>
+            <ul>
+                
+                    <li>
+                        <a href="/rustango_audit_log"
+                           >AuditLog</a>
+                    </li>
+                
+            </ul>
+        
+            <h3>contenttypes</h3>
+            <ul>
+                
+                    <li>
+                        <a href="/rustango_content_types"
+                           >ContentType</a>
+                    </li>
+                
+            </ul>
+        
+            <h3>i18n</h3>
+            <ul>
+                
+                    <li>
+                        <a href="/rustango_translations"
+                           >Translation</a>
+                    </li>
+                
+            </ul>
+        
+            <h3>rc</h3>
+            <ul>
+                
+                    <li>
+                        <a href="/rc_author"
+                           >RcAuthor</a>
+                    </li>
+                
+                    <li>
+                        <a href="/rc_category"
+                           >RcCategory</a>
+                    </li>
+                
+                    <li>
+                        <a href="/rc_child"
+                           >RcChild</a>
+                    </li>
+                
+                    <li>
+                        <a href="/rc_parent"
+                           >RcParent</a>
+                    </li>
+                
+                    <li>
+                        <a href="/rc_parent_tag"
+                           >RcParentTag</a>
+                    </li>
+                
+                    <li>
+                        <a href="/rc_post"
+                           class="active">RcPost</a>
+                    </li>
+                
+                    <li>
+                        <a href="/rc_tag"
+                           >RcTag</a>
+                    </li>
+                
+            </ul>
+        
+    
+    
+    
+</aside>
+
+  <main class="content">
+
+<nav class="breadcrumb" aria-label="breadcrumb">
+  <ol>
+    <li><a href="&#x2F;">Rustango Admin</a></li>
+    <li><strong>RcPosts</strong></li>
+  </ol>
+</nav>
+<h1>RcPosts</h1>
+<div class="list-shell">
+<div class="list-main">
+<p>Table: <code>rc_post</code>
+
+  &mdash; 250 rows
+
+
+  &nbsp;&middot;&nbsp; <a href="/rc_post/new">+ new RcPost</a>
+
+
+</p>
+
+
+
+
+<form method="get" action="/rc_post" class="search">
+  <input type="search" name="q" value="" placeholder="Search&hellip;">
+  <button type="submit" class="btn btn-secondary">Go</button>
+  
+  
+</form>
+
+
+
+
+
+<form method="post" action="/rc_post/__action" class="list-form">
+  
+  
+  
+  <table>
+    <thead>
+      <tr>
+      
+      
+        <th>id <small>(pk)</small></th>
+      
+        <th>title</th>
+      
+        <th>body</th>
+      
+        <th>status</th>
+      
+        <th>score</th>
+      
+        <th>author_id</th>
+      
+        <th>category_id</th>
+      
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+    
+      <tr>
+        
+        <td>1</td><td>Post &quot;1&quot; title</td><td>Body of post 1: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>7</td><td><a href="/rc_author/2">Author &lt;2&gt; &amp; co</a></td><td><a href="/rc_category/2">Category &lt;2&gt; &amp; co</a></td>
+        <td><a href="/rc_post/1">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>2</td><td>Post &quot;2&quot; title</td><td>Body of post 2: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>14</td><td><a href="/rc_author/3">Author &lt;3&gt; &amp; co</a></td><td><a href="/rc_category/3">Category &lt;3&gt; &amp; co</a></td>
+        <td><a href="/rc_post/2">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>3</td><td>Post &quot;3&quot; title</td><td>Body of post 3: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>21</td><td><a href="/rc_author/4">Author &lt;4&gt; &amp; co</a></td><td><a href="/rc_category/4">Category &lt;4&gt; &amp; co</a></td>
+        <td><a href="/rc_post/3">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>4</td><td>Post &quot;4&quot; title</td><td>Body of post 4: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>28</td><td><a href="/rc_author/5">Author &lt;5&gt; &amp; co</a></td><td><a href="/rc_category/5">Category &lt;5&gt; &amp; co</a></td>
+        <td><a href="/rc_post/4">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>5</td><td>Post &quot;5&quot; title</td><td>Body of post 5: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>35</td><td><a href="/rc_author/6">Author &lt;6&gt; &amp; co</a></td><td><a href="/rc_category/6">Category &lt;6&gt; &amp; co</a></td>
+        <td><a href="/rc_post/5">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>6</td><td>Post &quot;6&quot; title</td><td>Body of post 6: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>42</td><td><a href="/rc_author/7">Author &lt;7&gt; &amp; co</a></td><td><a href="/rc_category/7">Category &lt;7&gt; &amp; co</a></td>
+        <td><a href="/rc_post/6">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>7</td><td>Post &quot;7&quot; title</td><td>Body of post 7: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>49</td><td><a href="/rc_author/8">Author &lt;8&gt; &amp; co</a></td><td><a href="/rc_category/8">Category &lt;8&gt; &amp; co</a></td>
+        <td><a href="/rc_post/7">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>8</td><td>Post &quot;8&quot; title</td><td>Body of post 8: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>56</td><td><a href="/rc_author/9">Author &lt;9&gt; &amp; co</a></td><td><a href="/rc_category/1">Category &lt;1&gt; &amp; co</a></td>
+        <td><a href="/rc_post/8">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>9</td><td>Post &quot;9&quot; title</td><td>Body of post 9: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>63</td><td><a href="/rc_author/10">Author &lt;10&gt; &amp; co</a></td><td><a href="/rc_category/2">Category &lt;2&gt; &amp; co</a></td>
+        <td><a href="/rc_post/9">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>10</td><td>Post &quot;10&quot; title</td><td>Body of post 10: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>70</td><td><a href="/rc_author/11">Author &lt;11&gt; &amp; co</a></td><td><a href="/rc_category/3">Category &lt;3&gt; &amp; co</a></td>
+        <td><a href="/rc_post/10">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>11</td><td>Post &quot;11&quot; title</td><td>Body of post 11: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>77</td><td><a href="/rc_author/12">Author &lt;12&gt; &amp; co</a></td><td><a href="/rc_category/4">Category &lt;4&gt; &amp; co</a></td>
+        <td><a href="/rc_post/11">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>12</td><td>Post &quot;12&quot; title</td><td>Body of post 12: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>84</td><td><a href="/rc_author/13">Author &lt;13&gt; &amp; co</a></td><td><a href="/rc_category/5">Category &lt;5&gt; &amp; co</a></td>
+        <td><a href="/rc_post/12">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>13</td><td>Post &quot;13&quot; title</td><td>Body of post 13: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>91</td><td><a href="/rc_author/14">Author &lt;14&gt; &amp; co</a></td><td><a href="/rc_category/6">Category &lt;6&gt; &amp; co</a></td>
+        <td><a href="/rc_post/13">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>14</td><td>Post &quot;14&quot; title</td><td>Body of post 14: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>98</td><td><a href="/rc_author/15">Author &lt;15&gt; &amp; co</a></td><td><a href="/rc_category/7">Category &lt;7&gt; &amp; co</a></td>
+        <td><a href="/rc_post/14">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>15</td><td>Post &quot;15&quot; title</td><td>Body of post 15: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>4</td><td><a href="/rc_author/16">Author &lt;16&gt; &amp; co</a></td><td><a href="/rc_category/8">Category &lt;8&gt; &amp; co</a></td>
+        <td><a href="/rc_post/15">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>16</td><td>Post &quot;16&quot; title</td><td>Body of post 16: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>11</td><td><a href="/rc_author/17">Author &lt;17&gt; &amp; co</a></td><td><a href="/rc_category/1">Category &lt;1&gt; &amp; co</a></td>
+        <td><a href="/rc_post/16">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>17</td><td>Post &quot;17&quot; title</td><td>Body of post 17: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>18</td><td><a href="/rc_author/18">Author &lt;18&gt; &amp; co</a></td><td><a href="/rc_category/2">Category &lt;2&gt; &amp; co</a></td>
+        <td><a href="/rc_post/17">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>18</td><td>Post &quot;18&quot; title</td><td>Body of post 18: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>25</td><td><a href="/rc_author/19">Author &lt;19&gt; &amp; co</a></td><td><a href="/rc_category/3">Category &lt;3&gt; &amp; co</a></td>
+        <td><a href="/rc_post/18">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>19</td><td>Post &quot;19&quot; title</td><td>Body of post 19: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>32</td><td><a href="/rc_author/20">Author &lt;20&gt; &amp; co</a></td><td><a href="/rc_category/4">Category &lt;4&gt; &amp; co</a></td>
+        <td><a href="/rc_post/19">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>20</td><td>Post &quot;20&quot; title</td><td>Body of post 20: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>39</td><td><a href="/rc_author/1">Author &lt;1&gt; &amp; co</a></td><td><a href="/rc_category/5">Category &lt;5&gt; &amp; co</a></td>
+        <td><a href="/rc_post/20">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>21</td><td>Post &quot;21&quot; title</td><td>Body of post 21: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>46</td><td><a href="/rc_author/2">Author &lt;2&gt; &amp; co</a></td><td><a href="/rc_category/6">Category &lt;6&gt; &amp; co</a></td>
+        <td><a href="/rc_post/21">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>22</td><td>Post &quot;22&quot; title</td><td>Body of post 22: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>53</td><td><a href="/rc_author/3">Author &lt;3&gt; &amp; co</a></td><td><a href="/rc_category/7">Category &lt;7&gt; &amp; co</a></td>
+        <td><a href="/rc_post/22">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>23</td><td>Post &quot;23&quot; title</td><td>Body of post 23: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>60</td><td><a href="/rc_author/4">Author &lt;4&gt; &amp; co</a></td><td><a href="/rc_category/8">Category &lt;8&gt; &amp; co</a></td>
+        <td><a href="/rc_post/23">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>24</td><td>Post &quot;24&quot; title</td><td>Body of post 24: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>67</td><td><a href="/rc_author/5">Author &lt;5&gt; &amp; co</a></td><td><a href="/rc_category/1">Category &lt;1&gt; &amp; co</a></td>
+        <td><a href="/rc_post/24">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>25</td><td>Post &quot;25&quot; title</td><td>Body of post 25: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>74</td><td><a href="/rc_author/6">Author &lt;6&gt; &amp; co</a></td><td><a href="/rc_category/2">Category &lt;2&gt; &amp; co</a></td>
+        <td><a href="/rc_post/25">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>26</td><td>Post &quot;26&quot; title</td><td>Body of post 26: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>81</td><td><a href="/rc_author/7">Author &lt;7&gt; &amp; co</a></td><td><a href="/rc_category/3">Category &lt;3&gt; &amp; co</a></td>
+        <td><a href="/rc_post/26">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>27</td><td>Post &quot;27&quot; title</td><td>Body of post 27: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>88</td><td><a href="/rc_author/8">Author &lt;8&gt; &amp; co</a></td><td><a href="/rc_category/4">Category &lt;4&gt; &amp; co</a></td>
+        <td><a href="/rc_post/27">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>28</td><td>Post &quot;28&quot; title</td><td>Body of post 28: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>95</td><td><a href="/rc_author/9">Author &lt;9&gt; &amp; co</a></td><td><a href="/rc_category/5">Category &lt;5&gt; &amp; co</a></td>
+        <td><a href="/rc_post/28">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>29</td><td>Post &quot;29&quot; title</td><td>Body of post 29: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>1</td><td><a href="/rc_author/10">Author &lt;10&gt; &amp; co</a></td><td><a href="/rc_category/6">Category &lt;6&gt; &amp; co</a></td>
+        <td><a href="/rc_post/29">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>30</td><td>Post &quot;30&quot; title</td><td>Body of post 30: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>8</td><td><a href="/rc_author/11">Author &lt;11&gt; &amp; co</a></td><td><a href="/rc_category/7">Category &lt;7&gt; &amp; co</a></td>
+        <td><a href="/rc_post/30">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>31</td><td>Post &quot;31&quot; title</td><td>Body of post 31: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>15</td><td><a href="/rc_author/12">Author &lt;12&gt; &amp; co</a></td><td><a href="/rc_category/8">Category &lt;8&gt; &amp; co</a></td>
+        <td><a href="/rc_post/31">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>32</td><td>Post &quot;32&quot; title</td><td>Body of post 32: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>22</td><td><a href="/rc_author/13">Author &lt;13&gt; &amp; co</a></td><td><a href="/rc_category/1">Category &lt;1&gt; &amp; co</a></td>
+        <td><a href="/rc_post/32">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>33</td><td>Post &quot;33&quot; title</td><td>Body of post 33: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>29</td><td><a href="/rc_author/14">Author &lt;14&gt; &amp; co</a></td><td><a href="/rc_category/2">Category &lt;2&gt; &amp; co</a></td>
+        <td><a href="/rc_post/33">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>34</td><td>Post &quot;34&quot; title</td><td>Body of post 34: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>36</td><td><a href="/rc_author/15">Author &lt;15&gt; &amp; co</a></td><td><a href="/rc_category/3">Category &lt;3&gt; &amp; co</a></td>
+        <td><a href="/rc_post/34">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>35</td><td>Post &quot;35&quot; title</td><td>Body of post 35: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>43</td><td><a href="/rc_author/16">Author &lt;16&gt; &amp; co</a></td><td><a href="/rc_category/4">Category &lt;4&gt; &amp; co</a></td>
+        <td><a href="/rc_post/35">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>36</td><td>Post &quot;36&quot; title</td><td>Body of post 36: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>50</td><td><a href="/rc_author/17">Author &lt;17&gt; &amp; co</a></td><td><a href="/rc_category/5">Category &lt;5&gt; &amp; co</a></td>
+        <td><a href="/rc_post/36">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>37</td><td>Post &quot;37&quot; title</td><td>Body of post 37: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>57</td><td><a href="/rc_author/18">Author &lt;18&gt; &amp; co</a></td><td><a href="/rc_category/6">Category &lt;6&gt; &amp; co</a></td>
+        <td><a href="/rc_post/37">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>38</td><td>Post &quot;38&quot; title</td><td>Body of post 38: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>64</td><td><a href="/rc_author/19">Author &lt;19&gt; &amp; co</a></td><td><a href="/rc_category/7">Category &lt;7&gt; &amp; co</a></td>
+        <td><a href="/rc_post/38">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>39</td><td>Post &quot;39&quot; title</td><td>Body of post 39: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>71</td><td><a href="/rc_author/20">Author &lt;20&gt; &amp; co</a></td><td><a href="/rc_category/8">Category &lt;8&gt; &amp; co</a></td>
+        <td><a href="/rc_post/39">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>40</td><td>Post &quot;40&quot; title</td><td>Body of post 40: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>78</td><td><a href="/rc_author/1">Author &lt;1&gt; &amp; co</a></td><td><a href="/rc_category/1">Category &lt;1&gt; &amp; co</a></td>
+        <td><a href="/rc_post/40">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>41</td><td>Post &quot;41&quot; title</td><td>Body of post 41: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>85</td><td><a href="/rc_author/2">Author &lt;2&gt; &amp; co</a></td><td><a href="/rc_category/2">Category &lt;2&gt; &amp; co</a></td>
+        <td><a href="/rc_post/41">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>42</td><td>Post &quot;42&quot; title</td><td>Body of post 42: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>92</td><td><a href="/rc_author/3">Author &lt;3&gt; &amp; co</a></td><td><a href="/rc_category/3">Category &lt;3&gt; &amp; co</a></td>
+        <td><a href="/rc_post/42">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>43</td><td>Post &quot;43&quot; title</td><td>Body of post 43: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>99</td><td><a href="/rc_author/4">Author &lt;4&gt; &amp; co</a></td><td><a href="/rc_category/4">Category &lt;4&gt; &amp; co</a></td>
+        <td><a href="/rc_post/43">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>44</td><td>Post &quot;44&quot; title</td><td>Body of post 44: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>5</td><td><a href="/rc_author/5">Author &lt;5&gt; &amp; co</a></td><td><a href="/rc_category/5">Category &lt;5&gt; &amp; co</a></td>
+        <td><a href="/rc_post/44">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>45</td><td>Post &quot;45&quot; title</td><td>Body of post 45: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>12</td><td><a href="/rc_author/6">Author &lt;6&gt; &amp; co</a></td><td><a href="/rc_category/6">Category &lt;6&gt; &amp; co</a></td>
+        <td><a href="/rc_post/45">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>46</td><td>Post &quot;46&quot; title</td><td>Body of post 46: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>19</td><td><a href="/rc_author/7">Author &lt;7&gt; &amp; co</a></td><td><a href="/rc_category/7">Category &lt;7&gt; &amp; co</a></td>
+        <td><a href="/rc_post/46">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>47</td><td>Post &quot;47&quot; title</td><td>Body of post 47: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>26</td><td><a href="/rc_author/8">Author &lt;8&gt; &amp; co</a></td><td><a href="/rc_category/8">Category &lt;8&gt; &amp; co</a></td>
+        <td><a href="/rc_post/47">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>48</td><td>Post &quot;48&quot; title</td><td>Body of post 48: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>33</td><td><a href="/rc_author/9">Author &lt;9&gt; &amp; co</a></td><td><a href="/rc_category/1">Category &lt;1&gt; &amp; co</a></td>
+        <td><a href="/rc_post/48">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>49</td><td>Post &quot;49&quot; title</td><td>Body of post 49: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>40</td><td><a href="/rc_author/10">Author &lt;10&gt; &amp; co</a></td><td><a href="/rc_category/2">Category &lt;2&gt; &amp; co</a></td>
+        <td><a href="/rc_post/49">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>50</td><td>Post &quot;50&quot; title</td><td>Body of post 50: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>47</td><td><a href="/rc_author/11">Author &lt;11&gt; &amp; co</a></td><td><a href="/rc_category/3">Category &lt;3&gt; &amp; co</a></td>
+        <td><a href="/rc_post/50">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>51</td><td>Post &quot;51&quot; title</td><td>Body of post 51: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>54</td><td><a href="/rc_author/12">Author &lt;12&gt; &amp; co</a></td><td><a href="/rc_category/4">Category &lt;4&gt; &amp; co</a></td>
+        <td><a href="/rc_post/51">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>52</td><td>Post &quot;52&quot; title</td><td>Body of post 52: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>61</td><td><a href="/rc_author/13">Author &lt;13&gt; &amp; co</a></td><td><a href="/rc_category/5">Category &lt;5&gt; &amp; co</a></td>
+        <td><a href="/rc_post/52">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>53</td><td>Post &quot;53&quot; title</td><td>Body of post 53: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>68</td><td><a href="/rc_author/14">Author &lt;14&gt; &amp; co</a></td><td><a href="/rc_category/6">Category &lt;6&gt; &amp; co</a></td>
+        <td><a href="/rc_post/53">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>54</td><td>Post &quot;54&quot; title</td><td>Body of post 54: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>75</td><td><a href="/rc_author/15">Author &lt;15&gt; &amp; co</a></td><td><a href="/rc_category/7">Category &lt;7&gt; &amp; co</a></td>
+        <td><a href="/rc_post/54">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>55</td><td>Post &quot;55&quot; title</td><td>Body of post 55: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>82</td><td><a href="/rc_author/16">Author &lt;16&gt; &amp; co</a></td><td><a href="/rc_category/8">Category &lt;8&gt; &amp; co</a></td>
+        <td><a href="/rc_post/55">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>56</td><td>Post &quot;56&quot; title</td><td>Body of post 56: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>89</td><td><a href="/rc_author/17">Author &lt;17&gt; &amp; co</a></td><td><a href="/rc_category/1">Category &lt;1&gt; &amp; co</a></td>
+        <td><a href="/rc_post/56">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>57</td><td>Post &quot;57&quot; title</td><td>Body of post 57: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>96</td><td><a href="/rc_author/18">Author &lt;18&gt; &amp; co</a></td><td><a href="/rc_category/2">Category &lt;2&gt; &amp; co</a></td>
+        <td><a href="/rc_post/57">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>58</td><td>Post &quot;58&quot; title</td><td>Body of post 58: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>2</td><td><a href="/rc_author/19">Author &lt;19&gt; &amp; co</a></td><td><a href="/rc_category/3">Category &lt;3&gt; &amp; co</a></td>
+        <td><a href="/rc_post/58">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>59</td><td>Post &quot;59&quot; title</td><td>Body of post 59: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>9</td><td><a href="/rc_author/20">Author &lt;20&gt; &amp; co</a></td><td><a href="/rc_category/4">Category &lt;4&gt; &amp; co</a></td>
+        <td><a href="/rc_post/59">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>60</td><td>Post &quot;60&quot; title</td><td>Body of post 60: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>16</td><td><a href="/rc_author/1">Author &lt;1&gt; &amp; co</a></td><td><a href="/rc_category/5">Category &lt;5&gt; &amp; co</a></td>
+        <td><a href="/rc_post/60">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>61</td><td>Post &quot;61&quot; title</td><td>Body of post 61: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>23</td><td><a href="/rc_author/2">Author &lt;2&gt; &amp; co</a></td><td><a href="/rc_category/6">Category &lt;6&gt; &amp; co</a></td>
+        <td><a href="/rc_post/61">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>62</td><td>Post &quot;62&quot; title</td><td>Body of post 62: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>30</td><td><a href="/rc_author/3">Author &lt;3&gt; &amp; co</a></td><td><a href="/rc_category/7">Category &lt;7&gt; &amp; co</a></td>
+        <td><a href="/rc_post/62">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>63</td><td>Post &quot;63&quot; title</td><td>Body of post 63: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>37</td><td><a href="/rc_author/4">Author &lt;4&gt; &amp; co</a></td><td><a href="/rc_category/8">Category &lt;8&gt; &amp; co</a></td>
+        <td><a href="/rc_post/63">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>64</td><td>Post &quot;64&quot; title</td><td>Body of post 64: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>44</td><td><a href="/rc_author/5">Author &lt;5&gt; &amp; co</a></td><td><a href="/rc_category/1">Category &lt;1&gt; &amp; co</a></td>
+        <td><a href="/rc_post/64">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>65</td><td>Post &quot;65&quot; title</td><td>Body of post 65: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>51</td><td><a href="/rc_author/6">Author &lt;6&gt; &amp; co</a></td><td><a href="/rc_category/2">Category &lt;2&gt; &amp; co</a></td>
+        <td><a href="/rc_post/65">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>66</td><td>Post &quot;66&quot; title</td><td>Body of post 66: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>58</td><td><a href="/rc_author/7">Author &lt;7&gt; &amp; co</a></td><td><a href="/rc_category/3">Category &lt;3&gt; &amp; co</a></td>
+        <td><a href="/rc_post/66">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>67</td><td>Post &quot;67&quot; title</td><td>Body of post 67: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>65</td><td><a href="/rc_author/8">Author &lt;8&gt; &amp; co</a></td><td><a href="/rc_category/4">Category &lt;4&gt; &amp; co</a></td>
+        <td><a href="/rc_post/67">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>68</td><td>Post &quot;68&quot; title</td><td>Body of post 68: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>72</td><td><a href="/rc_author/9">Author &lt;9&gt; &amp; co</a></td><td><a href="/rc_category/5">Category &lt;5&gt; &amp; co</a></td>
+        <td><a href="/rc_post/68">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>69</td><td>Post &quot;69&quot; title</td><td>Body of post 69: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>79</td><td><a href="/rc_author/10">Author &lt;10&gt; &amp; co</a></td><td><a href="/rc_category/6">Category &lt;6&gt; &amp; co</a></td>
+        <td><a href="/rc_post/69">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>70</td><td>Post &quot;70&quot; title</td><td>Body of post 70: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>86</td><td><a href="/rc_author/11">Author &lt;11&gt; &amp; co</a></td><td><a href="/rc_category/7">Category &lt;7&gt; &amp; co</a></td>
+        <td><a href="/rc_post/70">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>71</td><td>Post &quot;71&quot; title</td><td>Body of post 71: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>93</td><td><a href="/rc_author/12">Author &lt;12&gt; &amp; co</a></td><td><a href="/rc_category/8">Category &lt;8&gt; &amp; co</a></td>
+        <td><a href="/rc_post/71">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>72</td><td>Post &quot;72&quot; title</td><td>Body of post 72: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>100</td><td><a href="/rc_author/13">Author &lt;13&gt; &amp; co</a></td><td><a href="/rc_category/1">Category &lt;1&gt; &amp; co</a></td>
+        <td><a href="/rc_post/72">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>73</td><td>Post &quot;73&quot; title</td><td>Body of post 73: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>6</td><td><a href="/rc_author/14">Author &lt;14&gt; &amp; co</a></td><td><a href="/rc_category/2">Category &lt;2&gt; &amp; co</a></td>
+        <td><a href="/rc_post/73">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>74</td><td>Post &quot;74&quot; title</td><td>Body of post 74: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>13</td><td><a href="/rc_author/15">Author &lt;15&gt; &amp; co</a></td><td><a href="/rc_category/3">Category &lt;3&gt; &amp; co</a></td>
+        <td><a href="/rc_post/74">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>75</td><td>Post &quot;75&quot; title</td><td>Body of post 75: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>20</td><td><a href="/rc_author/16">Author &lt;16&gt; &amp; co</a></td><td><a href="/rc_category/4">Category &lt;4&gt; &amp; co</a></td>
+        <td><a href="/rc_post/75">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>76</td><td>Post &quot;76&quot; title</td><td>Body of post 76: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>27</td><td><a href="/rc_author/17">Author &lt;17&gt; &amp; co</a></td><td><a href="/rc_category/5">Category &lt;5&gt; &amp; co</a></td>
+        <td><a href="/rc_post/76">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>77</td><td>Post &quot;77&quot; title</td><td>Body of post 77: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>34</td><td><a href="/rc_author/18">Author &lt;18&gt; &amp; co</a></td><td><a href="/rc_category/6">Category &lt;6&gt; &amp; co</a></td>
+        <td><a href="/rc_post/77">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>78</td><td>Post &quot;78&quot; title</td><td>Body of post 78: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>41</td><td><a href="/rc_author/19">Author &lt;19&gt; &amp; co</a></td><td><a href="/rc_category/7">Category &lt;7&gt; &amp; co</a></td>
+        <td><a href="/rc_post/78">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>79</td><td>Post &quot;79&quot; title</td><td>Body of post 79: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>48</td><td><a href="/rc_author/20">Author &lt;20&gt; &amp; co</a></td><td><a href="/rc_category/8">Category &lt;8&gt; &amp; co</a></td>
+        <td><a href="/rc_post/79">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>80</td><td>Post &quot;80&quot; title</td><td>Body of post 80: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>55</td><td><a href="/rc_author/1">Author &lt;1&gt; &amp; co</a></td><td><a href="/rc_category/1">Category &lt;1&gt; &amp; co</a></td>
+        <td><a href="/rc_post/80">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>81</td><td>Post &quot;81&quot; title</td><td>Body of post 81: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>62</td><td><a href="/rc_author/2">Author &lt;2&gt; &amp; co</a></td><td><a href="/rc_category/2">Category &lt;2&gt; &amp; co</a></td>
+        <td><a href="/rc_post/81">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>82</td><td>Post &quot;82&quot; title</td><td>Body of post 82: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>69</td><td><a href="/rc_author/3">Author &lt;3&gt; &amp; co</a></td><td><a href="/rc_category/3">Category &lt;3&gt; &amp; co</a></td>
+        <td><a href="/rc_post/82">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>83</td><td>Post &quot;83&quot; title</td><td>Body of post 83: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>76</td><td><a href="/rc_author/4">Author &lt;4&gt; &amp; co</a></td><td><a href="/rc_category/4">Category &lt;4&gt; &amp; co</a></td>
+        <td><a href="/rc_post/83">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>84</td><td>Post &quot;84&quot; title</td><td>Body of post 84: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>83</td><td><a href="/rc_author/5">Author &lt;5&gt; &amp; co</a></td><td><a href="/rc_category/5">Category &lt;5&gt; &amp; co</a></td>
+        <td><a href="/rc_post/84">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>85</td><td>Post &quot;85&quot; title</td><td>Body of post 85: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>90</td><td><a href="/rc_author/6">Author &lt;6&gt; &amp; co</a></td><td><a href="/rc_category/6">Category &lt;6&gt; &amp; co</a></td>
+        <td><a href="/rc_post/85">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>86</td><td>Post &quot;86&quot; title</td><td>Body of post 86: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>97</td><td><a href="/rc_author/7">Author &lt;7&gt; &amp; co</a></td><td><a href="/rc_category/7">Category &lt;7&gt; &amp; co</a></td>
+        <td><a href="/rc_post/86">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>87</td><td>Post &quot;87&quot; title</td><td>Body of post 87: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>3</td><td><a href="/rc_author/8">Author &lt;8&gt; &amp; co</a></td><td><a href="/rc_category/8">Category &lt;8&gt; &amp; co</a></td>
+        <td><a href="/rc_post/87">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>88</td><td>Post &quot;88&quot; title</td><td>Body of post 88: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>10</td><td><a href="/rc_author/9">Author &lt;9&gt; &amp; co</a></td><td><a href="/rc_category/1">Category &lt;1&gt; &amp; co</a></td>
+        <td><a href="/rc_post/88">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>89</td><td>Post &quot;89&quot; title</td><td>Body of post 89: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>17</td><td><a href="/rc_author/10">Author &lt;10&gt; &amp; co</a></td><td><a href="/rc_category/2">Category &lt;2&gt; &amp; co</a></td>
+        <td><a href="/rc_post/89">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>90</td><td>Post &quot;90&quot; title</td><td>Body of post 90: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>24</td><td><a href="/rc_author/11">Author &lt;11&gt; &amp; co</a></td><td><a href="/rc_category/3">Category &lt;3&gt; &amp; co</a></td>
+        <td><a href="/rc_post/90">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>91</td><td>Post &quot;91&quot; title</td><td>Body of post 91: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>31</td><td><a href="/rc_author/12">Author &lt;12&gt; &amp; co</a></td><td><a href="/rc_category/4">Category &lt;4&gt; &amp; co</a></td>
+        <td><a href="/rc_post/91">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>92</td><td>Post &quot;92&quot; title</td><td>Body of post 92: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>38</td><td><a href="/rc_author/13">Author &lt;13&gt; &amp; co</a></td><td><a href="/rc_category/5">Category &lt;5&gt; &amp; co</a></td>
+        <td><a href="/rc_post/92">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>93</td><td>Post &quot;93&quot; title</td><td>Body of post 93: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>45</td><td><a href="/rc_author/14">Author &lt;14&gt; &amp; co</a></td><td><a href="/rc_category/6">Category &lt;6&gt; &amp; co</a></td>
+        <td><a href="/rc_post/93">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>94</td><td>Post &quot;94&quot; title</td><td>Body of post 94: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>52</td><td><a href="/rc_author/15">Author &lt;15&gt; &amp; co</a></td><td><a href="/rc_category/7">Category &lt;7&gt; &amp; co</a></td>
+        <td><a href="/rc_post/94">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>95</td><td>Post &quot;95&quot; title</td><td>Body of post 95: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>59</td><td><a href="/rc_author/16">Author &lt;16&gt; &amp; co</a></td><td><a href="/rc_category/8">Category &lt;8&gt; &amp; co</a></td>
+        <td><a href="/rc_post/95">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>96</td><td>Post &quot;96&quot; title</td><td>Body of post 96: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>66</td><td><a href="/rc_author/17">Author &lt;17&gt; &amp; co</a></td><td><a href="/rc_category/1">Category &lt;1&gt; &amp; co</a></td>
+        <td><a href="/rc_post/96">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>97</td><td>Post &quot;97&quot; title</td><td>Body of post 97: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>73</td><td><a href="/rc_author/18">Author &lt;18&gt; &amp; co</a></td><td><a href="/rc_category/2">Category &lt;2&gt; &amp; co</a></td>
+        <td><a href="/rc_post/97">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>98</td><td>Post &quot;98&quot; title</td><td>Body of post 98: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>80</td><td><a href="/rc_author/19">Author &lt;19&gt; &amp; co</a></td><td><a href="/rc_category/3">Category &lt;3&gt; &amp; co</a></td>
+        <td><a href="/rc_post/98">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>99</td><td>Post &quot;99&quot; title</td><td>Body of post 99: &lt;p&gt;words&lt;/p&gt; and more words</td><td>draft</td><td>87</td><td><a href="/rc_author/20">Author &lt;20&gt; &amp; co</a></td><td><a href="/rc_category/4">Category &lt;4&gt; &amp; co</a></td>
+        <td><a href="/rc_post/99">View</a></td>
+      </tr>
+    
+      <tr>
+        
+        <td>100</td><td>Post &quot;100&quot; title</td><td>Body of post 100: &lt;p&gt;words&lt;/p&gt; and more words</td><td>published</td><td>94</td><td><a href="/rc_author/1">Author &lt;1&gt; &amp; co</a></td><td><a href="/rc_category/5">Category &lt;5&gt; &amp; co</a></td>
+        <td><a href="/rc_post/100">View</a></td>
+      </tr>
+    
+    </tbody>
+  </table>
+  
+</form>
+
+
+
+<p class="pager">
+  
+    <span class="muted">&larr; prev</span>
+  
+  &middot; Page 1 of 3 &middot;
+  
+    <a href="/rc_post?page=2">next &rarr;</a>
+  
+</p>
+
+</div>
+
+</div>
+
+  </main>
+</div>
+<button type="button" class="theme-toggle" data-rustango-theme-toggle aria-label="Toggle theme">
+  <span data-rustango-theme-icon>🌗</span>
+  <span data-rustango-theme-label>Auto</span>
+</button>
+<script nonce="">
+// Theme toggle — cycles auto → light → dark → auto. Persists choice
+// to localStorage so it survives page navigation. Pairs with the
+// no-flash <head> script that re-applies the saved value before
+// stylesheet evaluation.
+(function () {
+  const STORAGE_KEY = 'rustango-theme';
+  const ORDER = ['auto', 'light', 'dark'];
+  const ICONS = { auto: '🌗', light: '☀️', dark: '🌙' };
+  const LABELS = { auto: 'Auto', light: 'Light', dark: 'Dark' };
+
+  const read = () => {
+    try { return localStorage.getItem(STORAGE_KEY); } catch (e) { return null; }
+  };
+  const write = (v) => {
+    try { localStorage.setItem(STORAGE_KEY, v); } catch (e) { /* private mode */ }
+  };
+  const apply = (mode) => {
+    document.documentElement.dataset.theme = mode;
+    document.querySelectorAll('[data-rustango-theme-icon]').forEach((el) => {
+      el.textContent = ICONS[mode] || ICONS.auto;
+    });
+    document.querySelectorAll('[data-rustango-theme-label]').forEach((el) => {
+      el.textContent = LABELS[mode] || LABELS.auto;
+    });
+  };
+
+  // Sync icon/label with whichever theme the no-flash script picked.
+  const stored = read();
+  apply(stored && ORDER.includes(stored) ? stored : (document.documentElement.dataset.theme || 'auto'));
+
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-rustango-theme-toggle]');
+    if (!btn) return;
+    const cur = read();
+    const idx = ORDER.indexOf(cur && ORDER.includes(cur) ? cur : 'auto');
+    const next = ORDER[(idx + 1) % ORDER.length];
+    write(next);
+    apply(next);
+  });
+})();
+</script>
+
+</body>
+</html>
