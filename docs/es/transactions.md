@@ -565,7 +565,8 @@ tienen efectos secundarios.
 - Dos sentencias a la vez en un handler (`join!`) devuelven `NestedAtomic`.
 - `outside_atomic(fut)` ejecuta `fut` fuera del bloque, para una escritura que
   debe sobrevivir a un rollback. El framework escribe así las filas de
-  auditoría de seguridad y las marcas de cierre de sesión. En el pool de la
+  auditoría de seguridad y las marcas de cierre de sesión, salvo en un bloque
+  SQLite, al que se unen. En el pool de la
   petición necesita una segunda conexión: en SQLite espera el bloqueo de
   escritura del bloque, en PostgreSQL puede esperar una fila que el bloque
   bloqueó.

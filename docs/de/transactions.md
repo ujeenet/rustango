@@ -571,7 +571,8 @@ wird wiederholt: Handler haben Nebenwirkungen.
   `NestedAtomic`.
 - `outside_atomic(fut)` führt `fut` außerhalb des Blocks aus, für einen
   Schreibvorgang, der ein Rollback überstehen muss. Das Framework schreibt so
-  Sicherheits-Auditzeilen und Logout-Stempel. Auf dem Pool der Anfrage
+  Sicherheits-Auditzeilen und Logout-Stempel, außer in einem SQLite-Block,
+  dem sie beitreten. Auf dem Pool der Anfrage
   braucht es eine zweite Verbindung: Auf SQLite wartet sie auf die
   Schreibsperre des Blocks, auf PostgreSQL kann sie auf eine Zeile warten,
   die der Block gesperrt hat.

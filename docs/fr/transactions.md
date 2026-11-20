@@ -567,7 +567,8 @@ les handlers ont des effets de bord.
   `NestedAtomic`.
 - `outside_atomic(fut)` exécute `fut` hors du bloc, pour une écriture qui doit
   survivre à une annulation. Le framework écrit ainsi les lignes d'audit de
-  sécurité et les marques de déconnexion. Sur le pool de la requête il faut
+  sécurité et les marques de déconnexion, sauf dans un bloc SQLite, qu'elles
+  rejoignent. Sur le pool de la requête il faut
   une deuxième connexion : sur SQLite elle attend le verrou d'écriture du
   bloc, sur PostgreSQL elle peut attendre une ligne que le bloc a verrouillée.
 

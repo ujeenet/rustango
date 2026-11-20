@@ -26,7 +26,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - One `rustango_orgs` row with an unreadable storage mode or backend fails only that tenant: it no longer opens the registry breaker, and migrate-all, pre-warm, the per-tenant sweep, `list-tenants` and the console list skip and report it. Cast fields decode the cell without copying it first.
 - Every tenant extractor in a request serves one pool, looked up once, also when the pool cache evicts it mid-request. Inside an `atomic` block on that pool `Tenant::conn` lends the block's connection.
 - An `atomic` block commits and runs its `on_commit` callbacks on its own task: a caller dropped during COMMIT no longer commits the data and skips them.
-- Security audit rows (TOTP, SSO account changes, agent tool calls, audit cleanup) and logout stamps are written outside any `atomic` block. An `IdempotencyLayer` inside a block stores its response only after the commit.
+- Security audit rows (TOTP, SSO account changes, agent tool calls, audit cleanup) and logout stamps are written outside any `atomic` block (inside a SQLite one they join it: one writer). An `IdempotencyLayer` inside a block stores its response only after the commit.
 - **Breaking:** `sql::atomic_immediate`, deprecated in 0.67.0, is removed: call `atomic`.
 - List pages and prefetch copy rows less (100-row pages on SQLite): admin list 15% faster with 30% fewer allocations, ListView 11% (18% with an `ExtraContext`), ViewSet lists 11–15%; prefetch stitching makes 17–20% fewer allocations. Output is unchanged.
 

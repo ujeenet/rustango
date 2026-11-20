@@ -549,7 +549,7 @@ effects.
 - Two statements at once in a handler (`join!`) return `NestedAtomic`.
 - `outside_atomic(fut)` runs `fut` outside the block, for a write that must
   survive a rollback. The framework writes security audit rows and logout
-  stamps this way. On the request's own pool it needs a second connection: on
+  stamps this way, except in a SQLite block, where they join it. On the request's own pool it needs a second connection: on
   SQLite it waits for the block's write lock, on PostgreSQL it can wait on a
   row the block locked.
 
