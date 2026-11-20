@@ -43,6 +43,9 @@ use crate::storage::{BoxedStorage, StorageError};
 pub enum UploadError {
     #[error("multipart parse error: {0}")]
     Parse(String),
+    /// The request body passed its limit (axum's `DefaultBodyLimit`): a 413, not a 400.
+    #[error("request body too large: {0}")]
+    BodyTooLarge(String),
     #[error("file too large: {actual} bytes (max {max})")]
     TooLarge { actual: usize, max: usize },
     #[error("file extension `{0}` not allowed")]
@@ -57,7 +60,11 @@ pub enum UploadError {
 
 impl From<axum::extract::multipart::MultipartError> for UploadError {
     fn from(e: axum::extract::multipart::MultipartError) -> Self {
-        Self::Parse(e.to_string())
+        if e.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE {
+            Self::BodyTooLarge(e.body_text())
+        } else {
+            Self::Parse(e.to_string())
+        }
     }
 }
 
@@ -238,32 +245,7 @@ fn ensure_trailing_slash(mut s: String) -> String {
     s
 }
 
-/// Drop directory parts and replace anything outside `[a-zA-Z0-9._-]`
-/// with `_`, so the result is safe to use as a storage key. This is
-/// what stops a client-supplied path from escaping the upload prefix.
-pub fn sanitize_filename(name: &str) -> String {
-    // Keep the basename only; clients sometimes send a full path.
-    // Split on both separators instead of `Path::file_name`, which
-    // treats `\` as a separator only on Windows. Otherwise the same
-    // upload gets a different name depending on the server's OS.
-    let base = name
-        .rsplit(['/', '\\'])
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(name);
-    let mut out = String::with_capacity(base.len());
-    for c in base.chars() {
-        if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-            out.push(c);
-        } else {
-            out.push('_');
-        }
-    }
-    if out.is_empty() {
-        out.push_str("upload");
-    }
-    out
-}
+pub use crate::file_name::{sanitize_filename, MAX_FILENAME_BYTES};
 
 /// The lowercase text after the last dot, or `None`. A leading dot counts,
 /// unlike `Path::extension`: `.html` is stored as `<uuid>-.html`.
@@ -567,6 +549,44 @@ mod tests {
             storage.load("u/big.bin").await.is_err(),
             "no file should have been saved"
         );
+    }
+
+    /// A body past the request limit is its own error, so a handler can answer 413.
+    #[tokio::test]
+    async fn a_body_past_the_limit_is_body_too_large() {
+        use crate::storage::InMemoryStorage;
+        use axum::body::Body;
+        use axum::http::{header, Request, StatusCode};
+        use axum::routing::post;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        let storage: BoxedStorage = std::sync::Arc::new(InMemoryStorage::new());
+        let app = Router::new()
+            .route(
+                "/upload",
+                post(move |mp: Multipart| async move {
+                    let cfg = UploadConfig::new("u/");
+                    match save_uploads(mp, &cfg, &storage).await {
+                        Err(UploadError::BodyTooLarge(_)) => StatusCode::PAYLOAD_TOO_LARGE,
+                        Err(_) => StatusCode::BAD_REQUEST,
+                        Ok(_) => StatusCode::OK,
+                    }
+                }),
+            )
+            .layer(axum::extract::DefaultBodyLimit::max(256));
+        let body = format!(
+            "--b\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.bin\"\r\n\r\n{}\r\n--b--\r\n",
+            "x".repeat(4096)
+        );
+        let req = Request::builder()
+            .method("POST")
+            .uri("/upload")
+            .header(header::CONTENT_TYPE, "multipart/form-data; boundary=b")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     /// POST one multipart body with `names` as file fields through `cfg`.

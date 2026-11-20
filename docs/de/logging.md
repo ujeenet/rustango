@@ -117,6 +117,7 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 
 | Target | Wofür |
 |---|---|
+| `rustango::access` | Zugriffsprüfungen von Routen, die an einem Datenbankfehler scheiterten |
 | `rustango::admin` | Admin-Routing und -Registrierung |
 | `rustango::admin::audit` | Audit-Log-Schreibvorgänge |
 | `rustango::admin::sso` | Admin-SSO |

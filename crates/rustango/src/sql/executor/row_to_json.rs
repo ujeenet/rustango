@@ -6,18 +6,7 @@
 //! list/retrieve handlers + `contenttypes::fetch_row_as_json` —
 //! pulling them out drops 500 LOC from mod.rs.
 
-#[cfg(feature = "postgres")]
-use sqlx::postgres::PgArguments;
-#[cfg(feature = "postgres")]
-use sqlx::query::Query;
-
-#[cfg(feature = "postgres")]
-use super::bind_query;
-#[cfg(feature = "mysql")]
-use super::bind_query_my;
-#[cfg(feature = "sqlite")]
-use super::bind_query_sqlite;
-use super::ExecError;
+use super::{run_on, ExecError, RowRef, SqlExecutor};
 use crate::core::SelectQuery;
 use crate::sql::Pool;
 
@@ -437,61 +426,42 @@ pub(crate) async fn select_rows_as_json_with(
     fields: &[&'static crate::core::FieldSchema],
     decode: CellDecode,
 ) -> Result<Vec<serde_json::Value>, ExecError> {
-    crate::test_assertions::query_counter::bump();
-    let stmt = pool.dialect().compile_select(query)?;
+    rows_as_json_on(pool, query, fields, decode).await
+}
+
+/// [`select_rows_as_json_with`] on any [`SqlExecutor`].
+async fn rows_as_json_on<'c, E: SqlExecutor<'c>>(
+    exec: E,
+    query: &SelectQuery,
+    fields: &[&'static crate::core::FieldSchema],
+    decode: CellDecode,
+) -> Result<Vec<serde_json::Value>, ExecError> {
+    let stmt = exec.dialect().compile_select(query)?;
     let joined = joined_columns(&query.joins);
-    match pool {
-        #[cfg(feature = "postgres")]
-        Pool::Postgres(pg) => {
-            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query(q, v);
+    let joined = &joined;
+    run_on(exec, &stmt.sql, stmt.params, move |row| {
+        #[allow(unused_mut)]
+        let mut json;
+        match row {
+            #[cfg(feature = "postgres")]
+            RowRef::Postgres(r) => {
+                json = row_to_json_pg_with(r, fields, decode)?;
+                augment_joined_columns(&mut json, r, joined);
             }
-            let rows = q.fetch_all(pg).await?;
-            Ok(rows
-                .iter()
-                .map(|r| {
-                    let mut json = row_to_json_pg_with(r, fields, decode)?;
-                    augment_joined_columns(&mut json, r, &joined);
-                    Ok(json)
-                })
-                .collect::<Result<_, sqlx::Error>>()?)
-        }
-        #[cfg(feature = "mysql")]
-        Pool::Mysql(my) => {
-            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_my(q, v);
+            #[cfg(feature = "mysql")]
+            RowRef::Mysql(r) => {
+                json = row_to_json_my_with(r, fields, decode)?;
+                augment_joined_columns(&mut json, r, joined);
             }
-            let rows = q.fetch_all(my).await?;
-            Ok(rows
-                .iter()
-                .map(|r| {
-                    let mut json = row_to_json_my_with(r, fields, decode)?;
-                    augment_joined_columns(&mut json, r, &joined);
-                    Ok(json)
-                })
-                .collect::<Result<_, sqlx::Error>>()?)
-        }
-        #[cfg(feature = "sqlite")]
-        Pool::Sqlite(sq) => {
-            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_sqlite(q, v);
+            #[cfg(feature = "sqlite")]
+            RowRef::Sqlite(r) => {
+                json = row_to_json_sqlite_with(r, fields, decode)?;
+                augment_joined_columns(&mut json, r, joined);
             }
-            let rows = q.fetch_all(sq).await?;
-            Ok(rows
-                .iter()
-                .map(|r| {
-                    let mut json = row_to_json_sqlite_with(r, fields, decode)?;
-                    augment_joined_columns(&mut json, r, &joined);
-                    Ok(json)
-                })
-                .collect::<Result<_, sqlx::Error>>()?)
         }
-    }
+        Ok(json)
+    })
+    .await
 }
 
 /// Each joined column's `<alias>__<col>` JSON key and result label, built
@@ -550,49 +520,10 @@ pub async fn select_one_row_as_json(
     query: &SelectQuery,
     fields: &[&'static crate::core::FieldSchema],
 ) -> Result<Option<serde_json::Value>, ExecError> {
-    crate::test_assertions::query_counter::bump();
-    let stmt = pool.dialect().compile_select(query)?;
-    let joined = joined_columns(&query.joins);
-    match pool {
-        #[cfg(feature = "postgres")]
-        Pool::Postgres(pg) => {
-            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query(q, v);
-            }
-            Ok(q.fetch_optional(pg).await?.as_ref().map(|r| {
-                let mut json = row_to_json(r, fields);
-                augment_joined_columns(&mut json, r, &joined);
-                json
-            }))
-        }
-        #[cfg(feature = "mysql")]
-        Pool::Mysql(my) => {
-            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_my(q, v);
-            }
-            Ok(q.fetch_optional(my).await?.as_ref().map(|r| {
-                let mut json = row_to_json_my(r, fields);
-                augment_joined_columns(&mut json, r, &joined);
-                json
-            }))
-        }
-        #[cfg(feature = "sqlite")]
-        Pool::Sqlite(sq) => {
-            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_sqlite(q, v);
-            }
-            Ok(q.fetch_optional(sq).await?.as_ref().map(|r| {
-                let mut json = row_to_json_sqlite(r, fields);
-                augment_joined_columns(&mut json, r, &joined);
-                json
-            }))
-        }
-    }
+    Ok(select_rows_as_json(pool, query, fields)
+        .await?
+        .into_iter()
+        .next())
 }
 
 /// [`select_rows_as_json`] inside an open transaction.
@@ -602,61 +533,7 @@ pub(crate) async fn select_rows_as_json_tx(
     query: &SelectQuery,
     fields: &[&'static crate::core::FieldSchema],
 ) -> Result<Vec<serde_json::Value>, ExecError> {
-    crate::test_assertions::query_counter::bump();
-    let stmt = tx.dialect().compile_select(query)?;
-    let joined = joined_columns(&query.joins);
-    match &mut tx.conn {
-        #[cfg(feature = "postgres")]
-        crate::sql::TxConn::Postgres(t) => {
-            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query(q, v);
-            }
-            Ok(q.fetch_all(&mut **t)
-                .await?
-                .iter()
-                .map(|r| {
-                    let mut json = row_to_json(r, fields);
-                    augment_joined_columns(&mut json, r, &joined);
-                    json
-                })
-                .collect())
-        }
-        #[cfg(feature = "mysql")]
-        crate::sql::TxConn::Mysql(t) => {
-            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_my(q, v);
-            }
-            Ok(q.fetch_all(&mut **t)
-                .await?
-                .iter()
-                .map(|r| {
-                    let mut json = row_to_json_my(r, fields);
-                    augment_joined_columns(&mut json, r, &joined);
-                    json
-                })
-                .collect())
-        }
-        #[cfg(feature = "sqlite")]
-        crate::sql::TxConn::Sqlite(t) => {
-            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_sqlite(q, v);
-            }
-            Ok(q.fetch_all(&mut **t)
-                .await?
-                .iter()
-                .map(|r| {
-                    let mut json = row_to_json_sqlite(r, fields);
-                    augment_joined_columns(&mut json, r, &joined);
-                    json
-                })
-                .collect())
-        }
-    }
+    rows_as_json_on(tx, query, fields, CellDecode::LENIENT).await
 }
 
 /// [`select_one_row_as_json`] inside an open transaction.

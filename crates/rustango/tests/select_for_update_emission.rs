@@ -213,8 +213,9 @@ fn of_table_uses_backticks_on_mysql() {
         .unwrap();
     let stmt = MySql.compile_select(&q).unwrap();
     assert!(
-        stmt.sql.ends_with(" FOR UPDATE OF `sfu_job`"),
-        "MySQL `of` with backticks: {}",
+        stmt.sql
+            .ends_with(" FOR UPDATE /*!80000 OF `sfu_job` */ /*M!  */"),
+        "MySQL `of` with backticks, hidden from MariaDB: {}",
         stmt.sql
     );
 }

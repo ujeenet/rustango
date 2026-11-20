@@ -512,7 +512,8 @@ async fn viewset_update_out_of_scope_is_204(pool: &Pool) {
     assert!(!moved.visible && moved.tag == "q", "PUT committed");
 }
 
-async fn viewset_create_out_of_scope_is_201_without_body(pool: &Pool) {
+/// A create a global scope hides is written; only its key is echoed.
+async fn viewset_create_out_of_scope_echoes_its_key(pool: &Pool) {
     let (status, body) = send(
         pool,
         Method::POST,
@@ -522,7 +523,15 @@ async fn viewset_create_out_of_scope_is_201_without_body(pool: &Pool) {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
-    assert!(body.is_empty(), "no row echoed: {body}");
+    let echoed = json(&body);
+    assert!(
+        echoed["id"].is_i64(),
+        "the key, never an empty body: {body}"
+    );
+    assert!(
+        echoed.get("tag").is_none(),
+        "the hidden row is not echoed: {body}"
+    );
 
     let (status, body) = send(
         pool,
@@ -925,7 +934,7 @@ tri_dialect_test! {
         bulk_delete_skips_hidden_rows,
         viewset_writes_on_visible_rows_work,
         viewset_update_out_of_scope_is_204,
-        viewset_create_out_of_scope_is_201_without_body,
+        viewset_create_out_of_scope_echoes_its_key,
         custom_bulk_action_gets_only_visible_pks,
         template_writes_on_visible_rows_work,
         fk_display_skips_scoped_out_targets,

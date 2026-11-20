@@ -40,9 +40,7 @@ static PURGE_CACHES: std::sync::RwLock<Vec<crate::cache::BoxedCache>> =
 
 /// Make every purge delete the tenant's keys from `cache`: every
 /// `tenant:#org:<id>:<slug>:` area (app, locks, idempotency, pages, rate
-/// limits, sessions, flag overrides). The 0.63-layout idempotency copies are
-/// hashed with no tenant prefix and expire with their TTL. Call at boot for
-/// each such cache.
+/// limits, sessions, flag overrides). Call at boot for each such cache.
 pub fn clear_on_purge(cache: crate::cache::BoxedCache) {
     PURGE_CACHES
         .write()
@@ -267,6 +265,7 @@ async fn deactivate(registry: &crate::sql::Pool, id: i64) -> Result<u64, Tenancy
         .set("active", false)
         .compile()
         .map_err(crate::sql::ExecError::from)?;
+    // Deactivation commits on its own, never with a caller's block.
     let mut tx = crate::sql::write_transaction(registry).await?;
     let updated = crate::sql::update_tx(&mut tx, &update).await?;
     if updated > 0 {

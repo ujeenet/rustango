@@ -890,8 +890,14 @@ pub struct LockMode {
     /// PG 9.3+: `FOR UPDATE OF table1, table2, …`. Locks only the
     /// named tables when the query joins. Pass table names or
     /// aliases; an empty vec emits no `OF` clause. MySQL supports it
-    /// since 8.0.1; on SQLite it does nothing.
+    /// since 8.0.1; MariaDB has none and locks every table the query reads;
+    /// on SQLite it does nothing.
     pub of: Vec<&'static str>,
+    /// PG / MySQL: a shared lock (`FOR SHARE` / `LOCK IN SHARE MODE`)
+    /// instead of `FOR UPDATE`. In a repeatable-read transaction it reads
+    /// the latest committed row, not the snapshot. `of` applies on PG only;
+    /// `no_key`, `skip_locked` and `nowait` are ignored.
+    pub share: bool,
     /// Do not log the `tracing::warn!` the writer emits when this
     /// `LockMode` reaches a SQLite query. SQLite has no row-level
     /// lock syntax, so the clause is dropped and the warning says so.

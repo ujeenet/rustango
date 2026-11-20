@@ -1409,7 +1409,7 @@ mod tuning_tests {
         }
         #[cfg(all(feature = "tenancy", feature = "postgres"))]
         {
-            let o = crate::tenancy::scoped_pool_options(&Default::default());
+            let o = crate::tenancy::scoped_pool_options(&Default::default(), 3);
             assert_eq!(o.get_test_before_acquire(), want, "schema-mode tenant pool");
         }
     }

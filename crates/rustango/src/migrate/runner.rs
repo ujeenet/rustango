@@ -406,7 +406,8 @@ pub async fn drop_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError> 
     // may already be absent, and only PG can say `IF EXISTS` here.
     for model in &models {
         for sql in ddl::drop_constraints_sql_with_dialect(dialect, model) {
-            let _ = crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await;
+            let drop = crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new());
+            let _ = crate::sql::caught(pool, drop).await;
         }
     }
     // Phase 2 — drop the tables themselves.
@@ -4331,6 +4332,7 @@ async fn apply_nonatomic_pool(
     before: &SchemaSnapshot,
     ledger: &str,
 ) -> Result<(), MigrateError> {
+    crate::sql::refuse_ddl_in_block(pool, crate::sql::Ddl::NonTransactional)?;
     let callbacks = Callbacks::resolve(&mig.forward)?;
     tracing::info!(migration = %mig.name, "applying (non-atomic, _pool)");
     let schema = super::ensure::creation_schema(pool).await?;
@@ -5056,6 +5058,7 @@ async fn unapply_nonatomic_pool(
     snapshot: &SchemaSnapshot,
     ledger: &str,
 ) -> Result<(), MigrateError> {
+    crate::sql::refuse_ddl_in_block(pool, crate::sql::Ddl::NonTransactional)?;
     let callbacks = Callbacks::resolve(inverted)?;
     tracing::info!(migration = %target.name, "unapplying (non-atomic, _pool)");
     let schema = super::ensure::creation_schema(pool).await?;

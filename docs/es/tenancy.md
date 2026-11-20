@@ -244,8 +244,9 @@ cargo run -- create-tenant initech --mode database --database-url "postgres://..
   `application_name=rustango-tenant:<org id>`, para que una purga pueda
   terminar sus sesiones. Los pools de modo schema no se etiquetan.
 
-Por defecto: 16 conexiones por pool de modo database, 8 por pool de modo
-schema, ninguna conexión inactiva mantenida, timeout de inactividad
+Por defecto: 16 conexiones por pool de modo database; por tenant de modo
+schema 3 en el pool de consultas y 1 en el pool retenido, 16 tenants en caché;
+ninguna conexión inactiva mantenida, timeout de inactividad
 10 minutos, vida máxima 30 minutos, timeout de acquire 30 segundos.
 
 Las conexiones se multiplican por tenant y por proceso. Ajústalas con

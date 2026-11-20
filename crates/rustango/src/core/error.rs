@@ -271,13 +271,6 @@ pub enum BoundedDmlReason {
     NoSinglePrimaryKey,
     #[error("order_by spans a relation")]
     RelationOrderBy,
-    /// Never returned: a set operation is now [`QueryError::SetOperationDml`].
-    #[deprecated(
-        since = "0.60.6",
-        note = "match `QueryError::SetOperationDml`; removed in 0.65.0"
-    )]
-    #[error("the queryset has a set operation")]
-    SetOperation,
     #[error("limit or offset is negative")]
     Negative,
 }

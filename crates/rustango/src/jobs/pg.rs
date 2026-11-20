@@ -996,6 +996,7 @@ async fn pick_one(
             // MySQL has no `UPDATE … RETURNING`, so do it in three
             // steps inside one transaction: reserve an id with
             // `FOR UPDATE SKIP LOCKED`, update it, then read the row.
+            // The claim is the worker's own: it never joins a caller's block.
             let mut tx = my.begin().await?;
             // `LIMIT` must come before `FOR UPDATE SKIP LOCKED`.
             // MySQL rejects the other order with a 1064 syntax error,
@@ -1051,6 +1052,7 @@ async fn pick_one(
             // sqlx's `begin()` is a deferred `BEGIN`, so no lock yet; the
             // single `UPDATE … RETURNING` takes the write lock, and SQLite
             // serializes writers, so the pickup is exclusive.
+            // The claim is the worker's own: it never joins a caller's block.
             let mut tx = sq.begin().await?;
             // Use the canonical encoding, not `to_rfc3339()`. This
             // string is compared against `run_at`, which has a fixed

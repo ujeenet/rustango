@@ -144,7 +144,9 @@ impl AppBuilder {
         // no special branch needed.
         for schema in schemas {
             for sql in ddl::create_constraints_sql_with_dialect(dialect, schema) {
-                let _ = raw_execute_pool(&self.pool, &sql, vec![]).await;
+                // Best effort, so a failure must not abort a caller's PG block.
+                let _ = crate::sql::caught(&self.pool, raw_execute_pool(&self.pool, &sql, vec![]))
+                    .await;
             }
         }
         self.schemas.extend(schemas);

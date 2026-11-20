@@ -1653,6 +1653,11 @@ jobs:
           binary(=pool_conn_tri) |
           binary(=orm_dialect_tri) |
           binary(=atomic_savepoints_tri) |
+          binary(=atomic_joined_reads_tri) |
+          binary(=atomic_sites_tri) |
+          binary(=on_commit_tri) |
+          binary(=atomic_options_tri) |
+          binary(=executor_on_forms_tri) |
           binary(=get_or_create_atomic_tri) |
           binary(=regex_tri) |
           binary(=testkit_matrix_forms_tri) |
@@ -1696,6 +1701,7 @@ jobs:
           binary(=login_throttle_mysql_live) |
           binary(=view_global_scopes_tri) |
           binary(=template_views_typed_binds_tri) |
+          binary(=template_views_object_permissions_tri) |
           binary(=row_to_json_nulls_tri) |
           binary(=column_types_tri) |
           binary(=m2m_non_int_pk_tri) |

@@ -246,8 +246,9 @@ cargo run -- create-tenant initech --mode database --database-url "postgres://..
   `application_name=rustango-tenant:<org id>`, damit ein Purge ihre
   Sitzungen beenden kann. Pools im Schema-Modus sind nicht markiert.
 
-Standards: 16 Verbindungen pro Pool im Datenbank-Modus, 8 pro Pool im
-Schema-Modus, keine warm gehaltenen Verbindungen, Leerlauf-Timeout
+Standards: 16 Verbindungen pro Pool im Datenbank-Modus; pro Tenant im
+Schema-Modus 3 im Abfrage-Pool und 1 im Halte-Pool, 16 Tenants im Cache;
+keine warm gehaltenen Verbindungen, Leerlauf-Timeout
 10 Minuten, maximale Lebensdauer 30 Minuten, Acquire-Timeout 30 Sekunden.
 
 Verbindungen multiplizieren sich mit Tenants und Prozessen. Stelle sie mit

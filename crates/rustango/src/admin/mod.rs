@@ -80,8 +80,6 @@ mod templates;
 pub(crate) mod urls;
 mod views;
 
-#[cfg(feature = "tenancy")]
-pub(crate) use action::from_tx_handler;
 pub use action::{ActionCtx, ActionFn};
 pub use auth::{protect_with_basic_auth, protect_with_csrf};
 pub use computed_fields::{ComputedField, ComputedFieldLinkFn, ComputedFieldRenderFn};
@@ -108,8 +106,6 @@ pub use urls::__router_builds;
 pub(crate) use urls::ungated_admin_built;
 #[cfg(feature = "sso")]
 pub(crate) use urls::AdminDatabase;
-#[allow(deprecated)]
-pub use urls::AdminTxActionFn;
 #[cfg(feature = "tenancy")]
 pub(crate) use urls::{per_request_router, RequestState};
 #[cfg(all(test, feature = "sqlite"))]

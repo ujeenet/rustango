@@ -727,12 +727,17 @@ where
 
 /// Per-row audit emit over [`crate::sql::Pool`], dispatching to the right
 /// backend helper. **It does not share a transaction with the data
-/// write.** For that, open a transaction yourself and call the
+/// write.** Inside an `atomic` block on `pool` it joins the block. Otherwise
+/// open a transaction yourself and call the
 /// per-backend `emit_one*` on it.
 ///
 /// # Errors
 /// As [`emit_one`].
 pub async fn emit_one(pool: &crate::sql::Pool, entry: &PendingEntry) -> Result<(), sqlx::Error> {
+    // Inside a block the entry joins it, so it rolls back with the block.
+    if crate::sql::in_block(pool) {
+        return emit_many(pool, std::slice::from_ref(entry)).await;
+    }
     match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => emit_one_pg(pg, entry, Via::Pool(pool)).await,
@@ -1059,9 +1064,9 @@ pub async fn emit_many(
         crate::sql::ExecError::Driver(err) => err,
         other => sqlx::Error::Protocol(format!("{other}")),
     };
-    let mut tx = crate::sql::transaction_pool(pool).await.map_err(to_sqlx)?;
+    let mut tx = crate::sql::write_tx(pool).await.map_err(to_sqlx)?;
     emit_many_tx(&mut tx, entries).await.map_err(to_sqlx)?;
-    tx.commit().await
+    tx.commit().await.map_err(to_sqlx)
 }
 
 /// Old name of [`emit_one`].
@@ -2358,7 +2363,7 @@ pub async fn truncate_with_audit(
     entity_table: &'static str,
     mode: crate::sql::TruncateMode,
 ) -> Result<u64, crate::sql::ExecError> {
-    let mut tx = crate::sql::write_transaction(pool).await?;
+    let mut tx = crate::sql::write_tx(pool).await?;
     let affected = crate::sql::truncate_tx(&mut tx, entity_table, mode).await?;
     let entry = PendingEntry {
         entity_table,
@@ -2370,7 +2375,7 @@ pub async fn truncate_with_audit(
     emit_one_tx(&mut tx, &entry).await?;
     tx.commit()
         .await
-        .map_err(|e| crate::sql::truncate_refusal(entity_table, mode, e.into()))?;
+        .map_err(|e| crate::sql::truncate_refusal(entity_table, mode, e))?;
     Ok(affected)
 }
 

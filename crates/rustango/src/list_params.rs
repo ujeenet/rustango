@@ -197,6 +197,15 @@ pub fn page_offset(page: i64, page_size: i64) -> i64 {
         .saturating_mul(page_size.max(0))
 }
 
+/// Rows a ViewSet or template list's "view" hook scan reads by default: a
+/// fifth of the admin's default.
+#[cfg(any(feature = "admin", feature = "tenancy", feature = "template_views"))]
+pub(crate) const DEFAULT_VIEW_HOOK_SCAN_CAP: usize = 2_000;
+
+/// The largest `view_hook_scan_cap`: each list request reads that many rows.
+#[cfg(any(feature = "admin", feature = "tenancy", feature = "template_views"))]
+pub(crate) const MAX_VIEW_HOOK_SCAN_CAP: usize = 100_000;
+
 /// Default deepest row a list may skip to: a deeper `OFFSET` reads every
 /// skipped row, so one short URL costs a near-full scan.
 pub const DEFAULT_MAX_OFFSET: usize = 10_000;

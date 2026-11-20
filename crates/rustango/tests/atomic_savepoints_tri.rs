@@ -368,14 +368,21 @@ async fn concurrent_nested_blocks_are_refused(pool: &Pool) {
             async {
                 b_may_start.await.unwrap();
                 let rb = rustango::atomic!(&b, |sp| { put(sp, 3).await }).await;
+                // A pool read from outside the open block is refused too.
+                let read = Note::objects().fetch(&b).await.map(drop);
                 b_done.send(()).unwrap();
-                rb
+                (rb, read)
             },
         );
+        let (rb, read) = rb;
         assert!(ra.is_ok(), "the open block was refused: {ra:?}");
         assert!(
             matches!(rb, Err(ExecError::NestedAtomic)),
             "a second block on the same transaction ran: {rb:?}"
+        );
+        assert!(
+            matches!(read, Err(ExecError::NestedAtomic)),
+            "a read ran beside the open block: {read:?}"
         );
         Ok(())
     }))
@@ -708,8 +715,11 @@ async fn mysql_ddl_implicit_commit_is_reported(pool: &Pool) {
     if dialect(pool) != "mysql" {
         return; // Only MySQL commits implicitly on DDL.
     }
-    use rustango::sql::raw_execute_tx;
+    use rustango::sql::{raw_execute_pool, raw_execute_tx};
+    // A failed earlier run may have left it behind.
+    rustango::testkit::matrix::drop_table(pool, "asp_ddl_probe").await;
     let p = one_conn(pool).await;
+    let q = p.clone();
     let res: Result<(), ExecError> = within(rustango::atomic!(&p, |tx| {
         put(tx, 1).await?;
         raw_execute_tx(
@@ -726,10 +736,23 @@ async fn mysql_ddl_implicit_commit_is_reported(pool: &Pool) {
         matches!(res, Err(ExecError::AtomicEndedEarly)),
         "got {res:?}"
     );
+    // The same DDL as raw SQL on the pool joins the block; the commit
+    // check at its end finds the implicit commit.
+    let res: Result<(), ExecError> = within(rustango::atomic!(&p, |tx| {
+        put(tx, 2).await?;
+        raw_execute_pool(&q, "CREATE TABLE asp_ddl_probe (id INT)", vec![]).await?;
+        Ok(())
+    }))
+    .await;
+    rustango::testkit::matrix::drop_table(pool, "asp_ddl_probe").await;
+    assert!(
+        matches!(res, Err(ExecError::AtomicEndedEarly)),
+        "got {res:?}"
+    );
     assert_eq!(
         ids(pool).await,
-        vec![1],
-        "the DDL committed the earlier row"
+        vec![1, 2],
+        "the DDL committed the earlier rows"
     );
 }
 

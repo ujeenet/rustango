@@ -120,7 +120,8 @@ pub enum DatabaseTenantRejection {
 impl From<crate::tenancy::TenancyError> for DatabaseTenantRejection {
     fn from(e: crate::tenancy::TenancyError) -> Self {
         match e {
-            crate::tenancy::TenancyError::PoolBusy => Self::Busy,
+            crate::tenancy::TenancyError::PoolBusy
+            | crate::tenancy::TenancyError::TenantConnBusy { .. } => Self::Busy,
             e => Self::Internal(e.to_string()),
         }
     }

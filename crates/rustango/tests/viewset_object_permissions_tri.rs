@@ -60,16 +60,6 @@ pub struct Flip {
 }
 
 #[derive(rustango::Model, Debug, Clone)]
-#[rustango(table = "vop_legacy")]
-#[allow(dead_code)]
-pub struct Legacy {
-    #[rustango(primary_key)]
-    pub id: Auto<i64>,
-    #[rustango(max_length = 64)]
-    pub title: String,
-}
-
-#[derive(rustango::Model, Debug, Clone)]
 #[rustango(table = "vop_label")]
 #[allow(dead_code)]
 pub struct Label {
@@ -118,20 +108,6 @@ fn flip(_: &axum::http::request::Parts, row: Option<&Value>) -> bool {
 }
 rustango::register_object_permission!("vop_flip", "view", flip);
 
-/// The old macro names still register, with a deprecation warning.
-mod legacy {
-    #![allow(deprecated)]
-    use super::*;
-    fn not_hidden(_: &axum::http::request::Parts, row: Option<&Value>) -> bool {
-        !title(row).starts_with("hidden")
-    }
-    fn not_out(_: &axum::http::request::Parts) -> Vec<Filter> {
-        vec![Filter::new("title", Op::Ne, SqlValue::from("out"))]
-    }
-    rustango::register_admin_object_permission!("vop_legacy", "view", not_hidden);
-    rustango::register_admin_queryset!("vop_legacy", not_out);
-}
-
 fn not_secret(_: &axum::http::request::Parts, row: Option<&Value>) -> bool {
     row.is_none_or(|r| r["name"] != "secret")
 }
@@ -145,7 +121,7 @@ async fn setup(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Doc>(pool).await;
     rustango::testkit::matrix::fresh_table::<Soft>(pool).await;
     rustango::testkit::matrix::fresh_table::<Flip>(pool).await;
-    rustango::testkit::matrix::fresh_table::<Legacy>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Owned>(pool).await;
     // The FK owners go first so their target can be dropped.
     rustango::testkit::matrix::drop_table(pool, "vop_card").await;
     rustango::testkit::matrix::drop_table(pool, "vop_scoped").await;
@@ -478,6 +454,47 @@ async fn an_fk_to_a_hidden_target_is_refused(pool: &Pool) {
     assert_eq!(status, StatusCode::CREATED, "{body}");
 }
 
+/// A bulk create reads each FK target once per request, not once per row,
+/// and still names the entry that points at a hidden row.
+async fn a_bulk_create_reads_each_fk_target_once(pool: &Pool) {
+    let mut ids = Vec::new();
+    for name in ["public", "other", "secret"] {
+        let mut l = Label {
+            id: Auto::default(),
+            name: name.into(),
+        };
+        l.insert(pool).await.expect("seed");
+        ids.push(*l.id.get().expect("pk"));
+    }
+    let app = ViewSet::for_model(Scoped::SCHEMA, &["id", "owner_id", "label_id"])
+        .allow_anonymous()
+        .router("/scoped", pool.clone());
+    let bulk = |labels: [Option<i64>; 4]| {
+        Some(Value::Array(
+            labels
+                .iter()
+                .map(|l| json!({ "owner_id": 1, "label_id": l }))
+                .collect(),
+        ))
+    };
+    let count = |body| {
+        let app = app.clone();
+        rustango::test_assertions::QueryCounter::scope(async move {
+            let (status, body) = send(&app, "POST", "/scoped", body).await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+            rustango::test_assertions::QueryCounter::current()
+        })
+    };
+    let unlinked = count(bulk([None; 4])).await;
+    let (a, b) = (Some(ids[0]), Some(ids[1]));
+    let linked = count(bulk([a, b, a, b])).await;
+    assert_eq!(linked, unlinked + 1, "one FK read per request");
+
+    let (status, body) = send(&app, "POST", "/scoped", bulk([a, b, Some(ids[2]), a])).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(body.to_string().contains("bulk entry 2"), "{body}");
+}
+
 /// A superuser's row needs a superuser through the API too: an agent never is one,
 /// and the opt-out does not skip this framework rule.
 async fn a_superuser_row_needs_an_api_superuser(pool: &Pool) {
@@ -575,22 +592,6 @@ async fn a_row_hidden_after_the_scan_is_not_rendered(pool: &Pool) {
     assert!(titles_of(&body).is_empty(), "{body}");
 }
 
-/// The deprecated macro names still register their hook and scope.
-async fn the_old_macro_names_still_apply(pool: &Pool) {
-    for t in ["a", "hidden-b", "out"] {
-        let mut l = Legacy {
-            id: Auto::default(),
-            title: t.into(),
-        };
-        l.insert(pool).await.expect("seed");
-    }
-    let app = ViewSet::for_model(Legacy::SCHEMA, &["id", "title"])
-        .allow_anonymous()
-        .router("/legacy", pool.clone());
-    let (_, body) = send(&app, "GET", "/legacy", None).await;
-    assert_eq!(titles_of(&body), ["a"], "{body}");
-}
-
 /// A write may not move a row out of, or create one outside, the queryset scopes.
 async fn a_write_cannot_leave_the_queryset_scope(pool: &Pool) {
     let mut own = Scoped {
@@ -617,6 +618,64 @@ async fn a_write_cannot_leave_the_queryset_scope(pool: &Pool) {
     let rows = Scoped::objects().fetch(pool).await.expect("fetch");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].owner_id, 1, "a refused update wrote");
+}
+
+#[derive(rustango::Model, Debug, Clone)]
+#[rustango(table = "vop_owned")]
+#[allow(dead_code)]
+pub struct Owned {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub owner_id: i64,
+}
+
+/// An owner filter with no write pin: only owner 7's rows.
+fn owner_seven(
+    _: &std::collections::HashMap<String, String>,
+    _: &'static rustango::core::ModelSchema,
+) -> Vec<rustango::core::WhereExpr> {
+    vec![rustango::core::WhereExpr::Predicate(Filter::new(
+        "owner_id",
+        Op::Eq,
+        SqlValue::I64(7),
+    ))]
+}
+
+/// A create the "view" hook would hide is refused and rolled back; one only a
+/// filter backend hides is written and echoes its key, never an empty 201.
+async fn a_create_hidden_by_the_view_hook_is_refused(pool: &Pool) {
+    let docs = doc_app(pool, |v| v);
+    let (status, body) = send(
+        &docs,
+        "POST",
+        "/docs",
+        Some(json!({ "title": "hidden-new" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let bulk = json!([{ "title": "open-a" }, { "title": "hidden-b" }]);
+    let (status, body) = send(&docs, "POST", "/docs", Some(bulk)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let (status, body) = send(&docs, "POST", "/docs", Some(json!({ "title": "open-new" }))).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["title"], "open-new", "{body}");
+    let titles: Vec<String> = Doc::objects()
+        .fetch(pool)
+        .await
+        .expect("fetch")
+        .into_iter()
+        .map(|d| d.title)
+        .collect();
+    assert_eq!(titles, ["open-new"], "a refused create wrote");
+
+    let owned = ViewSet::for_model(Owned::SCHEMA, &["id", "owner_id"])
+        .allow_anonymous()
+        .filter_backend(owner_seven)
+        .router("/owned", pool.clone());
+    let (status, body) = send(&owned, "POST", "/owned", Some(json!({ "owner_id": 8 }))).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert!(body["id"].is_i64(), "the key, never an empty body: {body}");
+    assert!(body.get("owner_id").is_none(), "{body}");
 }
 
 /// A hidden row is a 404 before its body's FK is checked: a 422 would confirm it.
@@ -771,8 +830,8 @@ tri_dialect_test!(
         a_pending_body_holds_no_lock,
         a_page_filters_by_admitted_or_by_nothing,
         a_row_hidden_after_the_scan_is_not_rendered,
-        the_old_macro_names_still_apply,
         a_write_cannot_leave_the_queryset_scope,
+        a_create_hidden_by_the_view_hook_is_refused,
         a_hidden_row_is_404_before_its_fk_check,
         a_concurrent_edit_is_judged_after_it_lands,
         item_routes_hide_with_404_and_refuse_with_403,
@@ -783,6 +842,7 @@ tri_dialect_test!(
         skip_object_permissions_skips_app_hooks,
         a_queryset_scope_narrows_every_action,
         an_fk_to_a_hidden_target_is_refused,
+        a_bulk_create_reads_each_fk_target_once,
         a_superuser_row_needs_an_api_superuser,
     ],
 );

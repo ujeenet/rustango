@@ -73,6 +73,24 @@ async fn clear(pool: &Pool) {
 }
 
 /// Create, bulk create, PUT and PATCH keep `""` apart from `null`.
+/// Single and bulk creates inside a caller's `atomic` block roll back with it.
+async fn writes_roll_back_with_the_callers_block(pool: &Pool) {
+    let q = pool.clone();
+    let res: Result<(), rustango::sql::ExecError> = rustango::atomic!(pool, |_tx| {
+        let (status, body) = send(&q, Method::POST, "/items", r#"{"qty":1}"#).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let bulk = r#"[{"qty":2},{"qty":3}]"#;
+        let (status, body) = send(&q, Method::POST, "/items", bulk).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        Err(rustango::sql::ExecError::Sql(
+            rustango::sql::SqlError::EmptyInList,
+        ))
+    })
+    .await;
+    assert!(res.is_err());
+    assert!(rows(pool).await.is_empty(), "a create outlived the block");
+}
+
 async fn empty_string_is_not_null(pool: &Pool) {
     let nick = |rows: &[Item]| rows.iter().map(|r| r.nickname.clone()).collect::<Vec<_>>();
     let (status, body) = send(pool, Method::POST, "/items", r#"{"nickname":""}"#).await;
@@ -237,6 +255,7 @@ async fn null_on_a_not_null_field_is_refused(pool: &Pool) {
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        writes_roll_back_with_the_callers_block,
         null_on_a_not_null_field_is_refused,
         empty_string_is_not_null,
         decimal_number_keeps_its_digits,

@@ -29,9 +29,9 @@ Der Name einer Methode sagt Ihnen, was sie tut. Sobald Sie diese Suffixe gelernt
 
 ### Funktionen
 
-- **`fetch(&pool)`, `count(&pool)`, `first(&pool)`, `find(pk, &pool)`** — der schlichte Name nimmt einen `rustango::sql::Pool` und ist der Alltagsweg. Er funktioniert auf Postgres, MySQL und SQLite und wählt den Dialekt intern. Das ist es, was fast jeder Anwendungscode will.
+- **`fetch(&pool)`, `count(&pool)`, `first(&pool)`, `find(pk, &pool)`** — der schlichte Name nimmt einen `rustango::sql::Pool` und ist der Alltagsweg. Er funktioniert auf Postgres, MySQL und SQLite und wählt den Dialekt intern. Das ist es, was fast jeder Anwendungscode will. Die Regel gilt für `Model`- und `QuerySet`-Methoden. Freie Funktionen in `tenancy`, `auth` und ähnlichen Modulen (`has_perm_pool`, `authenticate_user_pool`) behalten ihr Suffix `_pool` bis 1.0: es ist der unterstützte Name, kein veralteter Rest.
 - **`fetch_on(executor)`, `count_on(executor)`** — das Suffix `_on` bedeutet „führe dies gegen den *Executor* aus, den ich dir übergebe“ — eine Verbindung oder eine offene Transaktion statt des Pools. Greif dazu, wenn du mehrere Statements in einer Transaktion brauchst. `fetch_on` / `first_on` / `count_on` / `exists_on` und das `fetch_on` von `values` / `aggregate` nehmen jeden `SqlExecutor` (`&mut PoolConn`, `&mut PoolTx`, `&Pool`) auf allen drei Backends; ebenso der Rest der `_on`-Familie.
-- **Schreibvorgänge folgen derselben Regel.** `save(&pool)`, `insert(&pool)`, `delete(&pool)`, `upsert(&pool)` und `bulk_insert(rows, &pool)` nehmen auf jedem Backend einen `rustango::sql::Pool`; ihre `_on`-Formen nehmen jeden `SqlExecutor`. Ein auditiertes Modell lehnt die `_on`-Formen ab, nutze dort die `&pool`-Varianten. Die alten `_pool`-Namen kompilieren noch, sind aber veraltet.
+- **Schreibvorgänge folgen derselben Regel.** `save(&pool)`, `insert(&pool)`, `delete(&pool)`, `upsert(&pool)` und `bulk_insert(rows, &pool)` nehmen auf jedem Backend einen `rustango::sql::Pool`; ihre `_on`-Formen nehmen jeden `SqlExecutor`. Ein auditiertes Modell lehnt die `_on`-Formen ab, nutze dort die `&pool`-Varianten. Die alten `_pool`-Namen dieser Methoden kompilieren noch, sind aber veraltet.
 - **`from_X(value)`** — konvertiert AUS einem anderen Wert (z. B. `from_model(post)`, `from_base32(s)`).
 - **`with_X(value)`** — eine Builder-Methode, die eine Option setzt und das Objekt zurückgibt, sodass Sie Aufrufe verketten können (z. B. `with_default_ttl(d)`, `with_access_ttl(secs)`).
 - **`new()`** — der minimale Konstruktor. Alle Argumente, die er entgegennimmt, sind erforderliche Abhängigkeiten (z. B. `RedisCache::new(url)` — Sie können den Cache nicht ohne URL bauen).
@@ -291,7 +291,7 @@ anderes Backend zu wählen: `default-features = false, features = ["batteries", 
 Um ein Binary zu verschlanken, das nicht alles braucht, deaktivieren Sie die Standardwerte und listen Sie nur auf, was Sie verwenden:
 
 ```toml
-rustango = { version = "0.66", default-features = false, features = ["postgres", "admin"] }
+rustango = { version = "0.67", default-features = false, features = ["postgres", "admin"] }
 ```
 
 ---

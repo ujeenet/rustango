@@ -716,14 +716,7 @@ where
     }
 }
 
-/// The default `view_hook_scan_cap`: an API list reads at most this many
-/// rows per request, a fifth of the admin's default.
-const DEFAULT_VIEW_HOOK_SCAN_CAP: usize = 2_000;
-
 pub use crate::list_params::DEFAULT_MAX_OFFSET;
-
-/// The largest `view_hook_scan_cap`: each list request reads that many rows.
-const MAX_VIEW_HOOK_SCAN_CAP: usize = 100_000;
 
 /// Builder for a set of REST CRUD endpoints over a single
 /// [`Model`](crate::core::Model) table.
@@ -825,7 +818,7 @@ impl ViewSet {
             pk_param: "pk".to_owned(),
             max_bulk_create: 1000,
             hooks: crate::object_permissions::Hooks::All,
-            view_hook_scan_cap: DEFAULT_VIEW_HOOK_SCAN_CAP,
+            view_hook_scan_cap: crate::list_params::DEFAULT_VIEW_HOOK_SCAN_CAP,
             related_filters: Vec::new(),
         };
         vs.assert_known_names("fields", fields.iter().copied(), false);
@@ -1125,7 +1118,7 @@ impl ViewSet {
     /// or offset list is a `400`; a queryset scope or cursor pagination scales.
     #[must_use]
     pub fn view_hook_scan_cap(mut self, rows: usize) -> Self {
-        self.view_hook_scan_cap = rows.clamp(1, MAX_VIEW_HOOK_SCAN_CAP);
+        self.view_hook_scan_cap = rows.clamp(1, crate::list_params::MAX_VIEW_HOOK_SCAN_CAP);
         self
     }
 
@@ -2054,24 +2047,16 @@ fn fk_targets(
     writable: &[&'static crate::core::FieldSchema],
 ) -> Vec<FkTarget> {
     let no_params = HashMap::new();
-    let hooks = state.vs.hooks;
-    writable
-        .iter()
-        .filter_map(|&field| {
-            FkTarget::of(field, |model| {
-                let mut scope = model.global_scope_exprs(&[]);
-                scope.extend(crate::soft_delete::active_filter(model));
-                let scopes = hooks.scope_filters(model.table, parts);
-                scope.extend(scopes.into_iter().map(WhereExpr::Predicate));
-                for (name, backend) in &state.vs.related_filters {
-                    if name == field.name {
-                        scope.extend(backend.filter_with(parts, &no_params, model));
-                    }
-                }
-                (scope, hooks.any(model.table, "view"))
-            })
-        })
-        .collect()
+    let related = |field: &'static crate::core::FieldSchema, model| {
+        state
+            .vs
+            .related_filters
+            .iter()
+            .filter(|(name, _)| name == field.name)
+            .flat_map(|(_, backend)| backend.filter_with(parts, &no_params, model))
+            .collect()
+    };
+    fk_target::hooked_targets(writable.iter().copied(), (parts, state.vs.hooks), related)
 }
 
 /// The admin's superuser-only fields of `table`, unless the principal is a superuser.
@@ -2176,26 +2161,38 @@ impl WriteSet {
         values: &[(&'static str, SqlValue)],
         stored: Option<(&'static crate::core::FieldSchema, &SqlValue)>,
     ) -> Result<Result<(), Refusal>, crate::sql::ExecError> {
+        let writes = [fk_target::FkWrite { values, stored }];
+        let hidden = self.first_fk_refusal(acq, tx, &writes).await?;
+        Ok(hidden.map_or(Ok(()), |(_, refusal)| Err(refusal)))
+    }
+
+    /// [`Self::check_fk_targets`] over many writes, one read per FK target:
+    /// the index of the first write that links a hidden row, and why.
+    async fn first_fk_refusal(
+        &self,
+        acq: &mut AcquiredConn,
+        tx: Option<&mut crate::sql::PoolTx<'_>>,
+        writes: &[fk_target::FkWrite<'_>],
+    ) -> Result<Option<(usize, Refusal)>, crate::sql::ExecError> {
         let (parts, hooks) = &self.view_gate;
         let admits =
             |t: &FkTarget, row: &Value| hooks.allows(t.model.table, "view", parts, Some(row));
-        let hidden = fk_target::first_hidden(
+        let hidden = fk_target::first_hidden_in(
             &acq.pool,
             tx,
             (self.schema, &self.owner_scope),
             &self.fk_targets,
-            values,
-            stored,
+            writes,
             admits,
         )
         .await?;
-        Ok(match hidden {
-            None => Ok(()),
-            Some(field) => Err(Refusal::Invalid {
+        Ok(hidden.map(|(i, field)| {
+            let refusal = Refusal::Invalid {
                 field: field.name,
                 message: "no such object".to_owned(),
-            }),
-        })
+            };
+            (i, refusal)
+        }))
     }
 
     fn is_writable(&self, name: &str) -> bool {
@@ -2392,18 +2389,8 @@ fn scope_filters(
     parts: &axum::http::request::Parts,
     params: &HashMap<String, String>,
 ) -> Vec<WhereExpr> {
-    let schema = state.vs.schema;
-    let mut all = schema.global_scope_exprs(&[]);
     // A soft-deleted row reads as gone to every action (#1998).
-    all.extend(crate::soft_delete::active_filter(schema));
-    all.extend(
-        state
-            .vs
-            .hooks
-            .scope_filters(schema.table, parts)
-            .into_iter()
-            .map(WhereExpr::Predicate),
-    );
+    let mut all = state.vs.hooks.row_scope(state.vs.schema, parts);
     all.extend(
         state
             .vs
@@ -3763,9 +3750,7 @@ async fn gate_item(
     action: Option<&'static str>,
 ) -> Result<(), Response> {
     let (schema, hooks) = (state.vs.schema, state.vs.hooks);
-    let hooked = std::iter::once("view")
-        .chain(action)
-        .any(|a| hooks.any(schema.table, a));
+    let hooked = hooks.judges(schema.table, action);
     let mut q = SelectQuery::by_pk(schema, pk_field.column, pk.clone());
     q.where_clause = narrow(q.where_clause, scope.to_vec());
     let fields: Vec<_> = schema.scalar_fields().collect();
@@ -3781,18 +3766,11 @@ async fn gate_item(
         }
     }
     .map_err(|e| json_server_error("viewset::object_permissions", &e))?;
-    let not_found = || json_error(StatusCode::NOT_FOUND, "not found");
-    let Some(row) = row else {
-        return Err(not_found());
-    };
-    if !hooks.allows(schema.table, "view", parts, Some(&row)) {
-        return Err(not_found());
-    }
-    match action {
-        Some(a) if !hooks.allows(schema.table, a, parts, Some(&row)) => {
-            Err(json_error(StatusCode::FORBIDDEN, "forbidden"))
-        }
-        _ => Ok(()),
+    use crate::object_permissions::Verdict;
+    match row.map(|row| hooks.judge(schema.table, parts, &row, action)) {
+        None | Some(Verdict::Hidden) => Err(json_error(StatusCode::NOT_FOUND, "not found")),
+        Some(Verdict::Refused) => Err(json_error(StatusCode::FORBIDDEN, "forbidden")),
+        Some(Verdict::Allowed) => Ok(()),
     }
 }
 
@@ -3927,7 +3905,7 @@ async fn handle_create(
 }
 
 /// Run `INSERT … RETURNING <pk>`, then re-fetch the row by its PK as
-/// JSON per `read_back`; `None` when the caller may not see it.
+/// JSON per `read_back`, or its key alone when the read-back hides it.
 ///
 /// Returns `(StatusCode, message)` so the caller emits the right code:
 /// * `CONFLICT` on a duplicate key, `BAD_REQUEST` on another constraint
@@ -3944,7 +3922,7 @@ async fn insert_and_fetch_one(
     pk_field: &'static crate::core::FieldSchema,
     fields: &[&'static crate::core::FieldSchema],
     read_back: &ReadBack,
-) -> Result<(SqlValue, Option<Value>), (StatusCode, String)> {
+) -> Result<(SqlValue, Value), (StatusCode, String)> {
     let query = InsertQuery {
         model: state.vs.schema,
         columns,
@@ -3963,7 +3941,11 @@ async fn insert_and_fetch_one(
     wrote(state);
     fetch_by_pk_scoped(state, acq, pk_field, pk_val.clone(), fields, read_back)
         .await
-        .map(|row| (pk_val, row))
+        .map(|row| {
+            // Outside a global scope or filter backend: echo the key alone.
+            let row = row.unwrap_or_else(|| key_only(pk_field, &pk_val));
+            (pk_val, row)
+        })
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -3973,11 +3955,11 @@ async fn insert_and_fetch_one(
 }
 
 /// The `add` hooks for a create, run as the admin runs them: on the
-/// request, then on each written row inside the write's transaction, which
-/// must also land inside the queryset scopes.
+/// request, then on each written row inside the write's transaction. The
+/// row must also land inside the queryset scopes and pass the "view" hook.
 struct AddHooks {
     hooks: crate::object_permissions::Hooks,
-    /// The request, kept only when a hook is registered for a row check.
+    /// The request, kept only when an "add" or "view" hook judges the row.
     parts: Option<axum::http::request::Parts>,
     /// The queryset scopes the written row must stay inside.
     scope: Vec<WhereExpr>,
@@ -3992,7 +3974,7 @@ impl AddHooks {
         }
         Ok(Self {
             hooks,
-            parts: hooks.any(table, "add").then(|| parts.clone()),
+            parts: hooks.judges(table, Some("add")).then(|| parts.clone()),
             scope: queryset_scope(state, parts),
         })
     }
@@ -4018,11 +4000,23 @@ impl AddHooks {
         select.where_clause = narrow(select.where_clause, self.scope.clone());
         let row = crate::sql::select_one_row_as_json_tx(tx, &select, &fields).await?;
         Ok(row.is_some_and(|row| {
-            self.parts
-                .as_ref()
-                .is_none_or(|parts| self.hooks.allows(model.table, "add", parts, Some(&row)))
+            self.parts.as_ref().is_none_or(|parts| {
+                let verdict = self.hooks.judge(model.table, parts, &row, Some("add"));
+                verdict == crate::object_permissions::Verdict::Allowed
+            })
         }))
     }
+}
+
+/// `{pk: value}`, for a created row the read-back does not show.
+fn key_only(pk_field: &'static crate::core::FieldSchema, pk: &SqlValue) -> Value {
+    let value = match pk {
+        SqlValue::I16(n) => json!(n),
+        SqlValue::I32(n) => json!(n),
+        SqlValue::I64(n) => json!(n),
+        other => Value::String(other.to_display_string()),
+    };
+    json!({ pk_field.name: value })
 }
 
 /// The host, path prefix and port a write to `rustango_orgs` or
@@ -4109,17 +4103,13 @@ impl RoutingClaims {
     }
 
     /// The write's transaction, an edited tenant's values already claimed.
-    async fn begin(
-        &self,
-        pool: &Pool,
-        pk: &SqlValue,
-    ) -> Result<crate::sql::PoolTx<'static>, ClaimFailed> {
+    async fn begin(&self, pool: &Pool, pk: &SqlValue) -> Result<crate::sql::WriteTx, ClaimFailed> {
         #[cfg(feature = "tenancy")]
         return Ok(self.claims.begin(pool, pk).await?);
         #[cfg(not(feature = "tenancy"))]
         {
             let _ = pk;
-            Ok(crate::sql::write_transaction(pool).await?)
+            Ok(crate::sql::write_tx(pool).await?)
         }
     }
 
@@ -4277,7 +4267,7 @@ fn write_failure(context: &str, e: &crate::sql::ExecError) -> (StatusCode, Strin
 
 /// Single-row create — used by both the form-urlencoded codepath
 /// and the JSON-object body codepath. Returns 201 + the row JSON (or its
-/// pk, per `read_back`) and `Location`, or no body when it is out of scope.
+/// pk, per `read_back`) and `Location`; outside a queryset scope it is a 403.
 async fn create_one(
     state: &Arc<ViewSetState>,
     acq: &mut AcquiredConn,
@@ -4323,7 +4313,7 @@ async fn create_one(
     let row = collected.into_iter().unzip();
     let hooks = (add_hooks, &claims);
     match insert_and_fetch_one(state, acq, hooks, row, pk_field, &fields, read_back).await {
-        Ok((pk, Some(obj))) => {
+        Ok((pk, obj)) => {
             let mut resp = json_created(obj);
             let location = format!(
                 "{}/{}",
@@ -4335,7 +4325,6 @@ async fn create_one(
             }
             resp
         }
-        Ok((_, None)) => StatusCode::CREATED.into_response(),
         Err((code, msg)) => json_error(code, &msg),
     }
 }
@@ -4346,7 +4335,8 @@ async fn create_one(
 /// atomic-insert — partial-insert recovery is a separate concern).
 /// On success, inserts each row sequentially and returns 201 + the
 /// JSON array of created rows in submission order, each as `read_back`
-/// allows; a row outside the scope is `null`.
+/// allows, `null` when the read-back hides it; a row outside a queryset
+/// scope or the "view" hook refuses the batch with a 403.
 ///
 /// Issue #435.
 async fn create_many(
@@ -4364,7 +4354,7 @@ async fn create_many(
     // Atomic validation: collect every (columns, values) up front
     // so a bad row near the end of the list doesn't leave half the
     // INSERTs committed: validate the whole list before any save.
-    let mut prepared: Vec<((Vec<&'static str>, Vec<SqlValue>), RoutingClaims)> =
+    let mut prepared: Vec<(Vec<(&'static str, SqlValue)>, RoutingClaims)> =
         Vec::with_capacity(rows.len());
     for (i, (row, json)) in rows.iter().enumerate() {
         if let Err(resp) = serializer_validate(state, json, Some(i)) {
@@ -4390,16 +4380,25 @@ async fn create_many(
             Ok(c) => c,
             Err(resp) => return resp,
         };
-        match write_set
-            .check_fk_targets(acq, None, &collected, None)
-            .await
-        {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => return e.into_response(state, Some(i)),
-            Err(e) => return json_server_error("viewset::bulk_create::fk", &e),
-        }
-        prepared.push((collected.into_iter().unzip(), claims));
+        prepared.push((collected, claims));
     }
+    // One read per FK target for the whole batch, not one per row.
+    let writes: Vec<_> = prepared
+        .iter()
+        .map(|(values, _)| fk_target::FkWrite {
+            values,
+            stored: None,
+        })
+        .collect();
+    match write_set.first_fk_refusal(acq, None, &writes).await {
+        Ok(None) => {}
+        Ok(Some((i, e))) => return e.into_response(state, Some(i)),
+        Err(e) => return json_server_error("viewset::bulk_create::fk", &e),
+    }
+    let prepared: Vec<((Vec<&'static str>, Vec<SqlValue>), RoutingClaims)> = prepared
+        .into_iter()
+        .map(|(values, claims)| (values.into_iter().unzip(), claims))
+        .collect();
 
     // Insert sequentially. We loop INSERT-RETURNING rather than
     // emitting one multi-row INSERT because:
@@ -4427,7 +4426,7 @@ async fn create_many(
     // A claim MySQL broke with a deadlock: the whole batch is retried once.
     let mut retry = prepared.iter().any(|(_, c)| c.any());
     let (tx, pks) = 'attempt: loop {
-        let mut tx = match crate::sql::transaction_pool(&acq.pool).await {
+        let mut tx = match crate::sql::write_tx(&acq.pool).await {
             Ok(tx) => tx,
             Err(e) => {
                 return json_server_error("viewset::bulk_create::begin", &e);
@@ -4611,7 +4610,7 @@ async fn update_inner(
     // only on a pool is read and updated unlocked, rather than lose its
     // audit entry.
     let mut locked = match crate::audit::TxUpdate::for_model(state.vs.schema) {
-        Some(u) => match crate::sql::write_transaction(&acq.pool).await {
+        Some(u) => match crate::sql::write_tx(&acq.pool).await {
             Ok(tx) => Some((u, tx)),
             Err(e) => return json_server_error("viewset::update::begin", &e),
         },
@@ -4620,7 +4619,7 @@ async fn update_inner(
     let item = (pk_field, &pk_val);
     let read = (
         &scope[..],
-        ItemRead::Always(locked.as_mut().map(|(_, tx)| tx)),
+        ItemRead::Always(locked.as_mut().map(|(_, tx)| &mut **tx)),
     );
     if let Err(resp) = gate_item(&state, &mut acq, &parts, item, read, Some("change")).await {
         return resp;
@@ -4654,7 +4653,7 @@ async fn update_inner(
             let body = write_set.patch_body(bridge.as_ref(), &json);
             let checked = match locked.as_mut() {
                 Some((_, tx)) => bridge.validate_patch(tx, &q, &body).await,
-                None => match crate::sql::write_transaction(&acq.pool).await {
+                None => match crate::sql::write_tx(&acq.pool).await {
                     Ok(mut tx) => bridge.validate_patch(&mut tx, &q, &body).await,
                     Err(e) => return json_server_error("viewset::update::begin", &e),
                 },
@@ -4704,7 +4703,7 @@ async fn update_inner(
             }
         }
     }
-    let tx = locked.as_mut().map(|(_, tx)| tx);
+    let tx = locked.as_mut().map(|(_, tx)| &mut **tx);
     let stored = Some((pk_field, &pk_val));
     match write_set
         .check_fk_targets(&mut acq, tx, &written, stored)
@@ -4718,6 +4717,8 @@ async fn update_inner(
     if assignments.is_empty() {
         // Only locked fields: answer as an update that changed nothing.
         if write_set.sends_locked(form) {
+            // Nothing was written: release the row lock so the read-back can join a block.
+            drop(locked.take());
             let fields = state.effective_fields();
             return match fetch_by_pk_scoped(&state, &mut acq, pk_field, pk_val, &fields, &read_back)
                 .await
@@ -4809,7 +4810,7 @@ async fn handle_destroy(
     // The row, locked in the delete's transaction: the hooks judge the row
     // the write removes. Before either path, as a soft delete is a delete.
     let schema = state.vs.schema;
-    let mut tx = match crate::sql::write_transaction(&acq.pool).await {
+    let mut tx = match crate::sql::write_tx(&acq.pool).await {
         Ok(tx) => tx,
         Err(e) => return json_server_error("viewset::destroy::begin", &e),
     };

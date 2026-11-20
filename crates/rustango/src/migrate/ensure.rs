@@ -672,10 +672,15 @@ async fn apply_batch(pool: &Pool, batch: &super::RenderedBatch) -> Result<(), sq
 
 /// Run `stmts` in order, tolerating objects that already exist.
 pub(crate) async fn run_statements(pool: &Pool, stmts: &[String]) -> Result<(), sqlx::Error> {
+    crate::sql::refuse_ddl_in_block(pool, crate::sql::Ddl::Transactional)
+        .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
     let dialect = pool.dialect().name();
     for stmt in stmts {
         let stmt = idempotent(stmt, dialect);
-        let mut res = crate::sql::raw_execute_pool(pool, &stmt, Vec::new()).await;
+        // Errors below are caught: in a block each statement gets a savepoint.
+        let run =
+            || crate::sql::caught(pool, crate::sql::raw_execute_pool(pool, &stmt, Vec::new()));
+        let mut res = run().await;
         // A racer's committed row type also says 42710; once in, the retry sees its table.
         // Racing MySQL DDL can lose a deadlock: the statement was undone, so run it again.
         let retry = match &res {
@@ -686,7 +691,7 @@ pub(crate) async fn run_statements(pool: &Pool, stmts: &[String]) -> Result<(), 
             _ => false,
         };
         if retry {
-            res = crate::sql::raw_execute_pool(pool, &stmt, Vec::new()).await;
+            res = run().await;
         }
         if let Err(e) = res {
             if is_already_exists(&e, dialect, &stmt) {

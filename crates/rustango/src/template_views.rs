@@ -106,20 +106,31 @@ macro_rules! pk_or_404 {
     };
 }
 
-/// The rows a template view may read or write: the model's global
-/// scopes, and only live rows on a soft-delete model (#2082).
+/// The rows of `model` this request reaches: global scopes, live rows
+/// (#2082) and the queryset scopes, as a ViewSet's.
+fn row_scope(model: &'static ModelSchema, parts: &Parts) -> Vec<WhereExpr> {
+    #[cfg(feature = "admin")]
+    return crate::object_permissions::Hooks::All.row_scope(model, parts);
+    #[cfg(not(feature = "admin"))]
+    {
+        let _ = parts;
+        crate::soft_delete::visible_scope(model)
+    }
+}
+
+/// The rows a template view may read or write: [`row_scope`] ANDed in.
 trait Visible {
-    fn visible(self) -> Self;
+    fn visible(self, parts: &Parts) -> Self;
 }
 
 macro_rules! impl_visible {
     ($($ty:ty),*) => {$(
         impl Visible for $ty {
-            fn visible(self) -> Self {
-                let model = self.model;
-                let mut q = self.with_global_scopes();
-                q.where_clause = crate::soft_delete::compose_with_active(model, q.where_clause);
-                q
+            fn visible(mut self, parts: &Parts) -> Self {
+                for scope in row_scope(self.model, parts) {
+                    self.where_clause.push_and(scope);
+                }
+                self
             }
         }
     )*};
@@ -131,12 +142,133 @@ impl_visible!(
     crate::core::DeleteQuery
 );
 
+/// The hooks on the row `q` selects, read only when one is registered:
+/// missing or hidden by "view" is a 404, refused by `action`'s hook a 403.
+async fn gate_row(
+    pool: &Pool,
+    parts: &Parts,
+    q: &SelectQuery,
+    action: Option<&'static str>,
+) -> Result<(), Response> {
+    #[cfg(feature = "admin")]
+    {
+        use crate::object_permissions::Hooks;
+        let table = q.model.table;
+        if !Hooks::All.judges(table, action) {
+            return Ok(());
+        }
+        let fields: Vec<_> = q.model.scalar_fields().collect();
+        let row = select_one_row_as_json(pool, q, &fields)
+            .await
+            .map_err(|e| template_error(&format!("query row: {e}")))?;
+        verdict(row.map(|row| Hooks::All.judge(table, parts, &row, action)))
+    }
+    #[cfg(not(feature = "admin"))]
+    {
+        let _ = (pool, parts, q, action);
+        Ok(())
+    }
+}
+
+/// Missing or hidden is a 404, refused a 403.
+#[cfg(feature = "admin")]
+fn verdict(v: Option<crate::object_permissions::Verdict>) -> Result<(), Response> {
+    use crate::object_permissions::Verdict;
+    match v {
+        None | Some(Verdict::Hidden) => Err((StatusCode::NOT_FOUND, "not found").into_response()),
+        Some(Verdict::Refused) => Err((StatusCode::FORBIDDEN, "permission denied").into_response()),
+        Some(Verdict::Allowed) => Ok(()),
+    }
+}
+
+/// The row an item view shows, `fields` of it: inside [`row_scope`] and
+/// judged as [`gate_row`] does, `action` beside "view". One read: when hooked,
+/// the whole row is judged and the same row rendered.
+async fn item_object(
+    pool: &Pool,
+    parts: &Parts,
+    (schema, lookup): (&'static ModelSchema, &'static FieldSchema),
+    raw: &str,
+    fields: &[&'static FieldSchema],
+    action: Option<&'static str>,
+) -> Result<Value, Response> {
+    let not_found = || (StatusCode::NOT_FOUND, "not found").into_response();
+    let key = match stored_pk(pool, schema, lookup, raw).await {
+        Ok(Some(v)) => v,
+        Ok(None) => return Err(not_found()),
+        Err(e) => return Err(template_error(&format!("read key: {e}"))),
+    };
+    let q = SelectQuery::by_pk(schema, lookup.column, key).visible(parts);
+    #[cfg(feature = "admin")]
+    {
+        use crate::object_permissions::Hooks;
+        if Hooks::All.judges(schema.table, action) {
+            let all: Vec<_> = schema.scalar_fields().collect();
+            let row = select_one_row_as_json(pool, &q, &all)
+                .await
+                .map_err(|e| template_error(&format!("query row: {e}")))?;
+            let judged = row
+                .as_ref()
+                .map(|r| Hooks::All.judge(schema.table, parts, r, action));
+            verdict(judged)?;
+            let mut row = row.unwrap_or_default();
+            if let Value::Object(m) = &mut row {
+                m.retain(|k, _| fields.iter().any(|f| f.name == k));
+            }
+            return Ok(row);
+        }
+    }
+    #[cfg(not(feature = "admin"))]
+    let _ = action;
+    match select_one_row_as_json(pool, &q, fields).await {
+        Ok(Some(r)) => Ok(r),
+        Ok(None) => Err(not_found()),
+        Err(e) => Err(template_error(&format!("query row: {e}"))),
+    }
+}
+
+/// The "view" hook over every row `where_clause` matches, ANDed in as one PK
+/// filter so the page and its total leave hidden rows out (see the ViewSet's list).
+async fn hide_from_list(
+    pool: &Pool,
+    parts: &Parts,
+    (model, cap): (&'static ModelSchema, usize),
+    where_clause: &mut WhereExpr,
+) -> Result<(), Response> {
+    #[cfg(feature = "admin")]
+    {
+        use crate::object_permissions::{view_hook_rows, Hooks, ViewHookRows};
+        let budget = crate::list_params::in_values_budget(pool.dialect().max_bind_params());
+        let query = (where_clause.clone(), None);
+        match view_hook_rows(pool, (parts, Hooks::All), model, query, (cap, budget)).await {
+            Ok(ViewHookRows::All) => Ok(()),
+            Ok(ViewHookRows::Only(f)) => {
+                where_clause.push_and(WhereExpr::Predicate(f));
+                Ok(())
+            }
+            Ok(ViewHookRows::TooMany) => Err((
+                StatusCode::BAD_REQUEST,
+                "this list matches more rows than its \"view\" hook can scan; narrow it \
+                 with filters, register a queryset scope, or raise view_hook_scan_cap",
+            )
+                .into_response()),
+            Err(e) => Err(template_error(&format!("view hook rows: {e}"))),
+        }
+    }
+    #[cfg(not(feature = "admin"))]
+    {
+        let _ = (pool, parts, model, cap, where_clause);
+        Ok(())
+    }
+}
+
 /// Run `query`; a soft-delete model stamps its column instead, as the admin does (#2082).
 async fn delete_rows(
     pool: &Pool,
+    parts: &Parts,
     query: crate::core::DeleteQuery,
 ) -> Result<u64, crate::sql::ExecError> {
-    let query = query.visible();
+    let query = query.visible(parts);
     let Some(col) = query.model.soft_delete_column else {
         return crate::audit::delete(pool, &query).await;
     };
@@ -237,6 +369,8 @@ pub struct ListView {
     max_page_size: i64,
     /// Deepest row `?page=N` may skip to; see [`Self::max_offset`].
     max_offset: usize,
+    /// Rows a list's "view" hook scan reads. See [`ListView::view_hook_scan_cap`].
+    view_hook_scan_cap: usize,
     fields: Option<Vec<String>>,
     order_by: Vec<(String, bool)>,
     filter_fields: Vec<String>,
@@ -470,7 +604,6 @@ async fn gate_request(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    use crate::access::Outcome;
     let read = matches!(
         *req.method(),
         axum::http::Method::GET | axum::http::Method::HEAD
@@ -488,18 +621,11 @@ async fn gate_request(
         Ok(o) => o,
         Err(resp) => return resp,
     };
-    match outcome {
-        Outcome::Allow => {
+    match outcome.refusal() {
+        Some(resp) => resp,
+        None => {
             next.run(axum::extract::Request::from_parts(parts, body))
                 .await
-        }
-        Outcome::Unauthenticated => {
-            (StatusCode::UNAUTHORIZED, "authentication required").into_response()
-        }
-        Outcome::Forbidden => (StatusCode::FORBIDDEN, "permission denied").into_response(),
-        Outcome::Unavailable(e) => {
-            tracing::error!(target: "rustango::template_views", error = %e, "permission read failed");
-            (StatusCode::SERVICE_UNAVAILABLE, "service unavailable").into_response()
         }
     }
 }
@@ -591,6 +717,7 @@ impl ListView {
             page_size: 20,
             max_page_size: 100,
             max_offset: crate::list_params::DEFAULT_MAX_OFFSET,
+            view_hook_scan_cap: crate::list_params::DEFAULT_VIEW_HOOK_SCAN_CAP,
             fields: None,
             order_by: Vec::new(),
             filter_fields: Vec::new(),
@@ -636,6 +763,15 @@ impl ListView {
     #[must_use]
     pub fn max_offset(mut self, n: usize) -> Self {
         self.max_offset = n;
+        self
+    }
+
+    /// Most rows a list reads to run the "view" hook (default 2 000, at
+    /// most 100 000): each list request reads that many rows. Past it the
+    /// list is a `400`; a queryset scope scales.
+    #[must_use]
+    pub fn view_hook_scan_cap(mut self, rows: usize) -> Self {
+        self.view_hook_scan_cap = rows.clamp(1, crate::list_params::MAX_VIEW_HOOK_SCAN_CAP);
         self
     }
 
@@ -1059,33 +1195,24 @@ async fn handle_list(
         Ok(v) => v,
         Err(msg) => return template_error(&msg),
     };
-    let where_clause = match build_list_where(
-        state.vs.schema,
-        &state.vs.filter_fields,
-        &state.vs.search_fields,
+    let (select_q, count_q) = match list_queries(
+        &state.vs,
+        &state.pool,
+        &parts,
         &params,
-    ) {
-        Ok(w) => w,
-        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-    };
-    // #562 — struct-update over SelectQuery::new for the list+filter
-    // query (custom WHERE + paginate).
-    let select_q = SelectQuery {
-        where_clause: where_clause.clone(),
         order_by,
-        limit: Some(page_size),
-        offset: Some(offset),
-        ..SelectQuery::new(state.vs.schema)
-    }
-    .visible();
-    // Search predicates are folded into where_clause by build_list_where.
-    let count_q = crate::core::CountQuery::new(state.vs.schema, where_clause).visible();
+        (page_size, offset),
+    )
+    .await
+    {
+        Ok(q) => q,
+        Err(refused) => return refused,
+    };
 
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
-    let (rows_result, count_result) = tokio::join!(
-        select_rows_as_json(&state.pool, &select_q, &fields),
-        count_rows_pool(&state.pool, &count_q),
-    );
+    // One after the other: inside an atomic block both reads share one connection.
+    let rows_result = select_rows_as_json(&state.pool, &select_q, &fields).await;
+    let count_result = count_rows_pool(&state.pool, &count_q).await;
     let mut object_list: Vec<Value> = match rows_result {
         Ok(r) => r,
         Err(e) => return template_error(&format!("query rows: {e}")),
@@ -1095,7 +1222,7 @@ async fn handle_list(
         Err(e) => return template_error(&format!("count rows: {e}")),
     };
     if state.vs.fk_display {
-        resolve_fk_displays_pool(state.vs.schema, &state.pool, &mut object_list).await;
+        resolve_fk_displays_pool(state.vs.schema, &state.pool, &mut object_list, &parts).await;
     }
 
     let mut ctx = list_context(
@@ -1116,6 +1243,38 @@ async fn handle_list(
     let mut resp = render(&state.tera, &state.vs.template, ctx, &parts);
     apply_csrf_cookie(&mut resp, set_cookie);
     resp
+}
+
+/// The page and count queries of a list, for the static and tenant handlers:
+/// its filters and search, the rows this request reaches, minus hidden rows.
+async fn list_queries(
+    vs: &ListView,
+    pool: &Pool,
+    parts: &Parts,
+    params: &HashMap<String, String>,
+    order_by: Vec<crate::core::OrderItem>,
+    (page_size, offset): (i64, i64),
+) -> Result<(SelectQuery, crate::core::CountQuery), Response> {
+    // Search predicates are folded into where_clause by build_list_where.
+    let mut where_clause =
+        build_list_where(vs.schema, &vs.filter_fields, &vs.search_fields, params)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()).into_response())?;
+    for scope in row_scope(vs.schema, parts) {
+        where_clause.push_and(scope);
+    }
+    let model = (vs.schema, vs.view_hook_scan_cap);
+    hide_from_list(pool, parts, model, &mut where_clause).await?;
+    let select_q = SelectQuery {
+        where_clause: where_clause.clone(),
+        order_by,
+        limit: Some(page_size),
+        offset: Some(offset),
+        ..SelectQuery::new(vs.schema)
+    };
+    Ok((
+        select_q,
+        crate::core::CountQuery::new(vs.schema, where_clause),
+    ))
 }
 
 /// The list page context; both the static and the tenant handler build it here.
@@ -1191,14 +1350,14 @@ async fn handle_list_action(
         let objects = match fetch_pks_as_objects_pool(
             state.vs.schema,
             pk_field,
-            &state.pool,
+            (&state.pool, &parts),
             &pks,
             state.vs.fields.as_deref(),
         )
         .await
         {
             Ok(o) => o,
-            Err(e) => return template_error(&format!("fetch confirm rows: {e}")),
+            Err(resp) => return resp,
         };
         return render_bulk_delete_confirm(
             &state.tera,
@@ -1221,9 +1380,10 @@ async fn handle_list_action(
         .iter()
         .find(|a| same_action_name(&a.name, &action))
     {
-        let pks = match visible_pks_pool(state.vs.schema, pk_field, &state.pool, &pks).await {
+        let at = (&state.pool, &parts);
+        let pks = match visible_pks_pool(state.vs.schema, pk_field, at, &pks, None).await {
             Ok(v) => v,
-            Err(e) => return template_error(&format!("scope selected rows: {e}")),
+            Err(resp) => return resp,
         };
         match &custom.handler {
             BulkActionHandler::Pool(f) => f(&state.pool, &pks).await,
@@ -1239,9 +1399,8 @@ async fn handle_list_action(
             }
         }
     } else if action == BUILTIN_DELETE_SELECTED {
-        if let Err(resp) =
-            run_delete_selected_pool(state.vs.schema, pk_field, &state.pool, &pks).await
-        {
+        let at = (&state.pool, &parts);
+        if let Err(resp) = run_delete_selected_pool(state.vs.schema, pk_field, at, &pks).await {
             return resp;
         }
         Ok(())
@@ -1405,19 +1564,11 @@ async fn handle_detail(
         Ok(f) => f,
         Err(e) => return template_error(&e),
     };
-    // #562 — use the `SelectQuery::by_pk` constructor instead of
-    // spelling out the 11-field literal.
-    let select_q = SelectQuery::by_pk(
-        state.vs.schema,
-        lookup.column,
-        pk_or_404!(&state.pool, state.vs.schema, lookup, &pk),
-    )
-    .visible();
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
-    let object = match select_one_row_as_json(&state.pool, &select_q, &fields).await {
-        Ok(Some(r)) => r,
-        Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
-        Err(e) => return template_error(&format!("query row: {e}")),
+    let item = (state.vs.schema, lookup);
+    let object = match item_object(&state.pool, &parts, item, &pk, &fields, None).await {
+        Ok(o) => o,
+        Err(resp) => return resp,
     };
 
     let mut ctx = Context::new();
@@ -1567,18 +1718,12 @@ async fn handle_delete_confirm(
             state.vs.schema.table
         ));
     };
-    // #562 — by_pk constructor for the single-PK-lookup shape.
-    let select_q = SelectQuery::by_pk(
-        state.vs.schema,
-        pk_field.column,
-        pk_or_404!(&state.pool, state.vs.schema, pk_field, &pk),
-    )
-    .visible();
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
-    let object = match select_one_row_as_json(&state.pool, &select_q, &fields).await {
-        Ok(Some(r)) => r,
-        Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
-        Err(e) => return template_error(&format!("query row: {e}")),
+    let item = (state.vs.schema, pk_field);
+    let delete = Some("delete");
+    let object = match item_object(&state.pool, &parts, item, &pk, &fields, delete).await {
+        Ok(o) => o,
+        Err(resp) => return resp,
     };
     let mut ctx = Context::new();
     ctx.insert("object", &object);
@@ -1590,20 +1735,27 @@ async fn handle_delete_confirm(
 
 async fn handle_delete_submit(
     State(state): State<Arc<DeleteViewState>>,
+    parts: Parts,
     Path(pk): Path<String>,
 ) -> Response {
-    let Some(pk_field) = state.vs.schema.primary_key() else {
+    delete_submit(&state.vs, &state.pool, &parts, &pk).await
+}
+
+/// The DeleteView POST shared by the static and tenant routers.
+async fn delete_submit(vs: &DeleteView, pool: &Pool, parts: &Parts, pk: &str) -> Response {
+    let Some(pk_field) = vs.schema.primary_key() else {
         return template_error(&format!(
             "model `{}` has no primary key — DeleteView can't delete by PK",
-            state.vs.schema.table
+            vs.schema.table
         ));
     };
-    let delete_q = crate::core::DeleteQuery::by_pk(
-        state.vs.schema,
-        pk_field.column,
-        pk_or_404!(&state.pool, state.vs.schema, pk_field, &pk),
-    );
-    match delete_rows(&state.pool, delete_q).await {
+    let key = pk_or_404!(pool, vs.schema, pk_field, pk);
+    let row = SelectQuery::by_pk(vs.schema, pk_field.column, key.clone()).visible(parts);
+    if let Err(resp) = gate_row(pool, parts, &row, Some("delete")).await {
+        return resp;
+    }
+    let delete_q = crate::core::DeleteQuery::by_pk(vs.schema, pk_field.column, key);
+    match delete_rows(pool, parts, delete_q).await {
         Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Ok(_) => {
             // Note: typically `{pk}` in a delete success_url
@@ -1611,7 +1763,7 @@ async fn handle_delete_submit(
             // anyway for symmetry with Create/Update; users with
             // soft-delete models might want to redirect to the
             // tombstone page.
-            let target = substitute_pk(&state.vs.success_url, &pk);
+            let target = substitute_pk(&vs.success_url, pk);
             axum::response::Redirect::to(&target).into_response()
         }
         Err(e) => delete_failed(&e),
@@ -2306,7 +2458,7 @@ async fn handle_create_post(
     // Schema-driven INSERT: nothing else supplies these (#1464).
     crate::forms::stamp_auto_timestamps(state.schema, &mut columns, &mut values);
     match create_insert(
-        &state.pool,
+        (&state.pool, &parts),
         state.schema,
         &state.success_url,
         columns,
@@ -2356,12 +2508,13 @@ fn delete_failed(e: &crate::sql::ExecError) -> Response {
 /// The CreateView INSERT shared by the static and tenant routers; returns
 /// the redirect target.
 async fn create_insert(
-    pool: &Pool,
+    (pool, parts): (&Pool, &Parts),
     schema: &'static ModelSchema,
     success_url: &str,
     columns: Vec<&'static str>,
     values: Vec<SqlValue>,
 ) -> Result<String, WriteFailed> {
+    hidden_fk((pool, parts), schema, (&columns, &values), None).await?;
     // Placeholders are checked now; their values are read after the write.
     let fields = success_url_fields(success_url, schema)
         .map_err(|e| WriteFailed::Error(template_error(&e)))?;
@@ -2428,15 +2581,72 @@ async fn create_insert(
     }
 }
 
-/// The UpdateView UPDATE shared by the static and tenant routers; returns
-/// the rows changed, `0` when no visible row has `this_row`'s PK.
+/// A form error for the first written FK naming a target row this request
+/// cannot see (its scopes or "view" hook), as a ViewSet refuses it. On
+/// update, `stored` is the row's pk: a value it already holds is kept.
+async fn hidden_fk(
+    (pool, parts): (&Pool, &Parts),
+    schema: &'static ModelSchema,
+    (columns, values): (&[&'static str], &[SqlValue]),
+    stored: Option<(&'static FieldSchema, &SqlValue)>,
+) -> Result<(), WriteFailed> {
+    #[cfg(feature = "admin")]
+    {
+        use crate::object_permissions::Hooks;
+        use crate::viewset::fk_target::{first_hidden_in, hooked_targets, FkTarget, FkWrite};
+        let written = schema
+            .scalar_fields()
+            .filter(|f| columns.contains(&f.column));
+        let targets = hooked_targets(written, (parts, Hooks::All), |_, _| Vec::new());
+        if targets.is_empty() {
+            return Ok(());
+        }
+        let pairs: Vec<(&'static str, SqlValue)> = columns
+            .iter()
+            .copied()
+            .zip(values.iter().cloned())
+            .collect();
+        let admits =
+            |t: &FkTarget, row: &Value| Hooks::All.allows(t.model.table, "view", parts, Some(row));
+        let owner = (schema, &row_scope(schema, parts)[..]);
+        let writes = [FkWrite {
+            values: &pairs,
+            stored,
+        }];
+        match first_hidden_in(pool, None, owner, &targets, &writes, admits).await {
+            Ok(None) => Ok(()),
+            Ok(Some((_, field))) => Err(WriteFailed::Refused(HashMap::from([(
+                field.name.to_owned(),
+                "no such object".to_owned(),
+            )]))),
+            Err(e) => Err(WriteFailed::Error(template_error(&format!(
+                "check related rows: {e}"
+            )))),
+        }
+    }
+    #[cfg(not(feature = "admin"))]
+    {
+        let _ = (pool, parts, schema, columns, values, stored);
+        Ok(())
+    }
+}
+
+/// The UpdateView UPDATE shared by the static and tenant routers, after the
+/// row's hooks; returns the rows changed, `0` when no visible row has the PK.
 async fn update_row(
-    pool: &Pool,
+    (pool, parts): (&Pool, &Parts),
     schema: &'static ModelSchema,
     columns: Vec<&'static str>,
     values: Vec<SqlValue>,
-    this_row: WhereExpr,
+    (pk_field, key): (&'static FieldSchema, SqlValue),
 ) -> Result<u64, WriteFailed> {
+    let row = SelectQuery::by_pk(schema, pk_field.column, key.clone()).visible(parts);
+    gate_row(pool, parts, &row, Some("change"))
+        .await
+        .map_err(WriteFailed::Error)?;
+    let stored = Some((pk_field, &key));
+    hidden_fk((pool, parts), schema, (&columns, &values), stored).await?;
+    let this_row = WhereExpr::Predicate(Filter::new(pk_field.column, Op::Eq, key));
     let mut stamped: Vec<(&'static str, SqlValue)> = columns
         .iter()
         .copied()
@@ -2450,7 +2660,7 @@ async fn update_row(
         .into_iter()
         .map(|(column, value)| crate::core::Assignment::new(column, value))
         .collect();
-    let update_q = crate::core::UpdateQuery::new(schema, set, this_row.clone()).visible();
+    let update_q = crate::core::UpdateQuery::new(schema, set, this_row.clone()).visible(parts);
     match crate::audit::update(pool, &update_q).await {
         Ok(n) => Ok(n),
         // A taken unique value is a form error, as on create (#2073).
@@ -2515,7 +2725,7 @@ async fn handle_update_get(
     csrf: CsrfCookie,
 ) -> Response {
     let page = state.page();
-    let object = match page.object(&state.pool, &pk).await {
+    let object = match page.object(&state.pool, &pk, &parts).await {
         Ok(o) => o,
         Err(resp) => return resp,
     };
@@ -2549,12 +2759,9 @@ async fn handle_update_post(
             .rerender_update(&state.pool, &pk, &form, &errors, &parts)
             .await;
     }
-    let pk_match = WhereExpr::Predicate(Filter {
-        column: pk_field.column,
-        op: Op::Eq,
-        value: pk_or_404!(&state.pool, state.schema, pk_field, &pk),
-    });
-    match update_row(&state.pool, state.schema, columns, values, pk_match).await {
+    let key = pk_or_404!(&state.pool, state.schema, pk_field, &pk);
+    let at = (&state.pool, &parts);
+    match update_row(at, state.schema, columns, values, (pk_field, key)).await {
         Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Ok(_) => {
             let target = substitute_pk(&state.success_url, &pk);
@@ -2725,26 +2932,17 @@ struct FormPage<'a> {
 }
 
 impl FormPage<'_> {
-    /// The row an update page shows, or the 404 / error response.
-    async fn object(&self, pool: &Pool, pk: &str) -> Result<Value, Response> {
+    /// The row an update page shows, or the 404 / 403 / error response.
+    async fn object(&self, pool: &Pool, pk: &str, parts: &Parts) -> Result<Value, Response> {
         let Some(pk_field) = self.schema.primary_key() else {
             return Err(template_error(&format!(
                 "model `{}` has no primary key — UpdateView can't probe by PK",
                 self.schema.table
             )));
         };
-        let key = match stored_pk(pool, self.schema, pk_field, pk).await {
-            Ok(Some(v)) => v,
-            Ok(None) => return Err((StatusCode::NOT_FOUND, "not found").into_response()),
-            Err(e) => return Err(template_error(&format!("read key: {e}"))),
-        };
-        let select_q = SelectQuery::by_pk(self.schema, pk_field.column, key).visible();
         let scalars = listed_scalars(self.schema, &[self.fields, self.context_fields]);
-        match select_one_row_as_json(pool, &select_q, &scalars).await {
-            Ok(Some(r)) => Ok(r),
-            Ok(None) => Err((StatusCode::NOT_FOUND, "not found").into_response()),
-            Err(e) => Err(template_error(&format!("query row: {e}"))),
-        }
+        let item = (self.schema, pk_field);
+        item_object(pool, parts, item, pk, &scalars, Some("change")).await
     }
 
     /// An update form refused: the submitted values over the stored row.
@@ -2756,7 +2954,7 @@ impl FormPage<'_> {
         errors: &HashMap<String, String>,
         parts: &Parts,
     ) -> Response {
-        let object = match self.object(pool, pk).await {
+        let object = match self.object(pool, pk, parts).await {
             Ok(o) => o,
             Err(resp) => return resp,
         };
@@ -3308,10 +3506,11 @@ async fn resolve_fk_displays_pool(
     schema: &'static ModelSchema,
     pool: &Pool,
     object_list: &mut [Value],
+    parts: &Parts,
 ) {
     let lookups = collect_fk_target_lookups(schema, object_list);
     for fk in lookups {
-        let map = match fetch_fk_display_map_pool(&fk, pool).await {
+        let map = match fetch_fk_display_map_pool(&fk, pool, parts).await {
             Ok(m) => m,
             Err(e) => {
                 tracing::debug!(
@@ -3409,18 +3608,26 @@ fn lookup_target_schema(table: &str) -> Option<&'static ModelSchema> {
 async fn fetch_fk_display_map_pool(
     fk: &FkLookup,
     pool: &Pool,
+    parts: &Parts,
 ) -> Result<HashMap<String, Value>, crate::sql::ExecError> {
-    let q = build_fk_display_query(fk);
+    let q = build_fk_display_query(fk, parts);
     let target = match lookup_target_schema(fk.target_table) {
         Some(s) => s,
         None => return Ok(HashMap::new()),
     };
     let fields: Vec<&'static crate::core::FieldSchema> = target.scalar_fields().collect();
-    let rows = select_rows_as_json(pool, &q, &fields).await?;
+    #[cfg_attr(not(feature = "admin"), allow(unused_mut))]
+    let mut rows = select_rows_as_json(pool, &q, &fields).await?;
+    // A target row its "view" hook hides gets no `_display`.
+    #[cfg(feature = "admin")]
+    {
+        let hooks = crate::object_permissions::Hooks::All;
+        rows.retain(|r| hooks.allows(target.table, "view", parts, Some(r)));
+    }
     Ok(extract_fk_display_map(fk, &rows))
 }
 
-fn build_fk_display_query(fk: &FkLookup) -> SelectQuery {
+fn build_fk_display_query(fk: &FkLookup, parts: &Parts) -> SelectQuery {
     // Synthesize a one-off `&'static ModelSchema` to use as the
     // SelectQuery's model — actually no, we need a real schema
     // because select_rows compiles the query against it. Use the
@@ -3429,8 +3636,8 @@ fn build_fk_display_query(fk: &FkLookup) -> SelectQuery {
     let target = lookup_target_schema(fk.target_table)
         .expect("target table existed when collecting lookups");
     // #810 — IN-list lookup via the `by_pk_in` constructor; a target
-    // row its own global scopes hide gets no `_display`.
-    SelectQuery::by_pk_in(target, fk.target_pk_column, fk.distinct_values.clone()).visible()
+    // row its own scopes hide gets no `_display`.
+    SelectQuery::by_pk_in(target, fk.target_pk_column, fk.distinct_values.clone()).visible(parts)
 }
 
 /// v0.38 — operates on JSON rows from `select_rows_as_json`
@@ -3549,49 +3756,87 @@ fn render_bulk_delete_confirm(
 async fn fetch_pks_as_objects_pool(
     schema: &'static ModelSchema,
     pk_field: &'static crate::core::FieldSchema,
-    pool: &Pool,
+    (pool, parts): (&Pool, &Parts),
     pks: &[SqlValue],
     listed: Option<&[String]>,
-) -> Result<Vec<Value>, String> {
+) -> Result<Vec<Value>, Response> {
+    let pks = visible_pks_pool(schema, pk_field, (pool, parts), pks, Some("delete")).await?;
     // #810 — IN-list lookup via the `by_pk_in` constructor.
-    let q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec()).visible();
+    let q = SelectQuery::by_pk_in(schema, pk_field.column, pks).visible(parts);
     let fields = match listed {
         Some(names) => listed_scalars(schema, &[names]),
         None => resolved_fields(schema, None),
     };
-    let rows = select_rows_as_json(pool, &q, &fields)
+    select_rows_as_json(pool, &q, &fields)
         .await
-        .map_err(|e| e.to_string())?;
-    Ok(rows)
+        .map_err(|e| template_error(&format!("fetch confirm rows: {e}")))
 }
 
-/// `pks` narrowed to the rows the view can see ([`Visible`]),
-/// in submitted order — what a custom bulk action receives.
+/// `pks` narrowed to the rows the view can see ([`Visible`], the "view"
+/// hook), in submitted order — what a bulk action receives. A visible row
+/// `action`'s hook refuses refuses the whole action with a 403.
 async fn visible_pks_pool(
     schema: &'static ModelSchema,
     pk_field: &'static crate::core::FieldSchema,
-    pool: &Pool,
+    (pool, parts): (&Pool, &Parts),
     pks: &[SqlValue],
-) -> Result<Vec<SqlValue>, String> {
-    if pks.is_empty() || (schema.global_scopes.is_empty() && schema.soft_delete_column.is_none()) {
+    action: Option<&'static str>,
+) -> Result<Vec<SqlValue>, Response> {
+    let failed = |e: crate::sql::ExecError| template_error(&format!("scope selected rows: {e}"));
+    let parsed = |v: &Value| {
+        let raw = v.as_str().map_or_else(|| v.to_string(), str::to_owned);
+        crate::forms::parse_pk_string(pk_field, &raw).ok()
+    };
+    if pks.is_empty() {
+        return Ok(Vec::new());
+    }
+    let q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec()).visible(parts);
+    #[cfg(feature = "admin")]
+    {
+        use crate::object_permissions::{Hooks, Verdict};
+        if Hooks::All.judges(schema.table, action) {
+            let fields: Vec<_> = schema.scalar_fields().collect();
+            let rows = select_rows_as_json(pool, &q, &fields)
+                .await
+                .map_err(failed)?;
+            let mut admitted = Vec::new();
+            for row in &rows {
+                match Hooks::All.judge(schema.table, parts, row, action) {
+                    Verdict::Hidden => {}
+                    Verdict::Refused => {
+                        return Err((StatusCode::FORBIDDEN, "permission denied").into_response())
+                    }
+                    Verdict::Allowed => admitted.extend(row.get(pk_field.name).and_then(parsed)),
+                }
+            }
+            // Parsed on both sides: a key stored as other text (case, BLOB) still matches.
+            return Ok(pks
+                .iter()
+                .filter(|p| {
+                    parsed(&Value::String(p.to_display_string()))
+                        .is_some_and(|k| admitted.contains(&k))
+                })
+                .cloned()
+                .collect());
+        }
+    }
+    #[cfg(not(feature = "admin"))]
+    let _ = action;
+    if row_scope(schema, parts).is_empty() {
         return Ok(pks.to_vec());
     }
-    let q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec()).visible();
     // The visible rows' own stored keys, as `pks` were bound.
     let visible = match crate::sql::select_stored_uuids(pool, &q, pk_field)
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(failed)?
     {
         Some(stored) => stored,
         None => select_rows_as_json(pool, &q, &[pk_field])
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(failed)?
             .iter()
             .filter_map(|r| r.get(pk_field.name))
-            .filter_map(|v| {
-                let raw = v.as_str().map_or_else(|| v.to_string(), str::to_owned);
-                crate::forms::parse_pk_string(pk_field, &raw).ok()
-            })
+            .filter_map(parsed)
             .collect(),
     };
     Ok(pks
@@ -3601,17 +3846,22 @@ async fn visible_pks_pool(
         .collect())
 }
 
-/// Run the built-in `delete_selected` action through [`delete_rows`]:
-/// `DELETE … WHERE <pk> IN (...)`, or a `deleted_at` stamp on a soft-delete model.
+/// Run the built-in `delete_selected` action through [`delete_rows`] on
+/// the rows the "delete" hook admits: `DELETE … WHERE <pk> IN (...)`, or a
+/// `deleted_at` stamp on a soft-delete model.
 async fn run_delete_selected_pool(
     schema: &'static ModelSchema,
     pk_field: &'static crate::core::FieldSchema,
-    pool: &Pool,
+    (pool, parts): (&Pool, &Parts),
     pks: &[SqlValue],
 ) -> Result<(), Response> {
+    let pks = visible_pks_pool(schema, pk_field, (pool, parts), pks, Some("delete")).await?;
+    if pks.is_empty() {
+        return Ok(());
+    }
     // #810 — `DeleteQuery::by_pk_in` for the DELETE … WHERE pk IN (...) shape.
-    let q = crate::core::DeleteQuery::by_pk_in(schema, pk_field.column, pks.to_vec());
-    delete_rows(pool, q)
+    let q = crate::core::DeleteQuery::by_pk_in(schema, pk_field.column, pks);
+    delete_rows(pool, parts, q)
         .await
         .map(|_| ())
         .map_err(|e| delete_failed(&e))
@@ -4102,31 +4352,16 @@ mod tenant {
             Ok(v) => v,
             Err(msg) => return template_error(&msg),
         };
-        let where_clause = match build_list_where(
-            state.vs.schema,
-            &state.vs.filter_fields,
-            &state.vs.search_fields,
-            &params,
-        ) {
-            Ok(w) => w,
-            Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-        };
-        // #562 — struct-update over SelectQuery::new for the
-        // tenant-side list+filter query (custom WHERE + paginate).
-        let select_q = SelectQuery {
-            where_clause: where_clause.clone(),
-            order_by,
-            limit: Some(page_size),
-            offset: Some(offset),
-            ..SelectQuery::new(state.vs.schema)
-        }
-        .visible();
-        let count_q = crate::core::CountQuery::new(state.vs.schema, where_clause).visible();
-
         // v0.38 — use the tenant's tri-dialect Pool enum; runs the
         // same code on PG / MySQL / SQLite. Routes through
         // select_rows_as_json + count_rows_pool.
         let pool = t.pool().clone();
+        let window = (page_size, offset);
+        let (select_q, count_q) =
+            match super::list_queries(&state.vs, &pool, &parts, &params, order_by, window).await {
+                Ok(q) => q,
+                Err(refused) => return refused,
+            };
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
         let mut object_list = match crate::sql::select_rows_as_json(&pool, &select_q, &fields).await
         {
@@ -4138,7 +4373,7 @@ mod tenant {
             Err(e) => return template_error(&format!("count rows: {e}")),
         };
         if state.vs.fk_display {
-            super::resolve_fk_displays_pool(state.vs.schema, &pool, &mut object_list).await;
+            super::resolve_fk_displays_pool(state.vs.schema, &pool, &mut object_list, &parts).await;
         }
 
         let mut ctx = super::list_context(
@@ -4200,14 +4435,14 @@ mod tenant {
             let objects = match super::fetch_pks_as_objects_pool(
                 state.vs.schema,
                 pk_field,
-                &pool,
+                (&pool, &parts),
                 &pks,
                 state.vs.fields.as_deref(),
             )
             .await
             {
                 Ok(o) => o,
-                Err(e) => return template_error(&format!("fetch confirm rows: {e}")),
+                Err(resp) => return resp,
             };
             return super::render_bulk_delete_confirm(
                 &state.tera,
@@ -4229,9 +4464,11 @@ mod tenant {
             .iter()
             .find(|a| super::same_action_name(&a.name, &action))
         {
-            let pks = match super::visible_pks_pool(state.vs.schema, pk_field, &pool, &pks).await {
+            let at = (&pool, &parts);
+            let pks = match super::visible_pks_pool(state.vs.schema, pk_field, at, &pks, None).await
+            {
                 Ok(v) => v,
-                Err(e) => return template_error(&format!("scope selected rows: {e}")),
+                Err(resp) => return resp,
             };
             match &custom.handler {
                 #[cfg(feature = "postgres")]
@@ -4265,8 +4502,9 @@ mod tenant {
                 }
             }
         } else if action == super::BUILTIN_DELETE_SELECTED {
+            let at = (&pool, &parts);
             if let Err(resp) =
-                super::run_delete_selected_pool(state.vs.schema, pk_field, &pool, &pks).await
+                super::run_delete_selected_pool(state.vs.schema, pk_field, at, &pks).await
             {
                 return resp;
             }
@@ -4307,18 +4545,11 @@ mod tenant {
                 Ok(f) => f,
                 Err(e) => return template_error(&e),
             };
-        // #562 — by_pk constructor for single-PK-lookup shape.
-        let select_q = SelectQuery::by_pk(
-            state.vs.schema,
-            lookup.column,
-            pk_or_404!(t.pool(), state.vs.schema, lookup, &pk),
-        )
-        .visible();
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
-        let object = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &fields).await {
-            Ok(Some(r)) => r,
-            Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
-            Err(e) => return template_error(&format!("query row: {e}")),
+        let item = (state.vs.schema, lookup);
+        let object = match super::item_object(t.pool(), &parts, item, &pk, &fields, None).await {
+            Ok(o) => o,
+            Err(resp) => return resp,
         };
 
         let mut ctx = Context::new();
@@ -4350,18 +4581,12 @@ mod tenant {
                 state.vs.schema.table
             ));
         };
-        // #562 — by_pk constructor for single-PK-lookup shape.
-        let select_q = SelectQuery::by_pk(
-            state.vs.schema,
-            pk_field.column,
-            pk_or_404!(t.pool(), state.vs.schema, pk_field, &pk),
-        )
-        .visible();
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
-        let object = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &fields).await {
-            Ok(Some(r)) => r,
-            Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
-            Err(e) => return template_error(&format!("query row: {e}")),
+        let item = (state.vs.schema, pk_field);
+        let delete = Some("delete");
+        let object = match super::item_object(t.pool(), &parts, item, &pk, &fields, delete).await {
+            Ok(o) => o,
+            Err(resp) => return resp,
         };
         let mut ctx = Context::new();
         ctx.insert("object", &object);
@@ -4373,28 +4598,11 @@ mod tenant {
 
     pub(super) async fn handle_delete_submit_tenant(
         State(state): State<Arc<TenantDeleteViewState>>,
+        parts: Parts,
         Path(pk): Path<String>,
         t: TenantScope,
     ) -> Response {
-        let Some(pk_field) = state.vs.schema.primary_key() else {
-            return template_error(&format!(
-                "model `{}` has no primary key — DeleteView can't delete by PK",
-                state.vs.schema.table
-            ));
-        };
-        let delete_q = crate::core::DeleteQuery::by_pk(
-            state.vs.schema,
-            pk_field.column,
-            pk_or_404!(t.pool(), state.vs.schema, pk_field, &pk),
-        );
-        match delete_rows(t.pool(), delete_q).await {
-            Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
-            Ok(_) => {
-                let target = super::substitute_pk(&state.vs.success_url, &pk);
-                axum::response::Redirect::to(&target).into_response()
-            }
-            Err(e) => super::delete_failed(&e),
-        }
+        super::delete_submit(&state.vs, t.pool(), &parts, &pk).await
     }
 
     // ---------- CreateView / UpdateView ----------
@@ -4454,8 +4662,13 @@ mod tenant {
         }
         // Schema-driven INSERT: nothing else supplies these (#1464).
         crate::forms::stamp_auto_timestamps(state.schema, &mut columns, &mut values);
-        let insert =
-            super::create_insert(t.pool(), state.schema, &state.success_url, columns, values);
+        let insert = super::create_insert(
+            (t.pool(), &parts),
+            state.schema,
+            &state.success_url,
+            columns,
+            values,
+        );
         match insert.await {
             Ok(url) => axum::response::Redirect::to(&url).into_response(),
             Err(super::WriteFailed::Refused(errors)) => {
@@ -4476,7 +4689,7 @@ mod tenant {
         t: TenantScope,
     ) -> Response {
         let page = state.page();
-        let object = match page.object(t.pool(), &pk).await {
+        let object = match page.object(t.pool(), &pk, &parts).await {
             Ok(o) => o,
             Err(resp) => return resp,
         };
@@ -4511,12 +4724,9 @@ mod tenant {
                 .rerender_update(t.pool(), &pk, &form, &errors, &parts)
                 .await;
         }
-        let pk_match = WhereExpr::Predicate(Filter {
-            column: pk_field.column,
-            op: Op::Eq,
-            value: pk_or_404!(t.pool(), state.schema, pk_field, &pk),
-        });
-        match super::update_row(t.pool(), state.schema, columns, values, pk_match).await {
+        let key = pk_or_404!(t.pool(), state.schema, pk_field, &pk);
+        let at = (t.pool(), &parts);
+        match super::update_row(at, state.schema, columns, values, (pk_field, key)).await {
             Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
             Ok(_) => {
                 let target = super::substitute_pk(&state.success_url, &pk);

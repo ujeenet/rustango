@@ -108,11 +108,20 @@ where
     F: FnMut(Vec<SqlValue>) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<C>, ExecError>>,
 {
-    let select = base.clone().compile()?;
-    let batches = in_batches(pool.dialect(), &select, base.is_sliced(), keys)?;
+    let batches = key_batches(pool.dialect(), base, keys)?;
     let split = batches.len() > 1;
     let rows = fetch_batches(batches, fetch).await?;
     Ok(Chunked { rows, split })
+}
+
+/// The `IN` lists [`fetch_in_chunks`] splits `keys` into.
+fn key_batches<T: Model>(
+    dialect: &dyn Dialect,
+    base: &QuerySet<T>,
+    keys: Vec<SqlValue>,
+) -> Result<Vec<Vec<SqlValue>>, ExecError> {
+    let select = base.clone().compile()?;
+    in_batches(dialect, &select, base.is_sliced(), keys)
 }
 
 /// Rows [`fetch_in_chunks`] read over one or more `IN` lists. A collation
@@ -154,7 +163,18 @@ where
     F: FnMut(Vec<SqlValue>) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<C>, ExecError>>,
 {
-    fetch_batches(in_batches(pool.dialect(), base, sliced, keys)?, fetch).await
+    fetch_batches(select_key_batches(pool, base, sliced, keys)?, fetch).await
+}
+
+/// `keys` split into the `IN` lists a schema-level `base` has bind room
+/// for, for callers that read each batch themselves (on a transaction).
+pub(crate) fn select_key_batches(
+    pool: &Pool,
+    base: &SelectQuery,
+    sliced: bool,
+    keys: Vec<SqlValue>,
+) -> Result<Vec<Vec<SqlValue>>, ExecError> {
+    in_batches(pool.dialect(), base, sliced, keys)
 }
 
 async fn fetch_batches<C, F, Fut>(
@@ -903,15 +923,22 @@ pub use tx::{transaction_pool, write_transaction, PoolTx, TxConn};
 
 // One executor for every `_on` method.
 mod on;
-use on::RowRef;
-pub use on::{PoolConn, PooledConn, SqlExecutor};
+pub(crate) use on::RowRef;
+use on::{on_pool, pool_exec, pool_rows};
+pub use on::{write_tx, PoolConn, PooledConn, ReusableExecutor, SqlExecutor, WriteTx};
 
 mod atomic;
+#[cfg(any(feature = "cache", feature = "tenancy"))]
+pub(crate) use atomic::detached;
 #[cfg(feature = "jobs")]
 pub(crate) use atomic::in_any_block;
-pub(crate) use atomic::in_block;
 pub(crate) use atomic::rolled_back;
-pub use atomic::{atomic, atomic_immediate, on_commit, on_commit_pending, AtomicTx, TxGuard};
+#[allow(deprecated)]
+pub use atomic::{
+    atomic, atomic_immediate, atomic_with, in_atomic, on_commit, on_commit_pending, AtomicOptions,
+    AtomicTx, Isolation, TxGuard, TxSetting,
+};
+pub(crate) use atomic::{caught, in_block};
 
 // `&Pool` dispatch. The `_pool` functions below take a [`Pool`],
 // compile SQL through `pool.dialect()` and run it on the matching
@@ -944,7 +971,7 @@ pub(crate) fn bind_query_sqlite<'a>(
 pub async fn insert_pool(pool: &Pool, query: &InsertQuery) -> Result<(), ExecError> {
     query.validate()?;
     let stmt = pool.dialect().compile_insert(query)?;
-    write_pool(pool, &stmt.sql, stmt.params).await?;
+    write_on(pool, &stmt.sql, stmt.params).await?;
     Ok(())
 }
 
@@ -959,14 +986,18 @@ pub async fn insert_or_ignore(pool: &Pool, query: &InsertQuery) -> Result<bool, 
         on_conflict: Some(crate::core::ConflictClause::DoNothing),
         ..query.clone()
     };
-    if let Some(w) = atomic::join(pool).await {
-        let mut w = w?;
-        let inserted = insert_or_ignore_tx(&mut w, &query).await?;
-        w.release().await?;
-        return Ok(inserted);
-    }
+    on_pool!(
+        pool,
+        atomic::Stmt::Write,
+        |tx| insert_or_ignore_tx(tx, &query).await,
+        insert_or_ignore_alone(pool, &query).await
+    )
+}
+
+/// [`insert_or_ignore`] outside an `atomic` block.
+async fn insert_or_ignore_alone(pool: &Pool, query: &InsertQuery) -> Result<bool, ExecError> {
     query.validate()?;
-    let stmt = pool.dialect().compile_insert(&query)?;
+    let stmt = pool.dialect().compile_insert(query)?;
     match pool {
         // A skip reports one affected row here too (CLIENT_FOUND_ROWS),
         // so read the insert id the conflict clause sets instead.
@@ -1029,7 +1060,7 @@ pub(crate) async fn raw_write(
     binds: Vec<SqlValue>,
 ) -> Result<u64, ExecError> {
     crate::sql::refuse_unbindable_values(pool.dialect(), &binds)?;
-    write_pool(pool, sql, binds).await
+    write_on(pool, sql, binds).await
 }
 
 /// Run a raw single-row `INSERT` and return the new row's `id_col`.
@@ -1043,12 +1074,21 @@ pub(crate) async fn raw_insert_id(
     id_col: &str,
 ) -> Result<i64, ExecError> {
     crate::sql::refuse_unbindable_values(pool.dialect(), &binds)?;
-    if let Some(w) = atomic::join(pool).await {
-        let mut w = w?;
-        let id = raw_insert_id_tx(&mut w, sql, binds, id_col).await?;
-        w.release().await?;
-        return Ok(id);
-    }
+    on_pool!(
+        pool,
+        atomic::Stmt::Write,
+        |tx| raw_insert_id_tx(tx, sql, binds, id_col).await,
+        raw_insert_id_alone(pool, sql, binds, id_col).await
+    )
+}
+
+#[cfg(feature = "jobs-postgres")]
+async fn raw_insert_id_alone(
+    pool: &Pool,
+    sql: &str,
+    binds: Vec<SqlValue>,
+    id_col: &str,
+) -> Result<i64, ExecError> {
     match pool {
         // No RETURNING: the id comes from the INSERT's own reply.
         #[cfg(feature = "mysql")]
@@ -1133,12 +1173,18 @@ pub(crate) async fn insert_returning_cow(
     pool: &Pool,
     query: Cow<'_, InsertQuery>,
 ) -> Result<InsertReturningPool, ExecError> {
-    if let Some(w) = atomic::join(pool).await {
-        let mut w = w?;
-        let row = insert_returning_cow_tx(&mut w, query).await?;
-        w.release().await?;
-        return Ok(row);
-    }
+    on_pool!(
+        pool,
+        atomic::Stmt::Write,
+        |tx| insert_returning_cow_tx(tx, query).await,
+        insert_returning_alone(pool, query).await
+    )
+}
+
+async fn insert_returning_alone(
+    pool: &Pool,
+    query: Cow<'_, InsertQuery>,
+) -> Result<InsertReturningPool, ExecError> {
     crate::test_assertions::query_counter::bump();
     query.validate()?;
     if query.returning.is_empty() {
@@ -1325,22 +1371,18 @@ fn sqlite_uuid_key(row: &sqlx::sqlite::SqliteRow, c: &str) -> Result<SqlValue, s
     any(feature = "admin", feature = "tenancy", feature = "template_views")
 ))]
 async fn sqlite_stored_column(
-    sq: &sqlx::SqlitePool,
+    pool: &Pool,
     query: &SelectQuery,
     field: &'static crate::core::FieldSchema,
 ) -> Result<Vec<SqlValue>, ExecError> {
     let query = query.clone().projection(vec![field.column]);
-    crate::test_assertions::query_counter::bump();
-    let stmt = crate::sql::Dialect::compile_select(crate::sql::sqlite::DIALECT, &query)?;
-    let mut q = sqlx::query(&stmt.sql);
-    for v in stmt.params {
-        q = bind_query_sqlite(q, v);
-    }
-    let rows = q.fetch_all(sq).await?;
-    Ok(rows
-        .iter()
-        .map(|row| sqlite_uuid_key(row, field.column))
-        .collect::<Result<_, _>>()?)
+    let stmt = pool.dialect().compile_select(&query)?;
+    run_on(pool, &stmt.sql, stmt.params, |row| match row {
+        RowRef::Sqlite(r) => sqlite_uuid_key(r, field.column),
+        #[allow(unreachable_patterns)]
+        _ => unreachable!("only called on a SQLite pool"),
+    })
+    .await
 }
 
 /// The UUID keys of the rows `query` selects, as stored; `None` where the
@@ -1352,8 +1394,8 @@ pub(crate) async fn select_stored_uuids(
     field: &'static crate::core::FieldSchema,
 ) -> Result<Option<Vec<SqlValue>>, ExecError> {
     #[cfg(feature = "sqlite")]
-    if let (Pool::Sqlite(sq), crate::core::FieldType::Uuid) = (pool, field.ty) {
-        return sqlite_stored_column(sq, query, field).await.map(Some);
+    if let (Pool::Sqlite(_), crate::core::FieldType::Uuid) = (pool, field.ty) {
+        return sqlite_stored_column(pool, query, field).await.map(Some);
     }
     let _ = (pool, query, field);
     Ok(None)
@@ -1383,7 +1425,7 @@ pub(crate) async fn stored_keys(
     keys: Vec<(SqlValue, &str)>,
 ) -> Result<Vec<Option<SqlValue>>, ExecError> {
     #[cfg(feature = "sqlite")]
-    if let (Pool::Sqlite(sq), crate::core::FieldType::Uuid) = (pool, field.ty) {
+    if let (Pool::Sqlite(_), crate::core::FieldType::Uuid) = (pool, field.ty) {
         let uuid_of = |v: &SqlValue| match v {
             SqlValue::Uuid(u) => Some(*u),
             SqlValue::String(s) => uuid::Uuid::parse_str(s).ok(),
@@ -1406,7 +1448,7 @@ pub(crate) async fn stored_keys(
                 })
                 .collect();
             let query = SelectQuery::by_pk_in(model, field.column, binds);
-            for v in sqlite_stored_column(sq, &query, field).await? {
+            for v in sqlite_stored_column(pool, &query, field).await? {
                 if let Some(u) = uuid_of(&v) {
                     let forms = stored.entry(u).or_default();
                     if !forms.contains(&v) {
@@ -1435,7 +1477,7 @@ pub(crate) async fn stored_keys(
 pub async fn update_pool(pool: &Pool, query: &UpdateQuery) -> Result<u64, ExecError> {
     query.validate()?;
     let stmt = pool.dialect().compile_update(query)?;
-    write_pool(pool, &stmt.sql, stmt.params).await
+    write_on(pool, &stmt.sql, stmt.params).await
 }
 
 /// `DELETE` against either backend; returns rows affected.
@@ -1484,7 +1526,7 @@ pub(crate) async fn delete_plan_pool(
     plan: crate::sql::DeletePlan,
 ) -> Result<u64, ExecError> {
     if plan.is_one_statement() {
-        return write_pool(pool, &plan.owner.sql, plan.owner.params).await;
+        return write_on(pool, &plan.owner.sql, plan.owner.params).await;
     }
     atomic(pool, move |tx| {
         Box::pin(async move {
@@ -1563,7 +1605,7 @@ pub(crate) async fn execute_all_or_none(
 ) -> Result<u64, ExecError> {
     if stmts.len() == 1 {
         let stmt = stmts.remove(0);
-        return write_pool(pool, &stmt.sql, stmt.params).await;
+        return write_on(pool, &stmt.sql, stmt.params).await;
     }
     atomic(pool, move |tx| {
         Box::pin(async move {
@@ -1647,11 +1689,23 @@ fn row_chunks(
 /// # Errors
 /// [`ExecError`] if the query is invalid or the driver rejects it.
 pub async fn bulk_update_pool(pool: &Pool, query: &BulkUpdateQuery) -> Result<u64, ExecError> {
+    bulk_update_on(pool, query).await
+}
+
+/// [`bulk_update_pool`] on any [`SqlExecutor`]: its batches in one
+/// transaction (a raw sqlx executor takes one batch only).
+///
+/// # Errors
+/// As [`bulk_update_pool`].
+pub async fn bulk_update_on<'c, E: SqlExecutor<'c>>(
+    exec: E,
+    query: &BulkUpdateQuery,
+) -> Result<u64, ExecError> {
     if query.rows.is_empty() {
         return Ok(0);
     }
-    let stmts = compile_bulk_update_batches(pool.dialect(), Cow::Borrowed(query), usize::MAX)?;
-    execute_all_or_none(pool, stmts).await
+    let stmts = compile_bulk_update_batches(exec.dialect(), Cow::Borrowed(query), usize::MAX)?;
+    exec.run_batches(stmts).await
 }
 
 /// Compile `query` in batches of at most `max` rows that fit the bind cap;
@@ -1696,7 +1750,7 @@ pub async fn raw_execute_pool(
     binds: Vec<SqlValue>,
 ) -> Result<u64, ExecError> {
     crate::sql::refuse_unbindable_values(pool.dialect(), &binds)?;
-    execute_pool(pool, sql, binds).await
+    pool_exec(pool, atomic::Stmt::Plain, sql, binds).await
 }
 
 /// [`raw_execute_pool`] inside an open [`PoolTx`], so several writes
@@ -1760,10 +1814,16 @@ pub async fn raw_execute_tx(
 ///
 /// # Errors
 /// The driver's [`sqlx::Error`], except for the already-exists cases.
-/// Non-driver `ExecError` variants map to `sqlx::Error::Protocol`.
+/// Non-driver `ExecError` variants map to `sqlx::Error::Protocol`. Inside an
+/// [`atomic`] block on a MySQL pool that is the [`ExecError::InAtomic`] refusal:
+/// MySQL would commit the block on DDL.
 pub async fn run_ddl_idempotent(pool: &Pool, ddl: &str) -> Result<(), sqlx::Error> {
+    refuse_ddl_in_block(pool, Ddl::Transactional)
+        .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
     for stmt in ddl.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-        match execute_pool(pool, stmt, Vec::new()).await {
+        // A caught "already exists" must not abort the block on PG.
+        let run = pool_exec(pool, atomic::Stmt::Plain, stmt, Vec::new());
+        match atomic::caught(pool, run).await {
             Ok(_) => {}
             Err(crate::sql::ExecError::Driver(err)) => {
                 // Two ways a re-run can fail with the job already done:
@@ -1792,88 +1852,55 @@ pub async fn run_ddl_idempotent(pool: &Pool, ddl: &str) -> Result<(), sqlx::Erro
 ///
 /// # Errors
 /// The driver's [`sqlx::Error`].
-pub(crate) async fn execute_unprepared_pool(pool: &Pool, sql: &str) -> Result<(), sqlx::Error> {
+pub(crate) async fn execute_unprepared_pool(pool: &Pool, sql: &str) -> Result<(), ExecError> {
     use sqlx::Executor as _;
     crate::test_assertions::query_counter::bump();
-    match pool {
-        #[cfg(feature = "postgres")]
-        Pool::Postgres(p) => p.execute(sqlx::raw_sql(sql)).await.map(drop),
-        #[cfg(feature = "mysql")]
-        Pool::Mysql(p) => p.execute(sqlx::raw_sql(sql)).await.map(drop),
-        #[cfg(feature = "sqlite")]
-        Pool::Sqlite(p) => p.execute(sqlx::raw_sql(sql)).await.map(drop),
+    on_pool!(
+        pool,
+        atomic::Stmt::Plain,
+        |tx| Ok(tx.execute_unprepared(sql).await?),
+        Ok(match pool {
+            #[cfg(feature = "postgres")]
+            Pool::Postgres(p) => p.execute(sqlx::raw_sql(sql)).await.map(drop),
+            #[cfg(feature = "mysql")]
+            Pool::Mysql(p) => p.execute(sqlx::raw_sql(sql)).await.map(drop),
+            #[cfg(feature = "sqlite")]
+            Pool::Sqlite(p) => p.execute(sqlx::raw_sql(sql)).await.map(drop),
+        }?)
+    )
+}
+
+/// Which DDL [`refuse_ddl_in_block`] is asked about.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ddl {
+    /// Runs in a transaction on PG and SQLite; MySQL commits on it.
+    Transactional,
+    /// Cannot run in a transaction anywhere (`CREATE INDEX CONCURRENTLY`).
+    NonTransactional,
+}
+
+/// Refuse DDL that would end or break an `atomic` block on `pool`: any DDL
+/// on MySQL (it commits the block), and `ddl` that no backend runs in a
+/// transaction. PG / SQLite transactional DDL joins the block.
+pub(crate) fn refuse_ddl_in_block(pool: &Pool, ddl: Ddl) -> Result<(), ExecError> {
+    if ddl == Ddl::NonTransactional {
+        return atomic::refuse_in_block(
+            pool,
+            "DDL that cannot run in a transaction",
+            "run it outside the block",
+        );
     }
+    if pool.dialect().name() == "mysql" {
+        return atomic::refuse_in_block(
+            pool,
+            "DDL on MySQL",
+            "MySQL commits the transaction on DDL; run it outside the block",
+        );
+    }
+    Ok(())
 }
 
 // ---- internal dispatch helpers ----
-
-/// Run one ORM write on `pool`; inside an [`atomic`] block on it, in a
-/// savepoint of the block's transaction, so the block's rollback undoes it.
-async fn write_pool(pool: &Pool, sql: &str, binds: Vec<SqlValue>) -> Result<u64, ExecError> {
-    if let Some(w) = atomic::join(pool).await {
-        let mut w = w?;
-        let n = execute_tx(&mut w, sql, binds).await?;
-        w.release().await?;
-        return Ok(n);
-    }
-    execute_pool(pool, sql, binds).await
-}
-
-/// The transaction a multi-statement ORM write runs in: its own, or a
-/// savepoint of the open [`atomic`] block on the same pool.
-#[doc(hidden)]
-pub struct WriteTx(WriteTxConn);
-
-enum WriteTxConn {
-    Own(PoolTx<'static>),
-    Joined(atomic::JoinedWrite),
-}
-
-/// Begin a write on `pool`: a savepoint inside an [`atomic`] block on it,
-/// else [`write_transaction`]. Finish with [`WriteTx::commit`].
-///
-/// # Errors
-/// Driver errors from `BEGIN` / `SAVEPOINT`; [`ExecError::NestedAtomic`]
-/// while the block's guard is held.
-#[doc(hidden)]
-pub async fn write_tx(pool: &Pool) -> Result<WriteTx, ExecError> {
-    match atomic::join(pool).await {
-        Some(w) => Ok(WriteTx(WriteTxConn::Joined(w?))),
-        None => Ok(WriteTx(WriteTxConn::Own(write_transaction(pool).await?))),
-    }
-}
-
-impl WriteTx {
-    /// Commit, or release the block's savepoint (the block commits it).
-    ///
-    /// # Errors
-    /// Driver errors from `COMMIT` / `RELEASE SAVEPOINT`.
-    pub async fn commit(self) -> Result<(), ExecError> {
-        match self.0 {
-            WriteTxConn::Own(tx) => Ok(tx.commit().await?),
-            WriteTxConn::Joined(w) => w.release().await,
-        }
-    }
-}
-
-impl std::ops::Deref for WriteTx {
-    type Target = PoolTx<'static>;
-    fn deref(&self) -> &PoolTx<'static> {
-        match &self.0 {
-            WriteTxConn::Own(tx) => tx,
-            WriteTxConn::Joined(w) => w,
-        }
-    }
-}
-
-impl std::ops::DerefMut for WriteTx {
-    fn deref_mut(&mut self) -> &mut PoolTx<'static> {
-        match &mut self.0 {
-            WriteTxConn::Own(tx) => tx,
-            WriteTxConn::Joined(w) => w,
-        }
-    }
-}
 
 /// `save()`'s UPDATE count: no row matched the PK is `RowNotFound`, not `Ok(0)`.
 #[doc(hidden)]
@@ -2256,11 +2283,11 @@ async fn run_truncate(
     table: &'static str,
     mode: TruncateMode,
 ) -> Result<u64, ExecError> {
-    let mut tx = tx::write_transaction(pool).await?;
+    let mut tx = write_tx(pool).await?;
     let affected = truncate_tx(&mut tx, table, mode).await?;
     tx.commit()
         .await
-        .map_err(|e| truncate_refusal(table, mode, e.into()))?;
+        .map_err(|e| truncate_refusal(table, mode, e))?;
     Ok(affected)
 }
 
@@ -2355,11 +2382,7 @@ where
 {
     let guard = exec.guard()?;
     crate::test_assertions::query_counter::bump();
-    guard.check(
-        exec.fetch_rows(sql, params, decode)
-            .await
-            .map_err(ExecError::from),
-    )
+    guard.check(exec.fetch_rows(sql, params, decode).await)
 }
 
 /// [`run_on`] for a statement that returns no rows: the rows affected.
@@ -2393,40 +2416,22 @@ pub async fn select_rows_pool<T>(pool: &Pool, query: &SelectQuery) -> Result<Vec
 where
     T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
-    crate::test_assertions::query_counter::bump();
     let stmt = pool.dialect().compile_select(query)?;
-    match pool {
+    run_on(pool, &stmt.sql, stmt.params, from_row::<T>).await
+}
+
+/// Decode `row` into `T`, on any backend.
+fn from_row<T>(row: RowRef<'_>) -> Result<T, sqlx::Error>
+where
+    T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow,
+{
+    match row {
         #[cfg(feature = "postgres")]
-        Pool::Postgres(pg) => {
-            let mut q: QueryAs<'_, sqlx::Postgres, T, PgArguments> =
-                sqlx::query_as::<_, T>(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_as(q, v);
-            }
-            Ok(q.fetch_all(pg).await?)
-        }
+        RowRef::Postgres(r) => <T as sqlx::FromRow<'_, PgRow>>::from_row(r),
         #[cfg(feature = "mysql")]
-        Pool::Mysql(my) => {
-            let mut q: sqlx::query::QueryAs<'_, sqlx::MySql, T, sqlx::mysql::MySqlArguments> =
-                sqlx::query_as::<_, T>(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_as_my(q, v);
-            }
-            Ok(q.fetch_all(my).await?)
-        }
+        RowRef::Mysql(r) => <T as sqlx::FromRow<'_, sqlx::mysql::MySqlRow>>::from_row(r),
         #[cfg(feature = "sqlite")]
-        Pool::Sqlite(sq) => {
-            let mut q: sqlx::query::QueryAs<
-                '_,
-                sqlx::Sqlite,
-                T,
-                sqlx::sqlite::SqliteArguments<'_>,
-            > = sqlx::query_as::<_, T>(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_as_sqlite(q, v);
-            }
-            Ok(q.fetch_all(sq).await?)
-        }
+        RowRef::Sqlite(r) => <T as sqlx::FromRow<'_, sqlx::sqlite::SqliteRow>>::from_row(r),
     }
 }
 
@@ -2443,41 +2448,7 @@ pub async fn select_one_row_pool<T>(
 where
     T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
-    crate::test_assertions::query_counter::bump();
-    let stmt = pool.dialect().compile_select(query)?;
-    match pool {
-        #[cfg(feature = "postgres")]
-        Pool::Postgres(pg) => {
-            let mut q: QueryAs<'_, sqlx::Postgres, T, PgArguments> =
-                sqlx::query_as::<_, T>(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_as(q, v);
-            }
-            Ok(q.fetch_optional(pg).await?)
-        }
-        #[cfg(feature = "mysql")]
-        Pool::Mysql(my) => {
-            let mut q: sqlx::query::QueryAs<'_, sqlx::MySql, T, sqlx::mysql::MySqlArguments> =
-                sqlx::query_as::<_, T>(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_as_my(q, v);
-            }
-            Ok(q.fetch_optional(my).await?)
-        }
-        #[cfg(feature = "sqlite")]
-        Pool::Sqlite(sq) => {
-            let mut q: sqlx::query::QueryAs<
-                '_,
-                sqlx::Sqlite,
-                T,
-                sqlx::sqlite::SqliteArguments<'_>,
-            > = sqlx::query_as::<_, T>(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_as_sqlite(q, v);
-            }
-            Ok(q.fetch_optional(sq).await?)
-        }
-    }
+    Ok(select_rows_pool(pool, query).await?.into_iter().next())
 }
 
 /// MySQL-typed `QueryAs` binding helper, symmetric with [`bind_query_as`].
@@ -2512,41 +2483,8 @@ pub async fn fetch_aggregate_pool<T>(
 where
     T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
-    crate::test_assertions::query_counter::bump();
     let stmt = pool.dialect().compile_aggregate(query)?;
-    match pool {
-        #[cfg(feature = "postgres")]
-        Pool::Postgres(pg) => {
-            let mut q: QueryAs<'_, sqlx::Postgres, T, PgArguments> =
-                sqlx::query_as::<_, T>(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_as(q, v);
-            }
-            Ok(q.fetch_all(pg).await?)
-        }
-        #[cfg(feature = "mysql")]
-        Pool::Mysql(my) => {
-            let mut q: sqlx::query::QueryAs<'_, sqlx::MySql, T, sqlx::mysql::MySqlArguments> =
-                sqlx::query_as::<_, T>(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_as_my(q, v);
-            }
-            Ok(q.fetch_all(my).await?)
-        }
-        #[cfg(feature = "sqlite")]
-        Pool::Sqlite(sq) => {
-            let mut q: sqlx::query::QueryAs<
-                '_,
-                sqlx::Sqlite,
-                T,
-                sqlx::sqlite::SqliteArguments<'_>,
-            > = sqlx::query_as::<_, T>(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_as_sqlite(q, v);
-            }
-            Ok(q.fetch_all(sq).await?)
-        }
-    }
+    run_on(pool, &stmt.sql, stmt.params, from_row::<T>).await
 }
 
 // `.values_dict()` / `.values_list()` projection.
@@ -2580,38 +2518,7 @@ where
 {
     crate::sql::refuse_unbindable_values(pool.dialect(), &binds)?;
     crate::test_assertions::query_counter::bump();
-    match pool {
-        #[cfg(feature = "postgres")]
-        Pool::Postgres(pg) => {
-            let mut q: QueryAs<'_, sqlx::Postgres, T, PgArguments> = sqlx::query_as::<_, T>(sql);
-            for v in binds {
-                q = bind_query_as(q, v);
-            }
-            Ok(q.fetch_all(pg).await?)
-        }
-        #[cfg(feature = "mysql")]
-        Pool::Mysql(my) => {
-            let mut q: sqlx::query::QueryAs<'_, sqlx::MySql, T, sqlx::mysql::MySqlArguments> =
-                sqlx::query_as::<_, T>(sql);
-            for v in binds {
-                q = bind_query_as_my(q, v);
-            }
-            Ok(q.fetch_all(my).await?)
-        }
-        #[cfg(feature = "sqlite")]
-        Pool::Sqlite(sq) => {
-            let mut q: sqlx::query::QueryAs<
-                '_,
-                sqlx::Sqlite,
-                T,
-                sqlx::sqlite::SqliteArguments<'_>,
-            > = sqlx::query_as::<_, T>(sql);
-            for v in binds {
-                q = bind_query_as_sqlite(q, v);
-            }
-            Ok(q.fetch_all(sq).await?)
-        }
-    }
+    pool_rows(pool, atomic::Stmt::Plain, sql, binds, from_row::<T>).await
 }
 
 /// [`raw_query_pool`] inside an open [`PoolTx`], for reads that must
@@ -2689,18 +2596,21 @@ pub async fn fetch_dates_pool<T: crate::core::Model + Send>(
     pool: &Pool,
     qs: crate::query::DatesQuerySet<T>,
 ) -> Result<Vec<chrono::NaiveDate>, ExecError> {
+    fetch_dates_on(pool, qs).await
+}
+
+/// [`fetch_dates_pool`] on any [`SqlExecutor`].
+///
+/// # Errors
+/// As [`fetch_dates_pool`].
+pub async fn fetch_dates_on<'c, T: crate::core::Model + Send, E: SqlExecutor<'c>>(
+    exec: E,
+    qs: crate::query::DatesQuerySet<T>,
+) -> Result<Vec<chrono::NaiveDate>, ExecError> {
     let column = qs.resolve_column()?;
-    // The inner SELECT keeps WHERE / JOINs / LIMIT; the outer orders by bucket.
     let bucket = crate::sql::DateBucket::Date(qs.kind);
-    let descending = qs.descending;
-    let stmt = crate::sql::compile_date_buckets(
-        pool.dialect(),
-        &qs.qs.compile()?,
-        column,
-        bucket,
-        descending,
-    )?;
-    let rows: Vec<(chrono::NaiveDate,)> = raw_query_pool(&stmt.sql, stmt.params, pool).await?;
+    let rows: Vec<(chrono::NaiveDate,)> =
+        date_buckets_on(exec, &qs.qs.compile()?, column, bucket, qs.descending).await?;
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
@@ -2714,19 +2624,38 @@ pub async fn fetch_datetimes_pool<T: crate::core::Model + Send>(
     pool: &Pool,
     qs: crate::query::DateTimesQuerySet<T>,
 ) -> Result<Vec<chrono::DateTime<chrono::Utc>>, ExecError> {
+    fetch_datetimes_on(pool, qs).await
+}
+
+/// [`fetch_datetimes_pool`] on any [`SqlExecutor`].
+///
+/// # Errors
+/// As [`fetch_datetimes_pool`].
+pub async fn fetch_datetimes_on<'c, T: crate::core::Model + Send, E: SqlExecutor<'c>>(
+    exec: E,
+    qs: crate::query::DateTimesQuerySet<T>,
+) -> Result<Vec<chrono::DateTime<chrono::Utc>>, ExecError> {
     let column = qs.resolve_column()?;
     let bucket = crate::sql::DateBucket::DateTime(qs.kind);
-    let descending = qs.descending;
-    let stmt = crate::sql::compile_date_buckets(
-        pool.dialect(),
-        &qs.qs.compile()?,
-        column,
-        bucket,
-        descending,
-    )?;
     let rows: Vec<(chrono::DateTime<chrono::Utc>,)> =
-        raw_query_pool(&stmt.sql, stmt.params, pool).await?;
+        date_buckets_on(exec, &qs.qs.compile()?, column, bucket, qs.descending).await?;
     Ok(rows.into_iter().map(|r| r.0).collect())
+}
+
+/// The distinct truncated `column` values of `inner`, one row each.
+async fn date_buckets_on<'c, E: SqlExecutor<'c>, R>(
+    exec: E,
+    inner: &SelectQuery,
+    column: &'static str,
+    bucket: crate::sql::DateBucket,
+    descending: bool,
+) -> Result<Vec<R>, ExecError>
+where
+    R: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send,
+{
+    // The inner SELECT keeps WHERE / JOINs / LIMIT; the outer orders by bucket.
+    let stmt = crate::sql::compile_date_buckets(exec.dialect(), inner, column, bucket, descending)?;
+    run_on(exec, &stmt.sql, stmt.params, from_row).await
 }
 
 /// Gives `QuerySet` a `count(&Pool)` method that works on any backend.
@@ -2855,8 +2784,8 @@ where
 
 mod prefetch;
 pub use prefetch::{
-    __reverse_fk_key, fetch_with_prefetch_filtered, fetch_with_prefetch_pool,
-    fetch_with_prefetch_related, fetch_with_prefetch_related_filtered,
+    __reverse_fk_key, fetch_with_prefetch_filtered, fetch_with_prefetch_on,
+    fetch_with_prefetch_pool, fetch_with_prefetch_related, fetch_with_prefetch_related_filtered,
 };
 
 /// [`select_rows_pool`] that also decodes `select_related` joins.
@@ -3331,16 +3260,17 @@ where
     /// **Writes can skew the result.** Each chunk is its own query,
     /// so a row inserted ahead of the offset can be missed, and a
     /// delete can shift a row into the next chunk and return it
-    /// twice. The chunker only takes a `&Pool`, never a transaction.
-    /// On a table other writers touch, write the LIMIT/OFFSET loop
-    /// yourself with `fetch_on` on a `PoolTx` inside a repeatable-read
-    /// transaction. Read-only or append-only tables are fine.
+    /// twice. Read-only or append-only tables are fine.
     ///
-    /// **`select_for_update()` is lost.** Each chunk runs in its own
-    /// implicit transaction, so row locks are released between
-    /// chunks. For a locked drain, either use `.fetch_on(&mut *tx)`
-    /// when the result fits in memory, or run your own LIMIT/OFFSET
-    /// loop inside the transaction.
+    /// **Inside an [`atomic`] block on the pool** each chunk runs on the
+    /// block's transaction, keeps its row locks, and pages by primary key
+    /// (`WHERE pk > last`) instead of OFFSET, so rows the loop updates out
+    /// of the filter are not skipped. Order by the primary key only, or not
+    /// at all; another order returns [`ExecError::InAtomic`].
+    ///
+    /// **Outside a block `select_for_update()` is lost:** each chunk
+    /// runs in its own implicit transaction, so row locks are released
+    /// between chunks.
     ///
     /// # Errors
     /// [`QueryError`](crate::core::QueryError) if the queryset fails
@@ -3370,6 +3300,7 @@ where
             exhausted: false,
             buffer: std::collections::VecDeque::new(),
             seen: 0,
+            last_key: None,
             _model: std::marker::PhantomData,
         })
     }
@@ -3453,7 +3384,7 @@ where
 }
 
 mod get_or_create;
-pub use get_or_create::{get_or_create, get_or_create_tx, update_or_create};
+pub use get_or_create::{get_or_create, get_or_create_tx, update_or_create, update_or_create_tx};
 
 /// Give the queryset a deterministic order before taking one row.
 /// An existing `order_by` is kept, or flipped when `reverse`;
@@ -3522,6 +3453,30 @@ where
 
 mod iter;
 pub use iter::ChunkedIter;
+
+#[cfg(all(test, feature = "sqlite"))]
+mod ddl_in_block_tests {
+    use super::*;
+
+    /// Non-transactional DDL is refused in a block on any backend; SQLite
+    /// runs transactional DDL in it.
+    #[tokio::test]
+    async fn non_transactional_ddl_is_refused_in_a_block() {
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        assert!(refuse_ddl_in_block(&pool, Ddl::NonTransactional).is_ok());
+        let p = pool.clone();
+        atomic(&pool, move |_tx| {
+            Box::pin(async move {
+                let r = refuse_ddl_in_block(&p, Ddl::NonTransactional);
+                assert!(matches!(r, Err(ExecError::InAtomic { .. })), "got {r:?}");
+                assert!(refuse_ddl_in_block(&p, Ddl::Transactional).is_ok());
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+    }
+}
 
 #[cfg(test)]
 mod in_chunk_tests {

@@ -284,6 +284,7 @@ async fn claim_extra_host_once(
     org_id: i64,
 ) -> Result<Claimed, HostError> {
     let key = ClaimKey::Host(host.to_owned());
+    // A routing claim commits on its own, never with a caller's block.
     let mut tx = crate::sql::write_transaction(registry).await?;
     let (row, _) = lock_key(&mut tx, &key, org_id, false)
         .await
@@ -431,6 +432,7 @@ async fn claim_routing_holding_once(
     held: &[ClaimKey],
     claimant: &mut Claimant<'_>,
 ) -> Result<crate::sql::PoolTx<'static>, ClaimError> {
+    // A routing claim commits on its own, never with a caller's block.
     let mut tx = crate::sql::write_transaction(registry).await?;
     let org_id = claimant.begin(&mut tx).await?;
     lock_and_claim(&mut tx, keys, held, org_id).await?;
@@ -1077,7 +1079,7 @@ impl AdminClaims {
         &self,
         registry: &Pool,
         pk: &crate::core::SqlValue,
-    ) -> Result<crate::sql::PoolTx<'static>, ClaimError> {
+    ) -> Result<crate::sql::WriteTx, ClaimError> {
         self.begin_holding(registry, pk, &[]).await
     }
 
@@ -1091,7 +1093,7 @@ impl AdminClaims {
         registry: &Pool,
         pk: &crate::core::SqlValue,
         hosts: &[String],
-    ) -> Result<crate::sql::PoolTx<'static>, ClaimError> {
+    ) -> Result<crate::sql::WriteTx, ClaimError> {
         let keys: &[ClaimKey] = match self {
             Self::OrgBefore(keys) => keys,
             _ => &[],
@@ -1099,9 +1101,15 @@ impl AdminClaims {
         let held: Vec<ClaimKey> = hosts.iter().cloned().map(ClaimKey::Host).collect();
         match pk_id(pk) {
             Some(id) if !keys.is_empty() || !held.is_empty() => {
-                claim_routing_holding(registry, keys, &held, Claimant::Base(id)).await
+                // The claim keeps its own transaction: see `claim_routing_holding`.
+                Ok(
+                    claim_routing_holding(registry, keys, &held, Claimant::Base(id))
+                        .await?
+                        .into(),
+                )
             }
-            _ => Ok(crate::sql::write_transaction(registry).await?),
+            // No claim: the plain write joins a caller's block.
+            _ => Ok(crate::sql::write_tx(registry).await?),
         }
     }
 

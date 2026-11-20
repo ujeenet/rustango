@@ -212,3 +212,68 @@ async fn a_rejected_bulk_does_not_lock_the_client_out() {
     assert_eq!(status, StatusCode::CREATED, "locked out: {body}");
     assert_eq!(rows(&pool).await, 2);
 }
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "bulk_shelf")]
+#[allow(dead_code)]
+pub struct Shelf {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(soft_delete)]
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "bulk_book")]
+#[allow(dead_code)]
+pub struct Book {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(fk = "bulk_shelf", on = "id")]
+    pub shelf_id: i64,
+}
+
+/// More distinct FK values than SQLite binds in one statement: the target
+/// read is split, and the entry naming a deleted row is still refused.
+#[tokio::test]
+async fn fk_check_past_the_bind_cap_is_split() {
+    const N: usize = 33_000;
+    let pool = Pool::connect("sqlite::memory:").await.expect("sqlite pool");
+    rustango::testkit::matrix::fresh_table::<Shelf>(&pool).await;
+    rustango::testkit::matrix::fresh_table::<Book>(&pool).await;
+    // Seed in one statement; the ORM path is not under test here.
+    rustango::sql::raw_execute_pool(
+        &pool,
+        &format!(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {N}) \
+             INSERT INTO bulk_shelf (id, deleted_at) SELECT i, CASE WHEN i = {N} \
+             THEN '2024-01-01T00:00:00Z' END FROM n"
+        ),
+        Vec::new(),
+    )
+    .await
+    .expect("seed shelves");
+    let app = ViewSet::for_model(Book::SCHEMA, &["id", "shelf_id"])
+        .allow_anonymous()
+        .max_bulk_create(N)
+        .router("/books", pool.clone());
+    let body: Vec<_> = (1..=N)
+        .map(|i| serde_json::json!({ "shelf_id": i }))
+        .collect();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/books")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::Value::from(body).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&bytes);
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{text}");
+    assert!(text.contains(&format!("bulk entry {}", N - 1)), "{text}");
+}

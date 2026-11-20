@@ -249,7 +249,8 @@ cargo run -- create-tenant initech --mode database --database-url "postgres://..
   `application_name=rustango-tenant:<org id>`, pour qu'une purge puisse
   terminer ses sessions. Les pools en mode schéma ne sont pas marqués.
 
-Par défaut : 16 connexions par pool en mode base, 8 par pool en mode schéma,
+Par défaut : 16 connexions par pool en mode base ; par tenant en mode schéma 3 dans le
+pool de requêtes et 1 dans le pool tenu, 16 tenants en cache ;
 aucune connexion inactive gardée au chaud, délai d'inactivité 10 minutes,
 durée de vie maximale 30 minutes, délai d'acquisition 30 secondes.
 

@@ -1,6 +1,7 @@
 //! Who may call a generated route: decided when the router mounts, checked
 //! per request. ViewSet and the template views share it, so a surface over a
-//! model cannot mount with nobody having said who may use it.
+//! model cannot mount with nobody having said who may use it. Routers over no
+//! model take a [`RouteAccess`](crate::access::RouteAccess) argument instead.
 
 use axum::http::request::Parts;
 
@@ -23,6 +24,9 @@ pub(crate) enum Gate {
     /// A signed-in user holding every codename; superusers pass.
     #[cfg_attr(not(feature = "admin"), allow(dead_code))]
     Codenames(Vec<String>),
+    /// A signed-in superuser.
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+    Superuser,
 }
 
 impl Gate {
@@ -34,12 +38,76 @@ impl Gate {
     )]
     pub(crate) async fn check(&self, caller: Option<&Caller>, pool: &Pool) -> Outcome {
         match self {
-            Self::Anonymous => Outcome::Allow,
-            // Mount refuses it; fail closed should one get here anyway.
-            Self::Undecided => Outcome::Forbidden,
-            Self::SignedIn if caller.is_some() => Outcome::Allow,
-            Self::SignedIn => Outcome::Unauthenticated,
             Self::Codenames(codenames) => check_codenames(codenames, caller, pool).await,
+            other => other.check_caller(caller),
+        }
+    }
+
+    /// The check for a rule that reads no codenames; codenames deny here.
+    fn check_caller(&self, caller: Option<&Caller>) -> Outcome {
+        match (self, caller) {
+            (Self::Anonymous, _) => Outcome::Allow,
+            (Self::SignedIn | Self::Superuser | Self::Codenames(_), None) => {
+                Outcome::Unauthenticated
+            }
+            (Self::SignedIn, Some(_)) => Outcome::Allow,
+            (Self::Superuser, Some(c)) if c.is_superuser => Outcome::Allow,
+            // Mount refuses `Undecided`; fail closed should one get here anyway.
+            _ => Outcome::Forbidden,
+        }
+    }
+}
+
+/// Who may read a router that serves no model, such as the debug panel or
+/// metrics. A required argument, so such a router cannot mount undecided.
+#[cfg(feature = "admin")]
+#[derive(Clone, Debug)]
+pub struct RouteAccess(Gate);
+
+#[cfg(feature = "admin")]
+impl RouteAccess {
+    /// Any caller that reaches the router: mount it on an internal port or
+    /// behind your own auth layer.
+    #[must_use]
+    pub fn allow_anonymous() -> Self {
+        Self(Gate::Anonymous)
+    }
+
+    /// Only a signed-in superuser, from `require_auth` / `optional_auth`:
+    /// `401` without a user, `403` for anyone else or a tenant's credential.
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub fn superuser() -> Self {
+        Self(Gate::Superuser)
+    }
+
+    /// `router` with this rule checked before each of its routes.
+    pub(crate) fn guard(self, router: axum::Router) -> axum::Router {
+        if self.0 == Gate::Anonymous {
+            return router;
+        }
+        let gate = std::sync::Arc::new(self.0);
+        router.route_layer(axum::middleware::from_fn_with_state(gate, check_route))
+    }
+}
+
+/// A process-wide route serves no tenant: the caller is checked as on a fixed pool.
+#[cfg(feature = "admin")]
+async fn check_route(
+    axum::extract::State(gate): axum::extract::State<std::sync::Arc<Gate>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let (parts, body) = req.into_parts();
+    let outcome = match Caller::on_fixed(&parts) {
+        Ok(caller) => gate.check_caller(caller.as_ref()),
+        Err(refused) => refused,
+    };
+    match outcome.refusal() {
+        Some(resp) => resp,
+        None => {
+            next.run(axum::extract::Request::from_parts(parts, body))
+                .await
         }
     }
 }
@@ -135,6 +203,25 @@ pub(crate) enum Outcome {
     /// The permission read failed → logged `503`; carries the cause.
     #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
     Unavailable(String),
+}
+
+impl Outcome {
+    /// The plain-text answer to a refused request; `None` to proceed.
+    pub(crate) fn refusal(self) -> Option<axum::response::Response> {
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse as _;
+        Some(match self {
+            Self::Allow => return None,
+            Self::Unauthenticated => {
+                (StatusCode::UNAUTHORIZED, "authentication required").into_response()
+            }
+            Self::Forbidden => (StatusCode::FORBIDDEN, "permission denied").into_response(),
+            Self::Unavailable(e) => {
+                tracing::error!(target: "rustango::access", error = %e, "permission read failed");
+                (StatusCode::SERVICE_UNAVAILABLE, "service unavailable").into_response()
+            }
+        })
+    }
 }
 
 /// Every codename is required; superusers pass. Without `tenancy` there is

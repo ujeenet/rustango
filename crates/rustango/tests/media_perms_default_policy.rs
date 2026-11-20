@@ -15,9 +15,8 @@
 //! `MediaPerms` — the default policy, so the secure path is the
 //! one-liner (#1546).
 //!
-//! `media_router` refuses every request, and the fastest way back to
-//! green from those 403s is an `AllowAll` trait impl: the original hole
-//! with extra steps. These tests are what make the shipped alternative
+//! The router needs an authorizer, and the fastest way to green is an
+//! `AllowAll` trait impl: the original hole with extra steps. These tests are what make the shipped alternative
 //! worth reaching for — and what stops it quietly granting more than it
 //! reads like.
 

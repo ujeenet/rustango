@@ -4,6 +4,54 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.67.0] — 2026-11-19
+
+### Added
+
+- `sql::update_or_create_tx`: `update_or_create` on an open `PoolTx`.
+- `sql::atomic_with(pool, AtomicOptions, f)`: an isolation level (`Isolation`) and PG transaction settings (`TxSetting`, a dotted name set with `set_config(.., true)`) for the outermost block; `atomic` sends what it did.
+- `sql::in_atomic(&pool)`: whether ORM calls on `pool` run in an open `atomic` block.
+- `_on` forms for an open transaction or connection: `sql::bulk_update_on`, `fetch_dates_on`, `fetch_datetimes_on`, `model_shortcuts::increment_one_on`, and the derived `Model::bulk_upsert_on` / `bulk_insert_or_ignore_on`.
+- `sql::fetch_with_prefetch_on`: prefetch on an open `&mut PoolTx` or a held `&mut PoolConn`; the sealed `ReusableExecutor` names what it takes.
+- `ExecError::InAtomic`: an operation refused inside an `atomic` block on its pool. `ExecError::InvalidTxSetting`: a bad `atomic_with` setting name. `LockMode::share` for a shared row lock (`FOR SHARE` / `LOCK IN SHARE MODE`).
+- `access::RouteAccess`: who may read a router that serves no model: `allow_anonymous()`, or with `tenancy` `superuser()`.
+- `ListView::view_hook_scan_cap`: most rows a template list reads to run the "view" hook.
+
+### Changed
+
+- **Breaking:** inside `atomic(&pool, ..)`, reads, raw SQL and DDL given the same `&Pool` run on the block's transaction, as writes already did: they see its uncommitted rows. They cost one statement each; on PG a failed one aborts the block (`AtomicAborted`). Two statements at once on one block, or one while its `TxGuard` is held, return `NestedAtomic`.
+- Raw SQL that commits or ends the block (`COMMIT`, a MySQL implicit commit) makes the block return `AtomicEndedEarly`. `run_ddl_idempotent` in a MySQL block returns an `sqlx::Error::Protocol` with the refusal; a non-atomic migration in any block returns `InAtomic`.
+- SQLite: `atomic` begins the outermost block with `BEGIN IMMEDIATE`, so `atomic_immediate` is deprecated (removed in 0.68.0). A block on a read-only SQLite database now fails at `BEGIN`.
+- Framework writes that opened their own transaction join a caller's `atomic` block on the same pool and roll back with it: audit `emit_one` / `emit_many`, `truncate`, fixtures, ViewSet and admin writes, media, and SSO sign-up and invites. Tenancy registry changes and the database cache still commit on their own.
+- `iterator()` inside a block pages by primary key, so rows the loop updates out of the filter are not skipped; it must be ordered by the primary key there. `get_or_create` / `update_or_create` re-read a lost race with a locking read inside a MySQL block.
+- **Breaking:** `debug_panel::debug_router` and `metrics::metrics_router` take a `RouteAccess`, so they cannot be mounted without saying who may read them.
+- **Breaking:** template views apply queryset scopes and the "view", "change" and "delete" object-permission hooks, as ViewSets do: a hidden row is a 404 on detail, edit and delete pages and is left out of lists, bulk actions and FK display names; a refused one is a 403. Create and update forms refuse an FK to a hidden target row.
+- **Breaking** (struct literals without `..Default::default()`): schema-mode pool defaults now fit a stock Postgres: 16 cached tenants (was 64), each with a 3-connection queries pool and a 1-connection held pool (new knob `scoped_held_pool_max_connections`), 64 connections at worst instead of 1024. A held connection busy past the acquire timeout is `TenancyError::TenantConnBusy` (a 503). Boot on a Postgres registry with schema tenants, or none yet, warns when `max_connections` minus reserved slots is below the budget.
+- **Breaking:** a ViewSet create whose row would fall outside a queryset scope or be hidden by the "view" hook is refused with 403 and writes nothing; it used to succeed.
+
+### Removed
+
+- **Breaking:** the items deprecated in 0.63 and earlier: `register_tx_action*` and `admin_register_tx_action*`, `AdminTxActionFn`, `register_admin_object_permission!`, `register_admin_queryset!`, `BoundedDmlReason::SetOperation`, `i18n::timezone::activate`, `media::router::media_router`, `DistributedLock::for_tenant` / `scoped`, `ScopedCache::for_tenant`, `tenancy::server::run`. See UPGRADING for replacements.
+- **Breaking:** the pre-0.64 tenant lock, idempotency and page-counter keys, and `IdempotencyLayer::legacy_keys`.
+
+### Fixed
+
+- In-memory SQLite: a read after a write inside `atomic` no longer hangs.
+- `get_or_create_tx` that loses an insert race returns the winner's row and leaves the transaction usable, instead of the unique violation.
+- `atomic_with` with settings on MySQL or SQLite names `set_config` in its error, not "operator `transaction settings`".
+- A ViewSet create whose row a global scope or filter backend hides answers 201 with its key instead of an empty body.
+- A ViewSet bulk create checks FK targets with one read per FK column for the whole batch (split at the bind limit), not one per row. A validation error on a later entry now wins over an FK refusal on an earlier one.
+- Admin lists of a `skip_count_for` table no longer run the facet and date-bucket scans: facets are left out and the date hierarchy shows its breadcrumb only.
+- Upload and media file names are cut to 100 bytes, keeping a short extension, so a long client name cannot overflow a key column or a filesystem name limit.
+- An upload body over the request limit is `UploadError::BodyTooLarge` (a 413), not `Parse`.
+- Generated projects that get `uploads` name axum's `multipart` feature themselves.
+- `find(1, &pool)` on an `i64` key (and the other key lookups: `find_or_fail`, `where_key`, `where_key_not`, `find_many_or_fail`) fits the integer to the key's width instead of failing with `TypeMismatch`.
+
+### Documentation
+
+- The naming guide says the bare-name rule covers `Model` and `QuerySet` methods; free functions such as `has_perm_pool` keep their `_pool` suffix until 1.0.
+- New Transactions guide (all four languages): what joins an `atomic` block, savepoints, `on_commit`, failures per backend, SQLite `BEGIN IMMEDIATE`, `atomic_with`, races, the `_on` forms, DDL, iterators and cancellation. The ORM guide no longer points SQLite users to `atomic_immediate`.
+
 ## [0.66.0] — 2026-11-11
 
 ### Added

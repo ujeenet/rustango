@@ -729,6 +729,52 @@ async fn plain_user(pool: &Pool, name: &str, email: &str, superuser: bool) -> i6
 
 /// Open sign-up with a domain rule: a new user lands with the default role,
 /// never a superuser; another domain is refused.
+/// A signup inside a caller's `atomic` block rolls back with it: no user,
+/// no link, no roles.
+async fn signup_rolls_back_with_the_callers_block(pool: &Pool) {
+    let t = tok();
+    let viewer = format!("Viewer-{t}");
+    role(pool, &viewer).await;
+    provider(pool, "open", false).await;
+    set(pool, "open", "signup_mode", SqlValue::String("open".into())).await;
+    set(
+        pool,
+        "open",
+        "default_roles",
+        SqlValue::String(viewer.clone()),
+    )
+    .await;
+    let email = format!("rb-{t}@client.org");
+    let q = pool.clone();
+    let (who, mail) = (format!("rb-{t}"), email.clone());
+    let block = rustango::atomic!(pool, |_tx| {
+        let admitted = tenant(&q, "open", &member(&who, &mail, serde_json::json!({})))
+            .await
+            .unwrap();
+        assert!(admitted.created);
+        Err::<(), _>(rustango::sql::ExecError::Sql(
+            rustango::sql::SqlError::EmptyInList,
+        ))
+    });
+    // A write on a second connection would wait for the block forever.
+    let res = tokio::time::timeout(std::time::Duration::from_secs(10), block)
+        .await
+        .expect("the signup waited for a second connection");
+    assert!(res.is_err());
+    let users = User::objects()
+        .filter("email", email)
+        .fetch(pool)
+        .await
+        .unwrap();
+    assert!(users.is_empty(), "the signup outlived the block");
+    let links = SsoLink::objects()
+        .filter("subject", format!("rb-{t}"))
+        .fetch(pool)
+        .await
+        .unwrap();
+    assert!(links.is_empty(), "the link outlived the block");
+}
+
 async fn open_signup_with_a_domain_rule(pool: &Pool) {
     let t = tok();
     let viewer = format!("Viewer-{t}");
@@ -2154,6 +2200,7 @@ async fn public_rules_body(pool: Pool) {
 tri_dialect_test!(
     setup: setup,
     scenarios: [
+        signup_rolls_back_with_the_callers_block,
         an_email_link_locks_the_password,
         a_role_without_permissions_is_privileged,
         a_partly_migrated_table_refuses,

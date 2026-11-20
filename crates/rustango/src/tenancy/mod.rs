@@ -141,8 +141,7 @@ pub mod session;
 #[cfg(feature = "admin-sso")]
 pub(crate) mod sso;
 pub mod sweep;
-// v0.38 slice 24 — `tenancy::server::run<DB>` is tri-dialect; the
-// operator console runs on whichever backend `TenantPools<DB>` was
+// v0.38 slice 24 — the operator console is tri-dialect: it runs on whichever backend `TenantPools<DB>` was
 // built with, schema-mode dispatch only fires on PG (by language),
 // and the inner admin uses the unified `crate::sql::Pool` enum.
 /// The database rights each storage mode needs, and what a login has.

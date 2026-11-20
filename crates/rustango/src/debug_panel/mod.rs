@@ -6,12 +6,13 @@
 //! ## Quick start
 //!
 //! ```ignore
+//! use rustango::access::RouteAccess;
 //! use rustango::debug_panel::{DebugPanelLayer, DebugPanelRouterExt, debug_router};
 //!
 //! let app = Router::new()
 //!     .route("/api/...", ...)
-//!     .merge(debug_router())                 // serves /__debug__/* — DEV ONLY
-//!     .debug_panel();                        // captures per-request data
+//!     .merge(debug_router(RouteAccess::superuser())) // serves /__debug__/* — DEV ONLY
+//!     .debug_panel();                                // captures per-request data
 //!
 //! // Browse http://localhost:8080/__debug__/
 //! ```
@@ -31,16 +32,19 @@
 //!
 //! **DO NOT mount in production** — the panel exposes request paths,
 //! query patterns, and timing data that an attacker could use for
-//! reconnaissance. Gate the mount on `RUSTANGO_ENV != "prod"`:
+//! reconnaissance. [`debug_router`](crate::debug_panel::debug_router) takes a [`RouteAccess`] saying who may
+//! read it; also gate the mount on `RUSTANGO_ENV != "prod"`:
 //!
 //! ```ignore
 //! let app = Router::new().route(...);
 //! let app = if std::env::var("RUSTANGO_ENV").as_deref() != Ok("prod") {
-//!     app.merge(debug_router()).debug_panel()
+//!     app.merge(debug_router(RouteAccess::superuser())).debug_panel()
 //! } else {
 //!     app
 //! };
 //! ```
+//!
+//! [`RouteAccess`]: crate::access::RouteAccess
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -257,12 +261,15 @@ async fn capture(state: DebugPanelState, req: Request<Body>, next: Next) -> Resp
 
 // ------------------------------------------------------------------ Router
 
-/// Build the debug panel router. Mount under `/__debug__/`.
+/// Build the debug panel router, serving `/__debug__/` to the callers
+/// `access` admits.
 #[must_use]
-pub fn debug_router() -> Router {
-    Router::new()
-        .route("/__debug__/", get(panel_index))
-        .route("/__debug__/data", get(panel_json))
+pub fn debug_router(access: crate::access::RouteAccess) -> Router {
+    access.guard(
+        Router::new()
+            .route("/__debug__/", get(panel_index))
+            .route("/__debug__/data", get(panel_json)),
+    )
 }
 
 async fn panel_index(axum::Extension(state): axum::Extension<DebugPanelState>) -> Html<String> {
@@ -525,6 +532,33 @@ mod tests {
         let html = render_panel(&[r]);
         assert!(!html.contains("A&B'C"), "method must be escaped");
         assert!(html.contains("A&amp;B"), "{html}");
+    }
+
+    /// The panel answers only the caller its access argument admits.
+    #[tokio::test]
+    async fn the_panel_checks_its_access() {
+        use crate::access::RouteAccess;
+        use crate::tenancy::middleware::AuthenticatedUser;
+        use tower::ServiceExt as _;
+        let status = |access: RouteAccess, user: Option<bool>| async move {
+            let mut app = debug_router(access).layer(axum::Extension(DebugPanelState::new()));
+            if let Some(is_superuser) = user {
+                app = app.layer(axum::Extension(AuthenticatedUser {
+                    id: 1,
+                    username: "u".into(),
+                    is_superuser,
+                }));
+            }
+            let req = Request::builder()
+                .uri("/__debug__/data")
+                .body(Body::empty())
+                .unwrap();
+            app.oneshot(req).await.unwrap().status().as_u16()
+        };
+        assert_eq!(status(RouteAccess::superuser(), None).await, 401);
+        assert_eq!(status(RouteAccess::superuser(), Some(false)).await, 403);
+        assert_eq!(status(RouteAccess::superuser(), Some(true)).await, 200);
+        assert_eq!(status(RouteAccess::allow_anonymous(), None).await, 200);
     }
 
     /// Every inline tag carries the nonce; no inline handler is left.

@@ -137,6 +137,24 @@ impl SqlValue {
         }
     }
 
+    /// An integer as `ty`'s width when it fits, so `find(1, ..)` matches an
+    /// `i64` key; anything else, or out of range, is returned unchanged.
+    #[must_use]
+    pub(crate) fn fit_integer(self, ty: FieldType) -> Self {
+        let n = match self {
+            Self::I16(n) => i64::from(n),
+            Self::I32(n) => i64::from(n),
+            Self::I64(n) => n,
+            other => return other,
+        };
+        match ty {
+            FieldType::I64 => Self::I64(n),
+            FieldType::I32 => i32::try_from(n).map_or(self, Self::I32),
+            FieldType::I16 => i16::try_from(n).map_or(self, Self::I16),
+            _ => self,
+        }
+    }
+
     /// The [`FieldType`] for this value, or `None` for `Null` and the
     /// container variants (`List`, `Array`, `RangeLiteral`, `HStore`,
     /// `Vector`, `Geometry`), which carry no checkable type here.

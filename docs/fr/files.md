@@ -143,7 +143,8 @@ acceptée sauf celles qu'un navigateur exécute comme script (`html`, `svg`, `xm
 `js`, … — `uploads::ACTIVE_EXTENSIONS`). La première erreur arrête la boucle et
 supprime les fichiers déjà enregistrés : une requête refusée ne laisse rien. Chaque
 `SavedUpload` porte `key`, `original_filename`, `content_type` (tel que le client
-l'annonce — ne vous y fiez pas) et `size_bytes`.
+l'annonce — ne vous y fiez pas) et `size_bytes`. Un corps au-delà de la limite
+d'axum (`DefaultBodyLimit`) donne `UploadError::BodyTooLarge` : répondez 413.
 
 ```rust
 let cfg = UploadConfig::new("avatars/").allowed_extensions(&["PNG", "Jpg"]);
@@ -396,7 +397,8 @@ sanitize_filename("my photo!.png");      // "my_photo_.png"
 sanitize_filename("");                    // "upload"   — never empty
 ```
 
-`save_uploads` l'applique pour vous ; ne l'appelez directement que si vous construisez des clés à la
+Un nom de plus de 100 octets (`MAX_FILENAME_BYTES`) est coupé, en gardant une
+extension courte. `save_uploads` l'applique pour vous ; ne l'appelez directement que si vous construisez des clés à la
 main.
 
 ---
@@ -648,9 +650,7 @@ let app = axum::Router::new()
     .nest("/media", media_router_with(manager, MediaPerms::new(pool)));
 ```
 
-`media_router(manager)` — l'ancien constructeur — est déprécié (supprimé en 0.65.0) et répond
-désormais `403` sur chaque route. C'est un changement de comportement
-délibéré en 0.57.7 : auparavant ces routes ne prenaient aucun extracteur
+Il n'existe pas de routeur sans politique. Avant 0.57.7, ces routes ne prenaient aucun extracteur
 d'authentification, d'autorisation ni de tenant, si bien que
 `GET /media/{id}` renvoyait la ligne **et une URL de téléchargement S3
 présignée** à quiconque savait deviner un entier, et `POST /uploads/begin`

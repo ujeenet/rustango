@@ -143,7 +143,8 @@ extensión salvo las que un navegador ejecuta como script (`html`, `svg`, `xml`,
 `js`, … — `uploads::ACTIVE_EXTENSIONS`). El primer error detiene el bucle y borra
 los archivos ya guardados, así que una petición rechazada no deja nada. Cada
 `SavedUpload` lleva `key`, `original_filename`, `content_type` (lo que dice el
-cliente — no te fíes) y `size_bytes`.
+cliente — no te fíes) y `size_bytes`. Un cuerpo que pasa el límite de axum
+(`DefaultBodyLimit`) da `UploadError::BodyTooLarge`: responde con 413.
 
 ```rust
 let cfg = UploadConfig::new("avatars/").allowed_extensions(&["PNG", "Jpg"]);
@@ -390,7 +391,8 @@ sanitize_filename("my photo!.png");      // "my_photo_.png"
 sanitize_filename("");                    // "upload"   — never empty
 ```
 
-`save_uploads` lo aplica por ti; llámalo directamente solo si construyes claves a mano.
+Un nombre de más de 100 bytes (`MAX_FILENAME_BYTES`) se recorta y conserva una
+extensión corta. `save_uploads` lo aplica por ti; llámalo directamente solo si construyes claves a mano.
 
 ---
 
@@ -634,9 +636,7 @@ let app = axum::Router::new()
     .nest("/media", media_router_with(manager, MediaPerms::new(pool)));
 ```
 
-`media_router(manager)` — el constructor antiguo — está obsoleto (se elimina en 0.65.0) y ahora
-responde `403` en cada ruta. Es un cambio de comportamiento deliberado en
-0.57.7: antes, esas rutas no tomaban ningún extractor de autenticación,
+No existe un router sin política. Antes de 0.57.7, esas rutas no tomaban ningún extractor de autenticación,
 autorización ni tenant, así que `GET /media/{id}` devolvía la fila **y una
 URL de descarga prefirmada de S3** a cualquiera capaz de adivinar un entero,
 y `POST /uploads/begin` emitía un `PUT` prefirmado para un prefijo de clave

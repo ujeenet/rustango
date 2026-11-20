@@ -276,7 +276,8 @@ cargo run -- create-tenant initech --mode database --database-url "postgres://..
   `application_name=rustango-tenant:<org id>`, so a purge can end its
   sessions. Schema-mode pools are not tagged.
 
-Defaults: 16 connections per database-mode pool, 8 per schema-mode pool,
+Defaults: 16 connections per database-mode pool; per schema-mode tenant 3 in the
+queries pool and 1 in the held pool, 16 tenants cached;
 no idle connections kept warm, idle timeout 10 minutes, max lifetime
 30 minutes, acquire timeout 30 seconds.
 

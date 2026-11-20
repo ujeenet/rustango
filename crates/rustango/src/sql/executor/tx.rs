@@ -30,6 +30,8 @@ use crate::sql::{Pool, PoolId};
 pub struct PoolTx<'a> {
     pub(crate) conn: TxConn<'a>,
     pool: PoolId,
+    /// Savepoints [`Self::next_savepoint`] has named so far.
+    savepoints: usize,
 }
 
 /// A driver connection a [`PoolTx`] can begin on.
@@ -54,6 +56,17 @@ begin_tx!("postgres", sqlx::PgConnection, Postgres);
 begin_tx!("mysql", sqlx::MySqlConnection, Mysql);
 begin_tx!("sqlite", sqlx::SqliteConnection, Sqlite);
 
+/// What [`PoolTx::status`] found on the server.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TxStatus {
+    Open,
+    /// PG: a failed statement aborted it; only a rollback remains.
+    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
+    Failed,
+    /// No transaction any more: committed, or rolled back by the server.
+    Ended,
+}
+
 /// The driver-typed transaction inside a [`PoolTx`].
 #[non_exhaustive]
 pub enum TxConn<'a> {
@@ -68,7 +81,18 @@ pub enum TxConn<'a> {
 impl<'a> PoolTx<'a> {
     /// `conn` opened on `pool`.
     pub(crate) fn new(conn: TxConn<'a>, pool: PoolId) -> Self {
-        Self { conn, pool }
+        Self {
+            conn,
+            pool,
+            savepoints: 0,
+        }
+    }
+
+    /// A quoted savepoint name no earlier call on this transaction used.
+    pub(crate) fn next_savepoint(&mut self, prefix: &str) -> String {
+        self.savepoints += 1;
+        self.dialect()
+            .quote_ident(&format!("{prefix}_{}", self.savepoints))
     }
 
     /// Begin on `conn`, a connection checked out of `pool`.
@@ -135,27 +159,49 @@ impl<'a> PoolTx<'a> {
         }
     }
 
-    /// `false` when the server already ended this transaction: PG after a
-    /// failed statement (its COMMIT would silently roll back), MySQL after a
-    /// deadlock, timeout rollback or implicit DDL commit (later statements
-    /// autocommit). Two round trips on MySQL, one on PG; SQLite reports
-    /// its rollbacks through [`Self::on_sqlite_rollback`] instead.
-    pub(crate) async fn still_open(&mut self) -> bool {
+    /// Whether the server still holds this transaction open: PG fails it
+    /// after a failed statement (its COMMIT would silently roll back); a raw
+    /// `COMMIT`, a MySQL implicit DDL commit or a deadlock ends it, and later
+    /// statements autocommit. One round trip on PG and SQLite, two on MySQL.
+    pub(crate) async fn status(&mut self) -> TxStatus {
         match &mut self.conn {
             #[cfg(feature = "postgres")]
-            TxConn::Postgres(_) => self.execute_unprepared("SELECT 1").await.is_ok(),
+            TxConn::Postgres(_) => {
+                // One simple query: outside a transaction SAVEPOINT is 25P01,
+                // in a failed one 25P02.
+                let probe = "SAVEPOINT rustango_probe; RELEASE SAVEPOINT rustango_probe";
+                match self.execute_unprepared(probe).await {
+                    Ok(()) => TxStatus::Open,
+                    Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("25P01") => {
+                        TxStatus::Ended
+                    }
+                    Err(_) => TxStatus::Failed,
+                }
+            }
             #[cfg(feature = "mysql")]
             TxConn::Mysql(tx) => {
                 // sqlx checks the server's in-transaction flag after its
                 // SAVEPOINT; MySQL has no `@@in_transaction` to read.
                 use sqlx::Connection as _;
-                match (**tx).begin().await {
+                let open = match (**tx).begin().await {
                     Ok(probe) => probe.commit().await.is_ok(),
                     Err(_) => false,
+                };
+                if open {
+                    TxStatus::Open
+                } else {
+                    TxStatus::Ended
                 }
             }
             #[cfg(feature = "sqlite")]
-            TxConn::Sqlite(_) => true,
+            TxConn::Sqlite(_) => {
+                // BEGIN fails inside a transaction. Outside one it opens a new
+                // one, which the block's rollback then ends.
+                match self.execute_unprepared("BEGIN").await {
+                    Ok(()) => TxStatus::Ended,
+                    Err(_) => TxStatus::Open,
+                }
+            }
         }
     }
 

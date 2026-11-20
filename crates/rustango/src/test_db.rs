@@ -194,6 +194,7 @@ pub async fn truncate_tables(pool: &Pool, tables: &[&str]) -> Result<(), ExecErr
     if tables.is_empty() {
         return Ok(());
     }
+    // A test reset commits on its own.
     let mut tx = write_transaction(pool).await?;
     for sql in pool.dialect().clear_tables_sql(tables) {
         raw_execute_tx(&mut tx, &sql, Vec::new()).await?;

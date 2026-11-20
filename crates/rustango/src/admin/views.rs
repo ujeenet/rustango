@@ -847,7 +847,9 @@ pub(crate) async fn table_view(
     // toggles `?<col>=<value>`: clicking the active value clears the
     // filter, clicking another value swaps to it.
     let show_all_facet = params.get("facet_show_all").map(String::as_str);
-    let facets_ctx: Vec<serde_json::Value> = if aggregates_withheld {
+    // A `skip_count_for` table is too big for the facet and date-bucket scans too.
+    let big_table = state.count_skipped_for_table(model.table);
+    let facets_ctx: Vec<serde_json::Value> = if aggregates_withheld || big_table {
         Vec::new()
     } else {
         compute_facets(
@@ -867,16 +869,16 @@ pub(crate) async fn table_view(
 
     // Date-hierarchy strip: the breadcrumb plus the child buckets at
     // the current drill level (year, month or day). One GROUP BY
-    // query, narrowed by the parent level's WHERE.
+    // query, narrowed by the parent level's WHERE; a big table gets the breadcrumb only.
     let date_hierarchy_ctx: Option<serde_json::Value> =
         if admin_cfg.date_hierarchy.is_empty() || aggregates_withheld {
             None
         } else {
-            let source = SelectQuery {
+            let source = (!big_table).then(|| SelectQuery {
                 where_clause: where_clause.clone(),
                 search: search.clone(),
                 ..SelectQuery::new(model)
-            };
+            });
             compute_date_hierarchy(&state, model, &admin_cfg, date_sel, &list_query, source).await?
         };
 
@@ -1421,7 +1423,7 @@ async fn compute_date_hierarchy(
     admin_cfg: &crate::core::AdminConfig,
     sel: crate::admin::date_hierarchy::DateSelection,
     list_query: &ListQuery,
-    source: SelectQuery,
+    source: Option<SelectQuery>,
 ) -> Result<Option<serde_json::Value>, AdminError> {
     use crate::admin::date_hierarchy::{range, DateSelection, DrillLevel};
 
@@ -1487,7 +1489,8 @@ async fn compute_date_hierarchy(
     }
 
     // ---------- Children ---------------------------------------------------
-    let Some(level) = DrillLevel::for_selection(sel) else {
+    // No `source`: the breadcrumb only, no bucket scans.
+    let (Some(level), Some(source)) = (DrillLevel::for_selection(sel), source) else {
         return Ok(Some(serde_json::json!({
             "field": field_name,
             "crumbs": crumbs,
@@ -2211,7 +2214,7 @@ pub(crate) async fn create_submit(
     #[cfg(feature = "tenancy")]
     let mut retry = claims.retries();
     let (mut tx, pk, deferred) = loop {
-        let mut tx = match crate::sql::write_transaction(&state.pool).await {
+        let mut tx = match crate::sql::write_tx(&state.pool).await {
             Ok(tx) => tx,
             Err(e) => return Ok(refused(write_error(model, &e)).await),
         };
@@ -2780,7 +2783,7 @@ pub(crate) async fn update_submit(
             Err(e) => return Ok(refused(claim_refusal(model, e)).await),
         };
         #[cfg(not(feature = "tenancy"))]
-        let mut tx = match crate::sql::write_transaction(&state.pool).await {
+        let mut tx = match crate::sql::write_tx(&state.pool).await {
             Ok(tx) => tx,
             Err(e) => return Ok(refused(write_error(model, &e)).await),
         };
@@ -2969,7 +2972,7 @@ pub(super) async fn hidden_fk_refusal(
 
 /// A failed ROLLBACK must not replace the refusal with a 500; dropping
 /// the connection discards the tx anyway.
-async fn rollback_quietly(tx: crate::sql::PoolTx<'static>, table: &str) {
+async fn rollback_quietly(tx: crate::sql::WriteTx, table: &str) {
     if let Err(e) = tx.rollback().await {
         tracing::warn!(target: "rustango::admin", error = %e, table, "admin edit rollback failed");
     }
@@ -3041,7 +3044,7 @@ pub(crate) async fn delete_submit(
     let emit = crate::audit::DiffEmit::for_model(model);
     #[cfg(feature = "sso")]
     let links = user_links(&state, model).await?;
-    let mut tx = crate::sql::write_transaction(&state.pool).await?;
+    let mut tx = crate::sql::write_tx(&state.pool).await?;
     #[cfg(feature = "tenancy")]
     let operators = match crate::tenancy::operators::AdminOperatorWrite::lock(
         &mut tx,
@@ -3368,7 +3371,7 @@ pub(crate) async fn action_submit(
             // The handler writes in the action's transaction; an audited
             // model's entries commit with it.
             let emit = crate::audit::DiffEmit::for_model(model);
-            let mut tx = crate::sql::write_transaction(&state.pool).await?;
+            let mut tx = crate::sql::write_tx(&state.pool).await?;
             // The principal the hooks above saw, and only the rows they passed.
             let actor = crate::object_permissions::Actor::of(&parts);
             let ctx = super::ActionCtx::new(
@@ -3411,7 +3414,7 @@ pub(crate) async fn action_submit(
         BuiltinWrite::HardDelete => user_links(&state, model).await?,
         BuiltinWrite::Mark(..) => None,
     };
-    let mut tx = crate::sql::write_transaction(&state.pool).await?;
+    let mut tx = crate::sql::write_tx(&state.pool).await?;
     #[cfg(feature = "tenancy")]
     let operators = match crate::tenancy::operators::AdminOperatorWrite::lock(
         &mut tx,

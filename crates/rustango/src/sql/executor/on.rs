@@ -4,7 +4,7 @@
 use futures_util::future::BoxFuture;
 use futures_util::stream::{BoxStream, TryStreamExt as _};
 
-use super::atomic::{self, Gate};
+use super::atomic::{self, Gate, Stmt};
 use super::{Dialect, ExecError, InsertReturningPool, PoolTx, TxConn};
 use crate::core::{BulkInsertQuery, InsertQuery, SqlValue};
 use crate::sql::{DeletePlan, Pool};
@@ -128,7 +128,7 @@ pub enum RowRef<'r> {
 async fn drain<R, U>(
     mut rows: BoxStream<'_, Result<R, sqlx::Error>>,
     mut decode: impl FnMut(&R) -> Result<U, sqlx::Error>,
-) -> Result<Vec<U>, sqlx::Error> {
+) -> Result<Vec<U>, ExecError> {
     let mut out = Vec::new();
     while let Some(row) = rows.try_next().await? {
         out.push(decode(&row)?);
@@ -167,7 +167,7 @@ pub trait SqlExecutor<'c>: sealed::Sealed<'c> + Send + Sized {
         sql: &'q str,
         params: Vec<SqlValue>,
         decode: F,
-    ) -> BoxFuture<'e, Result<Vec<U>, sqlx::Error>>
+    ) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
     where
         'c: 'e,
         U: Send + 'e,
@@ -202,6 +202,36 @@ pub trait SqlExecutor<'c>: sealed::Sealed<'c> + Send + Sized {
         Box::pin(async move {
             let rows = super::run_on(self, &page.sql, page.params, decode).await?;
             Ok((rows, None))
+        })
+    }
+
+    /// Runs `stmts` all or none; returns the rows they affected. One
+    /// statement runs alone; several need a transaction this executor can
+    /// open, so a raw sqlx executor refuses them.
+    #[doc(hidden)]
+    fn run_batches<'e>(
+        self,
+        mut stmts: Vec<crate::sql::CompiledStatement>,
+    ) -> BoxFuture<'e, Result<u64, ExecError>>
+    where
+        'c: 'e,
+        Self: 'e,
+    {
+        let dialect = self.dialect().name();
+        Box::pin(async move {
+            match stmts.len() {
+                0 => Ok(0),
+                1 => {
+                    let stmt = stmts.remove(0);
+                    super::write_on(self, &stmt.sql, stmt.params).await
+                }
+                _ => Err(ExecError::Sql(
+                    crate::sql::SqlError::OperatorNotSupportedInDialect {
+                        op: "a multi-statement write on a raw sqlx executor",
+                        dialect,
+                    },
+                )),
+            }
         })
     }
 
@@ -253,6 +283,57 @@ pub trait SqlExecutor<'c>: sealed::Sealed<'c> + Send + Sized {
 
 mod sealed {
     pub trait Sealed<'c> {}
+    pub trait Reusable {}
+}
+
+/// What the multi-statement `_on` forms run on: `&Pool`, `&mut PoolConn`
+/// or `&mut PoolTx`, each statement in turn on the same one. Sealed.
+pub trait ReusableExecutor: sealed::Reusable + Send {
+    /// The executor one statement takes.
+    #[doc(hidden)]
+    type Exec<'a>: SqlExecutor<'a>
+    where
+        Self: 'a;
+
+    /// Lend this executor to one statement.
+    #[doc(hidden)]
+    fn again(&mut self) -> Self::Exec<'_>;
+}
+
+impl sealed::Reusable for &Pool {}
+impl ReusableExecutor for &Pool {
+    type Exec<'a>
+        = &'a Pool
+    where
+        Self: 'a;
+
+    fn again(&mut self) -> &Pool {
+        self
+    }
+}
+
+impl sealed::Reusable for &mut PoolConn {}
+impl ReusableExecutor for &mut PoolConn {
+    type Exec<'a>
+        = &'a mut PoolConn
+    where
+        Self: 'a;
+
+    fn again(&mut self) -> &mut PoolConn {
+        self
+    }
+}
+
+impl<'t> sealed::Reusable for &mut PoolTx<'t> {}
+impl<'t> ReusableExecutor for &mut PoolTx<'t> {
+    type Exec<'a>
+        = &'a mut PoolTx<'t>
+    where
+        Self: 'a;
+
+    fn again(&mut self) -> &mut PoolTx<'t> {
+        self
+    }
 }
 
 #[cfg(feature = "postgres")]
@@ -261,7 +342,7 @@ fn pg_rows<'c: 'e, 'e, 'q: 'e, E, U, F>(
     sql: &'q str,
     params: Vec<SqlValue>,
     mut decode: F,
-) -> BoxFuture<'e, Result<Vec<U>, sqlx::Error>>
+) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
 where
     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
     U: Send + 'e,
@@ -277,7 +358,7 @@ fn my_rows<'c: 'e, 'e, 'q: 'e, E, U, F>(
     sql: &'q str,
     params: Vec<SqlValue>,
     mut decode: F,
-) -> BoxFuture<'e, Result<Vec<U>, sqlx::Error>>
+) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
 where
     E: sqlx::Executor<'c, Database = sqlx::MySql>,
     U: Send + 'e,
@@ -297,7 +378,7 @@ fn sq_rows<'c: 'e, 'e, 'q: 'e, E, U, F>(
     sql: &'q str,
     params: Vec<SqlValue>,
     mut decode: F,
-) -> BoxFuture<'e, Result<Vec<U>, sqlx::Error>>
+) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
 where
     E: sqlx::Executor<'c, Database = sqlx::Sqlite>,
     U: Send + 'e,
@@ -388,6 +469,71 @@ macro_rules! fetch_rows_or_count {
     };
 }
 
+/// Run one `$stmt` on `$pool`: `$joined`, with `$tx` the open `atomic`
+/// block's transaction, if there is one, else `$alone`. Every `&Pool`
+/// statement joins a block through here, so all get the same savepoint,
+/// gate and one-statement-at-a-time rules ([`atomic::Joined`]).
+macro_rules! on_pool {
+    ($pool:expr, $stmt:expr, |$tx:ident| $joined:expr, $alone:expr $(,)?) => {
+        match $crate::sql::executor::atomic::join($pool, $stmt).await {
+            Some(joined) => {
+                let mut joined = joined?;
+                let r = {
+                    let $tx: &mut $crate::sql::PoolTx<'static> = &mut joined;
+                    $joined
+                };
+                joined.finish(r).await
+            }
+            None => $alone,
+        }
+    };
+}
+pub(super) use on_pool;
+
+/// Rows of one `stmt` on `pool`, on its open `atomic` block if any.
+pub(super) fn pool_rows<'e, U, F>(
+    pool: &'e Pool,
+    stmt: Stmt,
+    sql: &'e str,
+    params: Vec<SqlValue>,
+    decode: F,
+) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
+where
+    U: Send + 'e,
+    F: FnMut(RowRef<'_>) -> Result<U, sqlx::Error> + Send + 'e,
+{
+    Box::pin(async move {
+        on_pool!(
+            pool,
+            stmt,
+            |tx| tx.fetch_rows(sql, params, decode).await,
+            match pool {
+                #[cfg(feature = "postgres")]
+                Pool::Postgres(p) => pg_rows(p, sql, params, decode).await,
+                #[cfg(feature = "mysql")]
+                Pool::Mysql(p) => my_rows(p, sql, params, decode).await,
+                #[cfg(feature = "sqlite")]
+                Pool::Sqlite(p) => sq_rows(p, sql, params, decode).await,
+            }
+        )
+    })
+}
+
+/// Rows affected by one `stmt` on `pool`, on its open `atomic` block if any.
+pub(super) async fn pool_exec(
+    pool: &Pool,
+    stmt: Stmt,
+    sql: &str,
+    params: Vec<SqlValue>,
+) -> Result<u64, ExecError> {
+    on_pool!(
+        pool,
+        stmt,
+        |tx| super::execute_tx(tx, sql, params).await,
+        super::execute_pool(pool, sql, params).await
+    )
+}
+
 impl<'c> sealed::Sealed<'c> for &'c Pool {}
 impl<'c> SqlExecutor<'c> for &'c Pool {
     fn dialect(&self) -> &'static dyn Dialect {
@@ -401,20 +547,13 @@ impl<'c> SqlExecutor<'c> for &'c Pool {
         sql: &'q str,
         params: Vec<SqlValue>,
         decode: F,
-    ) -> BoxFuture<'e, Result<Vec<U>, sqlx::Error>>
+    ) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
     where
         'c: 'e,
         U: Send + 'e,
         F: FnMut(RowRef<'_>) -> Result<U, sqlx::Error> + Send + 'e,
     {
-        match self {
-            #[cfg(feature = "postgres")]
-            Pool::Postgres(p) => pg_rows(p, sql, params, decode),
-            #[cfg(feature = "mysql")]
-            Pool::Mysql(p) => my_rows(p, sql, params, decode),
-            #[cfg(feature = "sqlite")]
-            Pool::Sqlite(p) => sq_rows(p, sql, params, decode),
-        }
+        pool_rows(self, Stmt::Plain, sql, params, decode)
     }
 
     fn execute_rows<'e, 'q: 'e>(
@@ -425,8 +564,7 @@ impl<'c> SqlExecutor<'c> for &'c Pool {
     where
         'c: 'e,
     {
-        // Joins an open `atomic` block on this pool.
-        Box::pin(super::write_pool(self, sql, params))
+        Box::pin(pool_exec(self, Stmt::Write, sql, params))
     }
 
     fn runs_plans(&self) -> bool {
@@ -438,6 +576,17 @@ impl<'c> SqlExecutor<'c> for &'c Pool {
         'c: 'e,
     {
         Box::pin(super::delete_plan_pool(self, plan))
+    }
+
+    fn run_batches<'e>(
+        self,
+        stmts: Vec<crate::sql::CompiledStatement>,
+    ) -> BoxFuture<'e, Result<u64, ExecError>>
+    where
+        'c: 'e,
+        Self: 'e,
+    {
+        Box::pin(super::execute_all_or_none(self, stmts))
     }
 
     fn insert_returning<'e>(
@@ -462,11 +611,91 @@ impl<'c> SqlExecutor<'c> for &'c Pool {
         Self: 'e,
     {
         Box::pin(async move {
-            let mut tx = super::write_tx(self).await?;
+            let mut tx = write_tx(self).await?;
             let rows = super::bulk_insert_rows_tx(&mut tx, std::borrow::Cow::Owned(query)).await?;
             tx.commit().await?;
             Ok(rows)
         })
+    }
+}
+
+/// The transaction a multi-statement ORM write runs in: its own, or a
+/// savepoint of the open [`atomic`](super::atomic()) block on the same pool.
+#[doc(hidden)]
+pub struct WriteTx(WriteTxConn);
+
+enum WriteTxConn {
+    Own(PoolTx<'static>),
+    Joined(atomic::Joined),
+}
+
+/// Begin a write on `pool`: a savepoint inside an [`atomic`](super::atomic())
+/// block on it, else [`write_transaction`](super::write_transaction).
+/// Finish with [`WriteTx::commit`].
+///
+/// # Errors
+/// Driver errors from `BEGIN` / `SAVEPOINT`; [`ExecError::NestedAtomic`]
+/// while the block's guard is held.
+#[doc(hidden)]
+pub async fn write_tx(pool: &Pool) -> Result<WriteTx, ExecError> {
+    match atomic::join(pool, Stmt::Write).await {
+        Some(w) => Ok(WriteTx(WriteTxConn::Joined(w?))),
+        None => Ok(WriteTx(WriteTxConn::Own(
+            super::write_transaction(pool).await?,
+        ))),
+    }
+}
+
+impl WriteTx {
+    /// Commit, or release the block's savepoint (the block commits it).
+    ///
+    /// # Errors
+    /// Driver errors from `COMMIT` / `RELEASE SAVEPOINT`.
+    pub async fn commit(self) -> Result<(), ExecError> {
+        match self.0 {
+            WriteTxConn::Own(tx) => Ok(tx.commit().await?),
+            WriteTxConn::Joined(w) => w.release().await,
+        }
+    }
+
+    /// Roll back, or undo the block's savepoint on its next use.
+    ///
+    /// # Errors
+    /// Driver errors from `ROLLBACK`.
+    pub async fn rollback(self) -> Result<(), ExecError> {
+        match self.0 {
+            WriteTxConn::Own(tx) => Ok(tx.rollback().await?),
+            WriteTxConn::Joined(w) => {
+                drop(w);
+                Ok(())
+            }
+        }
+    }
+}
+
+/// A transaction of its own, such as a registry claim's.
+impl From<PoolTx<'static>> for WriteTx {
+    fn from(tx: PoolTx<'static>) -> Self {
+        Self(WriteTxConn::Own(tx))
+    }
+}
+
+impl std::ops::Deref for WriteTx {
+    type Target = PoolTx<'static>;
+    fn deref(&self) -> &PoolTx<'static> {
+        match &self.0 {
+            WriteTxConn::Own(tx) => tx,
+            WriteTxConn::Joined(w) => w,
+        }
+    }
+}
+
+impl std::ops::DerefMut for WriteTx {
+    fn deref_mut(&mut self) -> &mut PoolTx<'static> {
+        match &mut self.0 {
+            WriteTxConn::Own(tx) => tx,
+            WriteTxConn::Joined(w) => w,
+        }
     }
 }
 
@@ -483,7 +712,7 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolConn {
         sql: &'q str,
         params: Vec<SqlValue>,
         decode: F,
-    ) -> BoxFuture<'e, Result<Vec<U>, sqlx::Error>>
+    ) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
     where
         'c: 'e,
         U: Send + 'e,
@@ -528,6 +757,25 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolConn {
         Box::pin(async move {
             let mut tx = self.begin().await?;
             let n = super::run_delete_plan_tx(&mut tx, plan).await?;
+            tx.commit().await?;
+            Ok(n)
+        })
+    }
+
+    fn run_batches<'e>(
+        self,
+        stmts: Vec<crate::sql::CompiledStatement>,
+    ) -> BoxFuture<'e, Result<u64, ExecError>>
+    where
+        'c: 'e,
+        Self: 'e,
+    {
+        Box::pin(async move {
+            if let [stmt] = stmts.as_slice() {
+                return super::write_on(self, &stmt.sql, stmt.params.clone()).await;
+            }
+            let mut tx = self.begin().await?;
+            let n = super::execute_batches_tx(&mut tx, stmts).await?;
             tx.commit().await?;
             Ok(n)
         })
@@ -584,7 +832,7 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolTx<'_> {
         sql: &'q str,
         params: Vec<SqlValue>,
         decode: F,
-    ) -> BoxFuture<'e, Result<Vec<U>, sqlx::Error>>
+    ) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
     where
         'c: 'e,
         U: Send + 'e,
@@ -629,6 +877,17 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolTx<'_> {
         Box::pin(super::run_delete_plan_tx(self, plan))
     }
 
+    fn run_batches<'e>(
+        self,
+        stmts: Vec<crate::sql::CompiledStatement>,
+    ) -> BoxFuture<'e, Result<u64, ExecError>>
+    where
+        'c: 'e,
+        Self: 'e,
+    {
+        Box::pin(super::execute_batches_tx(self, stmts))
+    }
+
     fn insert_returning<'e>(
         self,
         query: InsertQuery,
@@ -670,7 +929,7 @@ impl<'c, E: sqlx::Executor<'c, Database = sqlx::Postgres>> SqlExecutor<'c> for E
         sql: &'q str,
         params: Vec<SqlValue>,
         decode: F,
-    ) -> BoxFuture<'e, Result<Vec<U>, sqlx::Error>>
+    ) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
     where
         'c: 'e,
         U: Send + 'e,
@@ -764,7 +1023,7 @@ macro_rules! database_conn_executor {
                 sql: &'q str,
                 params: Vec<SqlValue>,
                 decode: F,
-            ) -> BoxFuture<'e, Result<Vec<U>, sqlx::Error>>
+            ) -> BoxFuture<'e, Result<Vec<U>, ExecError>>
             where
                 'c: 'e,
                 U: Send + 'e,
@@ -796,6 +1055,26 @@ macro_rules! database_conn_executor {
                     let pool = self.pool_id().clone();
                     let mut tx = PoolTx::begin_on(&mut ***self, &pool).await?;
                     let n = super::run_delete_plan_tx(&mut tx, plan).await?;
+                    tx.commit().await?;
+                    Ok(n)
+                })
+            }
+
+            fn run_batches<'e>(
+                self,
+                stmts: Vec<crate::sql::CompiledStatement>,
+            ) -> BoxFuture<'e, Result<u64, ExecError>>
+            where
+                'c: 'e,
+                Self: 'e,
+            {
+                Box::pin(async move {
+                    if let [stmt] = stmts.as_slice() {
+                        return super::write_on(self, &stmt.sql, stmt.params.clone()).await;
+                    }
+                    let pool = self.pool_id().clone();
+                    let mut tx = PoolTx::begin_on(&mut ***self, &pool).await?;
+                    let n = super::execute_batches_tx(&mut tx, stmts).await?;
                     tx.commit().await?;
                     Ok(n)
                 })

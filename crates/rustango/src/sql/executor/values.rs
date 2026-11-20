@@ -4,11 +4,6 @@
 //! [`super::decode`] turns cells into `SqlValue`s; the `fetch_values_*`
 //! functions shape the rows into dicts, tuples or a flat list.
 
-#[cfg(feature = "postgres")]
-use sqlx::postgres::PgArguments;
-#[cfg(feature = "postgres")]
-use sqlx::query::Query;
-
 use super::{run_on, ExecError, RowRef, SqlExecutor};
 use crate::core::{AggregateQuery, SelectQuery, SqlValue};
 use crate::sql::Pool;
@@ -16,13 +11,6 @@ use crate::sql::{
     MaybeMyFromRow, MaybeMyLoadRelated, MaybePgFromRow, MaybeSqliteFromRow, MaybeSqliteLoadRelated,
     UpdaterPool as _,
 };
-
-#[cfg(feature = "postgres")]
-use super::bind_query;
-#[cfg(feature = "mysql")]
-use super::bind_query_my;
-#[cfg(feature = "sqlite")]
-use super::bind_query_sqlite;
 
 use super::decode::{RowReader, TypedCol};
 use crate::core::joins::joined_key;
@@ -681,38 +669,15 @@ where
     V: FlatScalar,
 {
     let stmt = pool.dialect().compile_select(query)?;
-    crate::test_assertions::query_counter::bump();
-    match pool {
+    run_on(pool, &stmt.sql, stmt.params, |row| match row {
         #[cfg(feature = "postgres")]
-        Pool::Postgres(pg) => {
-            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query(q, v);
-            }
-            let rows = q.fetch_all(pg).await?;
-            Ok(rows.iter().map(decode_pair).collect::<Result<_, _>>()?)
-        }
+        RowRef::Postgres(r) => decode_pair(r),
         #[cfg(feature = "mysql")]
-        Pool::Mysql(my) => {
-            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_my(q, v);
-            }
-            let rows = q.fetch_all(my).await?;
-            Ok(rows.iter().map(decode_pair).collect::<Result<_, _>>()?)
-        }
+        RowRef::Mysql(r) => decode_pair(r),
         #[cfg(feature = "sqlite")]
-        Pool::Sqlite(sq) => {
-            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_sqlite(q, v);
-            }
-            let rows = q.fetch_all(sq).await?;
-            Ok(rows.iter().map(decode_pair).collect::<Result<_, _>>()?)
-        }
-    }
+        RowRef::Sqlite(r) => decode_pair(r),
+    })
+    .await
 }
 
 // Bridge methods on the values builders so callers chain `.fetch(&pool)`.
