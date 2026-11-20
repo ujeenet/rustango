@@ -14861,6 +14861,52 @@ mod field_attr_tests {
             .map(|e| e.to_string())
     }
 
+    /// A `text_enum` field is text whatever its type, needs `max_length`,
+    /// and refuses the knobs that only fit free text.
+    #[test]
+    fn text_enum_fields_are_text_and_refuse_free_text_knobs() {
+        let f: syn::FieldsNamed = syn::parse_quote!({
+            #[rustango(text_enum, max_length = 16)] a: Mode,
+            #[rustango(text_enum, max_length = 16)] b: Option<Mode>,
+            #[rustango(text_enum)] c: Mode,
+            #[rustango(text_enum, max_length = 16, choices = "a")] d: Mode,
+            #[rustango(text_enum, max_length = 16, blank)] e: Mode,
+            #[rustango(text_enum, max_length = 16, citext)] g: Mode,
+            #[rustango(text_enum, max_length = 16, validators = "email")] h: Mode,
+            #[rustango(text_enum, max_length = 16, default = "draft")] i: Mode,
+            #[rustango(text_enum, max_length = 16, default = "'draft'")] j: Mode,
+        });
+        let fields: Vec<syn::Field> = f.named.into_iter().collect();
+        let attrs = parse_field_attrs(&fields[1]).unwrap();
+        let det = detect_field(&fields[1], &attrs).unwrap();
+        assert!(det.kind == DetectedKind::String && det.nullable);
+        let errs: Vec<_> = fields.into_iter().map(error_for).collect();
+        assert_eq!(errs[0], None);
+        assert_eq!(errs[1], None);
+        assert!(
+            errs[2].as_deref().unwrap().contains("needs `max_length`"),
+            "{errs:?}"
+        );
+        for (i, key) in [
+            (3, "choices"),
+            (4, "blank"),
+            (5, "citext"),
+            (6, "validators"),
+        ] {
+            let e = errs[i].as_deref().unwrap();
+            assert!(e.contains(&format!("`{key}` does not apply")), "{e}");
+        }
+        assert!(
+            errs[7].as_deref().unwrap().contains("quoted stored name"),
+            "{errs:?}"
+        );
+        assert_eq!(errs[8], None);
+        // Without the flag the enum is an unsupported type, with a hint.
+        let ty: syn::Type = syn::parse_quote!(Mode);
+        let e = detect_type(&ty).err().unwrap().to_string();
+        assert!(e.contains("#[rustango(text_enum)]"), "{e}");
+    }
+
     /// `citext`, `vector` and `geometry` on the wrong type are errors, not no-ops (#1937).
     #[test]
     fn type_specific_attrs_reject_other_types() {

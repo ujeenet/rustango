@@ -102,6 +102,7 @@ where
     Ok(())
 }
 
+#[derive(Debug)]
 struct Repaired<E> {
     value: E,
     changed: bool,

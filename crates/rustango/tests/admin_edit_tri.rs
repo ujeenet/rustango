@@ -26,6 +26,24 @@ pub struct Doc {
     pub status: String,
 }
 
+#[derive(rustango::TextEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[text_enum(rename_all = "snake_case")]
+pub enum Stage {
+    Draft,
+    #[text_enum(rename = "on_air", label = "Live")]
+    Live,
+}
+
+/// A `text_enum` field: the admin offers the enum's values only.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "aed_edoc")]
+pub struct EDoc {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(text_enum, max_length = 16)]
+    pub stage: Stage,
+}
+
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "aed_order")]
 #[allow(dead_code)]
@@ -264,6 +282,7 @@ async fn setup(pool: &Pool) {
     fresh_table::<Slugged>(pool).await;
     fresh_table::<SlugRef>(pool).await;
     fresh_table::<Doc>(pool).await;
+    fresh_table::<EDoc>(pool).await;
     drop_table(pool, "aed_line").await;
     drop_table(pool, "aed_sline").await;
     drop_table(pool, "aed_cline").await;
@@ -710,6 +729,35 @@ async fn non_finite_float_is_refused(pool: &Pool) {
         assert_eq!(row.score, Some(1.5), "{bad}");
     }
     n.delete(pool).await.expect("delete");
+}
+
+/// An off-list value is a form error; the enum's stored names save.
+async fn text_enum_off_list_value_is_a_form_error(pool: &Pool) {
+    let mut d = EDoc {
+        id: Auto::default(),
+        stage: Stage::Draft,
+    };
+    d.insert(pool).await.expect("insert");
+    let id = *d.id.get().expect("pk");
+    let (status, html) = send(pool, "GET", &format!("/aed_edoc/{id}/edit"), "").await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    assert!(
+        html.contains("<select") && html.contains("on_air"),
+        "{html}"
+    );
+    for bad in ["Live", "live", "bogus"] {
+        let form = encode(&[("stage", bad.to_owned())]);
+        let (status, body) = send(pool, "POST", &format!("/aed_edoc/{id}"), &form).await;
+        assert!(!status.is_redirection(), "{bad} saved: {status}");
+        assert!(body.contains("Select a valid choice."), "{bad}: {body}");
+    }
+    let row = EDoc::objects().fetch(pool).await.expect("fetch").remove(0);
+    assert_eq!(row.stage, Stage::Draft);
+    let form = encode(&[("stage", "on_air".to_owned())]);
+    let (status, body) = send(pool, "POST", &format!("/aed_edoc/{id}"), &form).await;
+    assert!(status.is_redirection(), "{status}: {body}");
+    let row = EDoc::objects().fetch(pool).await.expect("fetch").remove(0);
+    assert_eq!(row.stage, Stage::Live);
 }
 
 /// A stored value outside `choices` survives a rename.
@@ -1353,6 +1401,7 @@ tri_dialect_test! {
         untouched_nullable_json_object_is_kept,
         untouched_empty_string_is_kept,
         non_finite_float_is_refused,
+        text_enum_off_list_value_is_a_form_error,
         untouched_unknown_choice_is_kept,
         stale_form_still_wins,
         inline_rows_take_no_auto_or_generated_input,

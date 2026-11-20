@@ -21,6 +21,138 @@
 //! assert!(Plan::from_db("Pro").is_err());
 //! assert_eq!(Plan::Free.to_string(), "free");
 //! ```
+//!
+//! On a model, `max_length` is required and a `default` is a quoted stored
+//! name; filters take the enum:
+//!
+//! ```
+//! use rustango::core::Column as _;
+//!
+//! #[derive(rustango::TextEnum, Clone, Copy, Debug, PartialEq, Eq)]
+//! #[text_enum(rename_all = "snake_case")]
+//! pub enum Status { Draft, Live }
+//!
+//! #[derive(rustango::Model)]
+//! #[rustango(table = "te_doc_post")]
+//! pub struct Post {
+//!     #[rustango(primary_key)]
+//!     pub id: rustango::Auto<i64>,
+//!     #[rustango(text_enum, max_length = 8, default = "'draft'")]
+//!     pub status: Status,
+//! }
+//!
+//! let _ = Post::status.eq(Status::Live);
+//! # fn main() {}
+//! ```
+//!
+//! A filter does not take a string:
+//!
+//! ```compile_fail
+//! # use rustango::core::Column as _;
+//! # #[derive(rustango::TextEnum, Clone, Copy, Debug, PartialEq, Eq)]
+//! # #[text_enum(rename_all = "snake_case")]
+//! # pub enum Status { Draft, Live }
+//! # #[derive(rustango::Model)]
+//! # #[rustango(table = "te_doc_post")]
+//! # pub struct Post {
+//! #     #[rustango(primary_key)]
+//! #     pub id: rustango::Auto<i64>,
+//! #     #[rustango(text_enum, max_length = 8)]
+//! #     pub status: Status,
+//! # }
+//! let _ = Post::status.eq("live");
+//! # fn main() {}
+//! ```
+//!
+//! `max_length` shorter than the longest stored value does not compile:
+//!
+//! ```compile_fail
+//! # #[derive(rustango::TextEnum, Clone, Copy, Debug, PartialEq, Eq)]
+//! # #[text_enum(rename_all = "snake_case")]
+//! # pub enum Status { Draft, Live }
+//! #[derive(rustango::Model)]
+//! #[rustango(table = "te_doc_post")]
+//! pub struct Post {
+//!     #[rustango(primary_key)]
+//!     pub id: rustango::Auto<i64>,
+//!     #[rustango(text_enum, max_length = 4)]
+//!     pub status: Status,
+//! }
+//! # fn main() {}
+//! ```
+//!
+//! Nor does a `default` that names no variant:
+//!
+//! ```compile_fail
+//! # #[derive(rustango::TextEnum, Clone, Copy, Debug, PartialEq, Eq)]
+//! # #[text_enum(rename_all = "snake_case")]
+//! # pub enum Status { Draft, Live }
+//! #[derive(rustango::Model)]
+//! #[rustango(table = "te_doc_post")]
+//! pub struct Post {
+//!     #[rustango(primary_key)]
+//!     pub id: rustango::Auto<i64>,
+//!     #[rustango(text_enum, max_length = 8, default = "'gone'")]
+//!     pub status: Status,
+//! }
+//! # fn main() {}
+//! ```
+//!
+//! Nor `choices` (or `blank`, `citext`, `validators`) on the field:
+//!
+//! ```compile_fail
+//! # #[derive(rustango::TextEnum, Clone, Copy, Debug, PartialEq, Eq)]
+//! # #[text_enum(rename_all = "snake_case")]
+//! # pub enum Status { Draft, Live }
+//! #[derive(rustango::Model)]
+//! #[rustango(table = "te_doc_post")]
+//! pub struct Post {
+//!     #[rustango(primary_key)]
+//!     pub id: rustango::Auto<i64>,
+//!     #[rustango(text_enum, max_length = 8, choices = "draft, live")]
+//!     pub status: Status,
+//! }
+//! # fn main() {}
+//! ```
+//!
+//! ```compile_fail
+//! # #[derive(rustango::TextEnum, Clone, Copy, Debug, PartialEq, Eq)]
+//! # #[text_enum(rename_all = "snake_case")]
+//! # pub enum Status { Draft, Live }
+//! #[derive(rustango::Model)]
+//! #[rustango(table = "te_doc_post")]
+//! pub struct Post {
+//!     #[rustango(primary_key)]
+//!     pub id: rustango::Auto<i64>,
+//!     #[rustango(text_enum, max_length = 8, blank)]
+//!     pub status: Status,
+//! }
+//! # fn main() {}
+//! ```
+//!
+//! A variant carries no data:
+//!
+//! ```compile_fail
+//! #[derive(rustango::TextEnum, Clone, Copy, Debug, PartialEq, Eq)]
+//! pub enum Status { Draft, Live(u8) }
+//! # fn main() {}
+//! ```
+//!
+//! A field of a type that is not a `TextEnum` does not compile:
+//!
+//! ```compile_fail
+//! #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+//! pub enum Status { Draft, Live }
+//! #[derive(rustango::Model)]
+//! #[rustango(table = "te_doc_post")]
+//! pub struct Post {
+//!     #[rustango(primary_key)]
+//!     pub id: rustango::Auto<i64>,
+//!     #[rustango(text_enum, max_length = 8)]
+//!     pub status: Status,
+//! }
+//! # fn main() {}
+//! ```
 
 use std::fmt;
 

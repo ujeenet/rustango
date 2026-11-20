@@ -455,6 +455,22 @@ pub(crate) fn effective_schema<'a>(schema_name: Option<&'a str>, slug: &'a str) 
 /// assert_eq!(StorageMode::Database.as_str(), "database");
 /// assert_eq!(StorageMode::from_db("schema").unwrap(), StorageMode::Schema);
 /// assert!(StorageMode::from_db("Schema").is_err());
+///
+/// use rustango::core::Column as _;
+/// use rustango::tenancy::Org;
+/// let _ = Org::storage_mode.eq(StorageMode::Schema);
+/// assert!(Org::new("acme").storage_mode == StorageMode::Database);
+/// ```
+///
+/// The field is no string, in a filter or a comparison:
+///
+/// ```compile_fail
+/// use rustango::core::Column as _;
+/// let _ = rustango::tenancy::Org::storage_mode.eq("schema");
+/// ```
+///
+/// ```compile_fail
+/// let _ = rustango::tenancy::Org::new("acme").storage_mode == "schema";
 /// ```
 #[derive(crate::TextEnum, Debug, Clone, Copy, PartialEq, Eq)]
 #[text_enum(rename_all = "snake_case")]
