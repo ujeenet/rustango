@@ -205,8 +205,8 @@ Jedes Feld rendert standardmäßig eine seinem Typ entsprechende Eingabe —
 `<input type="number">` für Ganzzahlen, `type="date"`/`datetime-local` für Datumsangaben,
 `type="checkbox"` für Booleans, ein `<textarea>` für lange Zeichenketten, ein `<select>`
 für FK-Spalten und so weiter. Ein `choices`- oder `text_enum`-Feld ist ein
-`<select>` seiner Werte; jeder andere gesendete Wert wird mit „Select a valid
-choice." abgelehnt. Überschreibe pro Feld mit
+`<select>` seiner Werte; jeder andere gesendete Wert wird mit einem
+Formularfehler abgelehnt. Überschreibe pro Feld mit
 `formfield_overrides = "field:widget"`:
 
 | Widget | Gilt für | Rendert |

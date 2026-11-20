@@ -16,7 +16,7 @@ use crate::tenancy::error::TenancyError;
 use crate::tenancy::pools::TenantPools;
 use crate::tenancy::BackendKind;
 
-use super::args::{parse, Parsed, Spec};
+use super::args::{flag_error, parse, Parsed, Spec};
 
 /// How long `test-db-server` waits for the server.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -164,7 +164,7 @@ where
     let p = parse(args, &ADD)?;
     let registry = pools.registry_pool();
     let backend = match p.value("--backend")? {
-        Some(b) => BackendKind::from_db(b)?,
+        Some(b) => BackendKind::from_db(b).map_err(|e| flag_error("--backend", &e))?,
         None => BackendKind::of_pool(&registry),
     };
     let mut spec = DbServerSpec {

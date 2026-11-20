@@ -208,8 +208,8 @@ Cada campo renderiza por defecto una entrada que coincide con su tipo —
 `<input type="number">` para enteros, `type="date"`/`datetime-local` para fechas,
 `type="checkbox"` para booleanos, un `<textarea>` para cadenas largas, un `<select>`
 para columnas FK, y así sucesivamente. Un campo `choices` o `text_enum` es un
-`<select>` de sus valores; cualquier otro valor enviado se rechaza con "Select a
-valid choice.". Sobrescribe por campo con
+`<select>` de sus valores; cualquier otro valor enviado se rechaza con un error
+de formulario. Sobrescribe por campo con
 `formfield_overrides = "field:widget"`:
 
 | Widget | Se aplica a | Renderiza |

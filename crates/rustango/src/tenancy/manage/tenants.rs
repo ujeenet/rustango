@@ -12,7 +12,7 @@ use crate::core::Column as _;
 use crate::sql::FetcherPool;
 
 use crate::tenancy::error::TenancyError;
-use crate::tenancy::manage::args::{next_value, reject_leading_flag};
+use crate::tenancy::manage::args::{flag_error, next_value, reject_leading_flag};
 use crate::tenancy::manage_interactive;
 use crate::tenancy::org::{BackendKind, Org, StorageMode};
 use crate::tenancy::pools::TenantPools;
@@ -361,11 +361,12 @@ fn parse_create_tenant_args(
         match flag.as_str() {
             "--mode" => {
                 let v = next_value(&mut iter, "--mode")?;
-                mode = Some(StorageMode::from_db(&v)?);
+                mode = Some(StorageMode::from_db(&v).map_err(|e| flag_error("--mode", &e))?);
             }
             "--backend" => {
                 let v = next_value(&mut iter, "--backend")?;
-                out.backend = Some(BackendKind::from_db(&v)?);
+                out.backend =
+                    Some(BackendKind::from_db(&v).map_err(|e| flag_error("--backend", &e))?);
             }
             "--display-name" => out.display_name = Some(next_value(&mut iter, "--display-name")?),
             "--database-url" => database_url = Some(next_value(&mut iter, "--database-url")?),

@@ -203,7 +203,7 @@ Each field renders an input matching its type by default — `<input type="numbe
 for integers, `type="date"`/`datetime-local` for dates, `type="checkbox"` for
 bools, a `<textarea>` for long strings, a `<select>` for FK columns, and so on.
 A `choices` or `text_enum` field is a `<select>` of its values; any other posted
-value is refused with "Select a valid choice."
+value is refused with a form error.
 Override per field with `formfield_overrides = "field:widget"`:
 
 | Widget | Applies to | Renders |

@@ -74,7 +74,7 @@ use crate::sql::Dialect as _;
 use crate::sql::UpdaterPool as _;
 use crate::tenancy::db_server::TenantDatabase;
 use crate::tenancy::error::TenancyError;
-use crate::tenancy::manage::args::next_value;
+use crate::tenancy::manage::args::{flag_error, next_value};
 use crate::tenancy::org::{Org, StorageMode};
 use crate::tenancy::pools::TenantPools;
 
@@ -732,7 +732,7 @@ fn parse_args(args: &[String]) -> Result<MigrateStorageArgs, TenancyError> {
         match flag.as_str() {
             "--to" => {
                 let v = next_value(&mut iter, "--to")?;
-                target = Some(StorageMode::from_db(&v)?);
+                target = Some(StorageMode::from_db(&v).map_err(|e| flag_error("--to", &e))?);
             }
             "--database-url" => database_url = Some(next_value(&mut iter, "--database-url")?),
             "--schema-name" => schema_name = Some(next_value(&mut iter, "--schema-name")?),
@@ -1376,7 +1376,10 @@ mod tests {
     #[test]
     fn parse_args_rejects_unknown_to_value() {
         let err = parse_args(&s(&["acme", "--to", "redis"])).unwrap_err();
-        assert!(format!("{err}").contains("--to must be"));
+        assert!(
+            format!("{err}").contains("--to: unknown value `redis` for StorageMode"),
+            "{err}"
+        );
     }
 
     #[test]

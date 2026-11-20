@@ -749,7 +749,10 @@ async fn text_enum_off_list_value_is_a_form_error(pool: &Pool) {
         let form = encode(&[("stage", bad.to_owned())]);
         let (status, body) = send(pool, "POST", &format!("/aed_edoc/{id}"), &form).await;
         assert!(!status.is_redirection(), "{bad} saved: {status}");
-        assert!(body.contains("Select a valid choice."), "{bad}: {body}");
+        assert!(
+            body.contains(&format!("value `{bad}` is not one of the declared choices")),
+            "{bad}: {body}"
+        );
     }
     let row = EDoc::objects().fetch(pool).await.expect("fetch").remove(0);
     assert_eq!(row.stage, Stage::Draft);
