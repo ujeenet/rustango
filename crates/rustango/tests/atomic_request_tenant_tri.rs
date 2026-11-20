@@ -301,7 +301,7 @@ async fn pg_schema_mode_runs_each_write_in_the_tenant_block() {
     };
     let _g = lock().lock().await;
     rustango::testkit::reset_org_cache();
-    let db = scratch_db::ScratchDb::create(&admin, "areq_tenant").await;
+    let db = scratch_db::ScratchDb::create(&admin, "rustango_areq_tenant").await;
     let registry = sqlx::PgPool::connect(db.url()).await.unwrap();
     let builder = rustango::server::Builder::from_pool(registry.clone(), db.url(), "localhost")
         .tenant_pools(cap_one())
@@ -342,7 +342,7 @@ async fn mysql_database_mode_runs_each_write_in_the_tenant_block() {
     };
     let _g = lock().lock().await;
     rustango::testkit::reset_org_cache();
-    let db = scratch_db::ScratchDb::create(&admin, "areq_reg").await;
+    let db = scratch_db::ScratchDb::create(&admin, "rustango_areq_reg").await;
     let registry = sqlx::MySqlPool::connect(db.url()).await.unwrap();
     let builder = rustango::server::Builder::from_pool(registry.clone(), db.url(), "localhost")
         .tenant_pools(cap_one())
@@ -353,7 +353,7 @@ async fn mysql_database_mode_runs_each_write_in_the_tenant_block() {
     let mut tenants = Vec::new();
     let mut dbs = Vec::new();
     for slug in ["acme", "globex"] {
-        let tdb = scratch_db::ScratchDb::create(&admin, &format!("areq_{slug}")).await;
+        let tdb = scratch_db::ScratchDb::create(&admin, &format!("rustango_areq_{slug}")).await;
         let tenant = Pool::connect(tdb.url()).await.unwrap();
         raw_execute_pool(
             &tenant,
