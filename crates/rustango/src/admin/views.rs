@@ -2021,16 +2021,17 @@ async fn user_roles_panel_ctx(state: &AppState, pk_raw: &str) -> Option<serde_js
     let perms = crate::tenancy::permissions::user_permissions_pool(user_id, &state.pool)
         .await
         .ok()?;
-    let roles_ctx: Vec<serde_json::Value> = roles
+    let roles_ctx = roles
         .into_iter()
         .map(|r| {
-            serde_json::json!({
-                "id": r.id.get().copied().unwrap_or(0),
+            Ok(serde_json::json!({
+                "id": r.id.require()?,
                 "name": r.name,
                 "description": r.description,
-            })
+            }))
         })
-        .collect();
+        .collect::<Result<Vec<serde_json::Value>, crate::sql::UnsavedRow>>()
+        .ok()?;
     Some(serde_json::json!({
         "roles": roles_ctx,
         "permissions": perms,

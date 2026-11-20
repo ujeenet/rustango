@@ -420,7 +420,7 @@ pub async fn create_role_pool(
         data: serde_json::Value::Object(serde_json::Map::new()),
     };
     role.save(pool).await?;
-    Ok(role.id.get().copied().unwrap_or(0))
+    Ok(role.id.require()?)
 }
 
 /// Get an existing role by name or create one, on any backend. Returns the id.
@@ -523,8 +523,8 @@ pub async fn user_roles_pool(
     let roles = user_roles_qs_pool(uid, pool).await?;
     Ok(roles
         .into_iter()
-        .map(|r| (r.id.get().copied().unwrap_or(0), r.name))
-        .collect())
+        .map(|r| Ok((r.id.require()?, r.name)))
+        .collect::<Result<_, crate::sql::UnsavedRow>>()?)
 }
 
 /// Grant `codename` to a role, on every backend.

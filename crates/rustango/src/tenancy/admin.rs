@@ -1314,7 +1314,9 @@ async fn login_submit(
     if let Err(refused) = attempt.resolve(super::login_key(field, &user)).await {
         return refused.into_response();
     }
-    let uid: i64 = user.id.get().copied().unwrap_or(0);
+    let Ok(uid) = user.id.require() else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "user has no id").into_response();
+    };
 
     // Verify before the active check so active vs inactive accounts take
     // the same time (audit H1).

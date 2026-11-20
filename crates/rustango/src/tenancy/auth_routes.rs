@@ -666,7 +666,10 @@ async fn login_in(
         .resolve(crate::tenancy::login_key(field, &user))
         .await
         .map_err(LoginRefused::into_response)?;
-    let uid = user.id.get().copied().unwrap_or(0);
+    let uid = user
+        .id
+        .require()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     // Verify before the active check so active vs inactive accounts take
     // the same time (audit H1).
@@ -992,8 +995,12 @@ async fn me_in(auth: JwtAuth, t: TenantScope, bearer: Bearer) -> Result<Json<Use
         return Err(err(StatusCode::FORBIDDEN, "account inactive"));
     }
 
+    let user_id = user
+        .id
+        .require()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(UserBrief {
-        user_id: user.id.get().copied().unwrap_or(0),
+        user_id,
         username: user.username,
         is_superuser: user.is_superuser,
     }))
