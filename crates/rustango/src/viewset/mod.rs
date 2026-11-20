@@ -1800,6 +1800,12 @@ fn json_response(body: Value) -> Response {
     json_with_status(StatusCode::OK, body)
 }
 
+/// A list envelope: `head` plus `results`, moved in rather than copied as `json!` would.
+fn page_response(mut head: Value, results: Vec<Value>) -> Response {
+    head["results"] = Value::Array(results);
+    json_response(head)
+}
+
 /// An [`ApiError`](crate::api_errors::ApiError) body; a 5xx message is
 /// logged rather than sent.
 fn json_error(status: StatusCode, msg: &str) -> Response {
@@ -3020,13 +3026,15 @@ async fn run_list(
             } else {
                 (None, None)
             };
-            json_response(json!({
-                "count": count,
-                "page": page,
-                "page_size": page_size,
-                "last_page": last_page,
-                "results": results,
-            }))
+            page_response(
+                json!({
+                    "count": count,
+                    "page": page,
+                    "page_size": page_size,
+                    "last_page": last_page,
+                }),
+                results,
+            )
         }
         PaginationStyle::Cursor {
             field: cursor_field,
@@ -3089,12 +3097,14 @@ async fn run_list(
             } else {
                 None
             };
-            json_response(json!({
-                "count": count,
-                "limit": limit,
-                "offset": offset,
-                "results": results,
-            }))
+            page_response(
+                json!({
+                    "count": count,
+                    "limit": limit,
+                    "offset": offset,
+                }),
+                results,
+            )
         }
     }
 }
@@ -3351,14 +3361,11 @@ async fn handle_list_cursor(
         limit: Some(page_size + 1),
         ..SelectQuery::new(state.vs.schema)
     };
-    let rows = or_500!(render_list(state, acq, &select_q, &fields).await);
+    let mut rows = or_500!(render_list(state, acq, &select_q, &fields).await);
 
     let has_more = rows.len() as i64 > page_size;
-    let page_rows: &[Value] = if has_more {
-        &rows[..page_size as usize]
-    } else {
-        &rows[..]
-    };
+    rows.truncate(usize::try_from(page_size).unwrap_or(usize::MAX));
+    let page_rows: &[Value] = &rows;
 
     let next_cursor = if has_more {
         // Read the cursor field value from the last JSON row.
@@ -3428,12 +3435,13 @@ async fn handle_list_cursor(
         None
     };
 
-    let results: Vec<Value> = page_rows.to_vec();
-    json_response(json!({
-        "page_size": page_size,
-        "next": next_cursor,
-        "results": results,
-    }))
+    page_response(
+        json!({
+            "page_size": page_size,
+            "next": next_cursor,
+        }),
+        rows,
+    )
 }
 
 /// `col > v OR (col = v AND pk > pk_v)` (`<` when descending): strictly
@@ -3557,11 +3565,13 @@ async fn cursor_page_admitted(
             pk.as_deref(),
         ))
     });
-    json_response(json!({
-        "page_size": page_size,
-        "next": next,
-        "results": results,
-    }))
+    page_response(
+        json!({
+            "page_size": page_size,
+            "next": next,
+        }),
+        results,
+    )
 }
 
 /// Can this column be a cursor?
