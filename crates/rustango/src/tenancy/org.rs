@@ -712,6 +712,39 @@ mod tests {
         assert_eq!(back, BackendKind::Sqlite);
     }
 
+    /// The two columns as they were declared when they were `String`s.
+    #[derive(crate::Model)]
+    #[rustango(table = "org_old_shape", managed = false)]
+    pub struct OldShape {
+        #[rustango(primary_key)]
+        pub id: crate::sql::Auto<i64>,
+        #[rustango(max_length = 16)]
+        pub storage_mode: String,
+        #[rustango(max_length = 16, default = "'postgres'")]
+        pub backend_kind: String,
+    }
+
+    /// The enum columns snapshot exactly as the `String` ones did, so no
+    /// migration is generated for them.
+    #[test]
+    fn enum_columns_snapshot_as_before() {
+        use crate::core::Model as _;
+        use crate::migrate::SchemaSnapshot;
+        let field = |schema, column: &str| {
+            let snap = SchemaSnapshot::from_models_forced(&[schema]);
+            let f = snap.tables[0]
+                .fields
+                .iter()
+                .find(|f| f.column == column)
+                .cloned()
+                .expect("column");
+            serde_json::to_string(&f).unwrap()
+        };
+        for column in ["storage_mode", "backend_kind"] {
+            assert_eq!(field(Org::SCHEMA, column), field(OldShape::SCHEMA, column));
+        }
+    }
+
     #[test]
     fn from_db_accepts_aliases() {
         for (s, want) in [
