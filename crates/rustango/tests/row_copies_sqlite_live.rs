@@ -57,7 +57,11 @@ fn stitched<P, C>(rows: &[(P, Vec<C>)], pk: fn(&P) -> i64, child: fn(&C) -> i64)
 #[tokio::test]
 async fn admin_list_page_is_unchanged() {
     let app = fixture::admin_app(fixture::seeded_pool().await);
-    assert_golden("admin_list.html", &fixture::get(&app, "/rc_post").await);
+    let page = fixture::get(&app, "/rc_post").await;
+    // The sidebar lists every model the build registers: compare the list only.
+    let start = page.find("<main class=\"content\">").expect("main");
+    let end = page.find("</main>").expect("main end") + "</main>".len();
+    assert_golden("admin_list.html", &format!("{}\n", &page[start..end]));
 }
 
 #[tokio::test]
