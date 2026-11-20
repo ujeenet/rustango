@@ -8,13 +8,14 @@
 //! ## Quick start
 //!
 //! ```ignore
+//! use rustango::access::RouteAccess;
 //! use rustango::metrics::{MetricsRegistry, metrics_router};
 //!
 //! let reg = MetricsRegistry::new();
 //!
-//! // Wire the scrape endpoint.
+//! // Wire the scrape endpoint; open here, so serve it on an internal port.
 //! let app = axum::Router::new()
-//!     .merge(metrics_router(reg.clone()))
+//!     .merge(metrics_router(reg.clone(), RouteAccess::allow_anonymous()))
 //!     .route("/api/posts", axum::routing::get(list_posts));
 //!
 //! // From handlers / background work, increment counters:
@@ -334,8 +335,9 @@ impl Histogram {
 // axum endpoint
 // =====================================================================
 
+/// The `/metrics` scrape route, served to the callers `access` admits.
 #[cfg(feature = "admin")]
-pub fn metrics_router(reg: MetricsRegistry) -> axum::Router {
+pub fn metrics_router(reg: MetricsRegistry, access: crate::access::RouteAccess) -> axum::Router {
     use axum::extract::State;
     use axum::http::header;
     use axum::response::Response;
@@ -354,14 +356,34 @@ pub fn metrics_router(reg: MetricsRegistry) -> axum::Router {
             .unwrap_or_else(|_| Response::new(axum::body::Body::empty()))
     }
 
-    axum::Router::new()
-        .route("/metrics", get(handler))
-        .with_state(StdArc::new(reg))
+    access.guard(
+        axum::Router::new()
+            .route("/metrics", get(handler))
+            .with_state(StdArc::new(reg)),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The scrape route answers only the caller its access argument admits.
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn the_scrape_route_checks_its_access() {
+        use crate::access::RouteAccess;
+        use tower::ServiceExt as _;
+        let status = |access: RouteAccess| async move {
+            let req = axum::http::Request::builder()
+                .uri("/metrics")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let app = metrics_router(MetricsRegistry::new(), access);
+            app.oneshot(req).await.unwrap().status().as_u16()
+        };
+        assert_eq!(status(RouteAccess::superuser()).await, 401);
+        assert_eq!(status(RouteAccess::allow_anonymous()).await, 200);
+    }
 
     // -------- Counter
 
@@ -511,7 +533,7 @@ mod tests {
 
         let r = MetricsRegistry::new();
         r.counter("hits", &[]).inc_by(7);
-        let app = metrics_router(r);
+        let app = metrics_router(r, crate::access::RouteAccess::allow_anonymous());
         let resp = app
             .oneshot(
                 Request::builder()

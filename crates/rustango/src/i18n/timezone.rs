@@ -88,23 +88,6 @@ where
     ACTIVE_TZ.scope(offset, future).await
 }
 
-/// Does nothing and returns `false`: the active offset is never set
-/// process-wide, where it would leak across requests and tenants.
-/// Use [`with_offset`] (task-scoped).
-///
-/// ```compile_fail
-/// #![deny(deprecated)]
-/// let utc = chrono::FixedOffset::east_opt(0).unwrap();
-/// rustango::i18n::timezone::activate(utc);
-/// ```
-#[deprecated(
-    since = "0.61.14",
-    note = "a no-op, removed in 0.65.0; scope the offset with `i18n::timezone::with_offset`"
-)]
-pub fn activate(_offset: FixedOffset) -> bool {
-    false
-}
-
 /// Convert a `DateTime<Utc>` to the current active offset.
 ///
 /// ```ignore

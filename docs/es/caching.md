@@ -312,10 +312,7 @@ Un tenant nuevo puede reutilizar el slug de un tenant purgado. Para que
 `purge-tenant` borre las claves del tenant anterior, llama a
 `rustango::tenancy::decommission::clear_on_purge(cache)` al arrancar por cada caché
 que las guarde. La purga borra allí todas las áreas
-(`CacheScope::for_tenant(cache, &tenant).purge()` hace lo mismo a mano). Hasta
-0.65.0, las respuestas de idempotencia también se escriben bajo su clave de 0.63
-`idem:<sha>`; esa clave va con hash y sin prefijo de tenant, así que la purga no
-la encuentra y expira con su TTL (24 horas por defecto).
+(`CacheScope::for_tenant(cache, &tenant).purge()` hace lo mismo a mano).
 
 ---
 

@@ -9,11 +9,15 @@
 //! in mod.rs proper.
 
 use super::{
-    extract_pk_value, ExecError, FetcherPool, FkPkAccess, HasPkValue, LoadRelated, MaybeMyFromRow,
+    extract_pk_value, ExecError, FkPkAccess, HasPkValue, LoadRelated, MaybeMyFromRow,
     MaybeMyLoadRelated, MaybePgFromRow, MaybeSqliteFromRow, MaybeSqliteLoadRelated,
+    ReusableExecutor, SqlExecutor as _,
 };
 use crate::core::Model;
 use crate::sql::Pool;
+// Each statement's future is boxed: an `E::Exec` held across an `.await`
+// makes the caller's future not `Send` (a higher-ranked rustc limit).
+use futures_util::FutureExt as _;
 
 /// `fetch_with_prefetch` against either backend. Bi-dialect counterpart
 /// of `fetch_with_prefetch` — fetches parents + children in two
@@ -55,11 +59,47 @@ where
         + Send
         + Unpin,
 {
-    fetch_with_prefetch_filtered(
+    fetch_with_prefetch_on(parent_qs, child_fk_column, pool).await
+}
+
+/// [`fetch_with_prefetch_pool`] on a [`ReusableExecutor`]: an open
+/// `&mut PoolTx` or a held `&mut PoolConn` runs every statement.
+///
+/// # Errors
+/// As [`fetch_with_prefetch_pool`].
+pub async fn fetch_with_prefetch_on<P, C, E>(
+    parent_qs: crate::query::QuerySet<P>,
+    child_fk_column: &'static str,
+    exec: E,
+) -> Result<Vec<(P, Vec<C>)>, ExecError>
+where
+    E: ReusableExecutor,
+    P: Model
+        + MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + HasPkValue
+        + Send
+        + Unpin,
+    C: Model
+        + MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + FkPkAccess
+        + Send
+        + Unpin,
+{
+    filtered_on(
         parent_qs,
         child_fk_column,
         crate::query::QuerySet::<C>::new(),
-        pool,
+        exec,
     )
     .await
 }
@@ -125,31 +165,68 @@ where
         + Send
         + Unpin,
 {
-    let parents: Vec<P> = parent_qs.fetch(pool).await?;
+    filtered_on(parent_qs, child_fk_column, child_qs, pool).await
+}
+
+/// [`fetch_with_prefetch_filtered`] on any [`ReusableExecutor`].
+async fn filtered_on<P, C, E>(
+    parent_qs: crate::query::QuerySet<P>,
+    child_fk_column: &'static str,
+    child_qs: crate::query::QuerySet<C>,
+    mut exec: E,
+) -> Result<Vec<(P, Vec<C>)>, ExecError>
+where
+    E: ReusableExecutor,
+    P: Model
+        + MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + HasPkValue
+        + Send
+        + Unpin,
+    C: Model
+        + MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + FkPkAccess
+        + Send
+        + Unpin,
+{
+    let parents: Vec<P> = parent_qs.fetch_on(exec.again()).boxed().await?;
     let on = target_column::<P, C>(child_fk_column);
     // The IN list AND-composes with the caller's filters, order and limit.
     // Over the bind cap the keys go in batches; a limit or offset then refuses.
-    stitch(parents, on, |keys| async {
+    let mut stitch = Stitch::new(parents, on)?;
+    while let Some(keys) = stitch.next_keys() {
         // Keys are an FK target's unique values: no two fold together.
-        let children = reverse_children(pool, &child_qs, child_fk_column, keys)
+        let children = reverse_children(&mut exec, &child_qs, child_fk_column, keys)
             .await?
             .rows();
-        Ok(children
-            .into_iter()
-            .filter_map(|c| Some((c.__rustango_fk_pk_value(child_fk_column)?, c)))
-            .collect())
-    })
-    .await
+        stitch.push(
+            children
+                .into_iter()
+                .filter_map(|c| Some((c.__rustango_fk_pk_value(child_fk_column)?, c)))
+                .collect(),
+        );
+    }
+    stitch.finish()
 }
 
 /// `child_qs` narrowed to rows whose `child_fk_column` is one of `keys`.
-async fn reverse_children<C>(
-    pool: &Pool,
+async fn reverse_children<C, E>(
+    exec: &mut E,
     child_qs: &crate::query::QuerySet<C>,
     child_fk_column: &'static str,
     keys: Vec<crate::core::SqlValue>,
 ) -> Result<super::Chunked<C>, ExecError>
 where
+    E: ReusableExecutor,
     C: Model
         + MaybePgFromRow
         + MaybeMyFromRow
@@ -160,17 +237,18 @@ where
         + Send
         + Unpin,
 {
-    super::fetch_in_chunks(pool, child_qs, keys, |keys| {
-        child_qs
-            .clone()
-            .filter_op(
-                child_fk_column,
-                crate::core::Op::In,
-                crate::core::SqlValue::List(keys),
-            )
-            .fetch(pool)
-    })
-    .await
+    let batches = super::key_batches(exec.again().dialect(), child_qs, keys)?;
+    let split = batches.len() > 1;
+    let mut rows = Vec::new();
+    for keys in batches {
+        let narrowed = child_qs.clone().filter_op(
+            child_fk_column,
+            crate::core::Op::In,
+            crate::core::SqlValue::List(keys),
+        );
+        rows.extend(narrowed.fetch_on(exec.again()).boxed().await?);
+    }
+    Ok(super::Chunked { rows, split })
 }
 
 /// Prefetch the relation `relation` of every parent: a many-to-many or a
@@ -255,27 +333,64 @@ where
         + Send
         + Unpin,
 {
+    related_filtered_on(parent_qs, relation, child_qs, pool).await
+}
+
+/// [`fetch_with_prefetch_related_filtered`] on any [`ReusableExecutor`].
+async fn related_filtered_on<P, C, E>(
+    parent_qs: crate::query::QuerySet<P>,
+    relation: &str,
+    child_qs: crate::query::QuerySet<C>,
+    mut exec: E,
+) -> Result<Vec<(P, Vec<C>)>, ExecError>
+where
+    E: ReusableExecutor,
+    P: Model
+        + MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + HasPkValue
+        + Send
+        + Unpin,
+    C: Model
+        + MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + HasPkValue
+        + Send
+        + Unpin,
+{
     // Resolved first, so a bad name costs no query.
     let named = Named::resolve::<P, C>(relation)?;
-    let parents: Vec<P> = parent_qs.fetch(pool).await?;
+    let parents: Vec<P> = parent_qs.fetch_on(exec.again()).boxed().await?;
     match named {
         Named::Reverse { field, column, on } => {
-            stitch(parents, on, |keys| async {
-                let children = reverse_children(pool, &child_qs, field, keys)
+            let mut stitch = Stitch::new(parents, on)?;
+            while let Some(keys) = stitch.next_keys() {
+                let children = reverse_children(&mut exec, &child_qs, field, keys)
                     .await?
                     .distinct();
-                children
-                    .into_iter()
-                    .map(|c| Ok((child_key(&c, column)?, c)))
-                    .collect()
-            })
-            .await
+                stitch.push(
+                    children
+                        .into_iter()
+                        .map(|c| Ok((child_key(&c, column)?, c)))
+                        .collect::<Result<_, ExecError>>()?,
+                );
+            }
+            stitch.finish()
         }
         Named::M2m(rel) => {
-            stitch(parents, None, |keys| {
-                m2m_children(pool, rel, &child_qs, keys)
-            })
-            .await
+            let mut stitch = Stitch::new(parents, None)?;
+            while let Some(keys) = stitch.next_keys() {
+                stitch.push(m2m_children(&mut exec, rel, &child_qs, keys).await?);
+            }
+            stitch.finish()
         }
     }
 }
@@ -340,13 +455,14 @@ const M2M_ALIAS: &str = "__rustango_m2m";
 
 /// `child_qs` inner-joined to `rel`'s junction on rows whose source is one
 /// of `keys`, each target paired with that source: one row per link.
-async fn m2m_children<C>(
-    pool: &Pool,
+async fn m2m_children<C, E>(
+    exec: &mut E,
     rel: &'static crate::core::M2MRelation,
     child_qs: &crate::query::QuerySet<C>,
     keys: Vec<crate::core::SqlValue>,
 ) -> Result<Vec<(crate::core::SqlValue, C)>, ExecError>
 where
+    E: ReusableExecutor,
     C: Model
         + MaybePgFromRow
         + MaybeMyFromRow
@@ -390,84 +506,102 @@ where
     };
     let label = crate::core::joins::joined_label(M2M_ALIAS, rel.src_col);
     let key = (label.as_str(), src_ty);
-    super::fetch_select_in_chunks(pool, &linked(None), child_qs.is_sliced(), keys, |keys| {
+    let dialect = exec.again().dialect();
+    let mut out = Vec::new();
+    for keys in super::in_batches(dialect, &linked(None), child_qs.is_sliced(), keys)? {
         let q = linked(Some(keys));
-        async move { super::select_rows_keyed_on(pool, &q, key).await }
-    })
-    .await
+        let rows = super::select_rows_keyed_on(exec.again(), &q, key);
+        out.extend(rows.boxed().await?);
+    }
+    Ok(out)
 }
 
-/// Pair each parent with the children `fetch` returns keyed by its `on`
-/// value (else its pk). A parent the query returned `n` times costs `n`
-/// child fetches: `C` is not `Clone`.
-async fn stitch<P, C, F, Fut>(
+/// Pairs each parent with the children read for its `on` value (else its
+/// pk). A parent the query returned `n` times costs `n` child fetches: `C`
+/// is not `Clone`.
+struct Stitch<P, C> {
     parents: Vec<P>,
     on: Option<&'static str>,
-    mut fetch: F,
-) -> Result<Vec<(P, Vec<C>)>, ExecError>
-where
-    P: Model + HasPkValue,
-    F: FnMut(Vec<crate::core::SqlValue>) -> Fut,
-    Fut: std::future::Future<Output = Result<Vec<(crate::core::SqlValue, C)>, ExecError>>,
-{
-    use std::collections::HashMap;
-    if parents.is_empty() {
-        return Ok(Vec::new());
-    }
-    P::SCHEMA
-        .primary_key()
-        .ok_or(ExecError::MissingPrimaryKey {
-            table: P::SCHEMA.table,
-        })?;
-    // Each distinct key in first-seen order, with how many parents carry it.
-    let mut keys: Vec<(String, crate::core::SqlValue, usize)> = Vec::new();
-    let mut at: HashMap<String, usize> = HashMap::new();
-    for parent in &parents {
-        let pk = parent_key(parent, on)?;
-        if matches!(pk, crate::core::SqlValue::Null) {
-            continue;
-        }
-        let text = pk.to_display_string();
-        match at.get(&text) {
-            Some(&i) => keys[i].2 += 1,
-            None => {
-                at.insert(text.clone(), keys.len());
-                keys.push((text, pk, 1));
+    /// Each distinct key in first-seen order, with how many parents carry it.
+    keys: Vec<(String, crate::core::SqlValue, usize)>,
+    rounds: Vec<std::collections::HashMap<String, Vec<C>>>,
+}
+
+impl<P: Model + HasPkValue, C> Stitch<P, C> {
+    fn new(parents: Vec<P>, on: Option<&'static str>) -> Result<Self, ExecError> {
+        let mut keys: Vec<(String, crate::core::SqlValue, usize)> = Vec::new();
+        if !parents.is_empty() {
+            P::SCHEMA
+                .primary_key()
+                .ok_or(ExecError::MissingPrimaryKey {
+                    table: P::SCHEMA.table,
+                })?;
+            let mut at: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            for parent in &parents {
+                let pk = parent_key(parent, on)?;
+                if matches!(pk, crate::core::SqlValue::Null) {
+                    continue;
+                }
+                let text = pk.to_display_string();
+                match at.get(&text) {
+                    Some(&i) => keys[i].2 += 1,
+                    None => {
+                        at.insert(text.clone(), keys.len());
+                        keys.push((text, pk, 1));
+                    }
+                }
             }
         }
+        Ok(Self {
+            parents,
+            on,
+            keys,
+            rounds: Vec::new(),
+        })
     }
-    let copies = keys.iter().map(|k| k.2).max().unwrap_or(0);
-    let mut rounds: Vec<HashMap<String, Vec<C>>> = Vec::with_capacity(copies);
-    for round in 0..copies {
-        let batch = keys
+
+    /// The keys of the next child fetch; `None` once every copy is read.
+    fn next_keys(&self) -> Option<Vec<crate::core::SqlValue>> {
+        let round = self.rounds.len();
+        let batch: Vec<_> = self
+            .keys
             .iter()
             .filter(|k| k.2 > round)
             .map(|k| k.1.clone())
             .collect();
-        let mut grouped: HashMap<String, Vec<C>> = HashMap::new();
-        for (fk, child) in fetch(batch).await? {
+        (!batch.is_empty()).then_some(batch)
+    }
+
+    /// The children the last [`Self::next_keys`] read, each with its key.
+    fn push(&mut self, children: Vec<(crate::core::SqlValue, C)>) {
+        let mut grouped: std::collections::HashMap<String, Vec<C>> =
+            std::collections::HashMap::new();
+        for (fk, child) in children {
             grouped
                 .entry(fk.to_display_string())
                 .or_default()
                 .push(child);
         }
-        rounds.push(grouped);
+        self.rounds.push(grouped);
     }
-    let mut taken: HashMap<String, usize> = HashMap::new();
-    let mut out = Vec::with_capacity(parents.len());
-    for parent in parents {
-        let pk = parent_key(&parent, on)?;
-        if matches!(pk, crate::core::SqlValue::Null) {
-            out.push((parent, Vec::new()));
-            continue;
+
+    fn finish(mut self) -> Result<Vec<(P, Vec<C>)>, ExecError> {
+        let mut taken: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut out = Vec::with_capacity(self.parents.len());
+        for parent in self.parents {
+            let pk = parent_key(&parent, self.on)?;
+            if matches!(pk, crate::core::SqlValue::Null) {
+                out.push((parent, Vec::new()));
+                continue;
+            }
+            let text = pk.to_display_string();
+            let copy = taken.entry(text.clone()).or_insert(0);
+            let kids = self.rounds[*copy].remove(&text).unwrap_or_default();
+            *copy += 1;
+            out.push((parent, kids));
         }
-        let text = pk.to_display_string();
-        let copy = taken.entry(text.clone()).or_insert(0);
-        let kids = rounds[*copy].remove(&text).unwrap_or_default();
-        *copy += 1;
-        out.push((parent, kids));
+        Ok(out)
     }
-    Ok(out)
 }
 
 /// The value `C.child_fk_column` stores for `parent`, for the reverse

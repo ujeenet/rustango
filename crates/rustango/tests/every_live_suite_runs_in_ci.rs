@@ -1043,7 +1043,7 @@ jobs:
 // two `--test` steps went unnoticed too, because `has_a_mysql_arm()`
 // only matches `*mysql_live` and `*_tri`.
 //
-// Not hypothetical: the `media_router` change broke the five `router_*`
+// Not hypothetical: the media router change broke the five `router_*`
 // tests in `media_collections_tags_live`, and the local run reported
 // them *passing* because the S3 vars were unset. A skip is
 // indistinguishable from a pass. Only `s3_live` caught it.

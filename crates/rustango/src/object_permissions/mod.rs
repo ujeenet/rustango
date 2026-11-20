@@ -141,6 +141,53 @@ impl Hooks {
             Self::FrameworkOnly => Vec::new(),
         }
     }
+
+    /// The rows of `model` this request reaches: its global scopes, live
+    /// rows, and the queryset scopes, ANDed by the caller.
+    pub(crate) fn row_scope(
+        self,
+        model: &'static crate::core::ModelSchema,
+        parts: &Parts,
+    ) -> Vec<crate::core::WhereExpr> {
+        let mut all = crate::soft_delete::visible_scope(model);
+        let scopes = self.scope_filters(model.table, parts);
+        all.extend(scopes.into_iter().map(crate::core::WhereExpr::Predicate));
+        all
+    }
+
+    /// Whether [`Self::judge`] needs the row: "view" or `action` is hooked.
+    pub(crate) fn judges(self, table: &str, action: Option<&str>) -> bool {
+        std::iter::once("view")
+            .chain(action)
+            .any(|a| self.any(table, a))
+    }
+
+    /// The "view" hook, then `action`'s, on a stored `row`.
+    pub(crate) fn judge(
+        self,
+        table: &str,
+        parts: &Parts,
+        row: &Value,
+        action: Option<&str>,
+    ) -> Verdict {
+        if !self.allows(table, "view", parts, Some(row)) {
+            Verdict::Hidden
+        } else if action.is_some_and(|a| !self.allows(table, a, parts, Some(row))) {
+            Verdict::Refused
+        } else {
+            Verdict::Allowed
+        }
+    }
+}
+
+/// What the hooks decide for one stored row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Verdict {
+    Allowed,
+    /// The "view" hook hides it: it reads as absent, a 404.
+    Hidden,
+    /// Visible, but the action's hook refuses it: a 403.
+    Refused,
 }
 
 /// `true` when every hook for `(table, action)` returns `true`, or
@@ -182,18 +229,6 @@ macro_rules! register_object_permission {
                 origin: $crate::object_permissions::HookOrigin::App,
             }
         }
-    };
-}
-
-/// The old name of [`register_object_permission!`](crate::register_object_permission!).
-#[deprecated(
-    since = "0.62.0",
-    note = "use `register_object_permission!`; removed in 0.65.0"
-)]
-#[macro_export]
-macro_rules! register_admin_object_permission {
-    ($table:expr, $action:expr, $check:expr $(,)?) => {
-        $crate::register_object_permission!($table, $action, $check);
     };
 }
 

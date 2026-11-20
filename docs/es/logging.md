@@ -120,6 +120,7 @@ Cada evento lleva un **target**, y es contra eso que casa
 
 | Target | Qué cubre |
 |---|---|
+| `rustango::access` | Comprobaciones de acceso a rutas que fallaron por un error de base de datos |
 | `rustango::admin` | Rutas y registro del admin |
 | `rustango::admin::audit` | Escrituras del log de auditoría |
 | `rustango::admin::sso` | SSO del admin |

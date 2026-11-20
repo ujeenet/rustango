@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::sync::OwnedMutexGuard;
 
+use super::tx::TxStatus;
 use super::{transaction_pool, write_transaction, ExecError, PoolTx};
 use crate::sql::{Pool, PoolId};
 
@@ -57,8 +58,12 @@ struct TxState {
     depth: usize,
     /// A savepoint statement failed; the transaction can only roll back.
     poisoned: bool,
+    /// The server ended the transaction without a failed statement.
+    ended: bool,
     /// [`RetryPoint`]s opened so far, so each gets its own name.
     retry_points: usize,
+    /// Open [`RetryPoint`]s: number and depth.
+    points: Vec<(usize, usize)>,
 }
 
 impl TxState {
@@ -84,28 +89,47 @@ impl TxState {
     async fn rollback_to(&mut self, depth: usize) -> Result<(), ExecError> {
         self.savepoint("ROLLBACK TO SAVEPOINT", depth).await?;
         self.savepoint("RELEASE SAVEPOINT", depth).await?;
-        self.depth = depth - 1;
+        self.left(depth);
         Ok(())
+    }
+
+    /// Savepoint `depth` is gone: the retry points inside it went with it.
+    fn left(&mut self, depth: usize) {
+        self.depth = depth - 1;
+        self.points.retain(|&(_, d)| d < depth);
+    }
+
+    /// Retry point `n` is gone, and every point opened after it.
+    fn point_gone(&mut self, n: usize) {
+        self.points.retain(|&(m, _)| m < n);
+    }
+
+    /// No savepoint could undo a failed statement now: PG aborts the block.
+    fn unguarded(&self) -> bool {
+        self.depth == 0 && self.points.is_empty()
     }
 
     /// Poison the transaction if the server already ended it.
     async fn check_open(&mut self, slot: &Slot) -> Result<(), ExecError> {
-        if self.tx().still_open().await {
+        let status = self.tx().status().await;
+        if status == TxStatus::Open {
             return Ok(());
         }
         self.poisoned = true;
         // No failed statement seen: the server ended it on its own, e.g.
         // a MySQL DDL implicit commit, so some writes may be committed.
-        let mysql = self.tx().dialect().name() == "mysql";
-        Err(if mysql && !slot.fatal.load(Ordering::SeqCst) {
-            ExecError::AtomicEndedEarly
-        } else {
-            ExecError::AtomicAborted
-        })
+        if status == TxStatus::Ended && !slot.fatal.load(Ordering::SeqCst) {
+            self.ended = true;
+            return Err(ExecError::AtomicEndedEarly);
+        }
+        Err(ExecError::AtomicAborted)
     }
 
     /// Refuse a poisoned transaction; roll back a cancelled block first.
     async fn settle(&mut self, slot: &Slot) -> Result<(), ExecError> {
+        if self.ended {
+            return Err(ExecError::AtomicEndedEarly);
+        }
         if self.poisoned || slot.fatal.load(Ordering::SeqCst) {
             return Err(ExecError::AtomicAborted);
         }
@@ -133,6 +157,7 @@ impl TxState {
             let name = retry_point_name(n);
             self.named_savepoint("ROLLBACK TO SAVEPOINT", &name).await?;
             self.named_savepoint("RELEASE SAVEPOINT", &name).await?;
+            self.point_gone(n);
         }
         Ok(())
     }
@@ -197,14 +222,9 @@ impl Gate {
 /// once the server ended it. Called by every `_tx` statement helper.
 pub(crate) fn gate(tx: &PoolTx<'_>) -> Result<Gate, ExecError> {
     let key = std::ptr::from_ref::<PoolTx<'_>>(tx) as usize;
-    let slot = BLOCK
-        .try_with(|b| {
-            std::iter::successors(Some(Arc::clone(b)), |b| b.enclosing.clone())
-                .map(|b| Arc::clone(&b.slot))
-                .find(|s| s.tx_key == key)
-        })
-        .ok()
-        .flatten();
+    let slot = std::iter::successors(current(), |b| b.enclosing.clone())
+        .map(|b| Arc::clone(&b.slot))
+        .find(|s| s.tx_key == key);
     if slot
         .as_ref()
         .is_some_and(|s| s.fatal.load(Ordering::SeqCst))
@@ -224,6 +244,18 @@ impl Gate {
         }
         r
     }
+}
+
+/// MySQL's lock-wait timeout (1205).
+#[allow(unused_variables)]
+fn is_lock_wait_timeout<T>(r: &Result<T, ExecError>) -> bool {
+    #[cfg(feature = "mysql")]
+    if let Err(ExecError::Driver(sqlx::Error::Database(db))) = r {
+        return db
+            .try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+            .is_some_and(|m| m.number() == 1205);
+    }
+    false
 }
 
 /// MySQL rolls the whole transaction back on a deadlock (1213) and may on a
@@ -282,8 +314,20 @@ impl Block {
 }
 
 tokio::task_local! {
-    /// The innermost block around the running future.
-    static BLOCK: Arc<Block>;
+    /// The innermost block around the running future; `None` in [`detached`].
+    static BLOCK: Option<Arc<Block>>;
+}
+
+/// The innermost block around the running future.
+fn current() -> Option<Arc<Block>> {
+    BLOCK.try_with(Clone::clone).ok().flatten()
+}
+
+/// Run `fut` outside any [`atomic`] block, so its pool statements take
+/// their own connection and commit on their own.
+#[cfg(any(feature = "cache", feature = "tenancy"))]
+pub(crate) async fn detached<F: Future>(fut: F) -> F::Output {
+    BLOCK.scope(None, fut).await
 }
 
 /// Handle an [`atomic`] block gets. Lock it for each statement; drop
@@ -379,13 +423,7 @@ impl Drop for OpenSavepoint {
 /// The innermost [`atomic`] block on `pool` around the running task.
 fn block_on(pool: &Pool) -> Option<Arc<Block>> {
     let id = PoolId::of(pool);
-    BLOCK
-        .try_with(|b| {
-            std::iter::successors(Some(Arc::clone(b)), |b| b.enclosing.clone())
-                .find(|b| b.pool.same(&id))
-        })
-        .ok()
-        .flatten()
+    std::iter::successors(current(), |b| b.enclosing.clone()).find(|b| b.pool.same(&id))
 }
 
 /// Whether the running task is inside an [`atomic`] block on `pool`.
@@ -393,74 +431,149 @@ pub(crate) fn in_block(pool: &Pool) -> bool {
     block_on(pool).is_some()
 }
 
-/// One ORM write's share of the open block on its pool: a savepoint on the
-/// block's transaction. Dropped unreleased, it rolls back on the next use.
-pub(crate) struct JoinedWrite {
+/// How a statement joins a block.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stmt {
+    /// A read or raw SQL: one statement, no savepoint. On PG its failure
+    /// aborts the block.
+    Plain,
+    /// An ORM write: in a savepoint, so a failed one leaves the block usable.
+    Write,
+}
+
+/// One statement's share of the open block on its pool. Holds the block's
+/// lock, so a second statement or a [`TxGuard`] meanwhile is refused. A
+/// write's savepoint, dropped unreleased, rolls back on the next use.
+pub(crate) struct Joined {
     guard: OwnedMutexGuard<TxState>,
     slot: Arc<Slot>,
-    depth: usize,
-    released: bool,
+    phase: Phase,
 }
 
-/// A savepoint for one write in the [`atomic`] block on `pool`; `None`
-/// outside one. Refused with [`ExecError::NestedAtomic`] while the block's
-/// guard is held.
-pub(crate) async fn join(pool: &Pool) -> Option<Result<JoinedWrite, ExecError>> {
+/// Where a joined write's savepoint is, so a drop at any await leaves the
+/// block's state right without a background task.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// A plain statement, or a write done with its savepoint.
+    Done,
+    /// SAVEPOINT sent: if it landed, the orphan nests harmlessly and goes
+    /// with the next release or the commit; nothing to undo yet.
+    Opening(usize),
+    /// The savepoint is open: a drop rolls back to it on the next use.
+    Open(usize),
+    /// RELEASE sent: the write is kept either way.
+    Releasing(usize),
+}
+
+/// `stmt`'s share of the [`atomic`] block on `pool`; `None` outside one.
+/// Refused with [`ExecError::NestedAtomic`] while the block's guard is
+/// held or another statement runs on it.
+pub(crate) async fn join(pool: &Pool, stmt: Stmt) -> Option<Result<Joined, ExecError>> {
     let block = block_on(pool)?;
-    Some(JoinedWrite::open(&block).await)
+    Some(Joined::open(&block, stmt).await)
 }
 
-impl JoinedWrite {
-    async fn open(block: &Block) -> Result<Self, ExecError> {
+impl Joined {
+    async fn open(block: &Block, stmt: Stmt) -> Result<Self, ExecError> {
         let slot = Arc::clone(&block.slot);
+        if slot.fatal.load(Ordering::SeqCst) {
+            return Err(ExecError::AtomicAborted);
+        }
         let guard = acquire(&slot).await?;
         if guard.depth != block.depth {
             return Err(ExecError::NestedAtomic);
         }
         slot.guards.fetch_add(1, Ordering::SeqCst);
-        let mut w = Self {
+        let mut j = Self {
             guard,
             slot,
-            depth: block.depth + 1,
-            released: false,
+            phase: Phase::Done,
         };
-        w.guard.savepoint("SAVEPOINT", w.depth).await?;
-        // Set only once it exists, so a cancel mid-open rolls nothing back.
-        w.guard.depth = w.depth;
-        Ok(w)
+        if stmt == Stmt::Write {
+            let depth = block.depth + 1;
+            j.phase = Phase::Opening(depth);
+            j.guard.savepoint("SAVEPOINT", depth).await?;
+            j.guard.depth = depth;
+            j.phase = Phase::Open(depth);
+        }
+        Ok(j)
     }
 
-    /// Keep the write: release its savepoint.
+    /// End the statement with its result `r`: record an error that ended the
+    /// transaction, else release the write's savepoint. A failed write's
+    /// savepoint rolls back on the block's next use.
+    pub(crate) async fn finish<T>(mut self, r: Result<T, ExecError>) -> Result<T, ExecError> {
+        let r = Gate(Some(Arc::clone(&self.slot))).check(r);
+        // A lock-wait timeout (MariaDB reports a `NOWAIT` miss as one too)
+        // undoes only the statement unless the server rolls back on it.
+        if is_lock_wait_timeout(&r) && self.guard.tx().status().await == TxStatus::Open {
+            self.slot.fatal.store(false, Ordering::SeqCst);
+        }
+        if let Err(ExecError::Driver(sqlx::Error::Database(_))) = &r {
+            // No savepoint to undo it: PG has aborted the whole block.
+            if self.guard.unguarded()
+                && self
+                    .guard
+                    .tx
+                    .as_ref()
+                    .is_some_and(|t| t.dialect().name() == "postgres")
+            {
+                self.slot.fatal.store(true, Ordering::SeqCst);
+            }
+        }
+        let v = r?;
+        self.release().await?;
+        Ok(v)
+    }
+
+    /// Keep the statement's writes: release its savepoint.
     pub(crate) async fn release(mut self) -> Result<(), ExecError> {
-        self.guard
-            .savepoint("RELEASE SAVEPOINT", self.depth)
-            .await?;
-        self.guard.depth = self.depth - 1;
-        self.released = true;
+        let Phase::Open(depth) = self.phase else {
+            return Ok(());
+        };
+        self.phase = Phase::Releasing(depth);
+        self.guard.savepoint("RELEASE SAVEPOINT", depth).await?;
+        self.guard.left(depth);
+        self.phase = Phase::Done;
         Ok(())
     }
 }
 
-impl Drop for JoinedWrite {
+impl Drop for Joined {
     fn drop(&mut self) {
-        if !self.released {
-            mark_cancelled(&self.slot, self.depth);
+        match self.phase {
+            Phase::Open(depth) => mark_cancelled(&self.slot, depth),
+            // Kept whether or not the RELEASE ran; a failed one poisoned the block.
+            Phase::Releasing(depth) => self.guard.left(depth),
+            Phase::Done | Phase::Opening(_) => {}
         }
         self.slot.guards.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
-impl std::ops::Deref for JoinedWrite {
+impl std::ops::Deref for Joined {
     type Target = PoolTx<'static>;
     fn deref(&self) -> &PoolTx<'static> {
         self.guard.tx.as_ref().expect("atomic transaction is open")
     }
 }
 
-impl std::ops::DerefMut for JoinedWrite {
+impl std::ops::DerefMut for Joined {
     fn deref_mut(&mut self) -> &mut PoolTx<'static> {
         self.guard.tx()
     }
+}
+
+/// Refuse `op` inside an [`atomic`] block on `pool`.
+pub(crate) fn refuse_in_block(
+    pool: &Pool,
+    op: &'static str,
+    reason: &'static str,
+) -> Result<(), ExecError> {
+    if in_block(pool) {
+        return Err(ExecError::InAtomic { op, reason });
+    }
+    Ok(())
 }
 
 /// A savepoint that undoes one step of the block on `pool` if it fails, so
@@ -473,6 +586,21 @@ pub(crate) async fn retry_point(pool: &Pool) -> Result<Option<RetryPoint>, ExecE
         Some(block) => RetryPoint::open(&block).await,
         None => Ok(None),
     }
+}
+
+/// Run `step` in a savepoint of the block on `pool`, if any, for a caller
+/// that catches its error and goes on: a failure then undoes only the step,
+/// so PG does not abort the block. The step's own error wins.
+pub(crate) async fn caught<T>(
+    pool: &Pool,
+    step: impl Future<Output = Result<T, ExecError>>,
+) -> Result<T, ExecError> {
+    let Some(point) = retry_point(pool).await? else {
+        return step.await;
+    };
+    let r = step.await;
+    let ended = point.end(r.is_ok()).await;
+    r.and_then(|v| ended.map(|()| v))
 }
 
 fn retry_point_name(n: usize) -> String {
@@ -502,9 +630,19 @@ impl RetryPoint {
         // Its own name: a nested retry point must not replace it (MySQL).
         guard.retry_points += 1;
         let n = guard.retry_points;
-        guard
-            .named_savepoint("SAVEPOINT", &retry_point_name(n))
-            .await?;
+        // Finished even if the caller is dropped; an orphan is released
+        // with its enclosing savepoint or the commit.
+        let claim = Claim::new(&slot);
+        let depth = block.depth;
+        let opened = in_background(async move {
+            let mut g = guard;
+            g.named_savepoint("SAVEPOINT", &retry_point_name(n)).await?;
+            g.points.push((n, depth));
+            Ok(())
+        })
+        .await;
+        drop(claim);
+        opened?;
         Ok(Some(Self {
             slot,
             depth: block.depth,
@@ -516,7 +654,7 @@ impl RetryPoint {
     /// Keep the step's writes, or roll them back.
     pub(crate) async fn end(mut self, keep: bool) -> Result<(), ExecError> {
         // Settles the step's cancelled savepoints first.
-        let mut guard = match acquire(&self.slot).await {
+        let guard = match acquire(&self.slot).await {
             Ok(g) => g,
             // A guard is live: a kept point stays open and commits with the
             // block; a rollback is left to the next settle (`Drop`).
@@ -530,15 +668,21 @@ impl RetryPoint {
             self.done = keep;
             return Ok(());
         }
-        let name = retry_point_name(self.n);
-        if !keep {
-            guard
-                .named_savepoint("ROLLBACK TO SAVEPOINT", &name)
-                .await?;
-        }
-        guard.named_savepoint("RELEASE SAVEPOINT", &name).await?;
+        let (n, name) = (self.n, retry_point_name(self.n));
+        // Finished in the background even if the caller is dropped, so a
+        // later settle never rolls back to a released point.
         self.done = true;
-        Ok(())
+        let _claim = Claim::new(&self.slot);
+        in_background(async move {
+            let mut g = guard;
+            if !keep {
+                g.named_savepoint("ROLLBACK TO SAVEPOINT", &name).await?;
+            }
+            g.named_savepoint("RELEASE SAVEPOINT", &name).await?;
+            g.point_gone(n);
+            Ok(())
+        })
+        .await
     }
 }
 
@@ -563,9 +707,7 @@ impl Drop for RetryPoint {
 /// is still ahead, on any pool.
 #[cfg(feature = "jobs")]
 pub(crate) fn in_any_block() -> bool {
-    BLOCK
-        .try_with(|b| !b.committed.load(Ordering::SeqCst))
-        .unwrap_or(false)
+    current().is_some_and(|b| !b.committed.load(Ordering::SeqCst))
 }
 
 /// Closure-scoped transaction with after-commit hooks.
@@ -618,11 +760,27 @@ pub(crate) fn in_any_block() -> bool {
 /// whole transaction rolls back and [`ExecError::AtomicAborted`] is
 /// returned.
 ///
-/// **ORM writes on the pool** (`save`, `insert`, `delete`, `update`, bulk and
-/// audited writes given the same `&Pool`) join the block in a savepoint, so
-/// its rollback undoes them; with a [`TxGuard`] held they return
-/// [`ExecError::NestedAtomic`]. Reads, raw SQL and DDL still run on their own
-/// connection.
+/// **ORM calls on the pool** (reads, writes, raw SQL and DDL given the same
+/// `&Pool`) run on the block's transaction, so they see its uncommitted rows
+/// and its rollback undoes them. ORM writes run in a savepoint, so a failed
+/// one (an ignored duplicate) leaves the block usable. Reads and raw SQL are
+/// one plain statement: on PG a failed one (a caught `nowait` read) aborts the
+/// block, and later statements and `atomic` return [`ExecError::AtomicAborted`];
+/// wrap such a step in a nested `atomic` to keep going. One statement at a time: with a
+/// [`TxGuard`] held, or two statements at once (`join!`), they return
+/// [`ExecError::NestedAtomic`]. MySQL and SQLite reads see one snapshot for
+/// the whole block. On MySQL, [`run_ddl_idempotent`](crate::sql::run_ddl_idempotent)
+/// refuses DDL with an `sqlx::Error::Protocol`; raw DDL commits the block.
+///
+/// **Separate connections** ([`Pool::acquire`], `Tenant::conn`, the cache,
+/// the job claim, tenancy registry changes) run outside the block's transaction: they do not see its
+/// writes and can deadlock on locks it holds. On SQLite every block holds the
+/// write lock from `BEGIN`, so their writes wait `busy_timeout` and then fail
+/// with `SQLITE_BUSY` (file databases too); in-memory ones wait forever.
+///
+/// **Raw SQL** that ends the transaction (`COMMIT`, `ROLLBACK`, an implicit
+/// commit) is found at the outermost commit, which then returns
+/// [`ExecError::AtomicEndedEarly`]; statements after it ran in autocommit.
 ///
 /// **Server-ended transactions:** after a statement error that ends the
 /// whole transaction (MySQL deadlock 1213 / timeout 1205, SQLite automatic
@@ -630,7 +788,7 @@ pub(crate) fn in_any_block() -> bool {
 /// every later ORM statement in the block
 /// returns [`ExecError::AtomicAborted`], and so does `atomic`. Before the
 /// outermost COMMIT the block also checks the transaction is still open
-/// (one round trip on PG, two on MySQL): a PG error the closure ignored
+/// (one round trip on PG and SQLite, two on MySQL): a PG error the closure ignored
 /// returns `AtomicAborted` instead of a silent rollback. Raw sqlx on the
 /// guard bypasses the per-statement check.
 ///
@@ -641,11 +799,19 @@ pub(crate) fn in_any_block() -> bool {
 /// **Failed statements differ by backend:** PG aborts the transaction,
 /// but MySQL and SQLite undo only the failed statement (duplicate key
 /// 1062, `SQLITE_BUSY`). If the closure ignores that error and returns
-/// `Ok`, the other writes commit. A MySQL lock-wait timeout (1205) always
-/// aborts the block.
+/// `Ok`, the other writes commit. A MySQL lock-wait timeout (1205, also
+/// MariaDB's `NOWAIT` miss) aborts the block when the server rolled the
+/// transaction back; ORM calls on the pool check, statements on a guard
+/// always abort.
 ///
-/// **Costs:** past 64 open savepoints in one transaction PostgreSQL
-/// spills its subtransaction cache, so avoid nesting in hot loops. On
+/// **SQLite** begins the outermost block with `BEGIN IMMEDIATE`, so a
+/// read-then-write block waits for the write lock instead of failing with
+/// `SQLITE_BUSY`; other writers wait for the block.
+///
+/// **Costs:** a read or raw statement costs one round trip; an ORM write
+/// three (its savepoint). Past 64 subtransactions in one transaction
+/// PostgreSQL spills its subtransaction cache, and every ORM write in a block
+/// is one, so keep blocks with many writes or nested blocks short. On
 /// MySQL a deadlock inside a nested block rolls back the whole outer
 /// transaction.
 ///
@@ -667,20 +833,153 @@ where
         Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
     >,
 {
-    run(pool, End::Commit, Begin::Deferred, f).await
+    atomic_with(pool, AtomicOptions::new(), f).await
 }
 
-/// [`atomic`] whose top-level SQLite block starts with `BEGIN IMMEDIATE`, as
-/// [`write_transaction`] does: a read-then-write block (`select_for_update`)
-/// then waits for the write lock instead of failing with `SQLITE_BUSY`.
+/// [`atomic`] with an isolation level or transaction settings, applied when
+/// the outermost block begins:
 ///
-/// Inside a block on the same pool it is a savepoint, like [`atomic`];
-/// inside another pool's block it begins deferred, as that pool may hold
-/// the file's lock. Other backends: exactly [`atomic`]. Writes that bypass
-/// the block (a spawned task, raw SQL on the pool) wait for its lock.
+/// ```no_run
+/// # async fn demo(pool: &rustango::sql::Pool) -> Result<(), rustango::sql::ExecError> {
+/// use rustango::sql::{atomic_with, AtomicOptions, Isolation, TxSetting};
+/// let opts = AtomicOptions::new()
+///     .isolation(Isolation::Serializable)
+///     .setting(TxSetting::new("app.account_id", "42")?);
+/// atomic_with(pool, opts, |_tx| Box::pin(async move { Ok(()) })).await
+/// # }
+/// ```
+///
+/// PG begins `BEGIN ISOLATION LEVEL …` and sets each setting with
+/// `set_config(name, value, true)`, gone at the end of the block. MySQL sets
+/// the level for this transaction only. SQLite is always serializable, so
+/// any level is accepted. Settings are PG-only. A block with neither sends
+/// what [`atomic`] sends.
+///
+/// # Errors
+/// As [`atomic`]; settings on MySQL or SQLite are
+/// [`SqlError::OperatorNotSupportedInDialect`](crate::sql::SqlError::OperatorNotSupportedInDialect),
+/// and options on a nested block (it cannot change them) [`ExecError::InAtomic`].
+pub async fn atomic_with<F, T>(pool: &Pool, opts: AtomicOptions, f: F) -> Result<T, ExecError>
+where
+    F: for<'tx> FnOnce(
+        &'tx AtomicTx,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
+    >,
+{
+    run(pool, End::Commit, opts, f).await
+}
+
+/// Whether the running task is inside an [`atomic`] block on `pool`, so
+/// ORM calls given `pool` run on its transaction. Also `true` for a block
+/// that failed or ended early: calls there return
+/// [`ExecError::AtomicAborted`] or [`ExecError::AtomicEndedEarly`].
+#[must_use]
+pub fn in_atomic(pool: &Pool) -> bool {
+    in_block(pool)
+}
+
+/// How [`atomic_with`] begins a block. Built with its methods; the default
+/// is what [`atomic`] does.
+#[derive(Debug, Clone)]
+#[must_use]
+pub struct AtomicOptions {
+    isolation: Option<Isolation>,
+    settings: Vec<TxSetting>,
+    begin: Begin,
+}
+
+impl Default for AtomicOptions {
+    fn default() -> Self {
+        Self {
+            isolation: None,
+            settings: Vec::new(),
+            begin: Begin::Immediate,
+        }
+    }
+}
+
+impl AtomicOptions {
+    /// The options [`atomic`] uses.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The outermost transaction's isolation level.
+    pub fn isolation(mut self, level: Isolation) -> Self {
+        self.isolation = Some(level);
+        self
+    }
+
+    /// A PG setting for the block's transaction only.
+    pub fn setting(mut self, setting: TxSetting) -> Self {
+        self.settings.push(setting);
+        self
+    }
+
+    fn changes_the_begin(&self) -> bool {
+        self.isolation.is_some() || !self.settings.is_empty()
+    }
+}
+
+/// A transaction isolation level for [`AtomicOptions::isolation`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Isolation {
+    ReadCommitted,
+    RepeatableRead,
+    Serializable,
+}
+
+impl Isolation {
+    #[cfg(any(feature = "postgres", feature = "mysql"))]
+    fn sql(self) -> &'static str {
+        match self {
+            Self::ReadCommitted => "READ COMMITTED",
+            Self::RepeatableRead => "REPEATABLE READ",
+            Self::Serializable => "SERIALIZABLE",
+        }
+    }
+}
+
+/// A PG setting set for one transaction, such as `app.account_id` for row
+/// security policies. The name must be dotted (`prefix.name`, more dots
+/// allowed), every part a plain identifier: that excludes the server's
+/// undotted settings such as `search_path` and `role`, not extension ones.
+#[derive(Debug, Clone)]
+pub struct TxSetting {
+    name: String,
+    value: String,
+}
+
+impl TxSetting {
+    /// `name = value` for the block's transaction. The value is bound.
+    ///
+    /// # Errors
+    /// [`ExecError::InvalidTxSetting`] unless `name` is dotted with every
+    /// part a plain identifier.
+    pub fn new(name: &str, value: impl Into<String>) -> Result<Self, ExecError> {
+        let plain = name.contains('.') && name.split('.').all(crate::core::is_plain_identifier);
+        if !plain {
+            return Err(ExecError::InvalidTxSetting {
+                name: name.to_owned(),
+            });
+        }
+        Ok(Self {
+            name: name.to_owned(),
+            value: value.into(),
+        })
+    }
+}
+
+/// [`atomic`], which now begins SQLite blocks with `BEGIN IMMEDIATE` too.
 ///
 /// # Errors
 /// As [`atomic`].
+#[deprecated(
+    since = "0.67.0",
+    note = "use `atomic`: it begins SQLite blocks with `BEGIN IMMEDIATE` now; removed in 0.68.0"
+)]
 pub async fn atomic_immediate<F, T>(pool: &Pool, f: F) -> Result<T, ExecError>
 where
     F: for<'tx> FnOnce(
@@ -689,11 +988,11 @@ where
         Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
     >,
 {
-    run(pool, End::Commit, Begin::Immediate, f).await
+    atomic_with(pool, AtomicOptions::new(), f).await
 }
 
 /// How a top-level SQLite block begins.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Begin {
     Deferred,
     Immediate,
@@ -717,10 +1016,14 @@ where
         Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
     >,
 {
-    run(pool, End::Rollback, Begin::Deferred, f).await
+    let opts = AtomicOptions {
+        begin: Begin::Deferred,
+        ..AtomicOptions::new()
+    };
+    run(pool, End::Rollback, opts, f).await
 }
 
-async fn run<F, T>(pool: &Pool, end: End, begin: Begin, f: F) -> Result<T, ExecError>
+async fn run<F, T>(pool: &Pool, end: End, opts: AtomicOptions, f: F) -> Result<T, ExecError>
 where
     F: for<'tx> FnOnce(
         &'tx AtomicTx,
@@ -729,13 +1032,71 @@ where
     >,
 {
     let id = PoolId::of(pool);
-    let current = BLOCK.try_with(Arc::clone).ok();
-    let same_pool =
-        std::iter::successors(current.clone(), |b| b.enclosing.clone()).find(|b| b.pool.same(&id));
+    let enclosing = current();
+    let same_pool = std::iter::successors(enclosing.clone(), |b| b.enclosing.clone())
+        .find(|b| b.pool.same(&id));
     match same_pool {
-        Some(parent) => nested(parent, current, end, f).await,
-        None => outermost(pool, id, current, end, begin, f).await,
+        // PG keeps a nested `set_config` past RELEASE; levels are refused.
+        Some(_) if opts.changes_the_begin() => Err(ExecError::InAtomic {
+            op: "an isolation level or setting",
+            reason: "it applies only when the outermost block begins",
+        }),
+        Some(parent) => nested(parent, enclosing, end, f).await,
+        None => outermost(pool, id, enclosing, end, &opts, f).await,
     }
+}
+
+/// Begin the outermost block's transaction as `opts` say. Without a level or
+/// settings it sends what it always did.
+async fn begin_block(
+    pool: &Pool,
+    opts: &AtomicOptions,
+    top: bool,
+) -> Result<PoolTx<'static>, ExecError> {
+    if !opts.settings.is_empty() && pool.dialect().name() != "postgres" {
+        return Err(ExecError::Sql(
+            crate::sql::SqlError::OperatorNotSupportedInDialect {
+                op: "set_config",
+                dialect: pool.dialect().name(),
+            },
+        ));
+    }
+    let mut tx = match (pool, opts.isolation) {
+        #[cfg(feature = "postgres")]
+        (Pool::Postgres(pg), Some(level)) => PoolTx::new(
+            super::TxConn::Postgres(
+                pg.begin_with(format!("BEGIN ISOLATION LEVEL {}", level.sql()))
+                    .await?,
+            ),
+            PoolId::of(pool),
+        ),
+        // One statement, so a cancel cannot leave the level for the next borrower.
+        #[cfg(feature = "mysql")]
+        (Pool::Mysql(my), Some(level)) => PoolTx::new(
+            super::TxConn::Mysql(
+                my.begin_with(format!(
+                    "SET TRANSACTION ISOLATION LEVEL {}; START TRANSACTION",
+                    level.sql()
+                ))
+                .await?,
+            ),
+            PoolId::of(pool),
+        ),
+        // SQLite is always serializable.
+        _ if opts.begin == Begin::Immediate && top => write_transaction(pool).await?,
+        _ => transaction_pool(pool).await?,
+    };
+    for s in &opts.settings {
+        let d = tx.dialect();
+        let sql = format!(
+            "SELECT set_config({}, {}, true)",
+            d.placeholder(1),
+            d.placeholder(2)
+        );
+        let binds = vec![s.name.clone().into(), s.value.clone().into()];
+        super::raw_execute_tx(&mut tx, &sql, binds).await?;
+    }
+    Ok(tx)
 }
 
 async fn outermost<F, T>(
@@ -743,7 +1104,7 @@ async fn outermost<F, T>(
     id: PoolId,
     enclosing: Option<Arc<Block>>,
     end: End,
-    begin: Begin,
+    opts: &AtomicOptions,
     f: F,
 ) -> Result<T, ExecError>
 where
@@ -754,11 +1115,7 @@ where
     >,
 {
     let fatal = Arc::new(AtomicBool::new(false));
-    let mut tx = if begin == Begin::Immediate && enclosing.is_none() {
-        write_transaction(pool).await?
-    } else {
-        transaction_pool(pool).await?
-    };
+    let mut tx = begin_block(pool, opts, enclosing.is_none()).await?;
     let hook = Arc::clone(&fatal);
     tx.on_sqlite_rollback(move || hook.store(true, Ordering::SeqCst))
         .await?;
@@ -766,7 +1123,9 @@ where
         tx: Some(tx),
         depth: 0,
         poisoned: false,
+        ended: false,
         retry_points: 0,
+        points: Vec::new(),
     }));
     // The `PoolTx` never moves inside `state`, so its address identifies it.
     let tx_key = state
@@ -795,7 +1154,7 @@ where
         block: Arc::clone(&block),
     };
     let res = BLOCK
-        .scope(Arc::clone(&block), async { f(&handle).await })
+        .scope(Some(Arc::clone(&block)), async { f(&handle).await })
         .await;
     // Waits for any background savepoint work, then rolls back a
     // cancelled nested block before deciding.
@@ -818,7 +1177,7 @@ where
             tx.commit().await?;
             block.committed.store(true, Ordering::SeqCst);
             let callbacks = block.take_callbacks();
-            BLOCK.sync_scope(block, || {
+            BLOCK.sync_scope(Some(block), || {
                 for cb in callbacks {
                     // The data is committed: one panicking hook must not skip the rest.
                     let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(cb));
@@ -900,7 +1259,7 @@ where
         block: Arc::clone(&block),
     };
     let res = BLOCK
-        .scope(Arc::clone(&block), async { f(&handle).await })
+        .scope(Some(Arc::clone(&block)), async { f(&handle).await })
         .await;
     let guard = match acquire(&slot).await {
         Ok(g) => g,
@@ -920,7 +1279,7 @@ where
         }
         if release {
             g.savepoint("RELEASE SAVEPOINT", depth).await?;
-            g.depth = depth - 1;
+            g.left(depth);
             let callbacks = block.take_callbacks();
             parent
                 .callbacks
@@ -991,7 +1350,7 @@ pub fn on_commit<F>(f: F)
 where
     F: FnOnce() + Send + 'static,
 {
-    let block = BLOCK.try_with(Arc::clone).unwrap_or_else(|_| {
+    let block = current().unwrap_or_else(|| {
         panic!(
             "rustango::sql::on_commit called outside an `atomic` block — \
              the callback would never fire. Wrap the caller in \
@@ -1014,7 +1373,7 @@ where
 /// called outside an `atomic` block.
 #[must_use]
 pub fn on_commit_pending() -> usize {
-    std::iter::successors(BLOCK.try_with(Arc::clone).ok(), |b| b.enclosing.clone())
+    std::iter::successors(current(), |b| b.enclosing.clone())
         .map(|b| {
             b.callbacks
                 .lock()

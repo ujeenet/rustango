@@ -179,7 +179,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 **When**: CI gate before running tests.
 
-**API**: [`migrate::manage::run`](../../src/migrate/manage.rs) `check` arm.
+**API**: [`migrate::manage::run`](../../src/migrate/manage/mod.rs) `check` arm.
 
 **Recipe**: `cargo run -- check` — runs the bundled checks (system warnings, unapplied migrations).
 
@@ -266,9 +266,9 @@ either idempotent or refuses on conflict.
 | `seed-permissions [--slug <s>]` | Re-run `auto_create_permissions` against one (`--slug`) or every active tenant. Idempotent — `UNIQUE (content_type_id, codename)` makes re-running on a populated catalog a no-op. Useful after adding `#[rustango(permissions)]` to a model without a fresh migrate cycle. |
 
 **API**:
-[`migrate::manage::make_api_routes_cmd`](../../src/migrate/manage.rs),
-[`migrate::manage::forget_pending_cmd`](../../src/migrate/manage.rs),
-[`migrate::manage::migrate_squash`](../../src/migrate/manage.rs),
+[`migrate::manage::make_api_routes_cmd`](../../src/migrate/manage/generate.rs),
+[`migrate::manage::forget_pending_cmd`](../../src/migrate/manage/showmigrations.rs),
+[`migrate::manage::migrate_squash`](../../src/migrate/manage/migrate.rs),
 [`tenancy::manage::roles::seed_permissions_cmd`](../../src/tenancy/manage/roles.rs).
 
 **Recipe**:
@@ -296,7 +296,7 @@ cargo run -- seed-permissions             # every active tenant
 cargo run -- seed-permissions --slug acme # one tenant only
 ```
 
-**Verified by**: scaffold/template tests in `crates/rustango/src/migrate/manage.rs::gen_tests`; `forget-pending` end-to-end via the validator-rejection recovery flow.
+**Verified by**: scaffold/template tests in `crates/rustango/src/migrate/manage/gen_tests.rs`; `forget-pending` end-to-end via the validator-rejection recovery flow.
 
 ---
 
@@ -2949,9 +2949,9 @@ combine with the existing dialect features:
 
 ```toml
 [dependencies]
-rustango = { version = "0.66", features = ["sqlite"] }
+rustango = { version = "0.67", features = ["sqlite"] }
 # or both at once:
-rustango = { version = "0.66", features = ["postgres", "sqlite"] }
+rustango = { version = "0.67", features = ["postgres", "sqlite"] }
 ```
 
 The macro emits per-backend trait impls only when the feature is
@@ -3418,7 +3418,7 @@ UPDATE`, `INSERT … RETURNING`) translated to portable equivalents.
 
 ```toml
 # Tri-dialect media
-rustango = { version = "0.66", default-features = false, features = ["sqlite", "media", "storage"] }
+rustango = { version = "0.67", default-features = false, features = ["sqlite", "media", "storage"] }
 ```
 
 ```rust,ignore
@@ -3480,7 +3480,7 @@ your framework-exposed **tools** over JSON-RPC 2.0 / Streamable HTTP.
 
 ```toml
 # Cargo.toml
-rustango = { version = "0.66", features = ["mcp"] }
+rustango = { version = "0.67", features = ["mcp"] }
 # mcp pulls tenancy + sse + serializer + openapi automatically.
 ```
 

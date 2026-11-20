@@ -615,6 +615,7 @@ impl MoveCtx<'_> {
         if self.reactivate {
             update = update.set_typed(Org::active.set(true));
         }
+        // The storage switch commits on its own registry transaction.
         let mut tx = self.pools.registry().begin().await?;
         let n = update.execute_on(&mut *tx).await?;
         expect_one(n, &self.parsed.slug)?;

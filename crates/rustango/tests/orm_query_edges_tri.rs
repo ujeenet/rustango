@@ -1086,6 +1086,43 @@ async fn find_many_or_fail_follows_the_collation(pool: &Pool) {
     );
 }
 
+/// An integer key of another width finds the row: `find(7, ..)` on an
+/// `i64` key, `find(7_i64, ..)` on an `i32` one. Out of range stays an error.
+async fn find_takes_an_integer_of_any_width(pool: &Pool) {
+    Bucket { id: 7 }.insert(pool).await.expect("bucket");
+    assert!(Bucket::find(7, pool).await.expect("find").is_some());
+    assert!(Bucket::find_or_fail(7_i16, pool).await.is_ok());
+    assert!(Bucket::objects()
+        .find(7, pool)
+        .await
+        .expect("qs find")
+        .is_some());
+    assert!(Bucket::objects().find_or_fail(7, pool).await.is_ok());
+    let others = Bucket::objects().where_key_not(7).fetch(pool).await;
+    assert!(others.expect("where_key_not").is_empty());
+    let missing = Bucket::find_many_or_fail([7, 8], pool).await;
+    assert!(
+        matches!(
+            missing,
+            Err(ExecError::Driver(rustango::sql::sqlx::Error::RowNotFound))
+        ),
+        "{missing:?}"
+    );
+
+    let mut small = Small {
+        id: rustango::sql::Auto::Unset,
+        n: 1,
+    };
+    small.insert(pool).await.expect("small");
+    let id = i64::from(*small.id.get().expect("pk"));
+    assert!(Small::find(id, pool).await.expect("narrowed").is_some());
+    let wide = Small::find(i64::MAX, pool).await;
+    assert!(
+        matches!(wide, Err(ExecError::Query(QueryError::TypeMismatch { .. }))),
+        "{wide:?}"
+    );
+}
+
 /// Concurrent `get_or_create` on a unique key: the losers return the
 /// winner's row instead of the unique violation.
 async fn get_or_create_survives_concurrent_callers(pool: &Pool) {
@@ -1337,6 +1374,7 @@ tri_dialect_test! {
         destroy_past_the_bind_cap_is_all_or_none,
         split_key_lists_return_each_row_once,
         find_many_or_fail_follows_the_collation,
+        find_takes_an_integer_of_any_width,
         get_or_create_survives_concurrent_callers,
         update_or_create_survives_concurrent_callers,
         get_or_create_keeps_a_violation_on_another_key,

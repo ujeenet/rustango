@@ -56,7 +56,7 @@ const EXEMPT: &[(&str, &str, &str, &str)] = &[
         "debug_panel/mod.rs",
         "",
         "debug_router",
-        "development-only panel the app mounts on purpose; open by design",
+        "takes a `RouteAccess` argument, so it cannot mount undecided",
     ),
     (
         "health.rs",
@@ -133,12 +133,6 @@ const EXEMPT: &[(&str, &str, &str, &str)] = &[
     (
         "media/router.rs",
         "",
-        "media_router",
-        "refuses every request; `media_router_with` takes an authorizer",
-    ),
-    (
-        "media/router.rs",
-        "",
         "media_router_with",
         "every request goes through the caller's `MediaAuthorizer`",
     ),
@@ -146,7 +140,7 @@ const EXEMPT: &[(&str, &str, &str, &str)] = &[
         "metrics.rs",
         "",
         "metrics_router",
-        "serves process metrics; the app mounts it on an internal port",
+        "takes a `RouteAccess` argument, so it cannot mount undecided",
     ),
     (
         "oauth2/router.rs",

@@ -410,8 +410,8 @@ impl<T: Model> QuerySet<T> {
 
     /// PG 9.3+ / MySQL 8.0.1+: `FOR UPDATE OF table1, table2, …` — lock
     /// only the named tables when the query joins. Without `OF` the
-    /// lock covers every joined table the result touches. No-op on
-    /// SQLite.
+    /// lock covers every joined table the result touches. MariaDB has no
+    /// `OF` and locks them all; no-op on SQLite.
     ///
     /// Each call appends. Pass base table names or join aliases.
     #[must_use]
@@ -1359,7 +1359,7 @@ impl<T: Model> QuerySet<T> {
     #[must_use]
     pub fn where_key(self, pk: impl Into<SqlValue>) -> Self {
         match T::SCHEMA.primary_key() {
-            Some(f) => self.filter_op(f.name, Op::Eq, pk),
+            Some(f) => self.filter_op(f.name, Op::Eq, pk.into().fit_integer(f.ty)),
             None => self.with_pending_error(QueryError::UnknownField {
                 model: T::SCHEMA.name,
                 field: "<pk>".to_string(),
@@ -1381,7 +1381,7 @@ impl<T: Model> QuerySet<T> {
     #[must_use]
     pub fn where_key_not(self, pk: impl Into<SqlValue>) -> Self {
         match T::SCHEMA.primary_key() {
-            Some(f) => self.filter_op(f.name, Op::Ne, pk),
+            Some(f) => self.filter_op(f.name, Op::Ne, pk.into().fit_integer(f.ty)),
             None => self.with_pending_error(QueryError::UnknownField {
                 model: T::SCHEMA.name,
                 field: "<pk>".to_string(),

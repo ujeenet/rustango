@@ -41,9 +41,9 @@ async fn claim(pool: &Pool, worker: i64) -> Result<Option<i64>, ExecError> {
     Ok(Some(job.id))
 }
 
-/// [`claim`] inside `atomic_immediate`, which takes the write lock at `BEGIN` too.
+/// [`claim`] inside `atomic`, which takes the SQLite write lock at `BEGIN` too.
 async fn claim_atomic(pool: &Pool, worker: i64) -> Result<Option<i64>, ExecError> {
-    rustango::sql::atomic_immediate(pool, move |tx| {
+    rustango::sql::atomic(pool, move |tx| {
         Box::pin(async move {
             let mut guard = tx.lock().await?;
             let free: Vec<Job> = Job::objects()
@@ -97,7 +97,7 @@ async fn racing_workers_claim_distinct_jobs(pool: &Pool) {
     race(pool, |pool, worker| Box::pin(claim(pool, worker))).await;
 }
 
-/// The same race in `atomic_immediate` blocks.
+/// The same race in `atomic` blocks.
 async fn racing_atomic_workers_claim_distinct_jobs(pool: &Pool) {
     race(pool, |pool, worker| Box::pin(claim_atomic(pool, worker))).await;
 }

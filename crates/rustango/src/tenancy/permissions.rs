@@ -349,47 +349,31 @@ pub async fn has_perm_pool(
     // #561 — was three byte-similar 5-arg-bind arms differing only
     // in how PG vs MySQL/SQLite decode BOOL vs TINYINT(1)/INTEGER.
     // Collapse onto per-backend `decode_has_perm_*_row` helpers.
-    let (is_super, explicit_grant, via_role, user_active) = match pool {
-        #[cfg(feature = "postgres")]
-        crate::sql::Pool::Postgres(pg) => {
-            let row = sqlx::query(&sql)
-                .bind(uid)
-                .bind(uid)
-                .bind(codename)
-                .bind(uid)
-                .bind(codename)
-                .bind(uid)
-                .fetch_one(pg)
-                .await?;
-            decode_has_perm_pg_row(&row)
-        }
-        #[cfg(feature = "mysql")]
-        crate::sql::Pool::Mysql(my) => {
-            let row = sqlx::query(&sql)
-                .bind(uid)
-                .bind(uid)
-                .bind(codename)
-                .bind(uid)
-                .bind(codename)
-                .bind(uid)
-                .fetch_one(my)
-                .await?;
-            decode_has_perm_my_row(&row)
-        }
-        #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(sq) => {
-            let row = sqlx::query(&sql)
-                .bind(uid)
-                .bind(uid)
-                .bind(codename)
-                .bind(uid)
-                .bind(codename)
-                .bind(uid)
-                .fetch_one(sq)
-                .await?;
-            decode_has_perm_sq_row(&row)
-        }
-    };
+    use crate::core::SqlValue;
+    // Through the ORM executor, so it joins an open `atomic` block on `pool`.
+    let (uid_v, cn) = (SqlValue::I64(uid), || SqlValue::String(codename.to_owned()));
+    let binds = vec![
+        uid_v.clone(),
+        uid_v.clone(),
+        cn(),
+        uid_v.clone(),
+        cn(),
+        uid_v,
+    ];
+    let rows = crate::sql::run_on(pool, &sql, binds, |row| {
+        Ok(match row {
+            #[cfg(feature = "postgres")]
+            crate::sql::RowRef::Postgres(r) => decode_has_perm_pg_row(r),
+            #[cfg(feature = "mysql")]
+            crate::sql::RowRef::Mysql(r) => decode_has_perm_my_row(r),
+            #[cfg(feature = "sqlite")]
+            crate::sql::RowRef::Sqlite(r) => decode_has_perm_sq_row(r),
+        })
+    })
+    .await
+    .map_err(exec_to_sqlx)?;
+    let (is_super, explicit_grant, via_role, user_active) =
+        rows.into_iter().next().ok_or(sqlx::Error::RowNotFound)?;
     if is_super {
         return Ok(true);
     }
@@ -404,6 +388,15 @@ pub async fn has_perm_pool(
         return Ok(granted);
     }
     Ok(via_role)
+}
+
+/// These functions return driver errors; a refusal such as `NestedAtomic`
+/// travels as its message.
+fn exec_to_sqlx(e: crate::sql::ExecError) -> sqlx::Error {
+    match e {
+        crate::sql::ExecError::Driver(err) => err,
+        other => sqlx::Error::Protocol(other.to_string()),
+    }
 }
 
 // ------------------------------------------------------------------ Role management (ORM-backed)
@@ -744,23 +737,21 @@ pub async fn user_roles_qs_pool(
     // `Value`, MySQL: `Json<Value>` wrapper, SQLite: `Option<String>`
     // → from_str round-trip). Decode collapses onto the per-backend
     // `decode_role_*_row` helpers below.
-    match pool {
-        #[cfg(feature = "postgres")]
-        crate::sql::Pool::Postgres(pg) => {
-            let rows = sqlx::query(&sql).bind(user_id).fetch_all(pg).await?;
-            rows.iter().map(decode_role_pg_row).collect()
-        }
-        #[cfg(feature = "mysql")]
-        crate::sql::Pool::Mysql(my) => {
-            let rows = sqlx::query(&sql).bind(user_id).fetch_all(my).await?;
-            rows.iter().map(decode_role_my_row).collect()
-        }
-        #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(sq) => {
-            let rows = sqlx::query(&sql).bind(user_id).fetch_all(sq).await?;
-            rows.iter().map(decode_role_sq_row).collect()
-        }
-    }
+    crate::sql::run_on(
+        pool,
+        &sql,
+        vec![crate::core::SqlValue::I64(user_id)],
+        |row| match row {
+            #[cfg(feature = "postgres")]
+            crate::sql::RowRef::Postgres(r) => decode_role_pg_row(r),
+            #[cfg(feature = "mysql")]
+            crate::sql::RowRef::Mysql(r) => decode_role_my_row(r),
+            #[cfg(feature = "sqlite")]
+            crate::sql::RowRef::Sqlite(r) => decode_role_sq_row(r),
+        },
+    )
+    .await
+    .map_err(exec_to_sqlx)
 }
 
 /// Per-backend decoder for `has_perm_pool`'s 3-column SELECT.

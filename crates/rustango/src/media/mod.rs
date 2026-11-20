@@ -46,8 +46,7 @@
 //! ```
 //!
 //! The REST router over this surface lives in [`router`] and needs the
-//! `admin` feature. It requires an authorization policy: `media_router`
-//! is deprecated and answers `403` to everything, and
+//! `admin` feature. It requires an authorization policy:
 //! `router::media_router_with` takes a [`router::MediaAuthorizer`].
 //!
 //! ## Schema
@@ -779,7 +778,7 @@ impl MediaManager {
             .where_(Media::id.eq(id))
             .compile_delete()
             .map_err(media_err_from_query)?;
-        let mut tx = crate::sql::transaction_pool(&self.pool)
+        let mut tx = crate::sql::write_tx(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
         crate::sql::delete_tx(&mut tx, &unlink)
@@ -788,7 +787,7 @@ impl MediaManager {
         crate::sql::delete_tx(&mut tx, &row)
             .await
             .map_err(media_err_from_exec)?;
-        tx.commit().await?;
+        tx.commit().await.map_err(media_err_from_exec)?;
         Ok(())
     }
 
@@ -1040,14 +1039,14 @@ impl MediaManager {
             deleted_at: None,
         };
         // IMMEDIATE on SQLite: this tx reads before it writes (#2180).
-        let mut tx = crate::sql::write_transaction(&self.pool)
+        let mut tx = crate::sql::write_tx(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
         // Locked until commit, so a concurrent `delete_collection` either
         // sees this child or has already deleted the parent (#1573).
         if let Some(p) = parent {
             if !lock_live_collection_tx(&mut tx, p).await? {
-                tx.rollback().await?;
+                tx.rollback().await.map_err(media_err_from_exec)?;
                 // Not "not found": the router would answer 404 for a bad body.
                 return Err(MediaError::Other(format!(
                     "parent collection {p} is missing or deleted"
@@ -1091,7 +1090,7 @@ impl MediaManager {
                 .await
                 .map_err(media_err_from_exec)?
         };
-        tx.commit().await?;
+        tx.commit().await.map_err(media_err_from_exec)?;
         created
             .into_iter()
             .next()
@@ -1201,7 +1200,7 @@ impl MediaManager {
         // orphaned, and the old `collection_id` recorded nowhere.
         // Both are database-only, so a transaction closes it.
         // IMMEDIATE on SQLite: the walk reads before the writes (#2180).
-        let mut tx = crate::sql::write_transaction(&self.pool)
+        let mut tx = crate::sql::write_tx(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
         // One bind spare for `deleted_at`; a wide subtree is many `IN` lists.
@@ -1232,7 +1231,7 @@ impl MediaManager {
                 .await
                 .map_err(media_err_from_exec)?;
         }
-        tx.commit().await?;
+        tx.commit().await.map_err(media_err_from_exec)?;
         Ok(())
     }
 
@@ -1246,12 +1245,12 @@ impl MediaManager {
         collection_id: Option<i64>,
     ) -> Result<(), MediaError> {
         // IMMEDIATE on SQLite: the collection check reads before the update.
-        let mut tx = crate::sql::write_transaction(&self.pool)
+        let mut tx = crate::sql::write_tx(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
         if let Some(c) = collection_id {
             if !lock_live_collection_tx(&mut tx, c).await? {
-                tx.rollback().await?;
+                tx.rollback().await.map_err(media_err_from_exec)?;
                 return Err(dead_collection(c));
             }
         }
@@ -1267,7 +1266,7 @@ impl MediaManager {
         crate::sql::update_tx(&mut tx, &update)
             .await
             .map_err(media_err_from_exec)?;
-        tx.commit().await?;
+        tx.commit().await.map_err(media_err_from_exec)?;
         Ok(())
     }
 
@@ -1406,35 +1405,32 @@ impl MediaManager {
         let d = self.pool.dialect();
         let (p1, p2) = (d.placeholder(1), d.placeholder(2));
         if d.name() == "mysql" {
-            #[cfg(feature = "mysql")]
-            {
-                // Irrefutable in a mysql-only build — see the note above.
-                #[allow(irrefutable_let_patterns)]
-                let crate::sql::Pool::Mysql(my) = &self.pool
-                else {
-                    unreachable!()
-                };
-                let mut tx = my.begin().await?;
-                sqlx::query(
-                    "INSERT INTO `rustango_media_tags` (`name`, `slug`) \
-                     VALUES (?, ?) \
-                     ON DUPLICATE KEY UPDATE `name` = VALUES(`name`)",
-                )
-                .bind(slug)
-                .bind(slug)
-                .execute(&mut *tx)
-                .await?;
-                let out: MediaTag = sqlx::query_as(
-                    "SELECT id, name, slug, created_at FROM `rustango_media_tags` WHERE slug = ?",
-                )
-                .bind(slug)
-                .fetch_one(&mut *tx)
-                .await?;
-                tx.commit().await?;
-                return Ok(out);
-            }
-            #[cfg(not(feature = "mysql"))]
-            unreachable!();
+            // No RETURNING: read the row back in the same transaction.
+            let slug_value = || crate::core::SqlValue::String(slug.to_owned());
+            let mut tx = crate::sql::write_tx(&self.pool)
+                .await
+                .map_err(media_err_from_exec)?;
+            crate::sql::raw_execute_tx(
+                &mut tx,
+                "INSERT INTO `rustango_media_tags` (`name`, `slug`) \
+                 VALUES (?, ?) \
+                 ON DUPLICATE KEY UPDATE `name` = VALUES(`name`)",
+                vec![slug_value(), slug_value()],
+            )
+            .await
+            .map_err(media_err_from_exec)?;
+            let rows: Vec<MediaTag> = crate::sql::raw_query_tx(
+                &mut tx,
+                "SELECT id, name, slug, created_at FROM `rustango_media_tags` WHERE slug = ?",
+                vec![slug_value()],
+            )
+            .await
+            .map_err(media_err_from_exec)?;
+            tx.commit().await.map_err(media_err_from_exec)?;
+            return rows
+                .into_iter()
+                .next()
+                .ok_or_else(|| MediaError::Other("ensure_tag INSERT returned no rows".into()));
         }
         let sql = format!(
             "INSERT INTO rustango_media_tags (name, slug) VALUES ({p1}, {p2}) \
@@ -1626,7 +1622,7 @@ impl MediaManager {
         );
 
         // SQLite has no row lock: take its write lock at BEGIN instead.
-        let mut tx = crate::sql::write_transaction(&self.pool)
+        let mut tx = crate::sql::write_tx(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
         if let Some(lock) = lock {
@@ -1640,7 +1636,7 @@ impl MediaManager {
         crate::sql::bulk_insert_tx(&mut tx, &tag_links(media_id, tag_ids))
             .await
             .map_err(media_err_from_exec)?;
-        tx.commit().await?;
+        tx.commit().await.map_err(media_err_from_exec)?;
         Ok(())
     }
 
@@ -1822,12 +1818,12 @@ impl MediaManager {
     async fn insert_row(&self, r: InsertRow) -> Result<Media, MediaError> {
         use crate::sql::FetcherTx as _;
         // IMMEDIATE on SQLite: the collection check reads before the insert.
-        let mut tx = crate::sql::write_transaction(&self.pool)
+        let mut tx = crate::sql::write_tx(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
         if let Some(c) = r.collection_id {
             if !lock_live_collection_tx(&mut tx, c).await? {
-                tx.rollback().await?;
+                tx.rollback().await.map_err(media_err_from_exec)?;
                 return Err(dead_collection(c));
             }
         }
@@ -1856,7 +1852,7 @@ impl MediaManager {
             .fetch_tx(&mut tx)
             .await
             .map_err(media_err_from_exec)?;
-        tx.commit().await?;
+        tx.commit().await.map_err(media_err_from_exec)?;
         inserted
             .into_iter()
             .next()
@@ -2156,42 +2152,13 @@ fn upload_matches(meta: &crate::storage::ObjectMeta, media: &Media) -> bool {
 /// Build a storage key: `<prefix>/<uuid>-<sanitized filename>`.
 fn build_key(prefix: &str, original_filename: &str) -> String {
     let prefix = prefix.trim_end_matches('/');
-    let safe = sanitize_filename(original_filename);
+    let safe = crate::file_name::sanitize_filename(original_filename);
     let uuid = uuid::Uuid::new_v4();
     if prefix.is_empty() {
         format!("{uuid}-{safe}")
     } else {
         format!("{prefix}/{uuid}-{safe}")
     }
-}
-
-// Basename only, safe ASCII, underscore for the rest.
-//
-// Identical to `crate::uploads::sanitize_filename`. They sit behind
-// different feature gates (`media` vs `uploads`), so neither can call
-// the other — change both or neither.
-fn sanitize_filename(name: &str) -> String {
-    // Split on both separators, not `Path::file_name`, which is
-    // per-platform: `\` separates on Windows and is an ordinary
-    // character elsewhere, so the same upload would be stored under a
-    // different name depending on the server's OS.
-    let base = name
-        .rsplit(['/', '\\'])
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(name);
-    let mut out = String::with_capacity(base.len());
-    for c in base.chars() {
-        if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-            out.push(c);
-        } else {
-            out.push('_');
-        }
-    }
-    if out.is_empty() {
-        out.push_str("upload");
-    }
-    out
 }
 
 /// Default disk name when the registry has nothing configured. Use
@@ -2248,17 +2215,6 @@ mod tests {
         assert!(!k.starts_with('/'));
         assert!(k.ends_with("-a.png"));
         assert_eq!(k.matches('/').count(), 0);
-    }
-
-    #[test]
-    fn sanitize_strips_directory_and_unsafe_chars() {
-        assert_eq!(sanitize_filename("../etc/passwd"), "passwd");
-        assert_eq!(sanitize_filename("My File.png"), "My_File.png");
-        assert_eq!(sanitize_filename("évil.jpg"), "_vil.jpg");
-        assert_eq!(sanitize_filename(""), "upload");
-        // Windows separators, asserted on every platform.
-        assert_eq!(sanitize_filename("C:\\windows\\evil.exe"), "evil.exe");
-        assert_eq!(sanitize_filename("C:/Users/me/photo.jpg"), "photo.jpg");
     }
 
     #[test]

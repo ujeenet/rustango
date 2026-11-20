@@ -105,7 +105,7 @@ impl Scheduler {
     /// over per-tenant tables must fan out explicitly with
     /// [`crate::tenancy::for_each_tenant`] (#1226), and a
     /// once-per-cluster guard should be scoped per tenant with
-    /// [`crate::distributed_lock::DistributedLock::for_tenant`] (#1228).
+    /// `CacheScope::for_tenant(cache, &tenant).locks()`.
     pub fn every<F, Fut>(&self, name: &str, period: Duration, job: F)
     where
         F: Fn() -> Fut + Send + Sync + 'static,
@@ -394,7 +394,7 @@ mod tests {
         // slept a fixed 80ms — CI's busy runner sometimes takes 100ms+
         // to deliver the second tick after the panicking one, so the
         // assertion landed at 0 and red-tagged main. Polling converges
-        // as soon as `counter >= 1`. Same shape as the on_commit_live /
+        // as soon as `counter >= 1`. Same shape as the on_commit_tri /
         // jobs_pg_live / job_fires_after_one_period flake fixes.
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {

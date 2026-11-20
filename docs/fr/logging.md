@@ -122,6 +122,7 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 
 | Target | Ce que ça couvre |
 |---|---|
+| `rustango::access` | Contrôles d'accès aux routes en échec sur une erreur de base de données |
 | `rustango::admin` | Routage et enregistrement de l'admin |
 | `rustango::admin::audit` | Écritures du journal d'audit |
 | `rustango::admin::sso` | SSO de l'admin |

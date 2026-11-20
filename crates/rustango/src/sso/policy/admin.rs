@@ -229,7 +229,7 @@ async fn bulk_post(
 
 /// Insert every invite, or none.
 async fn insert_all(pool: &Pool, invites: Vec<SsoInvite>) -> Result<(), String> {
-    let mut tx = crate::sql::transaction_pool(pool)
+    let mut tx = crate::sql::write_tx(pool)
         .await
         .map_err(|e| e.to_string())?;
     for mut i in invites {

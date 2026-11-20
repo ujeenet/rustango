@@ -170,7 +170,9 @@ Richtung umzukehren (`?sort=col&order=asc|desc`). Der Standard kommt aus `orderi
 Eine Seite hinter Zeile 100 000 (Liste und Audit-Log) antwortet mit 400; grenze mit Suche oder Filtern ein.
 Registriere sehr große Tabellen mit `Builder::skip_count_for([...])`, um das
 `SELECT COUNT(*)` zu überspringen (der Pager zeigt dann "Page N" ohne Gesamtsumme); ein
-`?count=skip` pro Anfrage bewirkt dasselbe ad hoc.
+`?count=skip` pro Anfrage bewirkt dasselbe ad hoc. Eine solche Tabelle zeigt auch
+keine `list_filter`-Facetten und keine Datums-Buckets (nur die Brotkrumen bleiben),
+da jede davon die ganze Tabelle liest.
 
 **Suche.** Wenn `search_fields` gesetzt ist, erscheint ein Suchfeld und gleicht diese
 Felder mit `ILIKE` (PostgreSQL) / `LIKE` (MySQL, SQLite) ab. `search_help_text` wird als
@@ -314,9 +316,6 @@ Verbindung blockieren. `ctx.actor()` ist, wer die Aktion ausgelöst hat;
 `ctx.method()`, `ctx.path()` und `ctx.client_ip()` beschreiben die Anfrage. Die rohe
 Anfrage (mit Cookies) liegt hinter `ctx.raw_request_parts_with_credentials()`, also
 halte sie aus Logs heraus.
-
-`register_tx_action` und `register_tx_action_with_perm`, deren Handler `(tx, pks)`
-erhält, sind veraltet.
 
 ---
 

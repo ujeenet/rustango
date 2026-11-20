@@ -17,10 +17,10 @@
 //!
 //! ```toml
 //! [dependencies]
-//! rustango = "0.66"                                        # Postgres (the default backend)
+//! rustango = "0.67"                                        # Postgres (the default backend)
 //! # or pick another backend — see "Choosing a backend" below:
-//! rustango = { version = "0.66", default-features = false, features = ["sqlite", "batteries"] }
-//! rustango = { version = "0.66", default-features = false, features = ["mysql",  "batteries"] }
+//! rustango = { version = "0.67", default-features = false, features = ["sqlite", "batteries"] }
+//! rustango = { version = "0.67", default-features = false, features = ["mysql",  "batteries"] }
 //! ```
 //!
 //! `default = ["postgres", "batteries"]`. **`batteries`** is everything except
@@ -601,6 +601,9 @@ pub mod jti_store;
 #[cfg(feature = "uploads")]
 pub mod uploads;
 
+#[cfg(any(feature = "uploads", feature = "media"))]
+mod file_name;
+
 /// First-class `Media` model — database-backed file references with
 /// direct-browser upload, CDN-aware URLs, soft delete and orphan purge.
 /// See [`media::Media`] + [`media::MediaManager`].
@@ -1024,9 +1027,9 @@ pub mod extractors;
 #[cfg(any(feature = "admin", feature = "tenancy"))]
 pub mod viewset;
 
-/// The access rule every generated model surface mounts with.
+/// The access rule every generated surface mounts with; see [`access::RouteAccess`].
 #[cfg(any(feature = "admin", feature = "template_views"))]
-pub(crate) mod access;
+pub mod access;
 
 /// Shared list-endpoint query-parameter helpers — one place that owns the
 /// reserved-key skip list, `?ordering=` parsing and `?page_size=` clamping,

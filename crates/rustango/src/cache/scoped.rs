@@ -78,17 +78,6 @@ impl ScopedCache {
         }
     }
 
-    /// Namespace `inner` for one tenant's app keys: `tenant:#org:<id>:<slug>:app:…`.
-    #[cfg(feature = "tenancy")]
-    #[deprecated(
-        since = "0.64.0",
-        note = "use `CacheScope::for_tenant(inner, tenant).app()`; removed in 0.67.0"
-    )]
-    #[must_use]
-    pub fn for_tenant(inner: BoxedCache, tenant: &crate::tenancy::TenantSlug) -> Self {
-        Self::in_space(inner, KeySpace::Tenant(tenant.clone()), Area::App)
-    }
-
     /// The prefix every key gets, including its trailing separator.
     #[must_use]
     pub fn prefix(&self) -> &str {
@@ -309,19 +298,6 @@ mod tests {
         let heir = ScopedCache::in_space(shared.clone(), app(2), Area::App);
         old.set("k", "old", None).await.unwrap();
         assert_eq!(heir.get("k").await.unwrap(), None);
-    }
-
-    /// The deprecated `for_tenant` writes the new app layout.
-    #[cfg(feature = "tenancy")]
-    #[allow(deprecated)]
-    #[tokio::test]
-    async fn for_tenant_wraps_the_app_area() {
-        let shared = mem();
-        let t = crate::tenancy::TenantSlug::new(1, "acme");
-        let app = ScopedCache::for_tenant(shared.clone(), &t);
-        assert_eq!(app.prefix(), "tenant:#org:1:acme:app:");
-        app.set("k", "v", None).await.unwrap();
-        assert!(shared.exists("tenant:#org:1:acme:app:k").await.unwrap());
     }
 
     /// A global app view keeps keys bare but escapes `tenant:`, and refuses a

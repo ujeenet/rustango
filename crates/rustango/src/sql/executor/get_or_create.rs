@@ -6,10 +6,10 @@
 //! closure.
 
 use super::{
-    atomic, ExecError, FetcherPool, FetcherTx, LoadRelated, MaybeMyFromRow, MaybeMyLoadRelated,
-    MaybePgFromRow, MaybeSqliteFromRow, MaybeSqliteLoadRelated, PoolTx,
+    atomic, select_rows_tx_with_related, ExecError, FetcherPool, LoadRelated, MaybeMyFromRow,
+    MaybeMyLoadRelated, MaybePgFromRow, MaybeSqliteFromRow, MaybeSqliteLoadRelated, PoolTx,
 };
-use crate::core::Model;
+use crate::core::{Model, SelectQuery};
 use crate::sql::Pool;
 
 /// v0.45 — `get_or_create`. Runs the queryset; if it
@@ -23,8 +23,12 @@ use crate::sql::Pool;
 /// INSERT. When `create_fn` fails on a UNIQUE or primary-key violation,
 /// the query runs again and the row it now finds is returned, so a
 /// UNIQUE constraint over the filtered columns makes concurrent callers safe.
-/// Inside an [`atomic`](super::atomic) block on `pool`, `create_fn` runs in a
-/// savepoint: its writes roll back when it fails and the block stays usable.
+/// Inside an [`atomic`](super::atomic) block on `pool`, the reads join the
+/// block and `create_fn` runs in a savepoint: its writes roll back when it
+/// fails and the block stays usable. Do not hold the block's guard across it.
+/// In a PG repeatable-read block a lost race returns the unique violation,
+/// and in a serializable one a serialization failure (40001): no read sees
+/// the winner's row there.
 ///
 /// The closure receives an **owned** `Pool` (cheap to clone — it's
 /// an `Arc` internally). That sidesteps Rust's async-closure
@@ -75,14 +79,17 @@ where
         Some(row) => Ok((row, false)),
         None => match create(create_fn, pool).await {
             Ok(row) => Ok((row, true)),
-            Err(e) => Ok((lost_race(qs, e, "get_or_create", pool).await?, false)),
+            Err(e) => Ok((lost_race(qs, e, "get_or_create", pool, true).await?, false)),
         },
     }
 }
 
 /// [`get_or_create`] inside an open transaction: the read and `create_fn`
-/// both run on `tx`. A unique violation from `create_fn` is returned, not
-/// retried, as on PostgreSQL it has already aborted `tx`.
+/// both run on `tx`. `create_fn` runs in a savepoint: when it loses an
+/// insert race (a unique violation) it is rolled back and the winner's row
+/// read instead, so `tx` stays usable. A PG repeatable-read transaction
+/// returns the unique violation instead, a serializable one a
+/// serialization failure (40001).
 ///
 /// ```ignore
 /// let (post, created) = rustango::sql::get_or_create_tx(
@@ -118,10 +125,124 @@ where
         Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'a>,
     >,
 {
-    match at_most_one(qs.fetch_tx(tx).await?, "get_or_create")? {
+    let select = qs.compile()?;
+    match at_most_one(
+        select_rows_tx_with_related(tx, &select).await?,
+        "get_or_create",
+    )? {
         Some(row) => Ok((row, false)),
-        None => Ok((create_fn(tx).await?, true)),
+        None => create_or_winner_tx(select, create_fn, tx, "get_or_create", true).await,
     }
+}
+
+/// [`update_or_create`] inside an open transaction: the read, `update_fn`
+/// and `create_fn` all run on `tx`. A lost insert race updates the winner's
+/// row, as in [`get_or_create_tx`], with the same PG repeatable-read and
+/// serializable errors.
+///
+/// # Errors
+/// As [`update_or_create`].
+pub async fn update_or_create_tx<'t, T, UF, CF>(
+    qs: crate::query::QuerySet<T>,
+    update_fn: UF,
+    create_fn: CF,
+    tx: &mut PoolTx<'t>,
+) -> Result<(T, bool), ExecError>
+where
+    T: Model
+        + MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+    UF: for<'a> FnOnce(
+        &'a mut PoolTx<'t>,
+        T,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'a>,
+    >,
+    CF: for<'a> FnOnce(
+        &'a mut PoolTx<'t>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'a>,
+    >,
+{
+    let select = qs.compile()?;
+    let found = select_rows_tx_with_related(tx, &select).await?;
+    let existing = match at_most_one(found, "update_or_create")? {
+        Some(row) => row,
+        None => {
+            match create_or_winner_tx(select, create_fn, tx, "update_or_create", false).await? {
+                (row, true) => return Ok((row, true)),
+                (row, false) => row,
+            }
+        }
+    };
+    Ok((update_fn(tx, existing).await?, false))
+}
+
+/// `create_fn` in a savepoint of `tx`; on a unique violation, the row a
+/// concurrent writer inserted first, with `(row, created)`.
+async fn create_or_winner_tx<'t, T, F>(
+    select: SelectQuery,
+    create_fn: F,
+    tx: &mut PoolTx<'t>,
+    op: &'static str,
+    share: bool,
+) -> Result<(T, bool), ExecError>
+where
+    T: Model
+        + MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+    F: for<'a> FnOnce(
+        &'a mut PoolTx<'t>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'a>,
+    >,
+{
+    // Its own name: a nested call on the same transaction must not replace it (MySQL).
+    let point = tx.next_savepoint("rustango_create");
+    tx.execute_unprepared(&format!("SAVEPOINT {point}")).await?;
+    let err = match create_fn(tx).await {
+        Ok(row) => {
+            tx.execute_unprepared(&format!("RELEASE SAVEPOINT {point}"))
+                .await?;
+            return Ok((row, true));
+        }
+        Err(e) => e,
+    };
+    let undo = format!("ROLLBACK TO SAVEPOINT {point}; RELEASE SAVEPOINT {point}");
+    // A deadlock or lost connection may have ended the whole transaction:
+    // `create_fn`'s error says why, not the failed rollback.
+    if tx.execute_unprepared(&undo).await.is_err() || !err.is_unique_violation() {
+        return Err(err);
+    }
+    let select = winner_read(select, tx.dialect(), share);
+    let row = at_most_one(select_rows_tx_with_related(tx, &select).await?, op)?.ok_or(err)?;
+    Ok((row, false))
+}
+
+/// The re-read after a lost race: MySQL's repeatable-read snapshot predates
+/// the winner's row, so it reads with a lock (`share`, else for update). A
+/// lock the caller set is kept.
+fn winner_read(mut select: SelectQuery, dialect: &dyn super::Dialect, share: bool) -> SelectQuery {
+    if dialect.name() == "mysql" && select.lock_mode.is_none() {
+        let mut lock = crate::core::LockMode::default();
+        lock.share = share;
+        lock.of = vec![select.model.table];
+        lock.silent_on_sqlite = true;
+        select.lock_mode = Some(lock);
+    }
+    select
 }
 
 /// Run `create_fn`, in a savepoint of the `atomic` block on `pool` if
@@ -131,13 +252,7 @@ where
     F: FnOnce(Pool) -> Fut,
     Fut: std::future::Future<Output = Result<T, ExecError>>,
 {
-    let Some(point) = atomic::retry_point(pool).await? else {
-        return create_fn(pool.clone()).await;
-    };
-    let res = create_fn(pool.clone()).await;
-    let ended = point.end(res.is_ok()).await;
-    // `create_fn`'s own error wins over a failure to end the savepoint.
-    res.and_then(|row| ended.map(|()| row))
+    atomic::caught(pool, create_fn(pool.clone())).await
 }
 
 /// The one row `qs` matches, if any.
@@ -180,6 +295,7 @@ async fn lost_race<T>(
     err: ExecError,
     op: &'static str,
     pool: &Pool,
+    share: bool,
 ) -> Result<T, ExecError>
 where
     T: Model
@@ -195,7 +311,17 @@ where
     if !err.is_unique_violation() {
         return Err(err);
     }
-    fetch_at_most_one(qs, op, pool).await?.ok_or(err)
+    // Only a block's re-read joins a snapshot. `update_or_create` takes the
+    // update lock at once, so two losers cannot deadlock upgrading.
+    let mut select = qs.compile()?;
+    if atomic::in_block(pool) {
+        select = winner_read(select, pool.dialect(), share);
+    }
+    at_most_one(
+        super::select_rows_pool_with_related(pool, &select).await?,
+        op,
+    )?
+    .ok_or(err)
 }
 
 /// v0.45 — `update_or_create`. Runs the queryset; if
@@ -256,7 +382,7 @@ where
         Some(row) => row,
         None => match create(create_fn, pool).await {
             Ok(row) => return Ok((row, true)),
-            Err(e) => lost_race(qs, e, "update_or_create", pool).await?,
+            Err(e) => lost_race(qs, e, "update_or_create", pool, false).await?,
         },
     };
     Ok((update_fn(pool.clone(), existing).await?, false))

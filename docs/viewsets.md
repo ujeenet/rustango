@@ -807,7 +807,8 @@ layer in full: reads public, writes need a Bearer token.
   queryset scope (which scales) or use cursor pagination;
 - queryset scopes narrow every read and write, and a create or update whose
   row would land outside them is a `403` that writes nothing; an FK may not
-  name a target row its scopes or `view` hook hide (`422`).
+  name a target row its scopes or `view` hook hide (`422`); a create the
+  `view` hook would hide is a `403` that writes nothing.
 
 `change` checks the stored row only: a queryset scope, or a pinned column
 (`OwnedBy`, `WritePin`), is what stops a row moving to another owner. A
@@ -864,7 +865,7 @@ A scope narrows reads only. A backend that owns a column also implements
 `WritePin::Deny` refuses the write with a 403.
 
 A model's static global scopes also limit what is read, not what is written: a
-create or update may leave the scope (201 with no body, or 204). For a security
+create or update may leave the scope (201 with only the key, or 204). For a security
 boundary, use a filter backend with `write_pins`.
 
 A write echoes its full row only to a caller with the `retrieve` permission;

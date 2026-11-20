@@ -190,12 +190,6 @@ async fn fill(app: &Router, pages: &CachePageLayer, t: &TenantSlug) {
     send(Request::builder().uri("/page")).await;
 }
 
-/// The 0.63 page generation counter of `t`, bumped beside the new one.
-/// Remove in 0.67.0.
-fn legacy_page_counter(key: &str, t: &TenantSlug) -> bool {
-    key.starts_with("rustango.cache_page|#gen|") && key.ends_with(&format!("{}|", t.namespace()))
-}
-
 /// The area of a tenant key: `tenant:<ns>:<area>:…`.
 fn area<'a>(key: &'a str, t: &TenantSlug) -> &'a str {
     let rest = key.strip_prefix(&prefix(t)).expect("a tenant key");
@@ -220,18 +214,11 @@ async fn a_tenant_request_writes_only_tenant_keys(pool: &Pool) {
     let app = app(root.clone(), pages.clone());
     for t in [acme(), acme2()] {
         fill(&app, &pages, &t).await;
-        // The 0.63 lock and idempotency keys, written beside the new ones.
-        // Remove in 0.67.0.
-        let legacy_lock = format!("lock:{}", prefix(&t));
         let written = rec.take();
         assert!(!written.is_empty());
         for key in &written {
             assert!(
-                key.starts_with(&prefix(&t))
-                    || key.starts_with(&legacy_lock)
-                    || key.starts_with("idem:")
-                    || legacy_page_counter(&key, &t)
-                    || GLOBAL_ALLOW.iter().any(|g| key.starts_with(g)),
+                key.starts_with(&prefix(&t)) || GLOBAL_ALLOW.iter().any(|g| key.starts_with(g)),
                 "{} wrote `{key}`",
                 t.slug
             );
@@ -247,8 +234,7 @@ async fn a_tenant_request_writes_only_tenant_keys(pool: &Pool) {
     let _ = root.clear().await;
 }
 
-/// The purge removes every area of org 1 `acme`, the 0.63 lock key too, and
-/// nothing of org 12 `acme2`.
+/// The purge removes every area of org 1 `acme` and nothing of org 12 `acme2`.
 async fn purge_removes_one_tenant_only(pool: &Pool) {
     let (rec, root) = fresh(pool).await;
     let pages = CachePageLayer::new(root.clone());
@@ -257,11 +243,6 @@ async fn purge_removes_one_tenant_only(pool: &Pool) {
     for t in [acme(), acme2()] {
         fill(&app, &pages, &t).await;
         for key in rec.take() {
-            // The 0.63 idempotency copy and page counter have no tenant
-            // prefix, so the purge cannot reach them. Remove in 0.67.0.
-            if key.starts_with("idem:") || legacy_page_counter(&key, &t) {
-                continue;
-            }
             if root.exists(&key).await.unwrap() {
                 live.push((t.org_id, key));
             }
@@ -274,14 +255,11 @@ async fn purge_removes_one_tenant_only(pool: &Pool) {
         .collect();
     let want = ["app", "flag", "idem", "lock", "page", "rl", "session"];
     assert_eq!(acme_areas, want.into_iter().collect());
-    // As a 0.63 pod left an app key and a lock.
+    // A key under the tenant prefix but in no known area goes too.
     for t in [acme(), acme2()] {
-        let old_app = format!("{}stats", prefix(&t));
-        root.set(&old_app, "old", None).await.unwrap();
-        live.push((t.org_id, old_app));
-        let old_lock = format!("lock:{}nightly", prefix(&t));
-        root.set(&old_lock, "pod-063", None).await.unwrap();
-        live.push((t.org_id, old_lock));
+        let odd = format!("{}stats", prefix(&t));
+        root.set(&odd, "x", None).await.unwrap();
+        live.push((t.org_id, odd));
     }
 
     CacheScope::for_tenant(root.clone(), &acme())

@@ -316,9 +316,6 @@ Le slug d'un tenant purgé peut être réutilisé par un nouveau tenant. Pour qu
 `rustango::tenancy::decommission::clear_on_purge(cache)` au démarrage pour
 chaque cache qui les contient. La purge y supprime toutes les zones
 (`CacheScope::for_tenant(cache, &tenant).purge()` fait de même à la main).
-Jusqu'à 0.65.0, les réponses d'idempotence sont aussi écrites sous leur clé 0.63
-`idem:<sha>` ; cette clé est hachée et n'a pas de préfixe de tenant, la purge ne
-la trouve donc pas et elle expire avec son TTL (24 heures par défaut).
 
 ---
 

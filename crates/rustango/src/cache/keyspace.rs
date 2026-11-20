@@ -56,8 +56,8 @@ impl KeySpace {
     pub(crate) fn key(&self, area: Area, rest: &str) -> String {
         match self {
             Self::Global => {
-                // The name is escaped in every area: a global lock named
-                // `tenant:<ns>:j` would be that tenant's 0.63 lock key.
+                // The name is escaped in every area: a global key must never
+                // start with `tenant:<ns>:`, a tenant's key space.
                 // Injective: `~` names get one more, so no two keys meet.
                 let tenant_like = rest
                     .strip_prefix(TENANT_PREFIX)
@@ -113,30 +113,11 @@ impl KeySpace {
         }
     }
 
-    /// The 0.63 key of `rest`, still used beside the new one so a pod on 0.63
-    /// and one on this release never both run it (locks, idempotency) and see
-    /// each other's page invalidations. Remove in 0.67.0.
-    pub(crate) fn legacy_key(&self, area: Area, rest: &str) -> Option<String> {
-        let ns = self.namespace()?;
-        match area {
-            Area::Lock => Some(format!("lock:{TENANT_PREFIX}:{ns}:{rest}")),
-            Area::Idem => Some(format!("idem:{rest}")),
-            // A page key held the namespace inside; the rest is the 0.63 key.
-            Area::Page => Some(rest.to_owned()),
-            _ => None,
-        }
-    }
-
-    /// Every key of this tenant, in every area, starts with one of these
-    /// (the second is the 0.63 lock layout: remove in 0.65.0). Empty for global.
+    /// Every key of this tenant, in every area, starts with this. Empty for global.
     #[cfg(feature = "tenancy")]
     pub(crate) fn purge_prefixes(&self) -> Vec<String> {
-        self.namespace().map_or_else(Vec::new, |ns| {
-            vec![
-                format!("{TENANT_PREFIX}:{ns}:"),
-                format!("lock:{TENANT_PREFIX}:{ns}:"),
-            ]
-        })
+        self.namespace()
+            .map_or_else(Vec::new, |ns| vec![format!("{TENANT_PREFIX}:{ns}:")])
     }
 }
 
@@ -173,7 +154,6 @@ mod tests {
                 "session:x:1"
             ]
         );
-        assert_eq!(KeySpace::Global.legacy_key(Area::Lock, "j"), None);
     }
 
     /// No global key, bare or not, can land in a tenant's keyspace.
@@ -190,7 +170,7 @@ mod tests {
         assert_eq!(app("~tenant:x"), "~~tenant:x");
         assert_eq!(app("~"), "~~");
         assert_eq!(app("tenantx"), "tenantx");
-        // A global lock never takes a tenant's 0.63 lock key.
+        // A global lock never takes a key in a tenant's space.
         let lock = KeySpace::Global.key(Area::Lock, "tenant:#org:1:acme:j");
         assert_eq!(lock, "lock:~tenant:#org:1:acme:j");
         assert_eq!(KeySpace::Global.key(Area::Lock, "~j"), "lock:~~j");
@@ -215,20 +195,7 @@ mod tests {
                 "tenant:#org:1:acme:session:x:1",
             ]
         );
-        assert_eq!(
-            acme.legacy_key(Area::Lock, "j").as_deref(),
-            Some("lock:tenant:#org:1:acme:j")
-        );
-        assert_eq!(
-            acme.legacy_key(Area::Idem, "ab").as_deref(),
-            Some("idem:ab")
-        );
-        assert_eq!(acme.legacy_key(Area::App, "k"), None);
-        assert_eq!(acme.legacy_key(Area::Page, "p|x").as_deref(), Some("p|x"));
         assert!(KeySpace::Global.purge_prefixes().is_empty());
-        assert_eq!(
-            acme.purge_prefixes(),
-            ["tenant:#org:1:acme:", "lock:tenant:#org:1:acme:"]
-        );
+        assert_eq!(acme.purge_prefixes(), ["tenant:#org:1:acme:"]);
     }
 }

@@ -63,7 +63,10 @@ fn call_sites(text: &str, name: &str) -> usize {
 #[test]
 fn the_single_database_migrate_runs_the_sweep() {
     assert!(
-        call_sites(&read("migrate/manage.rs"), "normalise_sqlite_datetimes") > 0,
+        call_sites(
+            &read("migrate/manage/migrate.rs"),
+            "normalise_sqlite_datetimes"
+        ) > 0,
         "migrate::manage no longer runs the #1464 datetime sweep. A database \
          migrated without it holds timestamps in a shape the ORM does not \
          compare against, and `migrate` reports success."

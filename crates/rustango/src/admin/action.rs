@@ -129,16 +129,3 @@ impl<'a> ActionCtx<'a> {
         self.parts
     }
 }
-
-/// Adapt a `(tx, pks)` handler of the deprecated `register_tx_action*`.
-pub(crate) fn from_tx_handler<F>(
-    handler: F,
-) -> impl for<'a> Fn(ActionCtx<'a>) -> AdminActionFuture<'a> + Send + Sync + 'static
-where
-    F: for<'a> Fn(&'a mut PoolTx<'static>, &'a [SqlValue]) -> AdminActionFuture<'a>
-        + Send
-        + Sync
-        + 'static,
-{
-    move |ctx: ActionCtx<'_>| handler(ctx.tx, ctx.pks)
-}

@@ -181,7 +181,9 @@ de `ordering`.
 répond 400, affinez avec la recherche ou les filtres. Pour les très grandes tables, enregistrez-les avec
 `Builder::skip_count_for([...])` pour éviter le `SELECT COUNT(*)` (le
 pagineur affiche alors « Page N » sans total global) ; un `?count=skip` par
-requête fait la même chose ponctuellement.
+requête fait la même chose ponctuellement. Une telle table n'affiche pas non
+plus les facettes `list_filter` ni les tranches de la hiérarchie de dates (seul
+le fil d'Ariane reste), car chacune lit toute la table.
 
 **Recherche.** Quand `search_fields` est défini, une boîte de recherche
 apparaît et fait correspondre ces champs avec `ILIKE` (PostgreSQL) / `LIKE`
@@ -335,9 +337,6 @@ transaction : une seconde connexion peut bloquer un pool SQLite à une seule
 connexion. `ctx.actor()` est qui a lancé l'action ; `ctx.method()`, `ctx.path()`
 et `ctx.client_ip()` décrivent la requête. La requête brute (cookies compris) est
 derrière `ctx.raw_request_parts_with_credentials()` : gardez-la hors des logs.
-
-`register_tx_action` et `register_tx_action_with_perm`, dont le gestionnaire
-reçoit `(tx, pks)`, sont dépréciés.
 
 ---
 

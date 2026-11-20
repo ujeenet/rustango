@@ -6263,10 +6263,10 @@ fn inherent_impl_tokens(
             ) -> ::core::result::Result<::core::option::Option<Self>, #root::sql::ExecError>
             {
                 use #root::sql::FetcherPool as _;
-                let _pk_val: #root::core::SqlValue = pk.into();
+                // `where_key` fits an integer to the key's width.
                 let mut _rows: ::std::vec::Vec<Self> =
                     #root::query::QuerySet::<Self>::default()
-                        .filter(::core::stringify!(#pk_ident), _pk_val)
+                        .where_key(pk)
                         .limit(1)
                         .fetch(pool)
                         .await?;
@@ -6360,7 +6360,7 @@ fn inherent_impl_tokens(
                         continue;
                     }
                     let _hit = #root::query::QuerySet::<Self>::default()
-                        .filter(::core::stringify!(#pk_ident), _key)
+                        .where_key(_key)
                         .exists(pool)
                         .await?;
                     if !_hit {
@@ -7586,6 +7586,8 @@ fn inherent_impl_tokens(
             })
         },
     };
+    let refuse_upsert = refuse("bulk_upsert_on");
+    let refuse_ignore = refuse("bulk_insert_or_ignore_on");
     let bulk_upsert_pool_method = {
         let (gen_idents, gen_cols): (Vec<_>, Vec<_>) =
             fields.uuid_v7_fields.iter().cloned().unzip();
@@ -7627,6 +7629,35 @@ fn inherent_impl_tokens(
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());
                 }
+                let _query = Self::__rustango_bulk_upsert_query(rows, target, update_cols)?;
+                #run_conflict_bulk_insert
+            }
+
+            /// [`Self::bulk_upsert_pool`] on a [`#root::sql::SqlExecutor`]. An
+            /// audited model is refused.
+            ///
+            /// # Errors
+            /// As [`Self::bulk_upsert_pool`].
+            pub async fn bulk_upsert_on<'_c, _E: #root::sql::SqlExecutor<'_c>>(
+                rows: &[Self],
+                target: &[&'static str],
+                update_cols: &[&'static str],
+                _executor: _E,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                #refuse_upsert
+                if rows.is_empty() {
+                    return ::core::result::Result::Ok(());
+                }
+                let _query = Self::__rustango_bulk_upsert_query(rows, target, update_cols)?;
+                #root::sql::__macro_internals::bulk_insert_owned_on(_executor, _query).await.map(drop)
+            }
+
+            #[doc(hidden)]
+            fn __rustango_bulk_upsert_query(
+                rows: &[Self],
+                target: &[&'static str],
+                update_cols: &[&'static str],
+            ) -> ::core::result::Result<#root::core::BulkInsertQuery, #root::sql::ExecError> {
                 let (_columns, _all_rows) = Self::__rustango_bulk_rows(rows)?;
                 #[allow(unused_mut)]
                 let mut _generated: ::std::vec::Vec<&'static str> = ::std::vec::Vec::new();
@@ -7635,14 +7666,13 @@ fn inherent_impl_tokens(
                         _generated.push(#gen_cols);
                     }
                 )*
-                let _query = #root::core::BulkInsertQuery::new(
+                ::core::result::Result::Ok(#root::core::BulkInsertQuery::new(
                     <Self as #root::core::Model>::SCHEMA,
                     _columns,
                     _all_rows,
                 )
                 .on_conflict_do_update(target, update_cols)
-                .generated(_generated);
-                #run_conflict_bulk_insert
+                .generated(_generated))
             }
 
             /// Tri-dialect `bulk_create(ignore_conflicts=True)` — silently
@@ -7661,14 +7691,38 @@ fn inherent_impl_tokens(
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());
                 }
+                let _query = Self::__rustango_bulk_ignore_query(rows)?;
+                #run_conflict_bulk_insert
+            }
+
+            /// [`Self::bulk_insert_or_ignore_pool`] on a
+            /// [`#root::sql::SqlExecutor`]. An audited model is refused.
+            ///
+            /// # Errors
+            /// As [`Self::bulk_insert_or_ignore_pool`].
+            pub async fn bulk_insert_or_ignore_on<'_c, _E: #root::sql::SqlExecutor<'_c>>(
+                rows: &[Self],
+                _executor: _E,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                #refuse_ignore
+                if rows.is_empty() {
+                    return ::core::result::Result::Ok(());
+                }
+                let _query = Self::__rustango_bulk_ignore_query(rows)?;
+                #root::sql::__macro_internals::bulk_insert_owned_on(_executor, _query).await.map(drop)
+            }
+
+            #[doc(hidden)]
+            fn __rustango_bulk_ignore_query(
+                rows: &[Self],
+            ) -> ::core::result::Result<#root::core::BulkInsertQuery, #root::sql::ExecError> {
                 let (_columns, _all_rows) = Self::__rustango_bulk_rows(rows)?;
-                let _query = #root::core::BulkInsertQuery::new(
+                ::core::result::Result::Ok(#root::core::BulkInsertQuery::new(
                     <Self as #root::core::Model>::SCHEMA,
                     _columns,
                     _all_rows,
                 )
-                .on_conflict_do_nothing();
-                #run_conflict_bulk_insert
+                .on_conflict_do_nothing())
             }
         }
     };

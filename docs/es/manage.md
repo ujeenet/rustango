@@ -67,7 +67,7 @@ errores de validación o de E/S. Ejecuta `cargo run -- --help` (o
 ## Todos los verbos
 
 Las secciones siguientes explican en detalle los verbos habituales. Esta tabla
-es la lista **completa**, tomada de los dos dispatchers (`migrate/manage.rs` y
+es la lista **completa**, tomada de los dos dispatchers (`migrate/manage/mod.rs` y
 `tenancy/manage/mod.rs`) en vez de la prosa — así que un verbo que falte en la
 guía sigue siendo localizable aquí. Ejecuta `<verb> --help` para sus banderas;
 el texto de ayuda manda, esta página no.
@@ -819,7 +819,7 @@ Imprime la versión del framework **Rustango**.
 
 ```bash
 $ cargo run -- version
-rustango 0.66.0
+rustango 0.67.0
 ```
 
 ### `about`
@@ -831,7 +831,7 @@ Incluye esto en los tickets de soporte cuando algo va mal.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.66.0
+  version:        0.67.0
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -1891,10 +1891,16 @@ actives el pre-calentamiento. Los ajustes viven en `TenantPoolsConfig`:
 | `database_pool_idle_timeout` | 10 min | Cierra las conexiones inactivas tras esta duración. Se defiende de los cortes por load-balancer / `idle_in_transaction_session_timeout`. |
 | `database_pool_max_lifetime` | 30 min | Fuerza la rotación de conexiones para que las credenciales arrendadas por vault se refresquen. |
 | `prewarm_active_tenants` | false | Cuando es true, `Server::Builder::serve` llama a `prewarm_database_tenants()` en el arranque. |
-| `max_cached_scoped_pools` | 64 | Tope de pools por tenant en caché para los tenants en modo esquema. |
-| `scoped_pool_max_connections` | 8 | `max_connections` de cada pool de tenant en modo esquema. |
+| `max_cached_scoped_pools` | 16 | Tope de pools por tenant en caché para los tenants en modo esquema. |
+| `scoped_pool_max_connections` | 3 | `max_connections` del pool de consultas de un tenant en modo esquema (`t.pool()`). |
+| `scoped_held_pool_max_connections` | 1 | `max_connections` del pool de conexiones retenidas de un tenant en modo esquema (`Tenant::conn`). Por encima, una petición espera hasta `database_pool_acquire_timeout` y luego recibe un 503 (`TenancyError::TenantConnBusy`). |
 | `max_concurrent_pool_builds` | 16 | Pools en modo base construidos a la vez; una construcción espera hasta `database_pool_acquire_timeout`, luego 503. `0` = sin límite. |
 | `max_pool_builds_per_minute` | 600 | Pools en modo base construidos por minuto; por encima 503. `0` = sin límite. |
+
+Los tenants en modo esquema pueden abrir `max_cached_scoped_pools × (scoped_pool_max_connections + scoped_held_pool_max_connections)`
+conexiones en el servidor del registro (64 por defecto), dimensionadas con el pool del registro
+para un Postgres estándar (`max_connections = 100`); el arranque avisa si el servidor permite
+menos tras sus plazas reservadas, incluso antes del primer tenant. Súbelos en un servidor mayor o detrás de PgBouncer.
 
 Con `Cli`, pasa la configuración mediante `Cli::with_tenant_pools(config)`.
 

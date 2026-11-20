@@ -4,12 +4,12 @@
 [[section]]
 title = "Primeros pasos"
 slug = "primeros-pasos"
-pages = ["getting-started.md", "common-tasks.md", "scaffolding.md", "glossary.md"]
+pages = ["getting-started.md", "why-rustango.md", "common-tasks.md", "scaffolding.md", "glossary.md"]
 
 [[section]]
 title = "Guías"
 slug = "guias"
-pages = ["models.md", "orm.md", "admin.md", "tenancy.md", "serializers.md", "viewsets.md", "html-views.md", "openapi.md", "query-method.md", "mcp.md", "urls.md", "manage.md", "migrations.md", "database-tuning.md", "middleware.md", "jobs.md", "websockets.md", "caching.md", "files.md", "i18n.md", "email.md", "testing.md", "security.md"]
+pages = ["models.md", "orm.md", "transactions.md", "admin.md", "tenancy.md", "serializers.md", "viewsets.md", "html-views.md", "openapi.md", "query-method.md", "mcp.md", "urls.md", "manage.md", "migrations.md", "database-tuning.md", "middleware.md", "jobs.md", "websockets.md", "caching.md", "files.md", "i18n.md", "email.md", "testing.md", "security.md"]
 
 [[section]]
 title = "Autenticación"

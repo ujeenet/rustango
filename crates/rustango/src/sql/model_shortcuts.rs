@@ -90,13 +90,45 @@ where
         + Send
         + Unpin,
 {
-    let col_static = resolve_col::<T>(col)?;
-    QuerySet::<T>::default()
-        .filter(pk_field, this_pk)
-        .update()
-        .set_expr(col, add_signed_expr(col_static, by))
+    increment_one::<T>(pk_field, this_pk, col, by)?
         .execute_pool(pool)
         .await
+}
+
+/// [`increment_one_pool`] on any [`SqlExecutor`](crate::sql::SqlExecutor).
+/// An audited model is refused, as by every `_on` write.
+///
+/// # Errors
+/// As [`increment_one_pool`]; [`ExecError::AuditUnsupported`] on an
+/// audited model.
+pub async fn increment_one_on<'c, T, E>(
+    pk_field: &'static str,
+    this_pk: SqlValue,
+    col: &str,
+    by: i64,
+    exec: E,
+) -> Result<u64, ExecError>
+where
+    T: Model + Send,
+    E: crate::sql::SqlExecutor<'c>,
+{
+    increment_one::<T>(pk_field, this_pk, col, by)?
+        .execute_on(exec)
+        .await
+}
+
+/// The `col = col + by` UPDATE of the row with primary key `this_pk`.
+fn increment_one<T: Model>(
+    pk_field: &'static str,
+    this_pk: SqlValue,
+    col: &str,
+    by: i64,
+) -> Result<crate::query::UpdateBuilder<T>, ExecError> {
+    let col_static = resolve_col::<T>(col)?;
+    Ok(QuerySet::<T>::default()
+        .filter(pk_field, this_pk)
+        .update()
+        .set_expr(col, add_signed_expr(col_static, by)))
 }
 
 /// `UPDATE … SET col = col + by` (signed) over the whole table. Backs

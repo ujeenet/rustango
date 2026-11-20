@@ -814,7 +814,7 @@ bulk create es todo o nada, `403` con `{"details": {"index": i}}`); `view` al
 leer, actualizar y eliminar (oculto es `404`), luego `change` o `delete` (`403`,
 también con soft delete); `view` en listas (las filas ocultas salen de la página
 y del `count`; por encima de `view_hook_scan_cap`, una lista por página u offset
-es un `400`: añade un scope de queryset o usa paginación por cursor). Los scopes de queryset acotan cada lectura y escritura; una escritura cuya fila saldría de ellos es un `403`. Los hooks leen la fila bloqueada en la transacción de escritura; una credencial de otro tenant es un `403`. `change` solo
+es un `400`: añade un scope de queryset o usa paginación por cursor). Los scopes de queryset acotan cada lectura y escritura; una escritura cuya fila saldría de ellos es un `403`, igual que una creación que el hook `view` ocultaría. Los hooks leen la fila bloqueada en la transacción de escritura; una credencial de otro tenant es un `403`. `change` solo
 comprueba la fila guardada. `object_permissions::Actor::of(&parts)` le dice a un
 hook quién pregunta; un token de agente nunca es superuser. `ViewSet::for_model`
 y las cinco vistas de plantilla rechazan `rustango_api_keys`, `rustango_agents`, `rustango_agent_grants`,
@@ -867,7 +867,7 @@ Un ámbito solo restringe la lectura. Un backend dueño de una columna implement
 `WritePin::Deny` rechaza la escritura con un 403.
 
 Los ámbitos globales estáticos de un modelo también limitan lo que se lee, no lo que se
-escribe: una creación o actualización puede salir del ámbito (201 sin cuerpo, o 204).
+escribe: una creación o actualización puede salir del ámbito (201 solo con la clave, o 204).
 Para una frontera de seguridad, usa un backend de filtro con `write_pins`.
 
 Una escritura devuelve su fila completa solo a quien tiene el permiso `retrieve`;

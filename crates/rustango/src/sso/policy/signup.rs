@@ -677,7 +677,7 @@ mod store {
         user_id: i64,
     ) -> Result<Revoked, Denied> {
         let lock = Lock::prepare(pool).await?;
-        let mut tx = crate::sql::transaction_pool(pool)
+        let mut tx = crate::sql::write_tx(pool)
             .await
             .map_err(|e| Denied::Storage(format!("begin: {e}")))?;
         if !consume(&mut tx, invite, user_id)
@@ -705,7 +705,7 @@ mod store {
         user_id: i64,
     ) -> Result<Revoked, Denied> {
         let lock = Lock::prepare(pool).await?;
-        let mut tx = crate::sql::transaction_pool(pool)
+        let mut tx = crate::sql::write_tx(pool)
             .await
             .map_err(|e| Denied::Storage(format!("begin: {e}")))?;
         link::insert_link_tx(&mut tx, key, subject, user_id, false)
@@ -928,7 +928,7 @@ mod store {
                 password_changed_at: None,
                 sessions_revoked_at: None,
             };
-            let mut tx = crate::sql::transaction_pool(pool)
+            let mut tx = crate::sql::write_tx(pool)
                 .await
                 .map_err(|e| Denied::Storage(format!("begin: {e}")))?;
             if let Err(e) = user.insert_tx(&mut tx).await {
@@ -1024,7 +1024,7 @@ mod store {
         let mut out = RoleSync::default();
         let storage = |e: ExecError| Denied::Storage(format!("role sync: {e}"));
         // Reads first: on SQLite take the write lock up front.
-        let mut tx = crate::sql::write_transaction(pool).await.map_err(storage)?;
+        let mut tx = crate::sql::write_tx(pool).await.map_err(storage)?;
         let roles = roles_named_tx(&mut tx, &managed).await.map_err(storage)?;
         let role_ids: Vec<SqlValue> = roles
             .iter()

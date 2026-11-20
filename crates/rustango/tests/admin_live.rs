@@ -2381,10 +2381,9 @@ pub struct UaPost {
     is_published: bool,
 }
 
-/// The deprecated `(tx, pks)` wrapper still runs its handler.
+/// A user-defined action runs its handler in the admin's transaction.
 #[tokio::test]
-#[allow(deprecated)]
-async fn user_defined_action_runs_via_register_tx_action() {
+async fn user_defined_action_runs_via_register_action() {
     // v0.11.0: register a custom handler on `Builder`. POSTing
     // `action=publish_selected` flips the targeted rows'
     // `is_published` flag via the user-supplied closure.
@@ -2406,19 +2405,24 @@ async fn user_defined_action_runs_via_register_tx_action() {
     }
 
     let app = rustango::admin::Builder::new(pool.clone())
-        .register_tx_action("ua_post", "publish_selected", |tx, pks| {
-            let pks = pks.to_vec();
-            Box::pin(async move {
-                let query = UaPost::objects()
-                    .filter("id__in", rustango::core::SqlValue::List(pks))
-                    .update()
-                    .set("is_published", true)
-                    .compile()
-                    .map_err(|e| rustango::admin::AdminError::Internal(e.to_string()))?;
-                rustango::sql::update_tx(tx, &query).await?;
-                Ok(())
-            })
-        })
+        .register_action(
+            "ua_post",
+            "publish_selected",
+            rustango::admin::ActionPerm::Change,
+            |mut ctx| {
+                let pks = ctx.pks().to_vec();
+                Box::pin(async move {
+                    let query = UaPost::objects()
+                        .filter("id__in", rustango::core::SqlValue::List(pks))
+                        .update()
+                        .set("is_published", true)
+                        .compile()
+                        .map_err(|e| rustango::admin::AdminError::Internal(e.to_string()))?;
+                    rustango::sql::update_tx(ctx.tx(), &query).await?;
+                    Ok(())
+                })
+            },
+        )
         .build();
 
     let body = "action=publish_selected&_selected=1&_selected=3".to_owned();

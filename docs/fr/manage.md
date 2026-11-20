@@ -69,7 +69,7 @@ retour non nul en cas d'erreur de validation ou d'E/S. Exécutez
 ## Tous les verbes
 
 Les sections ci-dessous détaillent les verbes courants. Ce tableau est la liste
-**complète**, tirée des deux dispatchers (`migrate/manage.rs` et
+**complète**, tirée des deux dispatchers (`migrate/manage/mod.rs` et
 `tenancy/manage/mod.rs`) plutôt que de la prose — un verbe absent du guide
 reste donc trouvable ici. Lancez `<verb> --help` pour ses drapeaux ; le texte
 d'aide fait foi, pas cette page.
@@ -848,7 +848,7 @@ Affiche la version du framework **Rustango**.
 
 ```bash
 $ cargo run -- version
-rustango 0.66.0
+rustango 0.67.0
 ```
 
 ### `about`
@@ -861,7 +861,7 @@ support en cas de problème.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.66.0
+  version:        0.67.0
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -1959,10 +1959,16 @@ sur `TenantPoolsConfig` :
 | `database_pool_idle_timeout` | 10 min | Ferme les connexions inactives après cette durée. Protège contre les coupures dues à l'équilibreur de charge / à `idle_in_transaction_session_timeout`. |
 | `database_pool_max_lifetime` | 30 min | Force la rotation des connexions pour que les identifiants louvés via vault soient renouvelés. |
 | `prewarm_active_tenants` | false | Si vrai, `Server::Builder::serve` appelle `prewarm_database_tenants()` au démarrage. |
-| `max_cached_scoped_pools` | 64 | Plafond des pools par tenant mis en cache pour les tenants en mode schéma. |
-| `scoped_pool_max_connections` | 8 | `max_connections` de chaque pool de tenant en mode schéma. |
+| `max_cached_scoped_pools` | 16 | Plafond des pools par tenant mis en cache pour les tenants en mode schéma. |
+| `scoped_pool_max_connections` | 3 | `max_connections` du pool de requêtes d'un tenant en mode schéma (`t.pool()`). |
+| `scoped_held_pool_max_connections` | 1 | `max_connections` du pool de connexions tenues d'un tenant en mode schéma (`Tenant::conn`). Au-delà, une requête attend jusqu'à `database_pool_acquire_timeout`, puis reçoit un 503 (`TenancyError::TenantConnBusy`). |
 | `max_concurrent_pool_builds` | 16 | Pools en mode base construits à la fois ; une construction attend jusqu'à `database_pool_acquire_timeout`, puis 503. `0` = sans limite. |
 | `max_pool_builds_per_minute` | 600 | Pools en mode base construits par minute ; au-delà 503. `0` = sans limite. |
+
+Les tenants en mode schéma peuvent ouvrir `max_cached_scoped_pools × (scoped_pool_max_connections + scoped_held_pool_max_connections)`
+connexions sur le serveur du registre (64 par défaut), dimensionnées avec le pool du registre
+pour un Postgres standard (`max_connections = 100`) ; le démarrage avertit si le serveur en
+autorise moins hors places réservées, même avant le premier tenant. Augmentez-les sur un serveur plus grand ou derrière PgBouncer.
 
 Avec `Cli`, passez la configuration via `Cli::with_tenant_pools(config)`.
 

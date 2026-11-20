@@ -7,7 +7,7 @@
 //! down, including tenants whose own databases are perfectly healthy.
 //!
 //! Measured against a stopped Postgres registry, two pods behind the
-//! framework's own `tenancy::server::run` stack:
+//! framework's own `server::Builder` stack:
 //!
 //! ```text
 //! registry UP     303   0.002s
