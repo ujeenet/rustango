@@ -674,6 +674,17 @@ pub async fn emit_one(pool: &crate::sql::Pool, entry: &PendingEntry) -> Result<(
     }
 }
 
+/// [`emit_one`] for a security event (a second factor, an SSO account change,
+/// an agent's action): outside any `atomic` block, so it is kept when the
+/// request around it rolls back.
+#[cfg(any(feature = "admin", feature = "sso", feature = "mcp"))]
+pub(crate) async fn emit_security(
+    pool: &crate::sql::Pool,
+    entry: &PendingEntry,
+) -> Result<(), sqlx::Error> {
+    crate::sql::outside_atomic(emit_one(pool, entry)).await
+}
+
 /// Codename a non-superuser needs to read the admin audit feed. Rows
 /// are still limited to tables they hold `{table}.view` on. Not a CRUD
 /// action, so no table's `{table}.view` grants it (#1979).

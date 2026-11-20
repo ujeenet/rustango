@@ -117,6 +117,49 @@ impl TenantPathPrefix {
 #[derive(Clone)]
 pub(crate) struct DispatchedOrg(pub(crate) super::Org);
 
+/// The dispatched org's data pool, looked up once on first use, so every
+/// extractor and the request's `atomic` block get the same pool even when
+/// the pool cache evicts or rebuilds it meanwhile.
+#[derive(Clone)]
+pub(crate) struct RequestPool {
+    tenant: TenantSlug,
+    pool: std::sync::Arc<tokio::sync::OnceCell<crate::sql::Pool>>,
+}
+
+impl RequestPool {
+    /// `org`'s pool: the stored one when `org` is the dispatched org, else `lookup`'s.
+    pub(crate) async fn get_or_lookup(
+        ext: &Extensions,
+        org: &super::Org,
+        lookup: impl std::future::Future<Output = Result<crate::sql::Pool, super::TenancyError>>,
+    ) -> Result<crate::sql::Pool, super::TenancyError> {
+        match ext.get::<Self>() {
+            Some(s) if TenantSlug::of(org).as_ref() == Some(&s.tenant) => {
+                s.pool.get_or_try_init(|| lookup).await.cloned()
+            }
+            _ => lookup.await,
+        }
+    }
+
+    /// Whether `ext` holds a stored pool.
+    #[cfg(feature = "_axum")]
+    pub(crate) fn stored(ext: &Extensions) -> bool {
+        ext.get::<Self>().is_some()
+    }
+}
+
+/// Store `org` as the request's resolved org, with an empty [`RequestPool`].
+pub(crate) fn store_org(ext: &mut Extensions, org: &super::Org) {
+    ext.insert(DispatchedOrg(org.clone()));
+    match TenantSlug::of(org) {
+        Some(tenant) => ext.insert(RequestPool {
+            tenant,
+            pool: std::sync::Arc::default(),
+        }),
+        None => ext.remove::<RequestPool>(),
+    };
+}
+
 /// Store the dispatcher's answer on `ext`: the [`RequestTenant`] marker, the
 /// org, and the prefix when the request is under it. Replaces whatever an
 /// outer layer stored.
@@ -126,12 +169,13 @@ pub(crate) fn store_dispatched<E>(
     prefix: Option<&str>,
 ) {
     ext.remove::<DispatchedOrg>();
+    ext.remove::<RequestPool>();
     ext.remove::<TenantPathPrefix>();
     if let Ok(Some(org)) = &found {
         if let Some(p) = prefix {
             ext.insert(TenantPathPrefix(p.trim_end_matches('/').to_owned()));
         }
-        ext.insert(DispatchedOrg(org.clone()));
+        store_org(ext, org);
     }
     ext.insert(RequestTenant::from_resolution(found));
 }

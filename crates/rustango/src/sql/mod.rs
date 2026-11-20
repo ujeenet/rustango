@@ -70,10 +70,12 @@ pub use server::{
 };
 pub use vector::Vector;
 // Always-on: tri-dialect entry points + traits that don't pin on PG.
-#[cfg(any(feature = "cache", feature = "tenancy"))]
-pub(crate) use executor::detached;
-#[cfg(feature = "jobs")]
+#[cfg(feature = "_axum")]
+pub(crate) use executor::atomic_request;
+#[cfg(any(feature = "jobs", all(feature = "admin", feature = "cache")))]
 pub(crate) use executor::in_any_block;
+#[cfg(feature = "tenancy")]
+pub(crate) use executor::lock_on;
 #[cfg(feature = "jobs-postgres")]
 pub(crate) use executor::raw_insert_id;
 #[cfg(any(feature = "jobs-postgres", all(feature = "sse", feature = "postgres")))]
@@ -101,14 +103,14 @@ pub use executor::{
     MaybeSqliteFromRow, MaybeSqliteLoadRelated, MaybeSqliteScalar, Page, PoolConn, PoolTx,
     PooledConn, ReusableExecutor, SqlExecutor, TxConn, TxGuard, TxSetting, UpdaterPool,
     __reverse_fk_key, __rustango_dedupe_by_pk, __rustango_delete_all_or_none,
-    __rustango_in_batches, __rustango_one_in_list, __rustango_require_join, atomic,
-    atomic_immediate, atomic_with, bulk_insert_pool, bulk_insert_tx, bulk_update_pool,
-    count_rows_pool, count_tx, delete_pool, delete_tx, explain_pool, fetch_aggregate_dict,
-    fetch_aggregate_pool, fetch_dates_pool, fetch_datetimes_pool, fetch_paginated_pool,
-    fetch_with_prefetch_filtered, fetch_with_prefetch_pool, fetch_with_prefetch_related,
-    fetch_with_prefetch_related_filtered, get_or_create, get_or_create_tx, in_atomic,
-    insert_or_ignore, insert_pool, insert_returning_pool, insert_returning_tx, insert_tx,
-    on_commit, on_commit_pending, raw_execute_pool, raw_execute_tx, raw_query_pool, raw_query_tx,
+    __rustango_in_batches, __rustango_one_in_list, __rustango_require_join, atomic, atomic_with,
+    bulk_insert_pool, bulk_insert_tx, bulk_update_pool, count_rows_pool, count_tx, delete_pool,
+    delete_tx, explain_pool, fetch_aggregate_dict, fetch_aggregate_pool, fetch_dates_pool,
+    fetch_datetimes_pool, fetch_paginated_pool, fetch_with_prefetch_filtered,
+    fetch_with_prefetch_pool, fetch_with_prefetch_related, fetch_with_prefetch_related_filtered,
+    get_or_create, get_or_create_tx, in_atomic, insert_or_ignore, insert_pool,
+    insert_returning_pool, insert_returning_tx, insert_tx, on_commit, on_commit_pending,
+    outside_atomic, raw_execute_pool, raw_execute_tx, raw_query_pool, raw_query_tx,
     run_ddl_idempotent, select_one_row_as_json, select_one_row_pool, select_rows_as_json,
     select_rows_pool, select_rows_pool_with_related, select_rows_tx_with_related, transaction_pool,
     try_get_flat, try_get_flat_my, try_get_flat_sqlite, update_or_create, update_or_create_tx,

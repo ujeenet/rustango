@@ -1658,6 +1658,8 @@ jobs:
           binary(=atomic_sites_tri) |
           binary(=on_commit_tri) |
           binary(=atomic_options_tri) |
+          binary(=atomic_request_tri) |
+          binary(=atomic_request_tenant_tri) |
           binary(=executor_on_forms_tri) |
           binary(=get_or_create_atomic_tri) |
           binary(=regex_tri) |

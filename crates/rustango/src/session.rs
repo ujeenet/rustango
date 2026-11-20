@@ -665,13 +665,13 @@ pub(crate) async fn revoke_sessions<T: crate::core::Model + Send>(
     use crate::query::Q;
     use crate::sql::UpdaterPool as _;
     let cutoff = logout_cutoff_at(sessions_revoked_at, cookie_iat);
-    crate::query::QuerySet::<T>::default()
+    let stamp = crate::query::QuerySet::<T>::default()
         .filter("id", id)
         .where_(Q::is_null(SESSIONS_REVOKED_AT) | Q::lt(SESSIONS_REVOKED_AT, cutoff))
         .update()
-        .set(SESSIONS_REVOKED_AT, cutoff)
-        .execute_pool(pool)
-        .await
+        .set(SESSIONS_REVOKED_AT, cutoff);
+    // A logout stands even when the request around it rolls back.
+    crate::sql::outside_atomic(stamp.execute_pool(pool)).await
 }
 
 /// Deactivate row `id` of a session principal (`AdminUser`, `Operator`, a

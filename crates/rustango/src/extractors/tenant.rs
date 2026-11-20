@@ -82,6 +82,9 @@ pub struct Tenant<DB: Database = DefaultTenantDb> {
     /// tenant's own pool. Either way a handler can run
     /// `Model::objects().fetch(&t.pool)`.
     pool: crate::sql::Pool,
+    /// The `atomic` block's transaction [`Tenant::conn`] lent, held until
+    /// the next call, [`Tenant::pool`] or the drop.
+    lent: std::sync::Mutex<Option<crate::sql::TxGuard<'static>>>,
 }
 
 impl<DB: Database> Tenant<DB> {
@@ -92,8 +95,15 @@ impl<DB: Database> Tenant<DB> {
     /// works with the `_on` helpers directly.
     ///
     /// # Errors
-    /// The pool acquire can fail when the connection was deferred.
+    /// The pool acquire can fail when the connection was deferred. Inside an
+    /// `atomic` block on [`Tenant::pool`] it is refused with
+    /// [`ExecError::InAtomic`](crate::sql::ExecError::InAtomic): use
+    /// `Tenant::conn`, which lends the block's connection.
     pub async fn pool_conn(&mut self) -> Result<&mut sqlx::pool::PoolConnection<DB>, TenancyError> {
+        self.refuse_in_block(
+            "Tenant::pool_conn",
+            "use `Tenant::conn`: it lends the block's connection",
+        )?;
         self.ensure_conn().await?;
         match &mut self.conn {
             TenantConnCell::Ready(conn) => Ok(conn),
@@ -120,8 +130,14 @@ impl<DB: Database> Tenant<DB> {
     /// extractor deferred one.
     ///
     /// # Errors
-    /// The pool acquire can fail when the connection was deferred.
+    /// The pool acquire can fail when the connection was deferred. Inside an
+    /// `atomic` block on [`Tenant::pool`] it is refused with
+    /// [`ExecError::InAtomic`](crate::sql::ExecError::InAtomic).
     pub async fn into_conn(mut self) -> Result<TenantConn<DB>, TenancyError> {
+        self.refuse_in_block(
+            "Tenant::into_conn",
+            "its writes would leave the block's transaction",
+        )?;
         self.ensure_conn().await?;
         match self.conn {
             TenantConnCell::Ready(conn) => Ok(conn),
@@ -149,9 +165,40 @@ impl<DB: Database> Tenant<DB> {
     /// least recently used tenant's pool, which rebuilds on its next
     /// request. Raise the cap if many tenants are busy at once. Database
     /// mode reuses the tenant's own pool throughout.
+    ///
+    /// It gives back a block connection `Tenant::conn` lent, so ORM calls
+    /// on the pool can run on the block again.
     #[must_use]
     pub fn pool(&self) -> &crate::sql::Pool {
+        *self
+            .lent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         &self.pool
+    }
+
+    fn refuse_in_block(&self, op: &'static str, reason: &'static str) -> Result<(), TenancyError> {
+        if crate::sql::in_block(&self.pool) {
+            return Err(crate::sql::ExecError::InAtomic { op, reason }.into());
+        }
+        Ok(())
+    }
+
+    /// Lock the open `atomic` block on the tenant's pool for `Tenant::conn`;
+    /// `None` outside one.
+    async fn lend(&mut self) -> Result<bool, TenancyError> {
+        let lent = self
+            .lent
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *lent = None;
+        match crate::sql::lock_on(&self.pool).await {
+            None => Ok(false),
+            Some(guard) => {
+                *lent = Some(guard?);
+                Ok(true)
+            }
+        }
     }
 
     /// No connection yet, taken from `pool` when asked: the SQLite /
@@ -170,6 +217,7 @@ impl<DB: Database> Tenant<DB> {
             org,
             pool: erased,
             conn: TenantConnCell::Deferred(source),
+            lent: std::sync::Mutex::new(None),
         }
     }
 }
@@ -216,11 +264,22 @@ impl Tenant<sqlx::Postgres> {
 #[cfg(feature = "postgres")]
 impl Tenant<sqlx::Postgres> {
     /// The held connection and the scoped pool, both from `org`'s pools.
+    #[cfg(any(test, feature = "test_utils"))]
     async fn from_pools(
         org: Org,
         pools: &Arc<TenantPools<sqlx::Postgres>>,
     ) -> Result<Self, TenancyError> {
         let pool = pools.scoped_pool_dyn(&org).await?;
+        Ok(Self::with_pool(org, pool, pools))
+    }
+
+    /// `org`'s `Tenant` over `pool`, its scoped pool; the held connection
+    /// comes from `pools`.
+    fn with_pool(
+        org: Org,
+        pool: crate::sql::Pool,
+        pools: &Arc<TenantPools<sqlx::Postgres>>,
+    ) -> Self {
         // Taken on first use from the tenant's own held pool, in both
         // modes, never the registry's or the one `t.pool()` uses: a busy
         // tenant would block the others, or deadlock at max size.
@@ -229,11 +288,12 @@ impl Tenant<sqlx::Postgres> {
             let (pools, org) = (Arc::clone(&pools), held_org.clone());
             Box::pin(async move { pools.acquire(&org).await })
         });
-        Ok(Self {
+        Self {
             org,
             conn: TenantConnCell::Deferred(source),
             pool,
-        })
+            lent: std::sync::Mutex::new(None),
+        }
     }
 }
 
@@ -280,32 +340,56 @@ impl<S, T> TenantArg<S> for T where T: FromRequestParts<S> + Into<TenantScope> +
 
 impl<DB: Database> From<Tenant<DB>> for TenantScope {
     fn from(t: Tenant<DB>) -> Self {
-        Self {
-            org: t.org,
-            pool: t.pool,
-        }
+        let Tenant { org, pool, .. } = t;
+        Self { org, pool }
     }
 }
 
-#[cfg(feature = "postgres")]
-impl Tenant<sqlx::Postgres> {
-    /// Borrow the connection as `&mut PgConnection`, the type sqlx
-    /// and the `fetch_on` / `get_on` helpers want, taking it from the
-    /// tenant's pool on first use. Postgres only; on other backends use
-    /// [`Tenant::pool_conn`].
-    ///
-    /// # Errors
-    /// The pool acquire, on the first call.
-    pub async fn conn(&mut self) -> Result<&mut sqlx::PgConnection, TenancyError> {
-        self.ensure_conn().await?;
-        match &mut self.conn {
-            TenantConnCell::Ready(conn) => Ok(conn),
-            TenantConnCell::Deferred(_) => {
-                unreachable!("ensure_conn just populated the connection")
+/// `Tenant::conn` for one backend.
+macro_rules! tenant_conn {
+    ($feature:literal, $db:ty, $conn:ty, $variant:ident) => {
+        #[cfg(feature = $feature)]
+        impl Tenant<$db> {
+            /// Borrow the connection, the type sqlx and the `fetch_on` /
+            /// `get_on` helpers want, taking it from the tenant's pool on
+            /// first use.
+            ///
+            /// Inside an `atomic` block on [`Tenant::pool`] (the request
+            /// layer's, or your own) it lends the block's connection
+            /// instead, so its statements commit or roll back with the
+            /// block. ORM calls on the pool are refused meanwhile: call
+            /// [`Tenant::pool`] again, or drop `self`, before them.
+            ///
+            /// # Errors
+            /// The pool acquire, on the first call; inside a block, as
+            /// [`AtomicTx::lock`](crate::sql::AtomicTx::lock).
+            pub async fn conn(&mut self) -> Result<&mut $conn, TenancyError> {
+                if self.lend().await? {
+                    let lent = self
+                        .lent
+                        .get_mut()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let tx = lent.as_mut().expect("just lent").conn();
+                    #[allow(unreachable_patterns)]
+                    return match tx {
+                        crate::sql::TxConn::$variant(tx) => Ok(&mut **tx),
+                        _ => unreachable!("a tenant's pool is its backend's"),
+                    };
+                }
+                self.ensure_conn().await?;
+                match &mut self.conn {
+                    TenantConnCell::Ready(conn) => Ok(conn),
+                    TenantConnCell::Deferred(_) => {
+                        unreachable!("ensure_conn just populated the connection")
+                    }
+                }
             }
         }
-    }
+    };
 }
+tenant_conn!("postgres", sqlx::Postgres, sqlx::PgConnection, Postgres);
+tenant_conn!("mysql", sqlx::MySql, sqlx::MySqlConnection, Mysql);
+tenant_conn!("sqlite", sqlx::Sqlite, sqlx::SqliteConnection, Sqlite);
 
 /// Why the [`Tenant`] extractor failed.
 #[derive(Debug)]
@@ -527,7 +611,7 @@ where
             .ok_or(TenantRejection::MissingContext)?;
         let org = resolved_org(mounted, parts).await?;
         let pool = mounted
-            .pool_for(&org)
+            .pool_for(&parts.extensions, &org)
             .await
             .map_err(TenantRejection::from)?;
         Ok(Self { org, pool })
@@ -549,9 +633,11 @@ where
             .ok_or(TenantRejection::MissingContext)?
             .clone();
         let org = resolved_org(mounted, parts).await?;
-        Tenant::from_pools(org, &ctx.pools)
+        let pool = mounted
+            .pool_for(&parts.extensions, &org)
             .await
-            .map_err(TenantRejection::from)
+            .map_err(TenantRejection::from)?;
+        Ok(Tenant::with_pool(org, pool, &ctx.pools))
     }
 }
 
@@ -571,30 +657,31 @@ where
     let internal = TenantRejection::from;
     let mounted = super::MountedTenantContext::of(&parts.extensions)
         .ok_or(TenantRejection::MissingContext)?;
-    let full = mounted.full::<DB>().cloned();
-    let db = mounted.database::<DB>().cloned();
-    if full.is_none() && db.is_none() {
+    if mounted.full::<DB>().is_none() && mounted.database::<DB>().is_none() {
         return Err(TenantRejection::MissingContext);
     }
     let org = resolved_org(mounted, parts).await?;
-    let pool = if let Some(ctx) = full {
-        // Rejects a schema-mode org, which needs Postgres.
-        #[cfg_attr(not(feature = "postgres"), allow(irrefutable_let_patterns))]
-        let crate::tenancy::TenantPool::Database { pool } = ctx
-            .pools
-            .database_pool_for_org(&org)
-            .await
-            .map_err(internal)?
-        else {
-            unreachable!("database_pool_for_org rejects schema-mode")
-        };
-        (*pool).clone()
-    } else {
-        let ctx = db.ok_or(TenantRejection::MissingContext)?;
-        let pool = ctx.pools.pool_for_org(&org).await.map_err(internal)?;
-        pool.pool().clone()
-    };
+    // A schema-mode org, which needs Postgres, is refused here.
+    let pool = mounted
+        .pool_for(&parts.extensions, &org)
+        .await
+        .map_err(internal)?;
+    let pool = typed::<DB>(pool).ok_or(TenantRejection::MissingContext)?;
     Ok(Tenant::deferred(org, pool))
+}
+
+/// The backend pool inside `pool`, if it is `DB`'s.
+#[cfg(any(feature = "sqlite", feature = "mysql"))]
+fn typed<DB: Database>(pool: crate::sql::Pool) -> Option<sqlx::Pool<DB>> {
+    let any: Box<dyn std::any::Any> = match pool {
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(p) => Box::new(p),
+        #[cfg(feature = "mysql")]
+        crate::sql::Pool::Mysql(p) => Box::new(p),
+        #[cfg(feature = "sqlite")]
+        crate::sql::Pool::Sqlite(p) => Box::new(p),
+    };
+    any.downcast::<sqlx::Pool<DB>>().ok().map(|p| *p)
 }
 
 #[cfg(feature = "sqlite")]

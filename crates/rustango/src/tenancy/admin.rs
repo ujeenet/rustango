@@ -447,14 +447,19 @@ where
     // A schema-mode PG tenant gets a short-lived pool with
     // `search_path` already set; a database-mode tenant gets a cheap
     // clone of its cached pool. Schema mode on another backend errors.
-    let pool = match pools.scoped_pool_dyn(&org).await {
-        Ok(p) => p,
-        Err(e) => {
-            // Before the session check, and the text can name the tenant DB host.
-            let body = crate::error::server_error_body("tenancy::admin::pool", &e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, body).into_response();
-        }
-    };
+    // The request's stored pool when the dispatcher resolved this org.
+    let lookup = pools.scoped_pool_dyn(&org);
+    let pool =
+        match super::request_tenant::RequestPool::get_or_lookup(&parts.extensions, &org, lookup)
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                // Before the session check, and the text can name the tenant DB host.
+                let body = crate::error::server_error_body("tenancy::admin::pool", &e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, body).into_response();
+            }
+        };
 
     // Per-tenant auth is opt-in. Without `with_session`, every request
     // goes straight to the inner admin.

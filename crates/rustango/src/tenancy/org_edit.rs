@@ -200,7 +200,7 @@ pub(crate) async fn apply_values_if(
     expected: Option<&str>,
 ) -> Result<Option<Applied>, TenancyError> {
     // A registry edit commits on its own, never with a caller's block.
-    crate::sql::detached(apply_values_if_alone(
+    crate::sql::outside_atomic(apply_values_if_alone(
         registry, secrets, slug, values, expected,
     ))
     .await

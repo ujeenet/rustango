@@ -417,7 +417,7 @@ pub(crate) async fn audit_cleanup_submit(
         source: crate::audit::current_source(),
         changes,
     };
-    if let Err(e) = crate::audit::emit_one(&state.pool, &entry).await {
+    if let Err(e) = crate::audit::emit_security(&state.pool, &entry).await {
         tracing::warn!(target: "rustango::admin::audit",
             error = %e, "audit_cleanup self-audit emit failed");
     }

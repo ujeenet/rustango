@@ -695,14 +695,15 @@ use on::{on_pool, pool_exec, pool_rows};
 pub use on::{write_tx, PoolConn, PooledConn, ReusableExecutor, SqlExecutor, WriteTx};
 
 mod atomic;
-#[cfg(any(feature = "cache", feature = "tenancy"))]
-pub(crate) use atomic::detached;
-#[cfg(feature = "jobs")]
+#[cfg(feature = "_axum")]
+pub(crate) use atomic::atomic_request;
+#[cfg(any(feature = "jobs", all(feature = "admin", feature = "cache")))]
 pub(crate) use atomic::in_any_block;
+#[cfg(feature = "tenancy")]
+pub(crate) use atomic::lock_on;
 pub(crate) use atomic::rolled_back;
-#[allow(deprecated)]
 pub use atomic::{
-    atomic, atomic_immediate, atomic_with, in_atomic, on_commit, on_commit_pending, AtomicOptions,
+    atomic, atomic_with, in_atomic, on_commit, on_commit_pending, outside_atomic, AtomicOptions,
     AtomicTx, Isolation, TxGuard, TxSetting,
 };
 pub(crate) use atomic::{caught, in_block};

@@ -55,13 +55,14 @@ use async_trait::async_trait;
 use super::{Cache, CacheError};
 use crate::core::SqlValue;
 use crate::sql::{
-    detached, DialectKind, ExecError, MaybeMyFromRow, MaybePgFromRow, MaybeSqliteFromRow, Pool,
+    outside_atomic, DialectKind, ExecError, MaybeMyFromRow, MaybePgFromRow, MaybeSqliteFromRow,
+    Pool,
 };
 
 // The cache stays independent of the caller's `atomic` block on the same
 // pool: its writes commit on their own. In-memory SQLite can then deadlock.
 async fn raw_execute_pool(pool: &Pool, sql: &str, binds: Vec<SqlValue>) -> Result<u64, ExecError> {
-    detached(crate::sql::raw_execute_pool(pool, sql, binds)).await
+    outside_atomic(crate::sql::raw_execute_pool(pool, sql, binds)).await
 }
 
 async fn raw_query_pool<T>(
@@ -72,11 +73,11 @@ async fn raw_query_pool<T>(
 where
     T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
-    detached(crate::sql::raw_query_pool(sql, binds, pool)).await
+    outside_atomic(crate::sql::raw_query_pool(sql, binds, pool)).await
 }
 
 async fn run_ddl_idempotent(pool: &Pool, ddl: &str) -> Result<(), sqlx::Error> {
-    detached(crate::sql::run_ddl_idempotent(pool, ddl)).await
+    outside_atomic(crate::sql::run_ddl_idempotent(pool, ddl)).await
 }
 
 /// Longest key stored as-is: MySQL's `VARBINARY(255)` column.
@@ -203,7 +204,7 @@ impl DatabaseCache {
             ),
         };
         // PG's `IF NOT EXISTS` is not atomic: a racing boot loses on a catalog row.
-        detached(crate::migrate::ensure::run_statements(
+        outside_atomic(crate::migrate::ensure::run_statements(
             &self.pool,
             std::slice::from_ref(&sql),
         ))

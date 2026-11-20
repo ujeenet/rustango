@@ -847,6 +847,11 @@ pub mod body_limit;
 #[cfg(feature = "_http_layers")]
 pub mod request_timeout;
 
+/// One transaction per write request: a failed request rolls back every
+/// write it made on its pool. See [`atomic_request::AtomicRequests`].
+#[cfg(feature = "_axum")]
+pub mod atomic_request;
+
 /// Real-IP extraction for apps behind a trusted reverse proxy. Reads
 /// `X-Forwarded-For`, `X-Real-IP`, `CF-Connecting-IP` or RFC 7239
 /// `Forwarded` and puts the client IP in the request extensions. See

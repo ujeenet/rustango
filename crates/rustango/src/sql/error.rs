@@ -500,6 +500,34 @@ impl ExecError {
         }
         db.code().as_deref() == Some("40P01")
     }
+
+    /// A conflict a retry can win: a deadlock, a serialization failure
+    /// (40001), a MySQL lock-wait timeout (1205), `SQLITE_BUSY`, or no free
+    /// pool connection.
+    #[cfg_attr(not(feature = "_axum"), allow(dead_code))]
+    pub(crate) fn is_transient(&self) -> bool {
+        if self.is_deadlock() {
+            return true;
+        }
+        let db = match self {
+            Self::Driver(sqlx::Error::PoolTimedOut) => return true,
+            Self::Driver(sqlx::Error::Database(db)) => db,
+            _ => return false,
+        };
+        #[cfg(feature = "mysql")]
+        if let Some(m) = db.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>() {
+            return m.number() == 1205;
+        }
+        #[cfg(feature = "sqlite")]
+        if db.try_downcast_ref::<sqlx::sqlite::SqliteError>().is_some() {
+            // Every extended code of SQLITE_BUSY (5).
+            return db
+                .code()
+                .and_then(|c| c.parse::<i32>().ok())
+                .is_some_and(|c| c & 0xff == 5);
+        }
+        db.code().as_deref() == Some("40001")
+    }
 }
 
 // =====================================================================
