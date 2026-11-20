@@ -219,7 +219,7 @@ async fn concurrent_reads_are_refused(pool: &Pool) {
         put(tx, 1).await?;
         // In-process SQLite can finish the first read before the second starts, so the
         // reads may never overlap there; the held-guard test below covers its refusal.
-        let mut seen = dialect(&p) == "sqlite";
+        let mut seen = dialect(&p) == rustango::sql::DialectKind::Sqlite;
         for _ in 0..50 {
             let (ra, rb) = tokio::join!(Note::objects().fetch(&a), Note::objects().count(&b));
             let refused = [ra.as_ref().err(), rb.as_ref().err()]

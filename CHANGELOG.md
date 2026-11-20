@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.68.0] — 2026-11-20
+
 ### Added
 
 - `sql::DialectKind` and `Dialect::kind()`: match on the backend so the compiler checks every arm. `Dialect::date_bucket_sql` / `datetime_bucket_sql` hold the `.dates()` / `.datetimes()` truncation; `testkit::matrix::Backend::kind()`.
