@@ -1712,15 +1712,15 @@ impl TxUpdate {
     }
 }
 
-/// Delete, or soft delete by `stamp`, the row `row` selects in the caller's
-/// `tx`, audited as [`delete`] and [`update_as`] audit it.
-/// `by_pk` re-reads the row after a soft delete, which leaves its scope.
+/// Delete, or soft delete by `stamp`, the rows `row` selects in the caller's
+/// `tx`, audited as [`delete`] and [`update_as`] audit them.
+/// `by_pk` re-reads the rows after a soft delete, which leaves their scope.
 ///
 /// # Errors
 /// As the write and the emit; an audited model with no in-transaction
 /// reader is [`crate::sql::ExecError::AuditUnsupported`].
 #[cfg(any(feature = "admin", feature = "template_views"))]
-pub(crate) async fn remove_one_tx(
+pub(crate) async fn remove_rows_tx(
     tx: &mut crate::sql::PoolTx<'_>,
     model: &'static crate::core::ModelSchema,
     (row, by_pk): (crate::core::WhereExpr, crate::core::WhereExpr),

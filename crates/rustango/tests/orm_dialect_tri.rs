@@ -1476,6 +1476,40 @@ async fn now_and_casts_keep_fractional_seconds(pool: &Pool) {
     );
 }
 
+/// `now()` compares with bound UTC datetimes in a session whose time zone
+/// is not UTC: MySQL's `NOW()` gave the session's local time.
+async fn now_is_utc_in_a_non_utc_session(pool: &Pool) {
+    use rustango::core::{funcs::now, Expr};
+    use rustango::sql::{raw_execute_tx, DialectKind};
+    let hour_ago = chrono::Utc::now() - chrono::Duration::hours(1);
+    seed_meas(pool, 0, &hour_ago.to_rfc3339()).await;
+    // (zone, reset): sqlx never resets a session variable on release.
+    let zone = match pool.dialect().kind() {
+        DialectKind::Mysql => Some(("SET time_zone = '-05:00'", Some("SET time_zone = '+00:00'"))),
+        DialectKind::Postgres => Some(("SET LOCAL TIME ZONE '-05:00'", None)),
+        _ => None,
+    };
+    let mut tx = rustango::sql::write_transaction(pool).await.expect("begin");
+    if let Some((set, _)) = zone {
+        raw_execute_tx(&mut tx, set, Vec::new())
+            .await
+            .expect("set zone");
+    }
+    let past = WhereExpr::ExprCompare {
+        lhs: Expr::Column("at"),
+        op: Op::Lt,
+        rhs: now(),
+    };
+    let n = Meas::objects().where_raw(past).count_on(&mut tx).await;
+    if let Some((_, Some(reset))) = zone {
+        raw_execute_tx(&mut tx, reset, Vec::new())
+            .await
+            .expect("reset zone");
+    }
+    tx.rollback().await.expect("rollback");
+    assert_eq!(n.expect("count"), 1, "an hour ago is before now()");
+}
+
 /// SQLite bound a Decimal as text, which no number ever exceeds.
 async fn decimal_compares_with_expressions(pool: &Pool) {
     use rust_decimal::Decimal;
@@ -1512,6 +1546,7 @@ tri_dialect_test! {
         string_agg_is_not_capped,
         string_agg_passes_one_mebibyte,
         now_and_casts_keep_fractional_seconds,
+        now_is_utc_in_a_non_utc_session,
         decimal_compares_with_expressions,
         insert_or_ignore_on_a_natural_pk,
         insert_or_ignore_reports_a_skip_on_an_auto_pk,

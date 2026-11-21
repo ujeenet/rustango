@@ -330,27 +330,6 @@ async fn hide_from_list(
     }
 }
 
-/// Run `query`; a soft-delete model stamps its column instead, as the admin does (#2082).
-async fn delete_rows(
-    pool: &Pool,
-    parts: &Parts,
-    query: crate::core::DeleteQuery,
-) -> Result<u64, crate::sql::ExecError> {
-    let query = query.visible(parts);
-    let Some(col) = query.model.soft_delete_column else {
-        return crate::audit::delete(pool, &query).await;
-    };
-    let stamp = crate::core::UpdateQuery::new(
-        query.model,
-        vec![crate::core::Assignment {
-            column: col,
-            value: SqlValue::from(chrono::Utc::now()).into(),
-        }],
-        query.where_clause,
-    );
-    crate::audit::update_as(pool, &stamp, crate::audit::AuditOp::SoftDelete).await
-}
-
 // ============================================================== ListView
 
 // ============================================================== Bulk actions
@@ -1836,7 +1815,7 @@ async fn delete_submit(vs: &DeleteView, pool: &Pool, parts: &Parts, pk: &str) ->
         let now = Some(chrono::Utc::now());
         crate::soft_delete::__mark_query(schema, col, pk_field.column, key, now).visible(parts)
     });
-    let deleted = crate::audit::remove_one_tx(&mut tx, schema, (row_where, by_pk), stamp.as_ref());
+    let deleted = crate::audit::remove_rows_tx(&mut tx, schema, (row_where, by_pk), stamp.as_ref());
     let deleted = match deleted.await {
         Ok(n) if n > 0 => tx.commit().await.map(|()| n),
         other => {
@@ -3952,31 +3931,17 @@ async fn visible_pks_pool(
     let q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec()).visible(parts);
     #[cfg(feature = "admin")]
     {
-        use crate::object_permissions::{Hooks, Verdict};
+        use crate::object_permissions::Hooks;
         if Hooks::All.judges(schema.table, action) {
             let fields: Vec<_> = schema.scalar_fields().collect();
             let rows = select_rows_as_json(pool, &q, &fields)
                 .await
                 .map_err(failed)?;
-            let mut admitted = Vec::new();
-            for row in &rows {
-                match Hooks::All.judge(schema.table, parts, row, action) {
-                    Verdict::Hidden => {}
-                    Verdict::Refused => {
-                        return Err((StatusCode::FORBIDDEN, "permission denied").into_response())
-                    }
-                    Verdict::Allowed => admitted.extend(row.get(pk_field.name).and_then(parsed)),
-                }
-            }
-            // Parsed on both sides: a key stored as other text (case, BLOB) still matches.
-            return Ok(pks
-                .iter()
-                .filter(|p| {
-                    parsed(&Value::String(p.to_display_string()))
-                        .is_some_and(|k| admitted.contains(&k))
-                })
-                .cloned()
-                .collect());
+            let judged = rows.into_iter().map(|row| {
+                let v = Hooks::All.judge(schema.table, parts, &row, action);
+                (row, v)
+            });
+            return admitted_pks(pk_field, pks, judged);
         }
     }
     #[cfg(not(feature = "admin"))]
@@ -4005,25 +3970,102 @@ async fn visible_pks_pool(
         .collect())
 }
 
-/// Run the built-in `delete_selected` action through [`delete_rows`] on
-/// the rows the "delete" hook admits: `DELETE … WHERE <pk> IN (...)`, or a
-/// `deleted_at` stamp on a soft-delete model.
+/// `pks`, in submitted order, kept where their row is judged allowed. A
+/// hidden row drops out; a refused one refuses the whole action, a 403.
+#[cfg(feature = "admin")]
+fn admitted_pks(
+    pk_field: &'static crate::core::FieldSchema,
+    pks: &[SqlValue],
+    judged: impl IntoIterator<Item = (Value, crate::object_permissions::Verdict)>,
+) -> Result<Vec<SqlValue>, Response> {
+    use crate::object_permissions::Verdict;
+    let parsed = |v: &Value| {
+        let raw = v.as_str().map_or_else(|| v.to_string(), str::to_owned);
+        crate::forms::parse_pk_string(pk_field, &raw).ok()
+    };
+    let mut admitted = Vec::new();
+    for (row, verdict) in judged {
+        match verdict {
+            Verdict::Hidden => {}
+            Verdict::Refused => return Err(refused()),
+            Verdict::Allowed => admitted.extend(row.get(pk_field.name).and_then(parsed)),
+        }
+    }
+    // Parsed on both sides: a key stored as other text (case, BLOB) still matches.
+    Ok(pks
+        .iter()
+        .filter(|p| {
+            parsed(&Value::String(p.to_display_string())).is_some_and(|k| admitted.contains(&k))
+        })
+        .cloned()
+        .collect())
+}
+
+/// The built-in `delete_selected`, in one transaction: lock the selected
+/// rows in one read, judge each, then delete (or soft delete) the admitted
+/// ones. A refused row deletes nothing. The selection is capped at
+/// `MAX_IN_VALUES`, far under every bind limit.
 async fn run_delete_selected_pool(
     schema: &'static ModelSchema,
     pk_field: &'static crate::core::FieldSchema,
     (pool, parts): (&Pool, &Parts),
     pks: &[SqlValue],
 ) -> Result<(), Response> {
-    let pks = visible_pks_pool(schema, pk_field, (pool, parts), pks, Some("delete")).await?;
     if pks.is_empty() {
         return Ok(());
     }
-    // #810 — `DeleteQuery::by_pk_in` for the DELETE … WHERE pk IN (...) shape.
-    let q = crate::core::DeleteQuery::by_pk_in(schema, pk_field.column, pks);
-    delete_rows(pool, parts, q)
+    let mut tx = crate::sql::write_tx(pool)
         .await
-        .map(|_| ())
-        .map_err(|e| delete_failed(&e))
+        .map_err(|e| template_error(&format!("begin write: {e}")))?;
+    let pks = match locked_delete_pks(&mut tx, schema, pk_field, parts, pks).await {
+        Ok(pks) if !pks.is_empty() => pks,
+        other => {
+            let _ = tx.rollback().await;
+            return other.map(drop);
+        }
+    };
+    let by_pk = crate::core::DeleteQuery::by_pk_in(schema, pk_field.column, pks).where_clause;
+    let rows = crate::core::DeleteQuery::new(schema, by_pk.clone()).visible(parts);
+    let stamp = schema.soft_delete_column.map(|col| {
+        let now = SqlValue::from(chrono::Utc::now());
+        let set = vec![crate::core::Assignment::new(col, now)];
+        crate::core::UpdateQuery::new(schema, set, rows.where_clause.clone())
+    });
+    let removed =
+        crate::audit::remove_rows_tx(&mut tx, schema, (rows.where_clause, by_pk), stamp.as_ref());
+    match removed.await {
+        Ok(_) => tx.commit().await.map_err(|e| delete_failed(&e)),
+        Err(e) => {
+            let _ = tx.rollback().await;
+            Err(delete_failed(&e))
+        }
+    }
+}
+
+/// The selected keys `delete_selected` may delete, judged on the rows locked
+/// in `tx` when a hook is registered; the DELETE's own scope narrows the rest.
+async fn locked_delete_pks(
+    tx: &mut crate::sql::PoolTx<'_>,
+    schema: &'static ModelSchema,
+    pk_field: &'static crate::core::FieldSchema,
+    parts: &Parts,
+    pks: &[SqlValue],
+) -> Result<Vec<SqlValue>, Response> {
+    #[cfg(feature = "admin")]
+    {
+        use crate::object_permissions::Hooks;
+        if Hooks::All.judges(schema.table, Some("delete")) {
+            let q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec()).visible(parts);
+            let judged = Hooks::All
+                .judge_locked_rows(tx, parts, q, Some("delete"))
+                .await
+                .map_err(|e| template_error(&format!("scope selected rows: {e}")))?;
+            return admitted_pks(pk_field, pks, judged);
+        }
+    }
+    #[cfg(not(feature = "admin"))]
+    let _ = (tx, schema, pk_field, parts);
+    Ok(pks.to_vec())
 }
 
 // v0.38 — `run_delete_selected_conn` removed; tenant handlers now

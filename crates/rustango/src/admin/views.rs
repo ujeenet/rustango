@@ -2921,9 +2921,9 @@ pub(crate) async fn update_submit(
 /// How a written row was made, which picks its re-check.
 #[derive(Clone, Copy)]
 pub(super) enum Written {
-    /// Scope and the `add` hook: no row existed before.
+    /// Scope, "view" and the `add` hook: no row existed before.
     Created,
-    /// Scope only: `change` already judged the row before the edit.
+    /// Scope and "view": `change` already judged the row before the edit.
     Edited,
 }
 
@@ -2945,8 +2945,8 @@ impl Written {
     }
 }
 
-/// Whether the row just written in `tx` is still in the request's scope
-/// (and, for a create, passes the `add` hook); a form must not move a row outside it.
+/// Whether the row just written in `tx` is still in the request's scope and
+/// passes the "view" hook (and, for a create, `add`), as a ViewSet checks it.
 pub(super) async fn admits_written(
     tx: &mut crate::sql::PoolTx<'_>,
     parts: &axum::http::request::Parts,
@@ -2955,14 +2955,15 @@ pub(super) async fn admits_written(
     pk: SqlValue,
     written: Written,
 ) -> Result<bool, crate::sql::ExecError> {
-    let fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
-    let select = RowScope::of(model, parts).by_pk(model, pk_field.column, pk);
-    let row = crate::sql::select_one_row_as_json_tx(tx, &select, &fields).await?;
-    Ok(row.is_some_and(|row| {
-        written.hook().is_none_or(|action| {
-            crate::admin::object_permissions::is_allowed(model.table, action, parts, Some(&row))
-        })
-    }))
+    let scope: Vec<WhereExpr> = RowScope::of(model, parts)
+        .filters()
+        .iter()
+        .cloned()
+        .map(WhereExpr::Predicate)
+        .collect();
+    crate::object_permissions::Hooks::All
+        .admits_written(tx, parts, (model, pk_field, pk), &scope, written.hook())
+        .await
 }
 
 /// The form error when a write links an FK to a row this request cannot

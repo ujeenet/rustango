@@ -4185,55 +4185,6 @@ async fn insert_admitted(
     }
 }
 
-/// A claimed UPDATE in a transaction of its own, retried once on a MySQL
-/// deadlock as the admin's edit is.
-async fn update_claimed(
-    pool: &Pool,
-    claims: &RoutingClaims,
-    query: &UpdateQuery,
-    pk: &SqlValue,
-) -> Result<u64, (StatusCode, String)> {
-    let Some(update) = crate::audit::TxUpdate::for_model(query.model) else {
-        // Not the routing tables: they have no pool-only audit.
-        let e = crate::sql::ExecError::AuditUnsupported {
-            table: query.model.table,
-            reason: "a claimed update needs an in-transaction audit",
-        };
-        return Err(write_failure("viewset::update", &e));
-    };
-    let mut retry = true;
-    loop {
-        let mut tx = match claims.begin(pool, pk).await {
-            Ok(tx) => tx,
-            Err(e) if e.is_deadlock() && std::mem::take(&mut retry) => continue,
-            Err(e) => return Err(e.into_failure("viewset::update")),
-        };
-        let n = match update.run(&mut tx, query, pk.clone()).await {
-            Ok(n) => n,
-            Err(e) => {
-                let _ = tx.rollback().await;
-                if e.is_deadlock() && std::mem::take(&mut retry) {
-                    continue;
-                }
-                return Err(write_failure("viewset::update", &e));
-            }
-        };
-        if n > 0 {
-            if let Err(e) = claims.after_write(&mut tx, pk).await {
-                let _ = tx.rollback().await;
-                if e.is_deadlock() && std::mem::take(&mut retry) {
-                    continue;
-                }
-                return Err(e.into_failure("viewset::update"));
-            }
-        }
-        tx.commit()
-            .await
-            .map_err(|e| write_failure("viewset::update::commit", &e.into()))?;
-        return Ok(n);
-    }
-}
-
 /// A failed INSERT/UPDATE: a lost conflict (deadlock, lock timeout,
 /// serialization failure, `SQLITE_BUSY`) is a `503`, a duplicate key a `409`,
 /// any other database rejection a `400`, driver text withheld; anything else
@@ -4754,15 +4705,14 @@ async fn update_inner(
             },
             Err(e) => Err(write_failure("viewset::update", &e)),
         },
-        // No transaction to re-check the written row in: refuse rather than skip it.
-        None if written_row.on_rows() => Err(write_failure(
+        // No transaction to re-check the row or claim in: refuse rather than skip it.
+        None if written_row.on_rows() || claims.any() => Err(write_failure(
             "viewset::update",
             &crate::sql::ExecError::AuditUnsupported {
                 table: state.vs.schema.table,
-                reason: "a scoped or hooked update needs an in-transaction audit",
+                reason: "a scoped, hooked or claimed update needs an in-transaction audit",
             },
         )),
-        None if claims.any() => update_claimed(&acq.pool, &claims, &query, &pk_val).await,
         None => acq
             .update(&query)
             .await
@@ -4841,7 +4791,7 @@ async fn handle_destroy(
         query.where_clause = narrow(query.where_clause, scope.clone());
         query
     });
-    let deleted = crate::audit::remove_one_tx(&mut tx, schema, (row, by_pk), stamp.as_ref()).await;
+    let deleted = crate::audit::remove_rows_tx(&mut tx, schema, (row, by_pk), stamp.as_ref()).await;
     let deleted = match deleted {
         Ok(n) if n > 0 => tx.commit().await.map(|()| n).map_err(Into::into),
         other => other,

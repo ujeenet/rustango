@@ -9,6 +9,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - **Breaking:** a ViewSet PUT or PATCH whose row would leave a queryset scope or be hidden by the "view" hook is refused with 403 and rolled back; it used to answer 204.
 - **Breaking:** `CreateView` runs the "add" hook, on the request and on the written row, and refuses a row outside the queryset scopes or the "view" hook with 403 and no row. `UpdateView` refuses an edit that would leave them the same way.
 - `UpdateView` and `DeleteView` judge the row locked in the write's transaction, as ViewSets do, so a concurrent change between the check and the write is seen.
+- The template `delete_selected` locks the selected rows in one read, judges them and deletes in one transaction; a refused row still deletes nothing.
+- **Breaking:** an admin create or edit whose row the "view" hook would hide is refused with 403 and rolled back, as ViewSets and template views refuse it.
 
 ### Added
 
@@ -20,6 +22,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - The boot warning for settings that are not applied also names `[audit] redact_query_params` and `[logging] access_log = false`.
 
 - A Postgres array bind with mixed element types returns `ValueNotSupportedInDialect` instead of dropping the elements that differ from the first; NULL elements are bound, not dropped.
+- `now()` on MySQL emits `UTC_TIMESTAMP(6)`: `NOW(6)` followed the session time zone, so it compared wrongly with bound UTC datetimes. PG and SQLite SQL is unchanged.
 
 ## [0.68.0] — 2026-11-20
 

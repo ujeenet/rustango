@@ -194,16 +194,34 @@ impl Hooks {
         self,
         tx: &mut crate::sql::PoolTx<'_>,
         parts: &Parts,
-        mut q: crate::core::SelectQuery,
+        q: crate::core::SelectQuery,
         action: Option<&str>,
     ) -> Result<Option<Verdict>, crate::sql::ExecError> {
+        let rows = self.judge_locked_rows(tx, parts, q, action).await?;
+        Ok(rows.into_iter().next().map(|(_, v)| v))
+    }
+
+    /// Every row `q` selects, locked in `tx` by one read, each [`Self::judge`]d.
+    pub(crate) async fn judge_locked_rows(
+        self,
+        tx: &mut crate::sql::PoolTx<'_>,
+        parts: &Parts,
+        mut q: crate::core::SelectQuery,
+        action: Option<&str>,
+    ) -> Result<Vec<(Value, Verdict)>, crate::sql::ExecError> {
         q.lock_mode = Some(crate::core::LockMode {
             silent_on_sqlite: true,
             ..crate::core::LockMode::default()
         });
         let fields: Vec<_> = q.model.scalar_fields().collect();
-        let row = crate::sql::select_one_row_as_json_tx(tx, &q, &fields).await?;
-        Ok(row.map(|row| self.judge(q.model.table, parts, &row, action)))
+        let rows = crate::sql::select_rows_as_json_tx(tx, &q, &fields).await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let v = self.judge(q.model.table, parts, &row, action);
+                (row, v)
+            })
+            .collect())
     }
 
     /// Whether [`Self::admits_written`] has anything to check.

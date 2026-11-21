@@ -59,6 +59,11 @@ impl Dialect for Postgres {
         let _ = write!(out, "${n}");
     }
 
+    /// A `TIMESTAMPTZ` instant: the session time zone does not move it.
+    fn utc_now_sql(&self) -> String {
+        "NOW()".to_owned()
+    }
+
     // PostgreSQL drops any constraint — CHECK, FOREIGN KEY, UNIQUE —
     // through the one ANSI spelling, and supports `IF EXISTS` on it, so
     // both of these are idempotent and identical. MySQL needs

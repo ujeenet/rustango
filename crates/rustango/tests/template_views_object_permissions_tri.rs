@@ -458,18 +458,30 @@ async fn an_edit_cannot_hide_its_row(pool: &Pool) {
     assert_eq!(left[0].owner_id, 1, "a refused edit wrote");
 }
 
-/// The hooks judge the row locked in the write's transaction: an edit or
-/// delete that waits on a concurrent change sees it. SQLite serializes writers.
+/// The hooks judge the rows locked in the write's transaction: an edit, a
+/// delete or a bulk delete that waits on a concurrent change sees it.
+/// SQLite serializes writers.
 async fn a_concurrent_change_is_judged_after_it_lands(pool: &Pool) {
     use rustango::core::{Assignment, UpdateQuery, WhereExpr};
     if pool.dialect().kind() == rustango::sql::DialectKind::Sqlite {
         return;
     }
-    let ids = notes(pool, &["open-1", "open-2"]).await;
+    let ids = notes(pool, &["open-1", "open-2", "open-3", "open-4"]).await;
     let app = app(pool);
-    for (id, title, action, form) in [
-        (ids[0], "locked-1", "edit", "title=open-x"),
-        (ids[1], "keep-2", "delete", ""),
+    // `delete_selected` of rows 3 and 4: row 3 turns "keep" meanwhile, so nothing goes.
+    let bulk = format!(
+        "action=delete_selected&_selected_action={}&_selected_action={}",
+        ids[2], ids[3]
+    );
+    for (id, title, uri, form) in [
+        (
+            ids[0],
+            "locked-1",
+            format!("/notes/{}/edit", ids[0]),
+            "title=open-x",
+        ),
+        (ids[1], "keep-2", format!("/notes/{}/delete", ids[1]), ""),
+        (ids[2], "keep-3", "/notes".to_owned(), bulk.as_str()),
     ] {
         let mut tx = rustango::sql::write_transaction(pool).await.expect("tx");
         let edit = UpdateQuery::new(
@@ -482,20 +494,23 @@ async fn a_concurrent_change_is_judged_after_it_lands(pool: &Pool) {
             .expect("edit");
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
         let call = tokio::spawn({
-            let (app, barrier) = (app.clone(), barrier.clone());
-            let uri = format!("/notes/{id}/{action}");
+            let (app, barrier, uri) = (app.clone(), barrier.clone(), uri.clone());
+            let form = form.to_owned();
             async move {
                 barrier.wait().await;
-                send(&app, Method::POST, &uri, form).await.0
+                send(&app, Method::POST, &uri, &form).await.0
             }
         });
         barrier.wait().await;
         // Long enough for the request to block on the row lock.
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         tx.commit().await.expect("commit");
-        assert_eq!(call.await.unwrap(), StatusCode::FORBIDDEN, "{action}");
+        assert_eq!(call.await.unwrap(), StatusCode::FORBIDDEN, "{uri}");
     }
-    assert_eq!(titles(pool).await, ["keep-2", "locked-1"]);
+    assert_eq!(
+        titles(pool).await,
+        ["keep-2", "keep-3", "locked-1", "open-4"]
+    );
 }
 
 tri_dialect_test!(

@@ -936,9 +936,40 @@ async fn bulk_actions_skip_hidden_rows(pool: &Pool) {
     assert_eq!(left, ["hide-bulk"], "the hidden row was acted on");
 }
 
+async fn bulk_titles(pool: &Pool) -> Vec<String> {
+    let mut left: Vec<String> = Bulk::objects()
+        .fetch(pool)
+        .await
+        .expect("fetch")
+        .into_iter()
+        .map(|b| b.title)
+        .collect();
+    left.sort();
+    left
+}
+
+/// A create or edit whose row the `view` hook would hide from its author is
+/// refused and leaves nothing written.
+async fn write_the_view_hook_hides_is_refused(pool: &Pool) {
+    let (status, body) = post(pool, "/rowscope_bulk", "title=hide-new").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "create: {body}");
+    assert!(bulk_titles(pool).await.is_empty(), "a refused create wrote");
+    let (status, body) = post(pool, "/rowscope_bulk", "title=ok-new").await;
+    assert!(status.is_redirection(), "{status}: {body}");
+    let id = *Bulk::objects().fetch(pool).await.expect("fetch")[0]
+        .id
+        .get()
+        .expect("pk");
+    let uri = format!("/rowscope_bulk/{id}");
+    let (status, body) = post(pool, &uri, "title=hide-now").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "edit: {body}");
+    assert_eq!(bulk_titles(pool).await, ["ok-new"], "a refused edit wrote");
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        write_the_view_hook_hides_is_refused,
         bulk_actions_skip_hidden_rows,
         nullable_bool_round_trips_in_admin_form,
         nullable_bool_round_trips_in_inline,

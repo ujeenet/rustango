@@ -357,8 +357,8 @@ pub trait Dialect: Send + Sync + sealed::Sealed {
     }
 
     /// The database's current time in UTC, comparable with a bound
-    /// `DateTime<Utc>`. For a value several hosts must agree on, such as
-    /// a lease, whose writers' clocks may disagree.
+    /// `DateTime<Utc>`, whatever the session time zone. `F::Now` emits it;
+    /// a lease uses it too, as its writers' clocks may disagree.
     fn utc_now_sql(&self) -> String {
         self.current_timestamp_default()
     }

@@ -38,16 +38,28 @@ fn update_set(value: Expr) -> UpdateQuery {
 // ---------- NOW() ----------
 
 #[test]
-fn now_emits_now_on_pg_mysql_current_timestamp_on_sqlite() {
+fn now_emits_a_utc_instant_on_every_dialect() {
     // NOW assigned to a timestamp column — use a fresh model where
     // the column is timestamp-typed. For dialect-emit testing the
     // column doesn't matter, only the SQL string.
     let q = update_set(now());
     let pg = Postgres.compile_update(&q).unwrap();
-    assert!(pg.sql.contains("= NOW()"), "PG: {}", pg.sql);
+    assert!(pg.sql.contains("= NOW() WHERE"), "PG: {}", pg.sql);
 
+    // `NOW(6)` follows the session time zone; bound datetimes are UTC.
     let my = MySql.compile_update(&q).unwrap();
-    assert!(my.sql.contains("= NOW(6)"), "MySQL: {}", my.sql);
+    assert!(
+        my.sql.contains("= UTC_TIMESTAMP(6) WHERE"),
+        "MySQL: {}",
+        my.sql
+    );
+    for d in [&Postgres as &dyn Dialect, &MySql, &Sqlite] {
+        let sql = d.compile_update(&q).unwrap().sql;
+        assert!(
+            sql.contains(&format!("= {} WHERE", d.utc_now_sql())),
+            "{sql}"
+        );
+    }
 
     // SQLite must NOT emit bare `CURRENT_TIMESTAMP`. It did until
     // #1464: a SQLite datetime column is TEXT compared
@@ -77,6 +89,12 @@ fn now_emits_now_on_pg_mysql_current_timestamp_on_sqlite() {
     assert!(
         sq.sql.contains("%Y-%m-%dT%H:%M:%f000+00:00"),
         "SQLite's now() must use the canonical format: {}",
+        sq.sql
+    );
+    assert!(
+        sq.sql
+            .contains("= strftime('%Y-%m-%dT%H:%M:%f000+00:00','now') WHERE"),
+        "SQLite: {}",
         sq.sql
     );
 }

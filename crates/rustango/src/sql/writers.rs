@@ -3385,24 +3385,9 @@ fn write_function(
                     got: args.len(),
                 });
             }
-            // PG has `NOW()`; MySQL needs `NOW(6)` to keep microseconds.
-            //
-            // SQLite must use the same format as every other write
-            // path. Its datetime columns are TEXT compared as text,
-            // so a bare `CURRENT_TIMESTAMP` would put a second shape
-            // in the column and break both `SET col = now()` and
-            // `WHERE col < now()`.
-            if b.d.kind() == DialectKind::Sqlite {
-                let _ = write!(
-                    b.sql,
-                    "strftime('{}','now')",
-                    crate::sql::SQLITE_DATETIME_FORMAT
-                );
-            } else if b.d.kind() == DialectKind::Mysql {
-                b.sql.push_str("NOW(6)");
-            } else {
-                b.sql.push_str("NOW()");
-            }
+            // A UTC instant comparable with bound datetimes: MySQL's `NOW()`
+            // follows the session time zone, SQLite's text must match the bind shape.
+            b.sql.push_str(&b.d.utc_now_sql());
             Ok(())
         }
         F::ExtractYear

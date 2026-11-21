@@ -154,6 +154,8 @@ untouched.
 - A model with a hand-written `ModelEntry` audited only on a pool can no longer be edited through `UpdateView`, or through a ViewSet when it has queryset scopes or hooks: the write needs an in-transaction audit.
 - A Postgres array mixing element types (other than NULL) is refused with `ValueNotSupportedInDialect`; build it from one type.
 - The database job queue writes `locked_at` from the database's clock (`UTC_TIMESTAMP(6)` on MySQL) and the reclaim compares against it. A job that waits on `ctx.stopping()` now also wakes when its lease is lost; check `ctx.lease_lost()` to tell it from a shutdown.
+- An admin create or edit (inline rows too) that the "view" hook would hide from its author now answers 403 and writes nothing.
+- On MySQL `now()` is `UTC_TIMESTAMP(6)`, not `NOW(6)`. A query that relied on session-local time should bind the instant it means.
 
 ## 0.68.0
 
