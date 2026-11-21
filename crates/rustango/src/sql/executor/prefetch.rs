@@ -21,9 +21,8 @@ use futures_util::FutureExt as _;
 /// `fetch_with_prefetch` against either backend. Bi-dialect counterpart
 /// of `fetch_with_prefetch` — fetches parents + children in two
 /// round trips and stitches each child onto its parent via
-/// [`FkPkAccess`]. Bounds add [`MaybeMyFromRow`] + [`MaybeMyLoadRelated`]
-/// over the `&PgPool` version's bounds; every `#[derive(Model)]`
-/// type satisfies them automatically.
+/// [`FkPkAccess`]. Every `#[derive(Model)]` type meets the
+/// [`DecodeModel`] bound automatically.
 ///
 /// `FkPkAccess` doesn't need a MySQL counterpart — it reads i64
 /// values from struct fields after decoding, with no Row dependency,

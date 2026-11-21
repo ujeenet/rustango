@@ -117,7 +117,10 @@ async fn handler(State(c): State<Ctx>, Query(op): Query<Op>) -> Response {
             put(p, b + 2).await.unwrap();
         }
         "outside" => {
-            outside_atomic(put(p, b + 1)).await.unwrap();
+            let q = p.clone();
+            outside_atomic(async move { put(&q, b + 1).await })
+                .await
+                .unwrap();
             put(p, b + 2).await.unwrap();
         }
         "raw_dup" => {
@@ -149,6 +152,24 @@ async fn handler(State(c): State<Ctx>, Query(op): Query<Op>) -> Response {
             put(p, b + 1).await.unwrap();
             put(p, b + 2).await.unwrap();
             return (status, [(header::SET_COOKIE, "sid=rolled-back")], "ok").into_response();
+        }
+        #[cfg(feature = "tenancy")]
+        "password_logout" => {
+            // The block locks the row, then the logout stamps it.
+            use rustango::sql::UpdaterPool as _;
+            let id = op.base;
+            rustango::tenancy::Operator::objects()
+                .filter("id", id)
+                .update()
+                .set("password_hash", "changed")
+                .execute_pool(p)
+                .await
+                .unwrap();
+            assert!(
+                rustango::session::deactivate::<rustango::tenancy::Operator>(p, id)
+                    .await
+                    .unwrap()
+            );
         }
         #[cfg(feature = "tenancy")]
         "logout" => {
@@ -461,11 +482,9 @@ async fn an_outside_write_survives_a_500(pool: &Pool) {
     assert_eq!(items(pool).await, vec![1]);
 }
 
-/// `session::deactivate` stamps the logout outside the block: a 500 keeps
-/// the account active and its sessions ended. SQLite has one writer, so the
-/// stamp joins the block there and rolls back with it.
+/// An operator row for the logout scenarios.
 #[cfg(feature = "tenancy")]
-async fn a_logout_stamp_survives_a_500(pool: &Pool) {
+async fn operator(pool: &Pool) -> i64 {
     use rustango::tenancy::Operator;
     let mut op = Operator {
         id: rustango::sql::Auto::default(),
@@ -477,7 +496,24 @@ async fn a_logout_stamp_survives_a_500(pool: &Pool) {
         sessions_revoked_at: None,
     };
     op.insert(pool).await.unwrap();
-    let id = *op.id.get().unwrap();
+    *op.id.get().unwrap()
+}
+
+#[cfg(feature = "tenancy")]
+async fn operator_row(pool: &Pool, id: i64) -> rustango::tenancy::Operator {
+    rustango::tenancy::Operator::objects()
+        .filter("id", id)
+        .fetch(pool)
+        .await
+        .unwrap()
+        .remove(0)
+}
+
+/// `session::deactivate` stamps the logout when the block ends: a 500 keeps
+/// the account active and its sessions ended, on every backend.
+#[cfg(feature = "tenancy")]
+async fn a_logout_stamp_survives_a_500(pool: &Pool) {
+    let id = operator(pool).await;
     let app = app(ctx(pool));
     send(
         &app,
@@ -485,22 +521,174 @@ async fn a_logout_stamp_survives_a_500(pool: &Pool) {
         &format!("mode=logout&status=500&base={id}"),
     )
     .await;
-    let got: Vec<Operator> = Operator::objects()
-        .filter("id", id)
-        .fetch(pool)
-        .await
-        .unwrap();
-    assert!(got[0].active, "the deactivation committed");
-    let kept = kind(pool) != DialectKind::Sqlite;
-    assert_eq!(
-        got[0].sessions_revoked_at.is_some(),
-        kept,
-        "the logout stamp"
+    let got = operator_row(pool, id).await;
+    assert!(got.active, "the deactivation committed");
+    assert!(
+        got.sessions_revoked_at.is_some(),
+        "the logout stamp rolled back"
     );
 }
 
 #[cfg(not(feature = "tenancy"))]
 async fn a_logout_stamp_survives_a_500(_: &Pool) {}
+
+/// A password change then a logout in one request: the stamp waits for
+/// the block instead of for the row lock the block holds.
+#[cfg(feature = "tenancy")]
+async fn a_password_change_then_logout_completes(pool: &Pool) {
+    let id = operator(pool).await;
+    let app = app(ctx(pool));
+    let query = format!("mode=password_logout&status=200&base={id}");
+    let resp = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        send(&app, Method::POST, &query),
+    )
+    .await
+    .expect("the logout waited on the request's own row lock");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let got = operator_row(pool, id).await;
+    assert_eq!(got.password_hash, "changed");
+    assert!(!got.active);
+    assert!(
+        got.sessions_revoked_at.is_some(),
+        "the logout stamp was lost"
+    );
+}
+
+#[cfg(not(feature = "tenancy"))]
+async fn a_password_change_then_logout_completes(_: &Pool) {}
+
+/// A one-connection pool on `pool`'s database (a new file on SQLite).
+async fn single_connection(pool: &Pool) -> (Pool, Option<tempfile::TempDir>) {
+    use rustango::testkit::matrix::Backend;
+    let wait = std::time::Duration::from_secs(3);
+    match kind(pool) {
+        #[cfg(feature = "postgres")]
+        DialectKind::Postgres => {
+            let url = Backend::Postgres.url().unwrap();
+            let pg = rustango::sql::sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .acquire_timeout(wait)
+                .connect(&url)
+                .await
+                .unwrap();
+            (Pool::Postgres(pg), None)
+        }
+        #[cfg(feature = "mysql")]
+        DialectKind::Mysql => {
+            let url = Backend::MySql.url().unwrap();
+            let my = rustango::sql::sqlx::mysql::MySqlPoolOptions::new()
+                .max_connections(1)
+                .acquire_timeout(wait)
+                .connect(&url)
+                .await
+                .unwrap();
+            (Pool::Mysql(my), None)
+        }
+        #[cfg(feature = "sqlite")]
+        DialectKind::Sqlite => {
+            let dir = tempfile::tempdir().unwrap();
+            let url = format!("sqlite://{}?mode=rwc", dir.path().join("one.db").display());
+            let sq = rustango::sql::sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .acquire_timeout(wait)
+                .connect(&url)
+                .await
+                .unwrap();
+            let one = Pool::Sqlite(sq);
+            setup(&one).await;
+            (one, Some(dir))
+        }
+        #[allow(unreachable_patterns)]
+        _ => unreachable!("a backend this build has"),
+    }
+}
+
+/// A pool of one: the request holds the only connection, and its escape
+/// write runs once the block gives it back instead of timing out.
+async fn an_escape_write_needs_no_second_connection(pool: &Pool) {
+    let (one, _dir) = single_connection(pool).await;
+    let routes = Router::new()
+        .route(
+            "/w",
+            post(|State(p): State<Pool>| async move {
+                put(&p, 1).await.unwrap();
+                let q = p.clone();
+                match outside_atomic(async move { put(&q, 2).await }).await {
+                    Ok(_) => StatusCode::CREATED,
+                    Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+                }
+            }),
+        )
+        .with_state(one.clone())
+        .layer(AtomicRequestLayer::new(one.clone()));
+    let resp = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        send(&routes, Method::POST, ""),
+    )
+    .await
+    .expect("the request hung");
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(items(&one).await, vec![1, 2]);
+}
+
+/// Update row `id` in place, taking its row lock.
+async fn lock_row(p: &Pool, id: i64) -> Result<u64, ExecError> {
+    use rustango::sql::UpdaterPool as _;
+    Item::objects()
+        .filter("id", id)
+        .update()
+        .set("id", id)
+        .execute_pool(p)
+        .await
+}
+
+/// Two requests lock rows 1 and 2 in opposite order: the deadlock victim's
+/// statement fails, its handler answers 500, and the layer makes it a 503.
+async fn a_statement_deadlock_is_a_503(pool: &Pool) {
+    if kind(pool) == DialectKind::Sqlite {
+        return;
+    }
+    put(pool, 1).await.unwrap();
+    put(pool, 2).await.unwrap();
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let request = move |pool: Pool, first: i64, second: i64, barrier: Arc<tokio::sync::Barrier>| {
+        let routes = Router::new()
+            .route(
+                "/w",
+                post(move |State(p): State<Pool>| {
+                    let barrier = barrier.clone();
+                    async move {
+                        lock_row(&p, first).await.unwrap();
+                        barrier.wait().await;
+                        match lock_row(&p, second).await {
+                            Ok(_) => StatusCode::CREATED,
+                            Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+                        }
+                    }
+                }),
+            )
+            .with_state(pool.clone())
+            .layer(AtomicRequestLayer::new(pool));
+        async move { send(&routes, Method::POST, "").await }
+    };
+    let (a, b) = tokio::join!(
+        request(pool.clone(), 1, 2, barrier.clone()),
+        request(pool.clone(), 2, 1, barrier)
+    );
+    let mut statuses = [a.status(), b.status()];
+    statuses.sort();
+    assert_eq!(
+        statuses,
+        [StatusCode::CREATED, StatusCode::SERVICE_UNAVAILABLE]
+    );
+    let lost = if a.status() == StatusCode::SERVICE_UNAVAILABLE {
+        &a
+    } else {
+        &b
+    };
+    assert_eq!(lost.headers()[header::RETRY_AFTER], "1");
+}
 
 /// `deferred()` keeps the isolation level where BEGIN is always deferred.
 async fn deferred_still_sets_the_level(pool: &Pool) {
@@ -558,6 +746,9 @@ tri_dialect_test! {
         a_spawned_write_escapes_the_block,
         an_outside_write_survives_a_500,
         a_logout_stamp_survives_a_500,
+        a_password_change_then_logout_completes,
+        an_escape_write_needs_no_second_connection,
+        a_statement_deadlock_is_a_503,
         deferred_still_sets_the_level,
     ],
 }
@@ -601,11 +792,16 @@ mod sqlite_only {
         conn
     }
 
-    /// Whether a writer holds PENDING, i.e. its COMMIT waits: a new reader is refused.
-    async fn commit_waiting(url: &str) -> bool {
-        use sqlx::Executor as _;
+    /// A connection for [`commit_waiting`], opened while no lock is held:
+    /// opening runs a PRAGMA that a writer's PENDING lock refuses.
+    async fn prober(url: &str) -> sqlx::pool::PoolConnection<sqlx::Sqlite> {
         let pool = journal_pool(url, Duration::ZERO).await;
-        let mut conn = pool.as_sqlite().unwrap().acquire().await.unwrap();
+        pool.as_sqlite().unwrap().acquire().await.unwrap()
+    }
+
+    /// Whether a writer holds PENDING, i.e. its COMMIT waits: a new reader is refused.
+    async fn commit_waiting(conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>) -> bool {
+        use sqlx::Executor as _;
         let refused = conn
             .execute("BEGIN; SELECT COUNT(*) FROM areq_item")
             .await
@@ -623,11 +819,12 @@ mod sqlite_only {
         let pool = journal_pool(&url, Duration::from_secs(10)).await;
         setup(&pool).await;
         let mut held = reader(&url).await;
+        let mut probe = prober(&url).await;
         let c = ctx(&pool);
         let committed = c.committed.clone();
         let app = app(c);
         let task = tokio::spawn(async move { send(&app, Method::POST, "mode=callback").await });
-        while !commit_waiting(&url).await {
+        while !commit_waiting(&mut probe).await {
             tokio::task::yield_now().await;
         }
         task.abort();
@@ -692,6 +889,104 @@ mod sqlite_only {
             StatusCode::OK
         );
         assert_eq!(items(&pool).await, vec![7]);
+    }
+
+    /// A write after a read loses to another connection's write: the
+    /// statement fails with `SQLITE_BUSY`, and the 500 the handler answers
+    /// becomes a 503 with `Retry-After`.
+    #[tokio::test]
+    async fn a_busy_statement_is_a_503() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = file(&dir);
+        let pool = pool_with(&url, SqliteJournalMode::Wal, Duration::from_millis(100)).await;
+        setup(&pool).await;
+        let other = pool_with(&url, SqliteJournalMode::Wal, Duration::from_millis(100)).await;
+        let routes = Router::new()
+            .route(
+                "/w",
+                post(move |State(p): State<Pool>| {
+                    let other = other.clone();
+                    async move {
+                        let _ = Item::objects().fetch(&p).await.unwrap();
+                        put(&other, 7).await.unwrap();
+                        match put(&p, 8).await {
+                            Ok(()) => StatusCode::CREATED,
+                            Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+                        }
+                    }
+                }),
+            )
+            .with_state(pool.clone())
+            .layer(AtomicRequestLayer::new(pool.clone()));
+        let resp = send(&routes, Method::POST, "").await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.headers()[header::RETRY_AFTER], "1");
+        assert_eq!(items(&pool).await, vec![7]);
+    }
+
+    /// A `DatabaseCache` on the request's pool: its write waits for the block
+    /// to end instead of for the block's write lock (`busy_timeout`).
+    #[cfg(feature = "cache")]
+    #[tokio::test]
+    async fn a_cache_write_in_a_request_does_not_stall() {
+        use rustango::cache::{Cache as _, DatabaseCache};
+        let dir = tempfile::tempdir().unwrap();
+        let url = file(&dir);
+        let pool = journal_pool(&url, Duration::from_secs(5)).await;
+        setup(&pool).await;
+        let cache = DatabaseCache::new(pool.clone(), "areq_cache");
+        cache.ensure_table().await.unwrap();
+        let in_handler = cache.clone();
+        let routes = Router::new()
+            .route(
+                "/w",
+                post(move |State(p): State<Pool>| {
+                    let cache = in_handler.clone();
+                    async move {
+                        put(&p, 1).await.unwrap();
+                        match cache.set("k", "v", None).await {
+                            Ok(()) => StatusCode::CREATED,
+                            Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+                        }
+                    }
+                }),
+            )
+            .with_state(pool.clone())
+            .layer(AtomicRequestLayer::new(pool.clone()));
+        let resp = tokio::time::timeout(Duration::from_secs(2), send(&routes, Method::POST, ""))
+            .await
+            .expect("the cache write waited on the request's write lock");
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
+        assert_eq!(items(&pool).await, vec![1]);
+    }
+
+    /// An `on_commit` callback runs on the commit's own task and still sees
+    /// the audit source it was queued under.
+    #[tokio::test]
+    async fn on_commit_keeps_the_audit_source() {
+        use rustango::audit::{current_source, with_source, AuditSource};
+        let dir = tempfile::tempdir().unwrap();
+        let pool = journal_pool(&file(&dir), Duration::from_secs(5)).await;
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let slot = seen.clone();
+        let p = pool.clone();
+        with_source(AuditSource::Custom("req-7".into()), async move {
+            atomic(&p, move |_| {
+                Box::pin(async move {
+                    on_commit(move || *slot.lock().unwrap() = Some(current_source()));
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        })
+        .await;
+        let got = seen.lock().unwrap().take();
+        assert_eq!(
+            format!("{got:?}"),
+            format!("{:?}", Some(AuditSource::Custom("req-7".into())))
+        );
     }
 
     /// `deferred()` begins with a plain BEGIN and works on a read-only

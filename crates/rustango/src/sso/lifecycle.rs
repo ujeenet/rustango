@@ -346,7 +346,8 @@ pub async fn deactivate_idle(pool: &Pool, registry: Option<&Pool>) -> Result<Idl
 }
 
 /// Switch off `user_id` unless one of its links was used since `cutoff`;
-/// audit it. `false`: nothing changed.
+/// audit it. `false`: nothing changed. Inside an `atomic` block both run
+/// when the block ends, and the user counts as changed.
 #[cfg(feature = "tenancy")]
 async fn deactivate(
     pool: &Pool,
@@ -371,23 +372,28 @@ async fn deactivate(
         .set("active", false)
         .set("sessions_revoked_at", now);
     // Commits with its audit row, whatever block the caller runs.
-    let n = crate::sql::outside_atomic_on(pool, deactivate.execute_pool(pool))
-        .await
-        .map_err(|e| format!("deactivate user {user_id}: {e}"))?;
-    if n == 0 {
-        return Ok(false);
-    }
-    let entry = crate::audit::PendingEntry {
-        entity_table: "rustango_users",
-        entity_pk: user_id.to_string(),
-        operation: crate::audit::AuditOp::Action,
-        source: crate::audit::AuditSource::Custom("sso".into()),
-        changes: serde_json::json!({"event": "sso_deactivated_idle", "active": false}),
+    let pool = pool.clone();
+    let step = async move {
+        let n = deactivate
+            .execute_pool(&pool)
+            .await
+            .map_err(|e| format!("deactivate user {user_id}: {e}"))?;
+        if n == 0 {
+            return Ok::<_, String>(false);
+        }
+        let entry = crate::audit::PendingEntry {
+            entity_table: "rustango_users",
+            entity_pk: user_id.to_string(),
+            operation: crate::audit::AuditOp::Action,
+            source: crate::audit::AuditSource::Custom("sso".into()),
+            changes: serde_json::json!({"event": "sso_deactivated_idle", "active": false}),
+        };
+        if let Err(e) = crate::audit::emit_security(&pool, &entry).await {
+            tracing::error!(target: "rustango::sso", user_id, error = %e, "an idle deactivation was NOT written to the audit log");
+        }
+        Ok(true)
     };
-    if let Err(e) = crate::audit::emit_security(pool, &entry).await {
-        tracing::error!(target: "rustango::sso", user_id, error = %e, "an idle deactivation was NOT written to the audit log");
-    }
-    Ok(true)
+    Ok(crate::sql::outside_atomic(step).await?.unwrap_or(true))
 }
 
 #[cfg(test)]

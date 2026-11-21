@@ -32,6 +32,8 @@ struct Slot {
     /// A statement error (MySQL) or an automatic rollback (SQLite) ended
     /// the transaction on the server.
     fatal: Arc<AtomicBool>,
+    /// A statement lost a conflict a retry can win ([`ExecError::is_transient`]).
+    transient: AtomicBool,
     /// Address of the `PoolTx` inside `state`, so ORM statements find it.
     tx_key: usize,
 }
@@ -163,18 +165,30 @@ impl TxState {
     }
 }
 
+/// Run `fut` on its own task, so dropping the caller does not cut it off;
+/// `None` if the runtime cancelled it.
+async fn kept<T: Send + 'static>(fut: impl Future<Output = T> + Send + 'static) -> Option<T> {
+    use tracing::instrument::{Instrument as _, WithSubscriber as _};
+    let Ok(rt) = tokio::runtime::Handle::try_current() else {
+        return Some(fut.await);
+    };
+    // The caller's span and subscriber follow, so the work logs as its own.
+    match rt
+        .spawn(fut.in_current_span().with_current_subscriber())
+        .await
+    {
+        Ok(v) => Some(v),
+        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+        Err(_) => None,
+    }
+}
+
 /// Run `fut` to completion even if the caller is dropped, so a savepoint
 /// statement is never cut off halfway.
 async fn in_background<T: Send + 'static>(
     fut: impl Future<Output = Result<T, ExecError>> + Send + 'static,
 ) -> Result<T, ExecError> {
-    use tracing::instrument::{Instrument as _, WithSubscriber as _};
-    // The caller's span and subscriber follow, so the work logs as its own.
-    match tokio::spawn(fut.in_current_span().with_current_subscriber()).await {
-        Ok(r) => r,
-        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-        Err(_) => Err(ExecError::AtomicAborted),
-    }
+    kept(fut).await.unwrap_or(Err(ExecError::AtomicAborted))
 }
 
 /// Lock the slot, settled. A lock held or claimed by a live caller is
@@ -237,10 +251,14 @@ pub(crate) fn gate(tx: &PoolTx<'_>) -> Result<Gate, ExecError> {
 }
 
 impl Gate {
-    /// Record a statement error that ended the whole transaction.
+    /// Record a statement error that ended the whole transaction, or that a
+    /// retry can win.
     pub(crate) fn check<T>(&self, r: Result<T, ExecError>) -> Result<T, ExecError> {
-        if let (Some(slot), Err(ExecError::Driver(e))) = (&self.0, &r) {
-            if ends_transaction(e) {
+        if let (Some(slot), Err(e)) = (&self.0, &r) {
+            if e.is_transient() {
+                slot.transient.store(true, Ordering::SeqCst);
+            }
+            if matches!(e, ExecError::Driver(d) if ends_transaction(d)) {
                 slot.fatal.store(true, Ordering::SeqCst);
             }
         }
@@ -302,9 +320,25 @@ struct Block {
     callbacks: Mutex<Vec<Callback>>,
     /// Set after the outermost commit: `on_commit` then runs at once.
     committed: AtomicBool,
+    /// [`outside_atomic`] work, queued on the root block only.
+    survivors: Mutex<Vec<Survivor>>,
 }
 
+type Survivor = std::pin::Pin<Box<dyn Future<Output = ()> + Send>>;
+
 impl Block {
+    fn new(pool: PoolId, slot: Arc<Slot>, depth: usize, enclosing: Option<Arc<Block>>) -> Self {
+        Self {
+            pool,
+            slot,
+            depth,
+            enclosing,
+            callbacks: Mutex::new(Vec::new()),
+            committed: AtomicBool::new(false),
+            survivors: Mutex::new(Vec::new()),
+        }
+    }
+
     fn take_callbacks(&self) -> Vec<Callback> {
         std::mem::take(
             &mut self
@@ -312,6 +346,59 @@ impl Block {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner),
         )
+    }
+
+    fn take_survivors(&self) -> Vec<Survivor> {
+        std::mem::take(
+            &mut self
+                .survivors
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
+    }
+}
+
+/// Run queued [`outside_atomic`] work in order, each failure or panic logged.
+async fn run_survivors(work: Vec<Survivor>) {
+    use futures_util::FutureExt as _;
+    for w in work {
+        if let Err(panic) = std::panic::AssertUnwindSafe(w).catch_unwind().await {
+            tracing::error!(
+                target: "rustango::error",
+                panic = crate::panic_guard::panic_message(&*panic),
+                "outside_atomic work panicked"
+            );
+        }
+    }
+}
+
+/// Runs the root block's queued work when the block ends: awaited on the
+/// normal path, spawned if the block's future is dropped first.
+struct Survivors(Arc<Block>);
+
+impl Survivors {
+    /// Run the work now the block's connection is released.
+    async fn run(&self) {
+        let work = self.0.take_survivors();
+        if !work.is_empty() {
+            kept(run_survivors(work)).await;
+        }
+    }
+}
+
+impl Drop for Survivors {
+    fn drop(&mut self) {
+        let work = self.0.take_survivors();
+        if work.is_empty() {
+            return;
+        }
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) => drop(rt.spawn(run_survivors(work))),
+            Err(_) => tracing::error!(
+                target: "rustango::error",
+                "outside_atomic work dropped: no runtime to finish it"
+            ),
+        }
     }
 }
 
@@ -325,25 +412,52 @@ fn current() -> Option<Arc<Block>> {
     BLOCK.try_with(Clone::clone).ok().flatten()
 }
 
-/// Run `fut` outside any [`atomic`] block, so its pool statements take their
-/// own connection and commit on their own: a write that must survive the
-/// block's rollback, such as a security audit row.
+/// Run `work` so it commits on its own and survives the rollback of any
+/// [`atomic`] block around the caller: a security audit row, a logout.
 ///
-/// On the block's own pool it needs a second connection. On SQLite it waits
-/// for the block's write lock; on PG it can wait on a row the block locked.
-pub async fn outside_atomic<F: Future>(fut: F) -> F::Output {
-    BLOCK.scope(None, fut).await
-}
-
-/// [`outside_atomic`] for a framework write on `pool`, except inside a
-/// SQLite block on it: one writer, so a second connection would wait for
-/// the block (forever in memory). There the write joins the block.
-#[cfg(any(feature = "admin", feature = "tenancy"))]
-pub(crate) async fn outside_atomic_on<F: Future>(pool: &Pool, fut: F) -> F::Output {
-    if pool.dialect().kind() == crate::sql::DialectKind::Sqlite && in_block(pool) {
-        return fut.await;
-    }
-    outside_atomic(fut).await
+/// Outside a block it runs at once: `Ok(Some(value))`. Inside one it is
+/// queued and `Ok(None)` is returned; it runs when the outermost block ends,
+/// after its COMMIT or ROLLBACK, so it never waits on the block's locks or
+/// needs a second connection while the block holds one. A queued failure is
+/// logged at error. Either way it runs on its own task with the caller's
+/// task-locals (audit source, timezone), and finishes if the caller is dropped.
+///
+/// # Errors
+/// `work`'s error, when it ran at once.
+pub async fn outside_atomic<F, T, E>(work: F) -> Result<Option<T>, E>
+where
+    F: Future<Output = Result<T, E>> + Send + 'static,
+    T: Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
+    // Boxed before and after the scopes, so no layer copies a large future.
+    let work = Box::pin(crate::task_context::Inherited::capture().scope(Box::pin(work)));
+    let Some(block) = current() else {
+        return match kept(work).await {
+            Some(r) => r.map(Some),
+            None => {
+                tracing::error!(target: "rustango::error", "outside_atomic work cancelled by the runtime");
+                Ok(None)
+            }
+        };
+    };
+    let root = std::iter::successors(Some(block), |b| b.enclosing.clone())
+        .last()
+        .expect("a block");
+    let queued: Survivor = Box::pin(async move {
+        if let Err(e) = work.await {
+            tracing::error!(
+                target: "rustango::error",
+                error = %e,
+                "outside_atomic work queued in a block failed"
+            );
+        }
+    });
+    root.survivors
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(queued);
+    Ok(None)
 }
 
 /// Handle an [`atomic`] block gets. Lock it for each statement; drop
@@ -361,6 +475,12 @@ impl AtomicTx {
     /// is open; [`ExecError::AtomicAborted`] after a failed savepoint.
     pub async fn lock(&self) -> Result<TxGuard<'_>, ExecError> {
         lock_block(&self.block).await
+    }
+
+    /// Whether a statement in the block lost a conflict a retry can win.
+    #[cfg(feature = "_axum")]
+    pub(crate) fn lost_a_conflict(&self) -> bool {
+        self.block.slot.transient.load(Ordering::SeqCst)
     }
 }
 
@@ -800,13 +920,15 @@ pub(crate) fn in_any_block() -> bool {
 /// the whole block. On MySQL, [`run_ddl_idempotent`](crate::sql::run_ddl_idempotent)
 /// refuses DDL with an `sqlx::Error::Protocol`; raw DDL commits the block.
 ///
-/// **Separate connections** ([`Pool::acquire`], the cache, the job claim,
-/// tenancy registry changes, [`outside_atomic`]) run outside the block's transaction: they do not see its
-/// writes and can deadlock on locks it holds. On SQLite every block holds the
+/// **Separate connections** ([`Pool::acquire`], the job claim) run outside
+/// the block's transaction: they do not see its writes and can deadlock on
+/// locks it holds. On SQLite every block holds the
 /// write lock from `BEGIN`, so their writes wait `busy_timeout` and then fail
 /// with `SQLITE_BUSY` (file databases too); in-memory ones wait forever.
 /// `Tenant::conn` inside a block on the tenant's pool lends the block's own
-/// connection instead; `Tenant::into_conn` is then refused.
+/// connection instead; `Tenant::into_conn` is then refused. Writes that must
+/// survive a rollback go through [`outside_atomic`], which queues them until
+/// the block ends.
 ///
 /// **Raw SQL** that ends the transaction (`COMMIT`, `ROLLBACK`, an implicit
 /// commit) is found at the outermost commit, which then returns
@@ -851,7 +973,8 @@ pub(crate) fn in_any_block() -> bool {
 /// commit), and `on_commit` there panics.
 ///
 /// **Callbacks fire in registration order**, serially, after the
-/// `COMMIT` returns OK. A panicking callback is logged and the rest still run.
+/// `COMMIT` returns OK, on the commit's own task with the task-locals each
+/// had when queued. A panicking callback is logged and the rest still run.
 ///
 /// # Errors
 /// Returns the first `ExecError` produced by `f`, or a driver error
@@ -1187,18 +1310,36 @@ where
         guards: AtomicUsize::new(0),
         claims: AtomicUsize::new(0),
         fatal,
+        transient: AtomicBool::new(false),
         tx_key,
     });
-    let block = Arc::new(Block {
-        pool: id,
-        slot: Arc::clone(&slot),
-        depth: 0,
-        enclosing,
-        callbacks: Mutex::new(Vec::new()),
-        committed: AtomicBool::new(false),
-    });
+    let root = enclosing.is_none();
+    let block = Arc::new(Block::new(id, Arc::clone(&slot), 0, enclosing));
+    // Only the root block queues `outside_atomic` work.
+    let survivors = root.then(|| Survivors(Arc::clone(&block)));
+    let (out, released) = outermost_body(&block, &slot, f, end).await;
+    // A guard carried out still holds the connection: `Drop` spawns the work.
+    if let Some(s) = survivors.as_ref().filter(|_| released) {
+        s.run().await;
+    }
+    out
+}
+
+async fn outermost_body<F, T>(
+    block: &Arc<Block>,
+    slot: &Arc<Slot>,
+    f: F,
+    end: impl FnOnce(&T) -> End,
+) -> (Result<T, ExecError>, bool)
+where
+    F: for<'tx> FnOnce(
+        &'tx AtomicTx,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
+    >,
+{
     let handle = AtomicTx {
-        block: Arc::clone(&block),
+        block: Arc::clone(block),
     };
     let res = BLOCK
         .scope(Some(Arc::clone(&block)), async { f(&handle).await })
@@ -1207,7 +1348,7 @@ where
     // A guard still held now was carried out of the block, e.g. by a
     // `Tenant` lending its connection: refuse; the drop rolls back.
     if slot.guards.load(Ordering::SeqCst) > 0 {
-        return Err(res.err().unwrap_or(ExecError::NestedAtomic));
+        return (Err(res.err().unwrap_or(ExecError::NestedAtomic)), false);
     }
     // Waits for any background savepoint work, then rolls back a
     // cancelled nested block before deciding.
@@ -1225,15 +1366,13 @@ where
     let mut tx = st.tx.take().expect("atomic transaction is open");
     drop(st);
     tx.clear_sqlite_rollback().await;
-    match res.and_then(|v| settled.map(|()| v)) {
+    let block = Arc::clone(block);
+    let out = match res.and_then(|v| settled.map(|()| v)) {
         Ok(v) if end == Some(End::Abandon) => {
             let _ = tx.rollback().await;
             Ok(v)
         }
-        Ok(v) if end == Some(End::Rollback) => {
-            tx.rollback().await?;
-            Ok(v)
-        }
+        Ok(v) if end == Some(End::Rollback) => tx.rollback().await.map(|()| v).map_err(Into::into),
         Ok(v) => {
             // On its own task, so a caller dropped mid-COMMIT (a client
             // disconnect) cannot commit the data and skip the callbacks.
@@ -1244,15 +1383,16 @@ where
                 BLOCK.sync_scope(Some(block), || run_callbacks(callbacks));
                 Ok(())
             })
-            .await?;
-            Ok(v)
+            .await
+            .map(|()| v)
         }
         Err(e) => {
             // Callbacks drop with `block`.
             let _ = tx.rollback().await;
             Err(e)
         }
-    }
+    };
+    (out, true)
 }
 
 fn run_callbacks(callbacks: Vec<Callback>) {
@@ -1316,14 +1456,12 @@ where
         open.ending = true;
         return Err(e);
     }
-    let block = Arc::new(Block {
-        pool: parent.pool.clone(),
-        slot: Arc::clone(&slot),
+    let block = Arc::new(Block::new(
+        parent.pool.clone(),
+        Arc::clone(&slot),
         depth,
         enclosing,
-        callbacks: Mutex::new(Vec::new()),
-        committed: AtomicBool::new(false),
-    });
+    ));
     let handle = AtomicTx {
         block: Arc::clone(&block),
     };
@@ -1432,11 +1570,13 @@ where
     if block.committed.load(Ordering::SeqCst) {
         f();
     } else {
+        // It runs on the commit's own task: carry the caller's task-locals.
+        let carried = crate::task_context::Inherited::capture();
         block
             .callbacks
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push(Box::new(f));
+            .push(Box::new(move || carried.sync_scope(f)));
     }
 }
 

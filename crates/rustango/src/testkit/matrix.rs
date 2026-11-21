@@ -149,6 +149,29 @@ impl Backend {
             None => url,
         })
     }
+
+    /// The server URL as configured, not the slot's database, for a test
+    /// that creates databases of its own; `None` (SQLite too) prints the
+    /// standard skip line for `test`'s arm.
+    #[must_use]
+    pub fn admin_url(self, test: &str) -> Option<String> {
+        let url = self.env_var().and_then(|var| std::env::var(var).ok());
+        if url.is_none() {
+            self.skip_arm(test);
+        }
+        url
+    }
+
+    /// Print the line for `test`'s arm on this backend, skipped because
+    /// its env var is unset.
+    pub fn skip_arm(self, test: &str) {
+        let (var, name) = match self {
+            Backend::Postgres => ("DATABASE_URL", "Postgres"),
+            Backend::MySql => ("MYSQL_TEST_URL", "MySQL"),
+            Backend::Sqlite => ("no env var", "SQLite"),
+        };
+        eprintln!("{var} not set — skipping the {name} arm of `{test}`");
+    }
 }
 
 /// nextest's global slot: unique among the tests running at one moment,
@@ -761,10 +784,7 @@ macro_rules! tri_dialect_test {
                     let Some(pool) =
                         $crate::testkit::matrix::Backend::Postgres.pool().await
                     else {
-                        eprintln!(
-                            "DATABASE_URL not set — skipping the Postgres arm of `{}`",
-                            stringify!($name)
-                        );
+                        $crate::testkit::matrix::Backend::Postgres.skip_arm(stringify!($name));
                         return;
                     };
                     ($setup)(&pool).await;
@@ -784,10 +804,7 @@ macro_rules! tri_dialect_test {
                     let Some(pool) =
                         $crate::testkit::matrix::Backend::MySql.pool().await
                     else {
-                        eprintln!(
-                            "MYSQL_TEST_URL not set — skipping the MySQL arm of `{}`",
-                            stringify!($name)
-                        );
+                        $crate::testkit::matrix::Backend::MySql.skip_arm(stringify!($name));
                         return;
                     };
                     ($setup)(&pool).await;

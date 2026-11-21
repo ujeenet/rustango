@@ -178,10 +178,7 @@ impl<DB: Database> Tenant<DB> {
     }
 
     fn refuse_in_block(&self, op: &'static str, reason: &'static str) -> Result<(), TenancyError> {
-        if crate::sql::in_block(&self.pool) {
-            return Err(crate::sql::ExecError::InAtomic { op, reason }.into());
-        }
-        Ok(())
+        Ok(crate::sql::refuse_in_block(&self.pool, op, reason)?)
     }
 
     /// Lock the open `atomic` block on the tenant's pool for `Tenant::conn`;

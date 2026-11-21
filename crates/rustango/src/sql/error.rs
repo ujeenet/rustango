@@ -504,7 +504,6 @@ impl ExecError {
     /// A conflict a retry can win: a deadlock, a serialization failure
     /// (40001), a MySQL lock-wait timeout (1205), `SQLITE_BUSY`, or no free
     /// pool connection.
-    #[cfg_attr(not(feature = "_axum"), allow(dead_code))]
     pub(crate) fn is_transient(&self) -> bool {
         if self.is_deadlock() {
             return true;

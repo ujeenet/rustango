@@ -521,7 +521,7 @@ impl DbServer {
         let backend = self.backend_kind()?;
         let orgs: Vec<Org> = Org::objects()
             .where_(Org::storage_mode.eq(StorageMode::Database))
-            .where_(Org::backend_kind.eq(backend))
+            .where_(Org::backend_kind.eq_any_spelling(backend))
             .fetch(registry)
             .await?;
         let mut out = Vec::new();

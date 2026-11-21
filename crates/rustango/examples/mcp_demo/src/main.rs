@@ -108,7 +108,7 @@ fn acme_org(database_url: String) -> Org {
     // A registry row has an id; tokens and notifications bind to it.
     o.id = Auto::Set(1);
     o.display_name = "Acme Inc.".into();
-    o.backend_kind = crate::tenancy::BackendKind::Sqlite;
+    o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
     o.database_url = Some(database_url);
     o.host_pattern = Some("acme.localhost".into());
     o

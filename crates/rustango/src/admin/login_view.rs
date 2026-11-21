@@ -1131,7 +1131,6 @@ async fn logout_submit(
                 auth.iat,
             )
             .await
-            .map(drop)
             .map_err(|e| e.to_string()),
             GateCheck::Reject => Ok(()),
             // Never report a logout that did not happen.

@@ -73,15 +73,15 @@ tokio::task_local! {
 
 tokio::task_local! {
     /// Tenant whose user the active source names; `None` when unbound.
-    static SOURCE_TENANT: Option<String>;
+    pub(crate) static SOURCE_TENANT: Option<String>;
     /// Tenant the current writes go to, where the framework knows it.
-    static WRITE_TENANT: WriteScope;
+    pub(crate) static WRITE_TENANT: WriteScope;
 }
 
 /// Where writes go. With `pool` set (a `with_tenant` pass), a source
 /// bound to `tenant` is kept only on writes through that pool (#2123).
 #[derive(Clone)]
-struct WriteScope {
+pub(crate) struct WriteScope {
     tenant: String,
     pool: Option<crate::sql::PoolId>,
 }
@@ -675,14 +675,19 @@ pub async fn emit_one(pool: &crate::sql::Pool, entry: &PendingEntry) -> Result<(
 }
 
 /// [`emit_one`] for a security event (a second factor, an SSO account change,
-/// an agent's action): outside any `atomic` block, so it is kept when the
-/// request around it rolls back. In a SQLite block it joins the block.
+/// an agent's action), through [`crate::sql::outside_atomic`]: kept when the
+/// request around it rolls back, written when its block ends.
+///
+/// # Errors
+/// As [`emit_one`], when it ran at once.
 #[cfg(any(feature = "admin", feature = "sso", feature = "mcp"))]
 pub(crate) async fn emit_security(
     pool: &crate::sql::Pool,
     entry: &PendingEntry,
 ) -> Result<(), sqlx::Error> {
-    crate::sql::outside_atomic_on(pool, emit_one(pool, entry)).await
+    let (pool, entry) = (pool.clone(), entry.clone());
+    crate::sql::outside_atomic(async move { emit_one(&pool, &entry).await }).await?;
+    Ok(())
 }
 
 /// Codename a non-superuser needs to read the admin audit feed. Rows
@@ -2349,5 +2354,43 @@ mod retention_tests {
         assert!(err.contains("[audit] retention_days"), "{err}");
         let err = Retention::from_flags(Some(0), None, false, Some(90)).unwrap_err();
         assert!(!err.contains("retention_days"), "{err}");
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "sqlite",
+    any(feature = "admin", feature = "sso", feature = "mcp")
+))]
+mod security_tests {
+    /// A security row written in a block that rolls back is kept, on
+    /// SQLite too: it lands when the block ends.
+    #[tokio::test]
+    async fn a_security_row_survives_its_blocks_rollback() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}?mode=rwc", dir.path().join("a.db").display());
+        let pool = crate::sql::Pool::connect(&url).await.unwrap();
+        super::ensure_table_pool(&pool).await.unwrap();
+        let entry = super::PendingEntry {
+            entity_table: "rustango_users",
+            entity_pk: "1".into(),
+            operation: super::AuditOp::Action,
+            source: super::AuditSource::System,
+            changes: serde_json::json!({"event": "totp_reset"}),
+        };
+        let p = pool.clone();
+        let rolled_back: Result<(), crate::sql::ExecError> = crate::sql::atomic(&pool, move |_| {
+            Box::pin(async move {
+                super::emit_security(&p, &entry).await.unwrap();
+                Err(crate::sql::ExecError::AtomicAborted)
+            })
+        })
+        .await;
+        assert!(rolled_back.is_err());
+        let sql = "SELECT COUNT(*) FROM rustango_audit_log";
+        let rows: Vec<(i64,)> = crate::sql::raw_query_pool(sql, vec![], &pool)
+            .await
+            .unwrap();
+        assert_eq!(rows[0].0, 1, "the security row rolled back with the block");
     }
 }

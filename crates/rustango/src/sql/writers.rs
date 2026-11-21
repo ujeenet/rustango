@@ -4156,15 +4156,20 @@ fn write_trunc_with_tz(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<()
         }
     };
     let unit_lc = unit.to_ascii_lowercase();
-    if !matches!(
-        unit_lc.as_str(),
-        "year" | "month" | "day" | "hour" | "minute" | "second"
-    ) {
-        return Err(SqlError::OpNotSupportedInDialect {
-            op: "TRUNC_WITH_TZ unit (allowed: year, month, day, hour, minute, second)",
-            dialect: b.d.name(),
-        });
-    }
+    let kind = match unit_lc.as_str() {
+        "year" => crate::query::DateTimeKind::Year,
+        "month" => crate::query::DateTimeKind::Month,
+        "day" => crate::query::DateTimeKind::Day,
+        "hour" => crate::query::DateTimeKind::Hour,
+        "minute" => crate::query::DateTimeKind::Minute,
+        "second" => crate::query::DateTimeKind::Second,
+        _ => {
+            return Err(SqlError::OpNotSupportedInDialect {
+                op: "TRUNC_WITH_TZ unit (allowed: year, month, day, hour, minute, second)",
+                dialect: b.d.name(),
+            })
+        }
+    };
     // The tz is inlined into the SQL, so restrict its characters.
     let safe_charset = |s: &str| {
         s.chars()
@@ -4189,21 +4194,21 @@ fn write_trunc_with_tz(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<()
         DialectKind::Mysql => {
             // CONVERT_TZ needs a from/to pair; stored timestamps are
             // UTC. The DATE_FORMAT mask does the truncation.
-            let mask = mysql_trunc_mask(&unit_lc);
+            let mask = super::dialect::datetime_bucket_mask(kind, "%i", "%S");
             b.sql.push_str("DATE_FORMAT(CONVERT_TZ(");
             write_expr(b, &args[0], None)?;
             b.sql.push_str(", '+00:00', '");
             b.sql.push_str(tz);
             b.sql.push_str("'), '");
-            b.sql.push_str(mask);
+            b.sql.push_str(&mask);
             b.sql.push_str("')");
         }
         DialectKind::Sqlite => {
             // SQLite has no timezone database, so `tz` is passed to
             // strftime as a modifier, usually a `±HH:MM` offset.
-            let mask = sqlite_trunc_mask(&unit_lc);
+            let mask = super::dialect::datetime_bucket_mask(kind, "%M", "%S");
             b.sql.push_str("strftime('");
-            b.sql.push_str(mask);
+            b.sql.push_str(&mask);
             b.sql.push_str("', ");
             write_expr(b, &args[0], None)?;
             b.sql.push_str(", '");
@@ -4212,28 +4217,6 @@ fn write_trunc_with_tz(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<()
         }
     }
     Ok(())
-}
-
-fn mysql_trunc_mask(unit: &str) -> &'static str {
-    match unit {
-        "year" => "%Y-01-01 00:00:00",
-        "month" => "%Y-%m-01 00:00:00",
-        "day" => "%Y-%m-%d 00:00:00",
-        "hour" => "%Y-%m-%d %H:00:00",
-        "minute" => "%Y-%m-%d %H:%i:00",
-        _ => "%Y-%m-%d %H:%i:%S",
-    }
-}
-
-fn sqlite_trunc_mask(unit: &str) -> &'static str {
-    match unit {
-        "year" => "%Y-01-01 00:00:00",
-        "month" => "%Y-%m-01 00:00:00",
-        "day" => "%Y-%m-%d 00:00:00",
-        "hour" => "%Y-%m-%d %H:00:00",
-        "minute" => "%Y-%m-%d %H:%M:00",
-        _ => "%Y-%m-%d %H:%M:%S",
-    }
 }
 
 /// `setweight(<tsvector>, '<weight>')`. Postgres only. The weight

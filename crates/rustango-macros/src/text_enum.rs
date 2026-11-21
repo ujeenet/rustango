@@ -140,15 +140,21 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         });
     }
 
-    // Every stored name and alias reads back to exactly one variant.
+    // Every stored name and alias reads back to exactly one variant, and no
+    // two differ only by case: MySQL's default collation compares them equal.
     let mut seen: Vec<&str> = Vec::new();
     for v in &variants {
         for s in std::iter::once(&v.value).chain(&v.aliases) {
-            if seen.contains(&s.as_str()) {
-                return Err(syn::Error::new_spanned(
-                    &v.ident,
-                    format!("`{s}` is used by two variants (as a stored name or alias)"),
-                ));
+            if let Some(prev) = seen.iter().find(|p| p.to_lowercase() == s.to_lowercase()) {
+                let msg = if prev == s {
+                    format!("`{s}` is used by two variants (as a stored name or alias)")
+                } else {
+                    format!(
+                        "`{prev}` and `{s}` differ only by case; MySQL's default \
+                         collation compares them equal"
+                    )
+                };
+                return Err(syn::Error::new_spanned(&v.ident, msg));
             }
             seen.push(s);
         }

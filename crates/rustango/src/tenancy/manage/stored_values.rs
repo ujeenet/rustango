@@ -70,10 +70,11 @@ where
     let registry = pools.registry_pool();
     let rows = Org::objects()
         .where_(Org::slug.eq(slug.clone()))
-        .values_list(&["id", "storage_mode", "backend_kind"])
+        .values_list(&["id", "storage_mode", "backend_kind", "schema_name"])
         .fetch(&registry)
         .await?;
-    let Some([SqlValue::I64(id), mode, backend]) = rows.first().map(Vec::as_slice) else {
+    let Some([SqlValue::I64(id), mode, backend, schema_name]) = rows.first().map(Vec::as_slice)
+    else {
         return Err(TenancyError::Validation(format!("no tenant `{slug}`")));
     };
     let mode = repaired::<StorageMode>("storage_mode", mode, p.value("--storage-mode")?)?;
@@ -85,6 +86,19 @@ where
     if !mode.changed && !backend.changed {
         writeln!(w, "tenant `{slug}` already stores canonical values")?;
         return Ok(());
+    }
+    // As provisioning: two schema-mode tenants never share one schema.
+    if mode.changed && mode.value == StorageMode::Schema {
+        let named = match schema_name {
+            SqlValue::String(s) => Some(s.as_str()),
+            _ => None,
+        };
+        let schema = crate::tenancy::org::effective_schema(named, &slug);
+        if crate::tenancy::org_host::schema_claimed(&registry, schema, Some(*id)).await? {
+            return Err(TenancyError::Validation(format!(
+                "another tenant uses schema `{schema}`; repair-tenant will not share it"
+            )));
+        }
     }
     Org::objects()
         .where_(Org::id.eq(*id))

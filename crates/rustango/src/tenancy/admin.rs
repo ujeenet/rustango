@@ -649,7 +649,6 @@ where
                         iat,
                     )
                     .await
-                    .map(drop)
                     .map_err(|e| e.to_string()),
                     // Never report a logout that did not happen.
                     SessionCheck::Error(e) => Err(e),

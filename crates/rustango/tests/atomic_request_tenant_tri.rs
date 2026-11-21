@@ -296,7 +296,10 @@ async fn sqlite_database_mode_runs_each_write_in_the_tenant_block() {
 #[cfg(feature = "postgres")]
 #[tokio::test]
 async fn pg_schema_mode_runs_each_write_in_the_tenant_block() {
-    let Ok(admin) = std::env::var("DATABASE_URL") else {
+    use rustango::testkit::matrix::Backend;
+    let Some(admin) =
+        Backend::Postgres.admin_url("pg_schema_mode_runs_each_write_in_the_tenant_block")
+    else {
         return;
     };
     let _g = lock().lock().await;
@@ -337,7 +340,10 @@ async fn pg_schema_mode_runs_each_write_in_the_tenant_block() {
 #[cfg(feature = "mysql")]
 #[tokio::test]
 async fn mysql_database_mode_runs_each_write_in_the_tenant_block() {
-    let Ok(admin) = std::env::var("MYSQL_TEST_URL") else {
+    use rustango::testkit::matrix::Backend;
+    let Some(admin) =
+        Backend::MySql.admin_url("mysql_database_mode_runs_each_write_in_the_tenant_block")
+    else {
         return;
     };
     let _g = lock().lock().await;

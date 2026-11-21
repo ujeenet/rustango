@@ -1,15 +1,18 @@
 //! One `atomic` block per write request, so a request that fails rolls back
 //! every write it made on the request's pool.
 //!
-//! ```ignore
-//! use rustango::atomic_request::AtomicRequests;
+//! The server builders take [`AtomicRequests`]; a hand-built router takes
+//! the layer:
+//!
+//! ```no_run
+//! # fn demo(pool: rustango::sql::Pool, routes: axum::Router) -> axum::Router {
+//! use rustango::atomic_request::AtomicRequestLayer;
 //! use rustango::sql::{AtomicOptions, Isolation};
 //!
-//! rustango::server::Builder::from_env().await?
-//!     .api(routes)
-//!     .atomic_requests(AtomicRequests::new().options(
-//!         AtomicOptions::new().isolation(Isolation::ReadCommitted),
-//!     ))
+//! routes.layer(AtomicRequestLayer::new(pool).options(
+//!     AtomicOptions::new().isolation(Isolation::ReadCommitted),
+//! ))
+//! # }
 //! ```
 //!
 //! - POST, PUT, PATCH, DELETE and other unsafe methods run the handler in
@@ -20,13 +23,21 @@
 //! - A failed `COMMIT` drops the handler's response, cookies included:
 //!   a serialization failure, deadlock, lock timeout or `SQLITE_BUSY` is a
 //!   `503` with `Retry-After`, anything else a `500`. Nothing is retried.
+//!   A response that rolls back after a statement in the block lost such a
+//!   conflict is replaced by the same `503`.
+//! - Each write request holds one pool connection from the start of its
+//!   handler to its end, so at most `max_connections` write requests run at
+//!   once per pool: size the pool for your concurrent writes, and keep slow
+//!   outbound calls out of write handlers.
 //! - SQLite blocks begin deferred, so a POST that writes nothing takes no
 //!   write lock.
 //!
 //! Layers inside this one (those on your own router) run in the block;
 //! what they write on the pool commits or rolls back with the request.
 //! Writes that must survive a rollback go through
-//! [`outside_atomic`](crate::sql::outside_atomic).
+//! [`outside_atomic`](crate::sql::outside_atomic), which runs them when the
+//! block ends. A `DatabaseCache` on the request's pool reads in the block,
+//! queues its writes the same way, and refuses `incr` and `add`.
 
 use std::convert::Infallible;
 use std::future::Future;
@@ -106,6 +117,7 @@ impl AtomicRequestLayer {
     }
 
     /// This layer with `requests`' settings.
+    #[cfg(any(feature = "runserver", feature = "tenancy"))]
     pub(crate) fn with(self, requests: &AtomicRequests) -> Self {
         self.options(requests.opts.clone())
     }
@@ -168,10 +180,7 @@ where
 
 /// Whether `m` may write: everything but the safe methods.
 fn writes(m: &Method) -> bool {
-    !matches!(
-        *m,
-        Method::GET | Method::HEAD | Method::OPTIONS | Method::TRACE
-    ) && m.as_str() != "QUERY"
+    !crate::urls::is_safe_method(m.as_str())
 }
 
 /// A 2xx or 3xx response commits; anything else rolls back.
@@ -187,13 +196,18 @@ where
 {
     let (method, path) = (req.method().clone(), req.uri().path().to_owned());
     let request_id = request_id(&req);
+    let at = (request_id.clone(), method.clone(), path.clone());
     let out = crate::sql::atomic_request(
         pool,
         opts,
-        move |_tx| {
+        move |tx| {
             Box::pin(async move {
                 let ran = crate::panic_guard::catch_unwind(inner.oneshot(req)).await;
                 Ok(ran.map(|r| match r {
+                    // A failure after a lost conflict is the conflict's: a retry can win.
+                    Ok(resp) if !keeps(resp.status()) && tx.lost_a_conflict() => {
+                        conflict(&at.0, &at.1, &at.2, &"a statement lost a conflict")
+                    }
                     Ok(resp) => resp,
                     Err(never) => match never {},
                 }))
@@ -210,6 +224,20 @@ where
     }
 }
 
+/// `503` with `Retry-After` for a request whose block lost a conflict.
+fn conflict(request_id: &str, method: &Method, path: &str, e: &dyn std::fmt::Display) -> Response {
+    tracing::warn!(
+        target: "rustango::atomic_request",
+        request_id, method = %method, path, error = %e,
+        "request transaction lost a conflict; answered 503"
+    );
+    let mut resp =
+        crate::api_errors::ApiError::service_unavailable("conflict, try again").into_response();
+    resp.headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    resp
+}
+
 fn request_id(req: &Request<Body>) -> String {
     #[cfg(feature = "_http_layers")]
     if let Some(id) = req.extensions().get::<crate::request_id::RequestId>() {
@@ -223,16 +251,7 @@ fn request_id(req: &Request<Body>) -> String {
 /// response describes writes that did not happen, so it is dropped.
 fn failed(e: &ExecError, request_id: &str, method: &Method, path: &str) -> Response {
     if e.is_transient() {
-        tracing::warn!(
-            target: "rustango::atomic_request",
-            request_id, method = %method, path, error = %e,
-            "request transaction lost a conflict; answered 503"
-        );
-        let mut resp =
-            crate::api_errors::ApiError::service_unavailable("conflict, try again").into_response();
-        resp.headers_mut()
-            .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
-        return resp;
+        return conflict(request_id, method, path, e);
     }
     tracing::error!(
         target: "rustango::error",

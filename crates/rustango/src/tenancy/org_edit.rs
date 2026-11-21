@@ -192,6 +192,10 @@ pub(crate) async fn apply_values(
 
 /// [`apply_values`], written only while `database_url` still holds
 /// `expected` when that is `Some`; `Ok(None)` when it changed meanwhile.
+///
+/// # Errors
+/// [`ExecError::InAtomic`](crate::sql::ExecError::InAtomic) inside an
+/// `atomic` block on `registry`: a registry edit commits on its own.
 pub(crate) async fn apply_values_if(
     registry: &Pool,
     secrets: &TenantSecrets,
@@ -199,20 +203,11 @@ pub(crate) async fn apply_values_if(
     values: Vec<(&'static str, crate::core::SqlValue)>,
     expected: Option<&str>,
 ) -> Result<Option<Applied>, TenancyError> {
-    // A registry edit commits on its own, never with a caller's block.
-    crate::sql::outside_atomic(apply_values_if_alone(
-        registry, secrets, slug, values, expected,
-    ))
-    .await
-}
-
-async fn apply_values_if_alone(
-    registry: &Pool,
-    secrets: &TenantSecrets,
-    slug: &str,
-    values: Vec<(&'static str, crate::core::SqlValue)>,
-    expected: Option<&str>,
-) -> Result<Option<Applied>, TenancyError> {
+    crate::sql::refuse_in_block(
+        registry,
+        "a tenant registry edit",
+        "it commits on its own; run it outside the block",
+    )?;
     use crate::core::SqlValue;
     let existing = Org::objects()
         .where_(Org::slug.eq(slug.to_owned()))

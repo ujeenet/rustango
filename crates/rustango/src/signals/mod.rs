@@ -321,7 +321,7 @@ pub fn receiver_count<T: Model + 'static>() -> usize {
 // Scopes nest: the outer state is restored on exit.
 
 tokio::task_local! {
-    static SUPPRESS_SIGNALS: bool;
+    pub(crate) static SUPPRESS_SIGNALS: bool;
 }
 
 /// `true` when the current task is inside a [`without_signals`],

@@ -91,10 +91,14 @@ SQLite, et sur MySQL à son niveau par défaut (repeatable read), toutes les
 lectures du bloc voient un seul instantané.
 
 Ceux-ci s'exécutent **hors** du bloc, sur leur propre connexion :
-`pool.acquire()`, le cache, la prise de jobs, les changements
-du registre de tenancy, une tâche lancée avec `tokio::spawn`, et un pool
-connecté à part (même vers la même base). Ils ne voient pas les écritures du
-bloc et peuvent attendre des verrous qu'il détient.
+`pool.acquire()`, la prise de jobs, une tâche lancée avec `tokio::spawn`, et
+un pool connecté à part (même vers la même base). Ils ne voient pas les
+écritures du bloc et peuvent attendre des verrous qu'il détient.
+
+Un `DatabaseCache` sur le pool du bloc lit dans le bloc et met ses écritures
+en file jusqu'à la fin du bloc ; il y refuse `incr`, `add` et le DDL. Un
+changement du registre de tenancy dans un bloc sur le pool du registre est
+refusé.
 
 L'argument de la closure est un `AtomicTx`. `tx.lock().await?` donne un
 `TxGuard` qui se déréférence en `PoolTx`, pour les helpers `_tx` et les formes
@@ -170,7 +174,9 @@ atomic(pool, move |_tx| {
 
 Le callback est synchrone : lancez le travail asynchrone depuis lui. Un
 callback qui panique est journalisé et les autres s'exécutent quand même.
-`on_commit` hors d'un bloc panique.
+`on_commit` hors d'un bloc panique. Les callbacks s'exécutent sur la tâche du
+commit, avec les task-locals du framework (source d'audit, fuseau horaire,
+signaux coupés) qu'ils avaient à la mise en file.
 
 ## Quand une instruction échoue
 
@@ -531,13 +537,19 @@ rustango::server::AppBuilder::from_env().await?
   HEAD, OPTIONS, TRACE et QUERY s'exécutent sans transaction : une route GET
   qui écrit (un callback SSO) reste en autocommit.
 - Seulement les routes de votre application : l'admin du tenant, la
-  connexion, le SSO et la console opérateur ne sont pas enveloppés.
+  connexion, le SSO et la console opérateur ne sont pas enveloppés, ni les
+  routes passées à `.auth_routes(..)`. Montez `JwtAuth::router()` là plutôt
+  que de le fusionner dans `.api()`.
 - Chaque extracteur de tenant de la requête (`TenantScope`, `Tenant`) sert le
   pool du bloc, même si le cache de pools l'évince entre-temps. Une requête
   sans tenant passe telle quelle ; un tenant dont le pool est introuvable
   reçoit 500, jamais le pool du registre.
-- Chaque requête d'écriture garde une connexion jusqu'à sa fin. Le démarrage
-  refuse `max_cached_scoped_pools = 0` ou `max_cached_database_pools = 0`, et
+- Chaque requête d'écriture garde une connexion du début à la fin de son
+  handler : au plus `max_connections` requêtes d'écriture tournent à la fois
+  par pool. Dimensionnez le pool pour vos écritures simultanées en pointe plus
+  les lectures, et sortez les appels sortants lents (HTTP, e-mail) des
+  handlers d'écriture ou passez-les à `on_commit`. Le démarrage refuse
+  `max_cached_scoped_pools = 0` ou `max_cached_database_pools = 0`, et
   avertit quand `scoped_pool_max_connections` est sous 8.
 
 **Ordre.** Le builder place le bloc à l'intérieur de ses propres couches
@@ -545,7 +557,8 @@ rustango::server::AppBuilder::from_env().await?
 de votre routeur. Les couches de votre routeur (sessions, CSRF, auth,
 idempotence) s'exécutent dans le bloc : ce qu'elles écrivent sur le pool est
 validé ou annulé avec la requête. Un `IdempotencyLayer` dans le bloc ne stocke
-une réponse qu'après le `COMMIT`. Sur un routeur fait main, ajoutez
+une réponse qu'après le `COMMIT` : un statut non 2xx qu'il doit stocker n'y est
+donc pas stocké, cette réponse étant annulée. Sur un routeur fait main, ajoutez
 `AtomicRequestLayer::new(pool)` ou `AtomicRequestLayer::tenant()` avant les
 couches qui doivent voir la réponse finale.
 
@@ -558,6 +571,10 @@ les handlers ont des effets de bord.
 | Échec de sérialisation (40001), interblocage, délai de verrou MySQL (1205), `SQLITE_BUSY`, aucune connexion libre | 503 avec `Retry-After: 1` |
 | `AtomicAborted`, `AtomicEndedEarly`, toute autre erreur | 500, journalisé avec l'id de la requête |
 
+Le même 503 remplace une réponse annulée après qu'une instruction du bloc a
+perdu un tel conflit : une écriture SQLite après une lecture, un interblocage
+MySQL. Une écriture de ViewSet qui en perd un répond 503 d'elle-même.
+
 **Ce qui échappe au bloc.**
 
 - Une tâche lancée par `tokio::spawn` valide seule ; lancez-la depuis
@@ -565,12 +582,15 @@ les handlers ont des effets de bord.
 - Un corps en streaming s'exécute après le `COMMIT`.
 - Deux instructions à la fois dans un handler (`join!`) renvoient
   `NestedAtomic`.
-- `outside_atomic(fut)` exécute `fut` hors du bloc, pour une écriture qui doit
-  survivre à une annulation. Le framework écrit ainsi les lignes d'audit de
-  sécurité et les marques de déconnexion, sauf dans un bloc SQLite, qu'elles
-  rejoignent. Sur le pool de la requête il faut
-  une deuxième connexion : sur SQLite elle attend le verrou d'écriture du
-  bloc, sur PostgreSQL elle peut attendre une ligne que le bloc a verrouillée.
+- `outside_atomic(work)` met `work` en file jusqu'à la fin du bloc et
+  l'exécute après le `COMMIT` ou le `ROLLBACK`, sur sa propre connexion : il
+  survit à une annulation et n'attend jamais les verrous du bloc. Il renvoie
+  `Ok(None)` quand il met en file ; un échec en file est journalisé. Le
+  framework écrit ainsi les lignes d'audit de sécurité, les marques de
+  déconnexion et les rapports du limiteur de connexion. Une écriture dont le
+  résultat est attendu tout de suite ne peut pas attendre : un
+  `DatabaseCache` sur le pool de la requête y refuse `incr` et `add`, et le
+  limiteur de connexion compte alors en mémoire.
 
 **`Tenant::conn`.** Dans un bloc sur le pool du tenant, `t.conn()` prête la
 connexion du bloc : ses instructions sont validées ou annulées avec la

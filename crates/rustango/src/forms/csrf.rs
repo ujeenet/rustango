@@ -837,20 +837,14 @@ fn path_is_exempt(path: &str, prefixes: &[String]) -> bool {
         .any(|p| crate::urls::path_under_prefix(path, p))
 }
 
-fn is_safe_method(m: &Method) -> bool {
-    matches!(
-        *m,
-        Method::GET | Method::HEAD | Method::OPTIONS | Method::TRACE
-    )
-}
-
-/// Whether `m` is exempt from CSRF token enforcement. The classic safe
-/// methods always are; the RFC 10008 `QUERY` method is too (a safe method
-/// with no browser CSRF vector) unless [`CsrfConfig::require_csrf_on_query`]
-/// opts it back in. `QUERY` is matched by name so this stays independent
-/// of the `admin`-gated `http_query` module.
+/// Whether `m` is exempt from CSRF token enforcement: a safe method. The
+/// RFC 10008 `QUERY` method has no browser CSRF vector, but
+/// [`CsrfConfig::require_csrf_on_query`] opts it back in.
 fn method_is_csrf_exempt(m: &Method, cfg: &CsrfConfig) -> bool {
-    is_safe_method(m) || (!cfg.require_csrf_on_query && m.as_str() == "QUERY")
+    match m.as_str() {
+        "QUERY" => !cfg.require_csrf_on_query,
+        name => crate::urls::is_safe_method(name),
+    }
 }
 
 /// Does this response already issue `name` as a cookie?
@@ -1330,12 +1324,13 @@ mod tests {
 
     #[test]
     fn safe_method_predicate() {
-        assert!(is_safe_method(&Method::GET));
-        assert!(is_safe_method(&Method::HEAD));
-        assert!(is_safe_method(&Method::OPTIONS));
-        assert!(!is_safe_method(&Method::POST));
-        assert!(!is_safe_method(&Method::PUT));
-        assert!(!is_safe_method(&Method::DELETE));
+        let cfg = CsrfConfig::default();
+        for m in [Method::GET, Method::HEAD, Method::OPTIONS, Method::TRACE] {
+            assert!(method_is_csrf_exempt(&m, &cfg), "{m}");
+        }
+        for m in [Method::POST, Method::PUT, Method::DELETE, Method::PATCH] {
+            assert!(!method_is_csrf_exempt(&m, &cfg), "{m}");
+        }
     }
 
     #[test]

@@ -1809,7 +1809,14 @@ fn page_response(mut head: Value, results: Vec<Value>) -> Response {
 /// An [`ApiError`](crate::api_errors::ApiError) body; a 5xx message is
 /// logged rather than sent.
 fn json_error(status: StatusCode, msg: &str) -> Response {
-    crate::api_errors::ApiError::logged(status, "viewset", msg).into_response()
+    let mut resp = crate::api_errors::ApiError::logged(status, "viewset", msg).into_response();
+    if status == StatusCode::SERVICE_UNAVAILABLE {
+        resp.headers_mut().insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from_static("1"),
+        );
+    }
+    resp
 }
 
 /// A 500 whose cause is logged under `context`, not sent.
@@ -4238,10 +4245,18 @@ async fn update_claimed(
     }
 }
 
-/// A failed INSERT/UPDATE: a duplicate key is a `409`, any other database
-/// rejection a `400`, driver text withheld; anything else (an audit write) is a logged `500`.
+/// A failed INSERT/UPDATE: a lost conflict (deadlock, lock timeout,
+/// serialization failure, `SQLITE_BUSY`) is a `503`, a duplicate key a `409`,
+/// any other database rejection a `400`, driver text withheld; anything else
+/// (an audit write) is a logged `500`.
 /// Field rules are checked before the write, by `WriteSet::check`.
 fn write_failure(context: &str, e: &crate::sql::ExecError) -> (StatusCode, String) {
+    if e.is_transient() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "conflict, try again".to_owned(),
+        );
+    }
     let client_caused = matches!(e, crate::sql::ExecError::Driver(sqlx::Error::Database(_)));
     let body = crate::error::client_error_body(context, e, client_caused);
     let status = if e.is_unique_violation() {
@@ -5249,6 +5264,17 @@ mod envelope_tests {
     async fn body(r: axum::response::Response) -> serde_json::Value {
         let b = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
         serde_json::from_slice(&b).unwrap()
+    }
+
+    /// A write that lost a conflict a retry can win is a 503 with
+    /// `Retry-After`, not a 400.
+    #[test]
+    fn a_lost_conflict_is_a_503() {
+        let e = crate::sql::ExecError::Driver(sqlx::Error::PoolTimedOut);
+        let (status, msg) = super::write_failure("t", &e);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let resp = json_error(status, &msg);
+        assert_eq!(resp.headers()[axum::http::header::RETRY_AFTER], "1");
     }
 
     #[tokio::test]

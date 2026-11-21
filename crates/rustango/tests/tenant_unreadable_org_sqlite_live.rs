@@ -1,6 +1,8 @@
 //! One `rustango_orgs` row whose storage mode or backend this version
 //! cannot read must fail that tenant only: resolution of the others, the
 //! breaker, and every sweep keep working and report the bad row.
+//! SQLite only: this Org path has no per-backend code, and decode errors
+//! are covered on all three backends by `text_enum_tri`.
 
 #![cfg(all(feature = "sqlite", feature = "tenancy", feature = "testkit"))]
 
@@ -242,4 +244,41 @@ async fn cli_lists_checks_and_repairs_a_bad_row() {
         .await
         .unwrap();
     assert_eq!(stored, ["sqlite", "sqlite"]);
+}
+
+/// Repairing a row to schema mode runs provisioning's claim check: it
+/// never puts a second tenant on a schema another one lives in.
+#[tokio::test]
+async fn repair_to_schema_mode_refuses_a_claimed_schema() {
+    let _g = lock().lock().await;
+    let reg = registry("storage_mode", "Schema ").await;
+    rustango::sql::raw_execute_pool(
+        &reg.pool,
+        "UPDATE rustango_orgs SET backend_kind = 'postgres' WHERE slug = 'bad'",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    rustango::sql::raw_execute_pool(
+        &reg.pool,
+        "UPDATE rustango_orgs SET storage_mode = 'schema', backend_kind = 'postgres', \
+         schema_name = 'bad' WHERE slug = 'good'",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+
+    let (r, _) = manage(&reg, &["repair-tenant", "bad", "--storage-mode", "schema"]).await;
+    assert!(
+        r.as_ref()
+            .is_err_and(|e| e.contains("another tenant uses schema `bad`")),
+        "{r:?}"
+    );
+    let (r, out) = manage(
+        &reg,
+        &["repair-tenant", "bad", "--storage-mode", "database"],
+    )
+    .await;
+    r.expect("repair to database mode");
+    assert!(out.contains("repaired tenant `bad`"), "{out}");
 }

@@ -701,8 +701,8 @@ pub(crate) use atomic::atomic_request;
 pub(crate) use atomic::in_any_block;
 #[cfg(feature = "tenancy")]
 pub(crate) use atomic::lock_on;
-#[cfg(any(feature = "admin", feature = "tenancy"))]
-pub(crate) use atomic::outside_atomic_on;
+#[cfg(any(feature = "tenancy", feature = "cache"))]
+pub(crate) use atomic::refuse_in_block;
 pub(crate) use atomic::rolled_back;
 pub use atomic::{
     atomic, atomic_with, in_atomic, on_commit, on_commit_pending, outside_atomic, AtomicOptions,

@@ -733,6 +733,59 @@ async fn database_purge_refuses_while_a_foreign_session_is_open() {
         .expect("purge once it closed");
 }
 
+/// Tenant B on A's database, its backend stored as the `pg` alias, still
+/// blocks A's purge at the registry check, before the identity probe.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+#[allow(irrefutable_let_patterns)]
+async fn database_purge_sees_a_tenant_stored_under_a_backend_alias() {
+    let _guard = rustango::testkit::matrix::live_lock().lock().await;
+    let Some(pool) = rustango::testkit::matrix::Backend::Postgres.pool().await else {
+        eprintln!("DATABASE_URL not set — skipping");
+        return;
+    };
+    setup(&pool).await;
+    let (a, db) = org_with_database(&pool, "alias").await;
+    let mut b = rustango::testkit::org_with(|o| {
+        o.slug = format!("purge-alias-b-{}", std::process::id());
+        o.display_name = "alias b".into();
+        o.database_url = a.database_url.clone();
+    });
+    b.save(&pool).await.expect("insert org b");
+    let b_id = *b.id.get().unwrap();
+    // The ORM writes only stored names: an older row, behind it.
+    rustango::sql::raw_execute_pool(
+        &pool,
+        "UPDATE rustango_orgs SET backend_kind = 'pg' WHERE id = $1",
+        vec![b_id.into()],
+    )
+    .await
+    .unwrap();
+
+    let err = purge_on(&pool, &a.slug)
+        .await
+        .expect_err("a shared database must not be dropped");
+    // The registry guard, not the identity probe behind it ("may be shared").
+    let msg = err.to_string();
+    assert!(
+        msg.ends_with(&format!("database — tenant `{}` uses it too", b.slug)),
+        "{msg}"
+    );
+    assert!(
+        database_exists(&pool, &db).await,
+        "the database was dropped"
+    );
+
+    let others = Org::objects()
+        .where_(Org::id.eq(b_id))
+        .compile_delete()
+        .unwrap();
+    rustango::sql::delete_pool(&pool, &others).await.unwrap();
+    purge_on(&pool, &a.slug)
+        .await
+        .expect("purge once it is alone");
+}
+
 /// A row pointing at the registry's own database is refused before anything changes (#2291).
 #[cfg(feature = "postgres")]
 #[tokio::test]

@@ -1113,7 +1113,7 @@ where
 {
     let others: Vec<Org> = Org::objects()
         .where_(Org::storage_mode.eq(StorageMode::Database))
-        .where_(Org::backend_kind.eq(BackendKind::Postgres))
+        .where_(Org::backend_kind.eq_any_spelling(BackendKind::Postgres))
         .fetch(registry)
         .await?;
     for other in others

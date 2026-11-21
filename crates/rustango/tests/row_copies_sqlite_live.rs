@@ -44,12 +44,16 @@ fn assert_golden(name: &str, actual: &str) {
     }
 }
 
-/// `parent: child ids` lines, in result order.
-fn stitched<P, C>(rows: &[(P, Vec<C>)], pk: fn(&P) -> i64, child: fn(&C) -> i64) -> String {
+/// `parent: child, child` lines in result order, each row as its fields.
+fn stitched<P, C>(
+    rows: &[(P, Vec<C>)],
+    parent: fn(&P) -> String,
+    child: fn(&C) -> String,
+) -> String {
     let mut out = String::new();
     for (p, kids) in rows {
-        let ids: Vec<String> = kids.iter().map(|c| child(c).to_string()).collect();
-        writeln!(out, "{}: {}", pk(p), ids.join(",")).unwrap();
+        let kids: Vec<String> = kids.iter().map(child).collect();
+        writeln!(out, "{}: {}", parent(p), kids.join(", ")).unwrap();
     }
     out
 }
@@ -100,7 +104,11 @@ async fn prefetch_results_are_unchanged() {
     assert!(fk
         .iter()
         .all(|(_, k)| k.len() == fixture::CHILDREN_PER_PARENT as usize));
-    let mut text = stitched(&fk, |p| p.id, |c| c.id);
-    text.push_str(&stitched(&m2m, |p| p.id, |t| t.id));
+    let parent = |p: &RcParent| format!("{} {:?}", p.id, p.name);
+    let child = |c: &RcChild| format!("{} {} {:?} {}", c.id, c.parent.pk(), c.title, c.rank);
+    let mut text = stitched(&fk, parent, child);
+    text.push_str(&stitched(&m2m, parent, |t| {
+        format!("{} {:?}", t.id, t.name)
+    }));
     assert_golden("prefetch.txt", &text);
 }

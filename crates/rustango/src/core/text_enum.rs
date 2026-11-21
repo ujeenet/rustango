@@ -140,6 +140,20 @@
 //! # fn main() {}
 //! ```
 //!
+//! No two stored names or aliases may differ only by case, which MySQL's
+//! default collation compares equal:
+//!
+//! ```compile_fail
+//! #[derive(rustango::TextEnum, Clone, Copy, Debug, PartialEq, Eq)]
+//! pub enum Grade {
+//!     #[text_enum(rename = "A")]
+//!     Top,
+//!     #[text_enum(rename = "a")]
+//!     Low,
+//! }
+//! # fn main() {}
+//! ```
+//!
 //! A field of a type that is not a `TextEnum` does not compile:
 //!
 //! ```compile_fail
@@ -192,6 +206,19 @@ pub trait TextEnum: Copy + Eq + Send + Sync + Unpin + 'static {
             .iter()
             .find(|(v, _, _)| v == self)
             .map_or("", |(_, _, l)| l)
+    }
+
+    /// Every spelling [`Self::from_db`] reads as this variant: its stored
+    /// name, then its aliases.
+    fn spellings(&self) -> Vec<&'static str> {
+        std::iter::once(self.as_str())
+            .chain(
+                Self::ALIASES
+                    .iter()
+                    .filter(|(v, _)| v == self)
+                    .map(|(_, s)| *s),
+            )
+            .collect()
     }
 
     /// Read a stored value: a stored name or an alias, exact match only.

@@ -652,16 +652,17 @@ pub(crate) fn logout_cutoff_at(
 
 /// End every session of row `id` of `T`, on every device, at [`logout_cutoff`].
 /// `sessions_revoked_at` is the row's current value; the WHERE never moves it back.
+/// Inside an `atomic` block the stamp runs when the block ends, rollback or not.
 ///
 /// # Errors
-/// [`crate::sql::ExecError`] from the update.
+/// [`crate::sql::ExecError`] from the update, when it ran at once.
 #[cfg(any(feature = "admin", feature = "tenancy"))]
-pub(crate) async fn revoke_sessions<T: crate::core::Model + Send>(
+pub(crate) async fn revoke_sessions<T: crate::core::Model + Send + 'static>(
     pool: &crate::sql::Pool,
     id: i64,
     sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
     cookie_iat: i64,
-) -> Result<u64, crate::sql::ExecError> {
+) -> Result<(), crate::sql::ExecError> {
     use crate::query::Q;
     use crate::sql::UpdaterPool as _;
     let cutoff = logout_cutoff_at(sessions_revoked_at, cookie_iat);
@@ -671,7 +672,9 @@ pub(crate) async fn revoke_sessions<T: crate::core::Model + Send>(
         .update()
         .set(SESSIONS_REVOKED_AT, cutoff);
     // A logout stands even when the request around it rolls back.
-    crate::sql::outside_atomic_on(pool, stamp.execute_pool(pool)).await
+    let pool = pool.clone();
+    crate::sql::outside_atomic(async move { stamp.execute_pool(&pool).await }).await?;
+    Ok(())
 }
 
 /// Deactivate row `id` of a session principal (`AdminUser`, `Operator`, a
@@ -684,7 +687,7 @@ pub(crate) async fn revoke_sessions<T: crate::core::Model + Send>(
 /// # Errors
 /// [`crate::sql::ExecError`] from the read or the updates.
 #[cfg(any(feature = "admin", feature = "tenancy"))]
-pub async fn deactivate<T: crate::core::Model + Send>(
+pub async fn deactivate<T: crate::core::Model + Send + 'static>(
     pool: &crate::sql::Pool,
     id: i64,
 ) -> Result<bool, crate::sql::ExecError> {

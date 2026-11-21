@@ -314,7 +314,8 @@ pub async fn set_admin_active_cmd<W: Write + Send>(
         update = update.set_typed(AdminUser::sessions_revoked_at.set(Some(chrono::Utc::now())));
     }
     // The revocation commits on its own, whatever block the caller runs.
-    crate::sql::outside_atomic_on(pool, update.execute_pool(pool)).await?;
+    let on = pool.clone();
+    crate::sql::outside_atomic(async move { update.execute_pool(&on).await }).await?;
     let action = if active { "activate" } else { "deactivate" };
     audit_account(pool, &user, action).await?;
     writeln!(w, "{action}d `{username}`")?;

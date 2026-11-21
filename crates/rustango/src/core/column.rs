@@ -346,6 +346,19 @@ pub trait Column: Copy + 'static {
         TypedFilter::scalar(Self::COLUMN, Op::In, SqlValue::List(list))
     }
 
+    /// `column IN (every spelling of value)`: rows stored under an alias
+    /// match too, as they do when read back.
+    fn eq_any_spelling(self, value: Self::Value) -> TypedFilter<Self::Model>
+    where
+        Self::Value: super::TextEnum,
+    {
+        let list = super::TextEnum::spellings(&value)
+            .into_iter()
+            .map(|s| SqlValue::String(s.to_owned()))
+            .collect();
+        TypedFilter::scalar(Self::COLUMN, Op::In, SqlValue::List(list))
+    }
+
     /// `column NOT IN (v1, v2, …)`.
     fn not_in<V, I>(self, values: I) -> TypedFilter<Self::Model>
     where

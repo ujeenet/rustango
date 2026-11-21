@@ -128,6 +128,8 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     error_pages: Option<crate::errors::ErrorPagesLayer>,
     /// Wraps the app's own routes in one transaction per write request.
     atomic_requests: Option<crate::atomic_request::AtomicRequests>,
+    /// Framework auth routes merged with `api`, outside `atomic_requests`.
+    auth_routes: Option<ApiRouter>,
     _phantom: PhantomData<DB>,
 }
 
@@ -217,14 +219,16 @@ impl<DB: Database> Builder<DB> {
             #[cfg(feature = "template_views")]
             error_pages: None,
             atomic_requests: None,
+            auth_routes: None,
             _phantom: PhantomData,
         }
     }
 
-    /// Run each write request to the app's own routes (not the tenant
-    /// admin, login, SSO or operator console) in one `atomic` block on its
-    /// tenant's pool: a response that is not 2xx/3xx, or a panic, rolls
-    /// back every write it made there. See [`crate::atomic_request`].
+    /// Run each write request to the [`Self::api`] routes in one `atomic`
+    /// block on its tenant's pool: a response that is not 2xx/3xx, or a
+    /// panic, rolls back every write it made there. The tenant admin, login,
+    /// SSO, operator console and [`Self::auth_routes`] are not wrapped. See
+    /// [`crate::atomic_request`].
     ///
     /// Each write request holds one tenant pool connection until it ends;
     /// on Postgres boot warns when `scoped_pool_max_connections` is below 8.
@@ -647,6 +651,15 @@ impl<DB: Database> Builder<DB> {
         self
     }
 
+    /// Mount framework auth routes, such as `JwtAuth::router()`, next to
+    /// [`Self::api`] but never inside [`Self::atomic_requests`], so a
+    /// failed login is counted and a logout kept.
+    #[must_use]
+    pub fn auth_routes(mut self, router: ApiRouter) -> Self {
+        self.auth_routes = Some(router);
+        self
+    }
+
     /// Register a custom bulk admin action that runs against the
     /// tenant pool of whichever tenant the request resolves to. The
     /// action name must also appear in the model's
@@ -952,6 +965,10 @@ impl<DB: Database> Builder<DB> {
                 router.layer(crate::atomic_request::AtomicRequestLayer::tenant().with(requests)),
             ),
             (api, _) => api,
+        };
+        let api = match (api, self.auth_routes) {
+            (Some(api), Some(auth)) => Some(api.merge(auth)),
+            (api, auth) => api.or(auth),
         };
         let tenant_app = match api {
             Some(router) => router.layer(Extension(ctx.clone())).merge(admin_routes),

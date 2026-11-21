@@ -1621,14 +1621,15 @@ async fn logout(
     // End the operator's sessions everywhere, impersonation ones included.
     let revoked = match live_session(&state, &headers).await {
         Ok(Some((op, payload))) => match operator_id(&op) {
-            Ok(id) => crate::session::revoke_sessions::<auth::Operator>(
-                &state.registry,
-                id,
-                op.sessions_revoked_at,
-                payload.iat,
-            )
-            .await
-            .map(drop),
+            Ok(id) => {
+                crate::session::revoke_sessions::<auth::Operator>(
+                    &state.registry,
+                    id,
+                    op.sessions_revoked_at,
+                    payload.iat,
+                )
+                .await
+            }
             Err(resp) => return resp,
         },
         Ok(None) => Ok(()),
