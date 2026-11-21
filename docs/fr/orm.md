@@ -721,7 +721,7 @@ Order::objects()
 
 | Builder | PG | MySQL | SQLite |
 |---|---|---|---|
-| `now()` | `NOW()` | `NOW()` | `CURRENT_TIMESTAMP` |
+| `now()` | `NOW()` | `UTC_TIMESTAMP(6)` | `strftime('%Y-%m-%dT%H:%M:%f000+00:00','now')` |
 | `extract_year(x)` | `CAST(EXTRACT(YEAR FROM x) AS INTEGER)` | `YEAR(x)` | `CAST(strftime('%Y', x) AS INTEGER)` |
 | `extract_week(x)` | `EXTRACT(WEEK FROM x)` — ISO 8601, plage 1–53 | `WEEK(x, 3)` — ISO 8601 | ISO 8601, à partir du jeudi de la semaine |
 | `extract_weekday(x)` | `CAST(EXTRACT(DOW FROM x) AS INTEGER)` | `(DAYOFWEEK(x) - 1)` | `CAST(strftime('%w', x) AS INTEGER)` |

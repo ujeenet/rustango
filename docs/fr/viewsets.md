@@ -809,7 +809,7 @@ lignes masquées sortent de la page et du `count` ; au-delà de
 `view_hook_scan_cap`, une liste paginée ou à offset donne un `400` : ajoutez un
 scope de queryset ou passez en pagination par curseur). Les scopes de
 queryset restreignent chaque lecture et écriture ; une écriture dont la ligne en
-sortirait donne un `403`, comme une création que le hook `view` masquerait. Les hooks lisent la ligne verrouillée dans la
+sortirait donne un `403`, comme une création ou une mise à jour que le hook `view` masquerait. Les hooks lisent la ligne verrouillée dans la
 transaction d'écriture ; un identifiant d'un autre tenant donne un `403`. `change` ne vérifie que la
 ligne stockée. `object_permissions::Actor::of(&parts)` indique à un hook qui
 demande ; un jeton d'agent n'est jamais superuser. `ViewSet::for_model` et les

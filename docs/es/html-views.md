@@ -112,8 +112,10 @@ una página de login en vez de un `401`, envuelve el router en `auth_decorators:
 Las vistas aplican las mismas reglas de fila que un ViewSet: los scopes
 `register_queryset_scope!` acotan cada lectura y escritura, y el hook `view`
 oculta filas (`404` en las páginas de detalle, edición y borrado; fuera de
-listas, acciones masivas y nombres de FK mostrados). Los hooks `change` y
-`delete` rechazan con un `403`, y un `delete_selected` que incluye una fila
+listas, acciones masivas y nombres de FK mostrados). Los hooks `add`, `change` y
+`delete` rechazan con un `403`, juzgados sobre la fila bloqueada en la
+transacción de escritura, y una creación o edición cuya fila saldría de los
+scopes o del hook `view` es un `403` que no escribe nada. Un `delete_selected` que incluye una fila
 rechazada es un `403` entero. Un formulario no puede apuntar una FK a una fila
 que los scopes o el hook `view` del destino ocultan (error de formulario). Una
 lista revisa como máximo `view_hook_scan_cap` filas (2 000 por defecto) con el

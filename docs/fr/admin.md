@@ -439,8 +439,11 @@ d'un modèle enregistré :
   `register_object_permission!("posts", "change", check)` où
   `check: fn(&Parts, Option<&Value>) -> bool` autorise ou refuse par ligne.
   Les gestionnaires intégrés consultent les actions `add`, `change`,
-  `delete` et `view` ; plusieurs hooks se combinent avec un ET logique. Un
-  hook `view` masque aussi des lignes dans la liste, l'autocomplétion, les noms
+  `delete` et `view` ; plusieurs hooks se combinent avec un ET logique. Une
+  création, une édition ou une ligne inline dont la ligne enregistrée serait
+  masquée par le hook `view` donne un 403 qui n'écrit rien. Les éditions,
+  suppressions et actions groupées jugent la ligne verrouillée dans la
+  transaction d'écriture. Un hook `view` masque aussi des lignes dans la liste, l'autocomplétion, les noms
   des facettes FK et les noms des cellules FK. La liste l'exécute sur chaque
   ligne que ses filtres et sa recherche retiennent : les totaux, les facettes,
   les tranches de dates et la recherche excluent donc les lignes masquées ;

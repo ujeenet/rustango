@@ -113,8 +113,10 @@ Les vues appliquent les mêmes règles de ligne qu'un ViewSet : les scopes
 `register_queryset_scope!` restreignent chaque lecture et écriture, et le hook
 `view` masque des lignes (`404` sur les pages de détail, d'édition et de
 suppression ; absentes des listes, des actions groupées et des noms d'affichage
-des FK). Les hooks `change` et `delete` refusent avec un `403`, et un
-`delete_selected` qui contient une ligne refusée donne un `403` en entier. Un
+des FK). Les hooks `add`, `change` et `delete` refusent avec un `403`, jugés sur
+la ligne verrouillée dans la transaction d'écriture, et une création ou une
+édition dont la ligne sortirait des scopes ou du hook `view` donne un `403` qui
+n'écrit rien. Un `delete_selected` qui contient une ligne refusée donne un `403` en entier. Un
 formulaire ne peut pas pointer une FK vers une ligne que les scopes ou le hook
 `view` de la cible masquent (erreur de formulaire). Une liste parcourt au plus
 `view_hook_scan_cap` lignes (2 000 par défaut) pour le hook `view` ; au-delà, la
