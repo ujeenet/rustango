@@ -72,10 +72,14 @@
 //! every [`PgJobQueue::heartbeat_interval`], so keep the threshold well
 //! above that. Lock times are the database's clock, not the hosts'.
 //! `attempt` counts at pickup: a job that crashes its process still
-//! spends an attempt, and `(id, attempt)` fences one run from the next.
+//! spends an attempt.
 //!
 //! A reclaimed job that was still alive runs on two workers at once; its
-//! first run sees [`JobCtx::stopping`] fire at its next heartbeat.
+//! first run sees [`JobCtx::stopping`] fire at its next heartbeat. The
+//! queue's own writes (heartbeat, finish, retry) match `(id, locked_by)`,
+//! so that run writes nothing to the row. The job's own writes are not
+//! fenced: a later run has a higher [`JobCtx::attempt`], so key them on
+//! `(id, attempt)` if a stale run must not land.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -602,7 +606,7 @@ impl PgJobQueue {
         Self::reclaim_stuck_jobs_pool(&Pool::Postgres(pool.clone()), older_than).await
     }
 
-    /// Clear `locked_at` on any row locked longer than `older_than`, by the
+    /// Clear `locked_at` on any row locked at least `older_than` ago, by the
     /// database's clock, so jobs left reserved by a crashed worker run
     /// again. Call it on a schedule, for example once a minute.
     ///
@@ -639,8 +643,10 @@ impl PgJobQueue {
         else {
             return Ok(0);
         };
+        // `<=`: SQLite's clock has whole ms, so ZERO still frees a lock
+        // taken in this tick.
         let stale = format!(
-            "SELECT id FROM rustango_jobs WHERE locked_at IS NOT NULL AND locked_at < {}",
+            "SELECT id FROM rustango_jobs WHERE locked_at IS NOT NULL AND locked_at <= {}",
             d.placeholder(1)
         );
         let ids: Vec<(i64,)> =
@@ -652,7 +658,7 @@ impl PgJobQueue {
         // deadlocks the two (1213). The cutoff is checked again per row.
         let sql = format!(
             "UPDATE rustango_jobs SET locked_at = NULL, locked_by = NULL \
-              WHERE id = {} AND locked_at IS NOT NULL AND locked_at < {}",
+              WHERE id = {} AND locked_at IS NOT NULL AND locked_at <= {}",
             d.placeholder(1),
             d.placeholder(2),
         );
@@ -1438,6 +1444,7 @@ mod tests {
     }
 
     /// Run this thread's process clock `by` off until the guard drops.
+    #[cfg(feature = "sqlite")]
     fn skew_clock(by: chrono::TimeDelta) -> impl Drop {
         struct Reset;
         impl Drop for Reset {
@@ -1619,6 +1626,51 @@ mod tests {
             let _fast = skew_clock(hour);
             assert_eq!(reclaim().await.expect("reclaim"), 0, "fast sweeper");
         }
+    }
+
+    /// `Duration::ZERO` frees a lease taken in the same clock tick: SQLite's
+    /// clock has whole milliseconds.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_zero_reclaim_frees_a_lease_taken_in_the_same_tick() {
+        let sqlite = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("pool");
+        let pool = Pool::Sqlite(sqlite);
+        PgJobQueue::ensure_table_pool(&pool).await.expect("table");
+        let due = Utc::now() - chrono::TimeDelta::hours(1);
+        crate::sql::raw_execute_pool(
+            &pool,
+            "INSERT INTO rustango_jobs (name, payload, max_attempts, run_at) VALUES ('j', '{}', 3, ?)",
+            vec![crate::core::SqlValue::DateTime(due)],
+        )
+        .await
+        .expect("insert");
+        for round in 0..20 {
+            let job = pick_one(&pool, "w", false, QueueFilter::All)
+                .await
+                .expect("pick");
+            assert!(job.is_some(), "round {round}: picked");
+            let freed = PgJobQueue::reclaim_stuck_jobs_pool(&pool, Duration::ZERO)
+                .await
+                .expect("reclaim");
+            assert_eq!(freed, 1, "round {round}");
+        }
+    }
+
+    /// Lease times come from the database's clock; the host's is read only
+    /// through `local_now`, which the skew test can move.
+    #[test]
+    fn the_host_clock_is_read_only_through_local_now() {
+        let src = include_str!("pg.rs");
+        let body = &src[..src.find("\nmod tests").expect("the test module")];
+        let reads = body.matches("Utc::now()").count();
+        assert_eq!(reads, 1, "read the host clock through `local_now`");
+        let at = body.find("Utc::now()").expect("one read");
+        let local_now = body.find("fn local_now()").expect("local_now");
+        assert!(at > local_now && at - local_now < 80, "outside `local_now`");
     }
 
     /// Every backend stores whole µs; the id `enqueue` returns must match.

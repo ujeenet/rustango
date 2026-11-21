@@ -1149,14 +1149,32 @@ async fn a_lost_lease_fires_the_stop_signal(pool: &Pool) {
         .await
         .unwrap();
     q.start().await;
-    barrier(&tok, "started").wait().await;
-    // As a sweep that judged the run dead would.
-    let reclaimed = PgJobQueue::reclaim_stuck_jobs_pool(pool, Duration::ZERO)
-        .await
-        .expect("reclaim");
-    assert_eq!(reclaimed, 1);
-    barrier(&tok, "done").wait().await;
+    let wait = |name: &'static str| {
+        let b = barrier(&tok, name);
+        async move { tokio::time::timeout(Duration::from_secs(15), b.wait()).await }
+    };
+    let started = wait("started").await;
+    // Handed to another worker, as a sweep then a pickup would: the beats
+    // cannot refresh it back, whatever the clocks say.
+    let taken = match started {
+        Ok(_) => {
+            let d = pool.dialect();
+            let sql = format!(
+                "UPDATE rustango_jobs SET locked_by = 'another-worker' WHERE locked_by IS NOT NULL \
+                 AND name = {}",
+                d.placeholder(1)
+            );
+            let name = SqlValue::String(UntilLeaseLost::NAME.to_owned());
+            rustango::sql::raw_execute_pool(pool, &sql, vec![name]).await
+        }
+        Err(_) => Ok(0),
+    };
+    // Asserted only once the job is released, so a failure never hangs.
+    let done = wait("done").await;
     q.shutdown().await;
+    assert!(started.is_ok(), "the job never started");
+    assert_eq!(taken.expect("take the lease"), 1, "rows taken");
+    assert!(done.is_ok(), "the job never saw the lease go");
     let seen = lease_seen().lock().unwrap()[&tok];
     assert_eq!(seen, (true, true), "(is_stopping, lease_lost)");
 }
