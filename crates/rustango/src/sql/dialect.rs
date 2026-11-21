@@ -356,6 +356,13 @@ pub trait Dialect: Send + Sync + sealed::Sealed {
         self.translate_default_expr("now()", "datetime", None)
     }
 
+    /// The database's current time in UTC, comparable with a bound
+    /// `DateTime<Utc>`. For a value several hosts must agree on, such as
+    /// a lease, whose writers' clocks may disagree.
+    fn utc_now_sql(&self) -> String {
+        self.current_timestamp_default()
+    }
+
     /// The full column clause for such a timestamp:
     /// `<type> NOT NULL DEFAULT <now>`.
     fn timestamp_now_column(&self) -> String {

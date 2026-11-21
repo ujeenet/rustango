@@ -506,7 +506,9 @@ Both queues call `Job::run_with(&self, ctx: &JobCtx)`. By default it calls
 - `ctx.idempotency_key(scope)` — the id under your scope, for an outside system.
 - `ctx.attempt()` — 1 for the first run, 2 for the first retry.
 - `ctx.stopping()` / `ctx.is_stopping()` — the queue is shutting down; finish
-  within `shutdown_grace` or the run is aborted and re-queued.
+  within `shutdown_grace` or the run is aborted and re-queued. On the database
+  queue they also fire when the run lost its lease (`ctx.lease_lost()`): another
+  worker took the row, so stop early, as this run's result is dropped.
 
 Use `idempotency_key` as the key an outside system sees, so a retried charge is
 not charged twice. The database queue's id is the row id plus its enqueue time,
@@ -617,7 +619,16 @@ builder sweeps the queue's own pool at `start` and then every
 least three heartbeats.
 
 A running job refreshes its lock every `heartbeat_interval` (10 s by default), so
-keep the threshold well above it. Each pickup spends an attempt, so a job that
+keep the threshold well above it. Lock times come from the database's clock, so
+hosts with skewed clocks agree on them. `reclaim_stuck_jobs_pool` does not know
+the heartbeat, so it does not raise its threshold; `Duration::ZERO` frees every lock.
+
+**A reclaimed live job can run on two workers at once.** If a heartbeat stalls
+(pool exhaustion, a long SQLite write lock), a sweep frees a job that is still
+running, and another worker starts it. The first run's writes to the row are
+dropped, but its outside effects are not. Pass `ctx.idempotency_key(..)` to
+outside systems, and use `(ctx.id(), ctx.attempt())` as a fencing token: the
+attempt grows on every pickup. Each pickup spends an attempt, so a job that
 crashes its worker is dead-lettered once `MAX_ATTEMPTS` runs are used. A job that
 panics is a `Retryable` failure; the worker keeps running.
 

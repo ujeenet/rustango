@@ -1643,7 +1643,7 @@ manage audit-cleanup --days 90
 manage audit-cleanup --keep-last 50 --tenant acme
 ```
 
-Les utilitaires `_pool` prennent un `&Pool` et fonctionnent sur les trois backends. Le verbe `audit-cleanup` nécessite la feature `tenancy`. Il élague le journal du registre et celui de chaque tenant actif ; `--tenant <slug>` ou `--registry` le restreint, et un `N` de 0 ou moins exige `--yes`.
+Les utilitaires `_pool` prennent un `&Pool` et fonctionnent sur les trois backends. Le verbe `audit-cleanup` élague le journal d'audit de l'application. Avec la tenancy, il élague le journal du registre et celui de chaque tenant actif ; `--tenant <slug>` ou `--registry` (qui exigent la feature `tenancy`) le restreint, et un `N` de 0 ou moins exige `--yes`.
 
 ---
 

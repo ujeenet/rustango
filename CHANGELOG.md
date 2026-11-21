@@ -10,7 +10,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - **Breaking:** `CreateView` runs the "add" hook, on the request and on the written row, and refuses a row outside the queryset scopes or the "view" hook with 403 and no row. `UpdateView` refuses an edit that would leave them the same way.
 - `UpdateView` and `DeleteView` judge the row locked in the write's transaction, as ViewSets do, so a concurrent change between the check and the write is seen.
 
+### Added
+
+- `JobCtx::lease_lost()`; on the database queue `ctx.stopping()` and `is_stopping()` also fire when another worker took the run's row.
+
 ### Fixed
+
+- The database job queue stamps and compares `locked_at` on the database's clock, so a host with a skewed clock no longer has its live jobs reclaimed and run twice.
+- The boot warning for settings that are not applied also names `[audit] redact_query_params` and `[logging] access_log = false`.
 
 - A Postgres array bind with mixed element types returns `ValueNotSupportedInDialect` instead of dropping the elements that differ from the first; NULL elements are bound, not dropped.
 

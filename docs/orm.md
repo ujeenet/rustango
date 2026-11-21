@@ -1645,7 +1645,7 @@ manage audit-cleanup --days 90
 manage audit-cleanup --keep-last 50 --tenant acme
 ```
 
-The `_pool` helpers take `&Pool` and run on all three backends. The `audit-cleanup` verb needs the `tenancy` feature. It trims the registry's log and every active tenant's; `--tenant <slug>` or `--registry` narrows it, and an `N` of 0 or less needs `--yes`.
+The `_pool` helpers take `&Pool` and run on all three backends. The `audit-cleanup` verb trims the app's audit log. Under tenancy it trims the registry's log and every active tenant's; `--tenant <slug>` or `--registry` (both need the `tenancy` feature) narrows it, and an `N` of 0 or less needs `--yes`.
 
 ---
 
