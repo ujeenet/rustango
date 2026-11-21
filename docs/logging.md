@@ -119,6 +119,7 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::admin` | Admin routing and registration |
 | `rustango::admin::audit` | Audit-log writes |
 | `rustango::admin::sso` | Admin SSO |
+| `rustango::atomic_request` | A request transaction that lost a conflict (503), or a write refused for an unresolved tenant |
 | `rustango::cache` | Cache backends |
 | `rustango::cache_page` | Page-cache middleware |
 | `rustango::cors` | CORS policy decisions |

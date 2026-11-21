@@ -79,6 +79,12 @@ pub enum AuthError {
     Refused(crate::login_throttle::LoginRefused),
 }
 
+impl From<crate::sql::UnsavedRow> for AuthError {
+    fn from(e: crate::sql::UnsavedRow) -> Self {
+        Self::Exec(e.into())
+    }
+}
+
 impl AuthError {
     /// A hashing error: busy is [`LoginRefused::Busy`], anything else an
     /// invalid credential.
@@ -260,7 +266,7 @@ impl AuthBackend for ModelBackend {
             .as_ref()
             .map(|u| basic_cache_key(slug, &username, &password, &u.password_hash));
         let cached = |u: &super::auth::User| {
-            let uid = u.id.get().copied().unwrap_or(0);
+            let uid = u.id.require().ok()?;
             let key = cache_key.as_ref()?;
             (u.active && uid != 0 && basic_cache_hit(slug, key, uid)).then(|| AuthUser {
                 id: uid,
@@ -321,7 +327,7 @@ impl AuthBackend for ModelBackend {
         }
 
         attempt.settle(true).await;
-        let id = user.id.get().copied().unwrap_or(0);
+        let id = user.id.require()?;
         if let (Some(key), true) = (cache_key, id != 0) {
             basic_cache_put(slug, key, id);
         }
@@ -542,7 +548,7 @@ impl AuthBackend for ApiKeyBackend {
         }
 
         Ok(Some(AuthUser {
-            id: user.id.get().copied().unwrap_or(0),
+            id: user.id.require()?,
             username: user.username,
             is_superuser: user.is_superuser,
         }))
@@ -850,18 +856,23 @@ impl JwtBackend {
     /// [`Self::issue`] for `user`, also ended when its password hash changes.
     /// Valid even when minted in the same second as a logout-all.
     #[must_use]
-    pub fn issue_for_user(&self, user: &super::auth::User) -> String {
-        self.sign_payload(&self.user_claims(user, None))
+    ///
+    /// # Errors
+    /// [`UnsavedRow`](crate::sql::UnsavedRow) for a user never saved.
+    pub fn issue_for_user(
+        &self,
+        user: &super::auth::User,
+    ) -> Result<String, crate::sql::UnsavedRow> {
+        Ok(self.sign_payload(&self.user_claims(user, None)?))
     }
 
     /// [`Self::issue_for_tenant`] for `user`, also ended when its password hash changes.
-    #[must_use]
     pub fn issue_for_tenant_user(
         &self,
         user: &super::auth::User,
         tenant: &super::TenantSlug,
-    ) -> String {
-        self.sign_payload(&self.user_claims(user, Some(tenant)))
+    ) -> Result<String, crate::sql::UnsavedRow> {
+        Ok(self.sign_payload(&self.user_claims(user, Some(tenant))?))
     }
 
     fn claims(&self, user_id: i64, tenant: Option<&super::TenantSlug>) -> serde_json::Value {
@@ -881,14 +892,14 @@ impl JwtBackend {
         &self,
         user: &super::auth::User,
         tenant: Option<&super::TenantSlug>,
-    ) -> serde_json::Value {
-        let mut payload = self.claims(user.id.get().copied().unwrap_or(0), tenant);
+    ) -> Result<serde_json::Value, crate::sql::UnsavedRow> {
+        let mut payload = self.claims(user.id.require()?, tenant);
         // Past the logout stamp, like the session claims below.
         payload["iat"] = crate::session::issued_at(user.sessions_revoked_at).into();
         if let Some(claims) = payload.as_object_mut() {
             super::auth_routes::RefreshSession::for_user(&self.pwf_secret, user).write(claims);
         }
-        payload
+        Ok(payload)
     }
 
     fn exp(&self) -> i64 {
@@ -1051,7 +1062,7 @@ impl AuthBackend for JwtBackend {
         }
 
         Ok(Some(AuthUser {
-            id: user.id.get().copied().unwrap_or(0),
+            id: user.id.require()?,
             username: user.username,
             is_superuser: user.is_superuser,
         }))
@@ -1492,6 +1503,17 @@ mod tests {
         super::super::TenantSlug::new(1, "acme")
     }
 
+    /// An unsaved user gets no token: its `sub` would be 0, and a
+    /// permission check would match whichever row holds id 0.
+    #[test]
+    fn an_unsaved_user_is_refused_a_token_not_given_sub_zero() {
+        let backend = JwtBackend::new(vec![7u8; 32]);
+        let user = crate::testkit::user();
+        assert!(user.id.is_unset());
+        assert!(backend.issue_for_user(&user).is_err());
+        assert!(backend.issue_for_tenant_user(&user, &acme()).is_err());
+    }
+
     /// A tenant that reuses a purged tenant's slug has a new org id: the old
     /// tenant's token, or one with no `org_id`, is refused there.
     #[tokio::test]
@@ -1518,7 +1540,7 @@ mod tests {
         ));
         for token in [
             backend.issue_for_tenant(id, &acme()),
-            backend.issue_for_tenant_user(&user, &acme()),
+            backend.issue_for_tenant_user(&user, &acme()).unwrap(),
             backend.sign_payload(&serde_json::json!({
                 "sub": id, "exp": backend.exp(), "iat": chrono::Utc::now().timestamp(),
                 "tenant": "acme",
@@ -1566,8 +1588,11 @@ mod tests {
         user.save(&pool).await.unwrap();
         let backend = JwtBackend::new(vec![7u8; 32]);
         for (token, tenant) in [
-            (backend.issue_for_user(&user), None),
-            (backend.issue_for_tenant_user(&user, &acme()), Some("acme")),
+            (backend.issue_for_user(&user).unwrap(), None),
+            (
+                backend.issue_for_tenant_user(&user, &acme()).unwrap(),
+                Some("acme"),
+            ),
         ] {
             let r = bearer(&backend, &token, tenant, &pool).await;
             assert!(matches!(r, Ok(Some(_))), "{tenant:?}: {r:?}");
@@ -1579,7 +1604,7 @@ mod tests {
     async fn user_bound_tokens_end_with_the_password_hash() {
         let (pool, mut user) = jwt_user("jwt_user_bound_pwf").await;
         let backend = JwtBackend::new(vec![7u8; 32]);
-        let token = backend.issue_for_tenant_user(&user, &acme());
+        let token = backend.issue_for_tenant_user(&user, &acme()).unwrap();
         assert!(bearer(&backend, &token, Some("acme"), &pool)
             .await
             .unwrap()

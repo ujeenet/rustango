@@ -64,8 +64,8 @@ async fn registry_with_org() -> Pool {
         o.id = rustango::sql::Auto::Unset;
         o.slug = "acme".into();
         o.display_name = "Acme".into();
-        o.storage_mode = "database".into();
-        o.backend_kind = "sqlite".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Database;
+        o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
         o.database_url = Some("sqlite::memory:".into());
         o.host_pattern = Some("acme.example.com".into());
     });
@@ -171,8 +171,8 @@ async fn removal_is_scoped_to_the_owning_org() {
         o.id = rustango::sql::Auto::Unset;
         o.slug = "globex".into();
         o.display_name = "Globex".into();
-        o.storage_mode = "database".into();
-        o.backend_kind = "sqlite".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Database;
+        o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
         o.database_url = Some("sqlite::memory:".into());
         o.host_pattern = Some("globex.example.com".into());
     });
@@ -260,8 +260,8 @@ async fn an_existing_registry_gains_the_table_on_a_plain_migrate() {
         o.id = rustango::sql::Auto::Unset;
         o.slug = "legacy".into();
         o.display_name = "Legacy".into();
-        o.storage_mode = "database".into();
-        o.backend_kind = "sqlite".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Database;
+        o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
         o.database_url = Some("sqlite::memory:".into());
         o.host_pattern = Some("legacy.example.com".into());
     });
@@ -333,8 +333,8 @@ async fn a_populated_host_table_survives_a_re_migrate() {
         o.id = rustango::sql::Auto::Unset;
         o.slug = "acme".into();
         o.display_name = "Acme".into();
-        o.storage_mode = "database".into();
-        o.backend_kind = "sqlite".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Database;
+        o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
         o.database_url = Some("sqlite::memory:".into());
         o.host_pattern = Some("acme.example.com".into());
     });

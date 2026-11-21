@@ -158,7 +158,9 @@ tenants en el navegador que usas para la consola.
 
 ## Modos de almacenamiento
 
-Cada tenant tiene un `storage_mode`: `schema` o `database`.
+Cada tenant tiene un `storage_mode`: `schema` o `database`. En Rust,
+`Org.storage_mode` es un `StorageMode` y `Org.backend_kind` un `BackendKind`,
+ambos guardados como texto (ver [campos enum](models.md#campos-enum-guardados-como-texto)).
 
 [![Modo schema: una base de datos Postgres con un schema por tenant, el search_path es el schema del tenant más schemas que solo tienen extensiones, y el pool rechaza un schema que falta, un schema con nombre de rol o un public con una tabla de tenant que falta en el schema. Modo database: cada tenant tiene su propia base de datos en el mismo backend que el registry](../img/tenancy-storage-modes.png)](../img/tenancy-storage-modes.png)
 
@@ -353,3 +355,21 @@ login del tenant; mira [purgar un tenant](tenant-databases.md#6-purgar-un-tenant
 
 Detalles: [la consola de operador](operator-console.md) y
 [comandos de tenancy](manage.md#comandos-de-tenancy).
+
+### Una fila que no se puede leer
+
+Si el `storage_mode` o el `backend_kind` guardado de un tenant no es un valor que
+esta versión conozca (una errata escrita a mano, por ejemplo `Schema`), ese tenant
+falla al resolverse con un error claro. Los demás tenants siguen funcionando, y una
+fila mala nunca abre el cortacircuitos del registro. Los barridos (migrar todos los
+tenants, precalentar, la lista de tenants en la consola y la CLI, el bucle de tareas
+por tenant) saltan la fila y la reportan.
+
+```bash
+cargo run -- check-tenants                                # lista filas ilegibles (falla) y grafías antiguas
+cargo run -- repair-tenant acme --storage-mode schema     # reescribe el valor malo
+cargo run -- repair-tenant globex                         # reescribe una grafía antigua como `pg`
+```
+
+`repair-tenant` lee la fila como texto en bruto y solo corrige un valor ilegible o
+una grafía antigua; nunca mueve un tenant a otro modo.

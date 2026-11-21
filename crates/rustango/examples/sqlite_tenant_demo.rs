@@ -61,7 +61,7 @@ impl OrgResolver for HostResolver {
         }
         Ok(Some({
             let mut o = Org::new(slug.to_owned());
-            o.backend_kind = "sqlite".into();
+            o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
             // The pool registry handles `database_url=None` by
             // expanding the configured `{slug}` template. The demo
             // template lives in memory keyed per slug.

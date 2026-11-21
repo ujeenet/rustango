@@ -26,6 +26,7 @@
 //! per-operator permission to check here and none is coming. What a
 //! console can do is decided when it is assembled, not per request.
 
+use crate::core::TextEnum as _;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -93,7 +94,7 @@ async fn render_form(
     // only fail, so the form does not.
     ctx.insert(
         "schema_mode_available",
-        &(state.registry.dialect().name() == "postgres"),
+        &(state.registry.dialect().kind() == crate::sql::DialectKind::Postgres),
     );
     // A tenant always uses the registry's backend.
     ctx.insert("backend", BackendKind::of_pool(&state.registry).as_str());
@@ -173,7 +174,7 @@ fn request_from_form(
     // The form shows the registry's backend; a posted one is checked
     // against it by the provisioner.
     let backend = field("backend_kind")
-        .map(|b| BackendKind::parse(b).map_err(|got| format!("Unknown backend `{got}`.")))
+        .map(|b| BackendKind::from_db(b).map_err(|_| format!("Unknown backend `{b}`.")))
         .transpose()?;
     if let Some(backend) = backend {
         backend
@@ -316,21 +317,26 @@ pub(super) async fn org_new_submit(
     let outcome = provisioner
         .provision(&request, Some(&op.username), None)
         .await;
-    let operator_id = op.id.get().copied().unwrap_or_default();
     let mut extra = serde_json::Map::new();
     // A failure can come after the Org row lands, so it is audited too.
     let verb = match &outcome {
         Ok((run, _)) => {
-            let run_id = run.id.get().copied().unwrap_or_default();
+            let run_id = match run.id.require() {
+                Ok(id) => id,
+                Err(e) => return super::unsaved_response(e),
+            };
             extra.insert("run_id".into(), serde_json::json!(run_id));
             "create"
         }
         Err(_) => "create_failed",
     };
-    super::emit_op_audit(&state.registry, &request.slug, operator_id, verb, extra).await;
+    super::emit_op_audit(&state.registry, &request.slug, &op, verb, extra).await;
     match outcome {
         Ok((run, outcome)) => {
-            let run_id = run.id.get().copied().unwrap_or_default();
+            let run_id = match run.id.require() {
+                Ok(id) => id,
+                Err(e) => return super::unsaved_response(e),
+            };
             show_outcome(&state, &op, &headers, run_id, outcome, "provision/").await
         }
         Err(e) => {
@@ -501,9 +507,9 @@ pub(super) async fn provision_resume(
             .await;
     }
     // Only the slug and mode matter: a resume keeps the row's storage.
-    let storage = match StorageMode::parse(&org.storage_mode) {
-        Ok(StorageMode::Schema) => provision::TenantStorage::Schema(org.schema_name.clone()),
-        _ => provision::TenantStorage::Database(DatabaseSource::Url(
+    let storage = match org.storage_mode {
+        StorageMode::Schema => provision::TenantStorage::Schema(org.schema_name.clone()),
+        StorageMode::Database => provision::TenantStorage::Database(DatabaseSource::Url(
             org.database_url.clone().unwrap_or_default(),
         )),
     };
@@ -524,7 +530,6 @@ pub(super) async fn provision_resume(
             "the resume task stopped: {e}"
         )))
     });
-    let operator_id = op.id.get().copied().unwrap_or_default();
     let mut extra = serde_json::Map::new();
     extra.insert("resumed_run_id".into(), serde_json::json!(run_id));
     let verb = if outcome.is_ok() {
@@ -532,10 +537,13 @@ pub(super) async fn provision_resume(
     } else {
         "resume_failed"
     };
-    super::emit_op_audit(&state.registry, &run.slug, operator_id, verb, extra).await;
+    super::emit_op_audit(&state.registry, &run.slug, &op, verb, extra).await;
     match outcome {
         Ok((new_run, outcome)) => {
-            let new_id = new_run.id.get().copied().unwrap_or_default();
+            let new_id = match new_run.id.require() {
+                Ok(id) => id,
+                Err(e) => return super::unsaved_response(e),
+            };
             show_outcome(&state, &op, &headers, new_id, outcome, "/orgs/provision/").await
         }
         Err(e) => match resumable(&state.registry, &run.slug).await {
@@ -573,7 +581,7 @@ pub(super) async fn test_connection(
 
     // Schema mode: the registry's own login creates the schema.
     if field("storage_mode") == Some("schema") {
-        if state.registry.dialect().name() != "postgres" {
+        if state.registry.dialect().kind() != crate::sql::DialectKind::Postgres {
             return probe_bad("Schema mode needs a Postgres registry; choose database mode.");
         }
         let rights = crate::tenancy::rights::RightsReport::for_new_schema(&state.registry).await;
@@ -806,13 +814,13 @@ pub(super) async fn provision_runs_index(
         }
     };
 
-    let view: Vec<_> = runs
+    let view = runs
         .iter()
         .map(|r| {
             let state_str = r.state.clone();
             let kind = store::RunKind::parse(&r.kind);
-            serde_json::json!({
-                "id": r.id.get().copied().unwrap_or_default(),
+            Ok(serde_json::json!({
+                "id": r.id.require()?,
                 "kind": kind.as_str(),
                 "is_migrate": kind == store::RunKind::Migrate,
                 // A batch migrate spans every tenant, so it stores no
@@ -831,9 +839,13 @@ pub(super) async fn provision_runs_index(
                 // column: the finish time on its own says little that
                 // the start time and a duration do not.
                 "took": took(r),
-            })
+            }))
         })
-        .collect();
+        .collect::<Result<_, crate::sql::UnsavedRow>>();
+    let view: Vec<_> = match view {
+        Ok(v) => v,
+        Err(e) => return super::unsaved_response(e),
+    };
 
     let mut ctx = Context::new();
     inject_op_brand(&mut ctx, &state.op_brand);

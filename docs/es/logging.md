@@ -124,6 +124,7 @@ Cada evento lleva un **target**, y es contra eso que casa
 | `rustango::admin` | Rutas y registro del admin |
 | `rustango::admin::audit` | Escrituras del log de auditoría |
 | `rustango::admin::sso` | SSO del admin |
+| `rustango::atomic_request` | Una transacción de petición que perdió un conflicto (503), o una escritura rechazada para un tenant sin resolver |
 | `rustango::cache` | Backends de caché |
 | `rustango::cache_page` | Middleware de caché de página |
 | `rustango::cors` | Decisiones de política CORS |

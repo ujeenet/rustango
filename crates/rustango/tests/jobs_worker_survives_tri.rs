@@ -1296,7 +1296,7 @@ async fn a_wrong_typed_context_column_runs_as_system(pool: &Pool) {
 /// lock: a no-op `ADD COLUMN` on PG would wait behind any reader.
 async fn ensure_table_does_not_wait_behind_a_reader(pool: &Pool) {
     // A SQLite transaction holds the database's write lock.
-    if pool.dialect().name() == "sqlite" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Sqlite {
         return;
     }
     let mut reader = rustango::sql::transaction_pool(pool).await.expect("tx");
@@ -1425,7 +1425,7 @@ async fn named_queues_run_only_their_own_jobs(pool: &Pool) {
 /// An older table gets `queue_name` and its pickup index from `ensure_table_pool`.
 async fn an_older_table_gets_the_queue_index(pool: &Pool) {
     PgJobQueue::ensure_table_pool(pool).await.expect("ensure");
-    let mysql = pool.dialect().name() == "mysql";
+    let mysql = pool.dialect().kind() == rustango::sql::DialectKind::Mysql;
     let drop_idx = if mysql {
         "DROP INDEX `rustango_jobs_queue_idx` ON `rustango_jobs`"
     } else {
@@ -1439,13 +1439,17 @@ async fn an_older_table_gets_the_queue_index(pool: &Pool) {
     }
     tx.commit().await.expect("commit");
     PgJobQueue::ensure_table_pool(pool).await.expect("ensure");
-    let probe = match pool.dialect().name() {
-        "postgres" => "SELECT COUNT(*) FROM pg_indexes WHERE indexname = 'rustango_jobs_queue_idx'",
-        "mysql" => {
+    let probe = match pool.dialect().kind() {
+        rustango::sql::DialectKind::Postgres => {
+            "SELECT COUNT(*) FROM pg_indexes WHERE indexname = 'rustango_jobs_queue_idx'"
+        }
+        rustango::sql::DialectKind::Mysql => {
             "SELECT COUNT(DISTINCT index_name) FROM information_schema.statistics \
              WHERE table_schema = DATABASE() AND index_name = 'rustango_jobs_queue_idx'"
         }
-        _ => "SELECT COUNT(*) FROM sqlite_master WHERE name = 'rustango_jobs_queue_idx'",
+        rustango::sql::DialectKind::Sqlite => {
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'rustango_jobs_queue_idx'"
+        }
     };
     let rows: Vec<(i64,)> = rustango::sql::raw_query_pool(probe, Vec::new(), pool)
         .await
@@ -1616,7 +1620,7 @@ async fn a_running_job_cannot_be_cancelled(pool: &Pool) {
 /// `ensure_table_pool` adds `unique_key` to an older table; until then a
 /// unique dispatch is refused.
 async fn an_older_table_gets_the_unique_column(pool: &Pool) {
-    let mysql = pool.dialect().name() == "mysql";
+    let mysql = pool.dialect().kind() == rustango::sql::DialectKind::Mysql;
     let drop_idx = if mysql {
         "DROP INDEX `rustango_jobs_unique_idx` ON `rustango_jobs`"
     } else {

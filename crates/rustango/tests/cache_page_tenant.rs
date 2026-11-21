@@ -37,7 +37,7 @@ async fn registry() -> Pool {
         let mut org = rustango::testkit::org_with(|o| {
             o.slug = slug.to_owned();
             o.display_name = slug.to_owned();
-            o.backend_kind = "sqlite".into();
+            o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
         });
         org.insert(&pool).await.expect("insert org");
     }
@@ -263,7 +263,7 @@ async fn server_builder_keys_the_page_on_the_tenant() {
         let mut org = rustango::testkit::org_with(|o| {
             o.slug = slug.to_owned();
             o.display_name = slug.to_owned();
-            o.backend_kind = "sqlite".into();
+            o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
         });
         org.insert(&pool).await.expect("insert org");
     }
@@ -336,7 +336,7 @@ async fn a_reused_slug_does_not_get_the_purged_tenants_page() {
     let mut heir = rustango::testkit::org_with(|o| {
         o.slug = "acme".into();
         o.display_name = "acme".into();
-        o.backend_kind = "sqlite".into();
+        o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
     });
     heir.insert(&registry).await.unwrap();
     assert_ne!(heir.id.get(), old.id.get());

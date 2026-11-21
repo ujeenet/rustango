@@ -250,6 +250,12 @@ impl fmt::Display for EmailAddr {
     }
 }
 
+impl From<crate::sql::UnsavedRow> for PolicyError {
+    fn from(e: crate::sql::UnsavedRow) -> Self {
+        Self(e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

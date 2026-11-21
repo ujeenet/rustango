@@ -17,10 +17,10 @@
 //!
 //! ```toml
 //! [dependencies]
-//! rustango = "0.67"                                        # Postgres (the default backend)
+//! rustango = "0.68"                                        # Postgres (the default backend)
 //! # or pick another backend — see "Choosing a backend" below:
-//! rustango = { version = "0.67", default-features = false, features = ["sqlite", "batteries"] }
-//! rustango = { version = "0.67", default-features = false, features = ["mysql",  "batteries"] }
+//! rustango = { version = "0.68", default-features = false, features = ["sqlite", "batteries"] }
+//! rustango = { version = "0.68", default-features = false, features = ["mysql",  "batteries"] }
 //! ```
 //!
 //! `default = ["postgres", "batteries"]`. **`batteries`** is everything except
@@ -406,6 +406,95 @@ macro_rules! __impl_sqlite_load_related {
     }) => {};
 }
 
+// ---- sqlx Type + Decode for a type stored as text ----
+//
+// One body for `Cast<C>` and every `TextEnum`: decode the cell as `&str`,
+// then convert. `Type` defers to `String`, so VARCHAR and TEXT both read.
+// Each backend arm collapses to nothing when its feature is off.
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __text_column_impls {
+    ([$($g:tt)*] $ty:ty, |$s:ident| $conv:expr) => {
+        $crate::__text_column_impls_pg!([$($g)*] $ty, |$s| $conv);
+        $crate::__text_column_impls_my!([$($g)*] $ty, |$s| $conv);
+        $crate::__text_column_impls_sqlite!([$($g)*] $ty, |$s| $conv);
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __text_column_impls_for {
+    ($db:ty; [$($g:tt)*] $ty:ty, |$s:ident| $conv:expr) => {
+        impl<'r, $($g)*> $crate::sql::sqlx::Decode<'r, $db> for $ty {
+            fn decode(
+                value: <$db as $crate::sql::sqlx::Database>::ValueRef<'r>,
+            ) -> ::core::result::Result<Self, $crate::sql::sqlx::error::BoxDynError> {
+                let $s: &str = <&'r str as $crate::sql::sqlx::Decode<'r, $db>>::decode(value)?;
+                $conv.map_err(|e| ::std::boxed::Box::new(e) as $crate::sql::sqlx::error::BoxDynError)
+            }
+        }
+
+        impl<$($g)*> $crate::sql::sqlx::Type<$db> for $ty {
+            fn type_info() -> <$db as $crate::sql::sqlx::Database>::TypeInfo {
+                <::std::string::String as $crate::sql::sqlx::Type<$db>>::type_info()
+            }
+
+            fn compatible(ty: &<$db as $crate::sql::sqlx::Database>::TypeInfo) -> bool {
+                <::std::string::String as $crate::sql::sqlx::Type<$db>>::compatible(ty)
+            }
+        }
+    };
+}
+
+#[doc(hidden)]
+#[cfg(feature = "postgres")]
+#[macro_export]
+macro_rules! __text_column_impls_pg {
+    ([$($g:tt)*] $ty:ty, |$s:ident| $conv:expr) => {
+        $crate::__text_column_impls_for!($crate::sql::sqlx::Postgres; [$($g)*] $ty, |$s| $conv);
+    };
+}
+
+#[doc(hidden)]
+#[cfg(not(feature = "postgres"))]
+#[macro_export]
+macro_rules! __text_column_impls_pg {
+    ([$($g:tt)*] $ty:ty, |$s:ident| $conv:expr) => {};
+}
+
+#[doc(hidden)]
+#[cfg(feature = "mysql")]
+#[macro_export]
+macro_rules! __text_column_impls_my {
+    ([$($g:tt)*] $ty:ty, |$s:ident| $conv:expr) => {
+        $crate::__text_column_impls_for!($crate::sql::sqlx::MySql; [$($g)*] $ty, |$s| $conv);
+    };
+}
+
+#[doc(hidden)]
+#[cfg(not(feature = "mysql"))]
+#[macro_export]
+macro_rules! __text_column_impls_my {
+    ([$($g:tt)*] $ty:ty, |$s:ident| $conv:expr) => {};
+}
+
+#[doc(hidden)]
+#[cfg(feature = "sqlite")]
+#[macro_export]
+macro_rules! __text_column_impls_sqlite {
+    ([$($g:tt)*] $ty:ty, |$s:ident| $conv:expr) => {
+        $crate::__text_column_impls_for!($crate::sql::sqlx::Sqlite; [$($g)*] $ty, |$s| $conv);
+    };
+}
+
+#[doc(hidden)]
+#[cfg(not(feature = "sqlite"))]
+#[macro_export]
+macro_rules! __text_column_impls_sqlite {
+    ([$($g:tt)*] $ty:ty, |$s:ident| $conv:expr) => {};
+}
+
 pub mod audit;
 /// The built-in `manage` verbs and the did-you-mean hint, for both CLIs.
 pub(crate) mod cli_verbs;
@@ -757,6 +846,9 @@ pub mod body_limit;
 /// [`request_timeout::RequestTimeoutLayer`].
 #[cfg(feature = "_http_layers")]
 pub mod request_timeout;
+
+#[cfg(feature = "_axum")]
+pub mod atomic_request;
 
 /// Real-IP extraction for apps behind a trusted reverse proxy. Reads
 /// `X-Forwarded-For`, `X-Real-IP`, `CF-Connecting-IP` or RFC 7239
@@ -1521,6 +1613,10 @@ pub use axum as __axum;
 /// ```
 pub use rustango_macros::Model;
 
+/// `#[derive(TextEnum)]` — an enum field stored as text. See
+/// [`core::text_enum`]; the trait is [`core::TextEnum`].
+pub use rustango_macros::TextEnum;
+
 /// Re-exported for `register_admin_computed!` and any user code that
 /// wants to submit inventory entries via macros that reference
 /// `$crate::inventory`. The runtime indirection costs nothing —
@@ -1556,10 +1652,10 @@ pub use sql::Auto;
 /// # fn main() {}
 /// ```
 pub mod prelude {
-    pub use crate::core::{Column, Model};
+    pub use crate::core::{Column, Model, TextEnum};
     pub use crate::sql::{Auto, CounterPool, ExistsPool, FetcherPool, FetcherTx, UpdaterPool};
-    /// The derive, beside the trait of the same name.
-    pub use rustango_macros::Model;
+    /// The derives, beside the traits of the same name.
+    pub use rustango_macros::{Model, TextEnum};
 }
 
 /// Bake every migration file in a directory into the binary at

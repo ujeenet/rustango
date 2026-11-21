@@ -66,8 +66,8 @@ async fn boot() -> Booted {
     // A stored logo, so the edit page renders a `/__brand__/` preview.
     let slug = unique("acme");
     let mut org = Org::new(slug.clone());
-    org.storage_mode = "schema".into();
-    org.backend_kind = "sqlite".into();
+    org.storage_mode = rustango::tenancy::StorageMode::Schema;
+    org.backend_kind = rustango::tenancy::BackendKind::Sqlite;
     org.schema_name = Some(slug.clone());
     org.host_pattern = Some(format!("{slug}.example.com"));
     org.logo_path = Some("logo.png".into());

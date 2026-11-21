@@ -8,7 +8,7 @@
 
 use super::{run_on, ExecError, RowRef, SqlExecutor};
 use crate::core::SelectQuery;
-use crate::sql::Pool;
+use crate::sql::{DialectKind, Pool};
 
 /// Knobs for [`QuerySet::explain_on`](crate::query::QuerySet). Defaults render plain
 /// `EXPLAIN <stmt>` — safe to call (no execution, no side effects).
@@ -138,17 +138,19 @@ pub(super) async fn explain_lines_on<'c, E: SqlExecutor<'c>>(
         sql.push(' ');
         sql
     };
-    let prefix = match d.name() {
+    let prefix = match d.kind() {
         // `EXPLAIN ANALYZE` (8.0.18+) runs the query and wins over
         // `format`; `FORMAT=JSON|TREE` (8.0.16+) is plan-only. MariaDB has
         // neither TREE nor `EXPLAIN ANALYZE`, so it gets its one-cell JSON.
-        "mysql" if options.analyze => by_server("EXPLAIN ANALYZE", "ANALYZE FORMAT=JSON"),
-        "mysql" if json => "EXPLAIN FORMAT=JSON ".to_owned(),
-        "mysql" => by_server("EXPLAIN FORMAT=TREE", "EXPLAIN FORMAT=JSON"),
+        DialectKind::Mysql if options.analyze => {
+            by_server("EXPLAIN ANALYZE", "ANALYZE FORMAT=JSON")
+        }
+        DialectKind::Mysql if json => "EXPLAIN FORMAT=JSON ".to_owned(),
+        DialectKind::Mysql => by_server("EXPLAIN FORMAT=TREE", "EXPLAIN FORMAT=JSON"),
         // Plan-only, so analyze/buffers/verbose no-op. Columns: id,
         // parent, notused, detail.
-        "sqlite" => "EXPLAIN QUERY PLAN ".to_owned(),
-        _ => match options.to_clause() {
+        DialectKind::Sqlite => "EXPLAIN QUERY PLAN ".to_owned(),
+        DialectKind::Postgres => match options.to_clause() {
             c if c.is_empty() => "EXPLAIN ".to_owned(),
             c => format!("EXPLAIN {c} "),
         },
@@ -177,7 +179,7 @@ pub(super) async fn explain_lines_on<'c, E: SqlExecutor<'c>>(
         }
     })
     .await?;
-    if json && d.name() == "sqlite" {
+    if json && d.kind() == DialectKind::Sqlite {
         return Ok(vec![format!("[{}]", lines.join(","))]);
     }
     Ok(lines)

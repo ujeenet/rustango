@@ -60,8 +60,8 @@ impl OrgResolver for HostResolver {
             o.id = rustango::sql::Auto::default();
             o.slug = slug.to_owned();
             o.display_name = slug.to_owned();
-            o.storage_mode = "database".into();
-            o.backend_kind = "sqlite".into();
+            o.storage_mode = rustango::tenancy::StorageMode::Database;
+            o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
             o.database_url = None;
         })))
     }

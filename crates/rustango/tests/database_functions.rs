@@ -105,7 +105,7 @@ fn pg_concat_emits_text_pipes() {
         stmt.sql
     );
     assert_eq!(
-        stmt.params,
+        stmt.params(),
         vec![SqlValue::String(" ".into()), SqlValue::I64(1)]
     );
 }
@@ -192,7 +192,7 @@ fn replace_emits_3_arg_call() {
         stmt.sql
     );
     assert_eq!(
-        stmt.params,
+        stmt.params(),
         vec![
             SqlValue::String("foo".into()),
             SqlValue::String("bar".into()),

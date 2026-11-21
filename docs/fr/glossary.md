@@ -229,6 +229,11 @@ vers un `Author`. C'est ainsi que les lignes se référencent les unes les autre
 **NULL / nullable** — `NULL` est le mot de la base de données pour « aucune valeur / vide ». Un
 champ **nullable** a le droit d'être vide ; un champ non-nullable est obligatoire.
 
+**Champ enum (`TextEnum`)** — un champ dont le type Rust est une enum comme
+`Status::Draft`, stockée sous un texte court comme `draft`. Lire une valeur qui ne
+nomme aucune variante est une erreur, pas une supposition. Voir
+[champs enum](models.md#champs-enum-stockés-en-texte).
+
 **ORM** — *Object-Relational Mapper.* La partie du framework qui transforme vos
 structs Rust en lignes de base de données et inversement, pour que vous
 écriviez vos requêtes en Rust plutôt qu'en SQL à la main. Voir le

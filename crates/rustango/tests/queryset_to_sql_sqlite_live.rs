@@ -51,7 +51,7 @@ async fn to_compiled_returns_sql_and_params() {
         .unwrap();
     assert!(stmt.sql.contains("WHERE"));
     // Two filters → two bound parameters.
-    assert_eq!(stmt.params.len(), 2);
+    assert_eq!(stmt.params().len(), 2);
 }
 
 #[tokio::test]

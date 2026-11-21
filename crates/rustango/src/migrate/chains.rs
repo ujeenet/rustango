@@ -679,7 +679,7 @@ pub(crate) async fn converge_preview(
     groups.retain(|g| !pending.contains(g[0].table()));
     let schema = ensure::creation_schema(pool).await?;
     let mut fks = Vec::new();
-    let dialect = pool.dialect().name();
+    let dialect = pool.dialect().kind();
     for p in ensure::plan_groups(pool, &last.snapshot, &groups, schema.as_deref()).await? {
         match p.batch {
             Ok(b) => {
@@ -1039,7 +1039,7 @@ mod tests {
             "`cd_child.p_id` ON DELETE: CASCADE in the database, SET NULL",
         ];
         // SQLite keeps no VARCHAR length.
-        if pool.dialect().name() != "sqlite" {
+        if pool.dialect().kind() != crate::sql::DialectKind::Sqlite {
             wanted.push("`cd_child.name` max_length: 40 in the database, 60");
         }
         for want in wanted {

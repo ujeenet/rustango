@@ -379,6 +379,7 @@ jobs:
           cargo nextest run --profile ci -p rustango --features tenancy \
             --test branding_urls_are_escaped \
             --test database_url_one_resolver \
+            --test dialect_branches_use_kind \
             --test docs_links \
             --test docs_contract \
             --test doctest_ignore_budget \
@@ -1657,6 +1658,8 @@ jobs:
           binary(=atomic_sites_tri) |
           binary(=on_commit_tri) |
           binary(=atomic_options_tri) |
+          binary(=atomic_request_tri) |
+          binary(=atomic_request_tenant_tri) |
           binary(=executor_on_forms_tri) |
           binary(=get_or_create_atomic_tri) |
           binary(=regex_tri) |
@@ -1704,6 +1707,7 @@ jobs:
           binary(=template_views_object_permissions_tri) |
           binary(=row_to_json_nulls_tri) |
           binary(=column_types_tri) |
+          binary(=text_enum_tri) |
           binary(=m2m_non_int_pk_tri) |
           binary(=m2m_changed_noop_tri) |
           binary(=update_validation_tri) |
@@ -1722,6 +1726,7 @@ jobs:
           binary(=media_collection_race_tri) |
           binary(=media_purge_tri) |
           binary(=media_listing_bounds_tri) |
+          binary(=framework_orm_reads_tri) |
           binary(=viewset_bulk_create_is_atomic) |
           binary(=tenancy_manage_mysql_live) |
           binary(=permissions_mysql_live) |

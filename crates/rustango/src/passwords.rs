@@ -339,6 +339,12 @@ pub(crate) fn rehash_update(
     }
 }
 
+/// The upgrade of a row never saved is skipped; the stored hash stands.
+#[cfg(feature = "tenancy")]
+pub(crate) fn rehash_unsaved(e: crate::sql::UnsavedRow) {
+    tracing::warn!(target: "rustango::passwords", error = %e, "cannot store the upgraded password hash");
+}
+
 /// The hash in force after running [`rehash_update`].
 pub(crate) fn rehash_applied<E: std::fmt::Display>(
     applied: Result<u64, E>,

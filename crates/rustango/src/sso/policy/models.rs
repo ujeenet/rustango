@@ -15,7 +15,6 @@ use crate::sql::Auto;
         readonly_fields = "uses, used_at, used_by, invited_by, created_at",
     )
 )]
-#[allow(dead_code)]
 pub struct SsoInvite {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
@@ -92,7 +91,6 @@ pub struct SsoInvite {
         readonly_fields = "shared_provider_id, shared_issuer",
     )
 )]
-#[allow(dead_code)]
 pub struct SsoSharedOverride {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
@@ -191,7 +189,6 @@ pub struct SsoSharedOverride {
     access = "admin_only",
     admin(list_display = "name, password_login, sso_only, default_provider")
 )]
-#[allow(dead_code)]
 pub struct SsoTenantPolicy {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
@@ -242,7 +239,6 @@ pub struct SsoTenantPolicy {
         ordering = "position",
     )
 )]
-#[allow(dead_code)]
 pub struct SsoLandingRule {
     #[rustango(primary_key)]
     pub id: Auto<i64>,

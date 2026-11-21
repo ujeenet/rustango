@@ -65,7 +65,7 @@ async fn org_with_host(pool: &Pool, slug: &str, host: Option<String>) -> i64 {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = slug.to_owned();
         o.display_name = slug.to_owned();
-        o.backend_kind = "sqlite".into();
+        o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
         o.database_url = Some("sqlite::memory:".into());
         o.host_pattern = host;
     });
@@ -266,10 +266,10 @@ async fn two_port_claims_at_once_one_wins(pool: &Pool) {
 }
 
 fn port_offset(pool: &Pool) -> u32 {
-    match pool.dialect().name() {
-        "postgres" => 10_000,
-        "mysql" => 20_000,
-        _ => 30_000,
+    match pool.dialect().kind() {
+        rustango::sql::DialectKind::Postgres => 10_000,
+        rustango::sql::DialectKind::Mysql => 20_000,
+        rustango::sql::DialectKind::Sqlite => 30_000,
     }
 }
 

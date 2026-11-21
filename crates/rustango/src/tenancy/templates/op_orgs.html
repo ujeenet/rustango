@@ -7,6 +7,15 @@
     is no tenant page left to return to. -#}
 {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
 {% if notice %}<div class="alert alert-notice">{{ notice }}</div>{% endif %}
+{% if bad_orgs | default(value=[]) | length > 0 %}
+<div class="alert alert-error">
+  These tenants cannot be read: a stored value is not one this version knows.
+  Fix each with <code>manage repair-tenant &lt;slug&gt;</code>.
+  <ul>
+    {% for b in bad_orgs %}<li><strong>{{ b.slug }}</strong>: {{ b.column }} is <code>{{ b.value }}</code></li>{% endfor %}
+  </ul>
+</div>
+{% endif %}
 
 {#- A div, not a p: `<form>` is not phrasing content, so the HTML parser
     closes an open `<p>` when it meets one — the actions row split in two

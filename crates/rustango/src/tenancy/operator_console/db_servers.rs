@@ -5,6 +5,7 @@
 //! pre-filled, blank on edit keeps it. Audit rows and logs name the
 //! fields that changed, never their values.
 
+use crate::core::TextEnum as _;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -51,7 +52,7 @@ pub(super) struct MessagesQuery {
 }
 
 fn registry_backend(state: &ConsoleState) -> BackendKind {
-    BackendKind::parse(state.registry.dialect().name()).unwrap_or_default()
+    BackendKind::of_pool(&state.registry)
 }
 
 /// A row for the templates: no password, only whether one is saved.
@@ -218,8 +219,7 @@ async fn audit(state: &ConsoleState, op: &auth::Operator, name: &str, verb: &str
         .iter()
         .map(|f| ((*f).to_owned(), serde_json::Value::Bool(true)))
         .collect();
-    let operator_id = op.id.get().copied().unwrap_or_default();
-    super::emit_registry_audit(&state.registry, TABLE, name, operator_id, verb, extra).await;
+    super::emit_registry_audit(&state.registry, TABLE, name, op, verb, extra).await;
 }
 
 pub(super) async fn create(

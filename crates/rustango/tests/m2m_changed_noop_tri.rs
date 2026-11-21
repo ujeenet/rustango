@@ -291,7 +291,7 @@ async fn add_inside_atomic_that_updated_the_source(pool: &Pool) {
     assert_eq!(statements, 1, "add on a keyed junction is one insert");
     // MySQL's FK check and SQLite's write lock wait on any second
     // connection, so only PG can show the self-lock.
-    if pool.dialect().name() != "postgres" {
+    if pool.dialect().kind() != rustango::sql::DialectKind::Postgres {
         return;
     }
     let (p, late) = (pool.clone(), tags());

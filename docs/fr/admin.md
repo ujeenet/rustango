@@ -219,6 +219,8 @@ Chaque champ affiche une saisie correspondant à son type par défaut —
 `<input type="number">` pour les entiers, `type="date"`/`datetime-local` pour
 les dates, `type="checkbox"` pour les booléens, un `<textarea>` pour les
 chaînes longues, un `<select>` pour les colonnes FK, et ainsi de suite.
+Un champ `choices` ou `text_enum` est un `<select>` de ses valeurs ; toute autre
+valeur envoyée est refusée avec une erreur de formulaire.
 Remplacez-le par champ avec `formfield_overrides = "field:widget"` :
 
 | Widget | S'applique à | Affiche |

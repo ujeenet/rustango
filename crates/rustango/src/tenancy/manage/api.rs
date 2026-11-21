@@ -12,6 +12,7 @@
 //! returned without error. This is the canonical seed/bootstrap
 //! shape: re-running the demo or a deployment hook does not error.
 
+use crate::core::TextEnum as _;
 use std::path::Path;
 
 use sqlx::Database;
@@ -222,15 +223,14 @@ where
     };
     // Finish a create whose migrations failed; a suspended tenant stays as is.
     let registry = pools.registry_pool();
-    let org_id = existing.id.get().copied().unwrap_or_default();
+    let org_id = existing.id.require()?;
     if existing.active
         || !crate::tenancy::provision_store::org_left_by_failed_run(&registry, org_id).await?
     {
         return Ok(existing);
     }
     // The engine's resume, with the storage the failed create stored.
-    let mode = StorageMode::parse(&existing.storage_mode)
-        .map_err(|m| TenancyError::Validation(format!("unknown storage mode `{m}`")))?;
+    let mode = existing.storage_mode;
     let storage = match mode {
         StorageMode::Schema => TenantStorage::Schema(existing.schema_name.clone()),
         StorageMode::Database => TenantStorage::Database(DatabaseSource::Url(
@@ -245,14 +245,14 @@ where
     let run = crate::tenancy::provision_store::open_run(
         &registry,
         slug,
-        &existing.storage_mode,
-        &existing.backend_kind,
+        existing.storage_mode.as_str(),
+        existing.backend_kind.as_str(),
         None,
         None,
         None,
     )
     .await?;
-    let run_id = run.id.get().copied().unwrap_or_default();
+    let run_id = run.id.require()?;
     let outcome = provision::provision_tenant_in_run(
         pools,
         registry_url,

@@ -253,8 +253,8 @@ async fn tenant_migrate_fans_out_per_active_org_with_per_schema_ledger() {
         o.id = Auto::default();
         o.slug = unique("acme");
         o.display_name = "ACME".into();
-        o.storage_mode = StorageMode::Schema.as_str().into();
-        o.backend_kind = "postgres".to_owned();
+        o.storage_mode = StorageMode::Schema;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = None;
         o.schema_name = Some(acme_schema.clone());
         o.host_pattern = None;
@@ -267,8 +267,8 @@ async fn tenant_migrate_fans_out_per_active_org_with_per_schema_ledger() {
         o.id = Auto::default();
         o.slug = unique("globex");
         o.display_name = "GLOBEX".into();
-        o.storage_mode = StorageMode::Schema.as_str().into();
-        o.backend_kind = "postgres".to_owned();
+        o.storage_mode = StorageMode::Schema;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = None;
         o.schema_name = Some(globex_schema.clone());
         o.host_pattern = None;
@@ -405,8 +405,8 @@ async fn tenant_migrate_skips_inactive_orgs() {
         o.id = Auto::default();
         o.slug = unique("active");
         o.display_name = "Active".into();
-        o.storage_mode = StorageMode::Schema.as_str().into();
-        o.backend_kind = "postgres".to_owned();
+        o.storage_mode = StorageMode::Schema;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = None;
         o.schema_name = Some(active_schema.clone());
         o.host_pattern = None;
@@ -419,8 +419,8 @@ async fn tenant_migrate_skips_inactive_orgs() {
         o.id = Auto::default();
         o.slug = unique("inactive");
         o.display_name = "Inactive".into();
-        o.storage_mode = StorageMode::Schema.as_str().into();
-        o.backend_kind = "postgres".to_owned();
+        o.storage_mode = StorageMode::Schema;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = None;
         o.schema_name = Some(inactive_schema.clone());
         o.host_pattern = None;
@@ -486,8 +486,8 @@ async fn tenants_after_the_registry_restore_the_schema() {
             o.id = Auto::default();
             o.slug = slug.into();
             o.display_name = slug.into();
-            o.storage_mode = StorageMode::Schema.as_str().into();
-            o.backend_kind = "postgres".to_owned();
+            o.storage_mode = StorageMode::Schema;
+            o.backend_kind = rustango::tenancy::BackendKind::Postgres;
             o.database_url = None;
             o.schema_name = Some(format!("sch_{slug}"));
             o.host_pattern = None;
@@ -551,8 +551,8 @@ async fn schema_mode_tenants_share_citext() {
             o.id = Auto::default();
             o.slug = unique("ci");
             o.display_name = "CI".into();
-            o.storage_mode = StorageMode::Schema.as_str().into();
-            o.backend_kind = "postgres".to_owned();
+            o.storage_mode = StorageMode::Schema;
+            o.backend_kind = rustango::tenancy::BackendKind::Postgres;
             o.database_url = None;
             o.schema_name = Some(schema.clone());
             o.host_pattern = None;

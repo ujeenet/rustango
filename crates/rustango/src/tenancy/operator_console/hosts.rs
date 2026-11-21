@@ -224,8 +224,7 @@ async fn audit(state: &ConsoleState, slug: &str, op: &auth::Operator, verb: &str
         "hostname".into(),
         serde_json::Value::String(host.to_owned()),
     );
-    let operator_id = op.id.get().copied().unwrap_or_default();
-    super::emit_op_audit(&state.registry, slug, operator_id, verb, extra).await;
+    super::emit_op_audit(&state.registry, slug, op, verb, extra).await;
 }
 
 #[cfg(test)]

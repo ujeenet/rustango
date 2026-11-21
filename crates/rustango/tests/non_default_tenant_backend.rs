@@ -69,8 +69,8 @@ async fn boot() -> Env {
     .expect("migrate-registry");
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = "acme".into();
-        o.storage_mode = "database".into();
-        o.backend_kind = "sqlite".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Database;
+        o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
         o.database_url = Some(tenant_url.clone());
         o.host_pattern = Some("acme.app.test".into());
     });

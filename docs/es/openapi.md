@@ -147,7 +147,8 @@ DELETE), y se mantiene sincronizado con la configuración del ViewSet:
   id `Auto`, sin columna `read_only` ni de borrado lógico; los campos `write_only` se
   incluyen; nada es obligatorio en PATCH. Las respuestas referencian el esquema
   registrado. Un campo que un filter backend fija por petición sigue apareciendo (y
-  puede aparecer como obligatorio); el servidor ignora el valor del cuerpo para él.
+  puede aparecer como obligatorio); el servidor ignora el valor del cuerpo para él. Un campo `choices` o `text_enum`
+  lleva un `enum` de sus nombres guardados (los alias de un enum no aparecen).
 - **Cuerpos y errores** → create, PUT y PATCH aceptan cuerpos JSON o urlencoded y
   documentan `422 validation_failed`, `400` para un cuerpo mal formado y `413` para
   uno demasiado grande. La operación create describe la forma de array masivo en su

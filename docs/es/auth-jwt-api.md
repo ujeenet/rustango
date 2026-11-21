@@ -75,6 +75,10 @@ rustango::manage::Cli::new()
     .await
 ```
 
+Con `server::Builder::atomic_requests`, pasa `auth.router()` a
+`.auth_routes(..)` en lugar de fusionarlo en `.api()`: las rutas de auth del
+framework quedan fuera de la transacción de la petición.
+
 Crea **un solo** `JwtAuth` y pasa clones de él a todas partes. Cada instancia
 tiene su propia lista de revocación en memoria: con dos, `require_bearer` no ve
 un logout hecho en el router, y el token sigue funcionando hasta que expira. Un

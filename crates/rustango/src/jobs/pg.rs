@@ -87,7 +87,7 @@ use super::{
     DeadLetterFn, Dispatch, Enqueued, HandlerRegistry, Job, JobCtx, JobDeadLetter, JobError, JobId,
     JobQueue, Next, Registered, Running, StopSignal, UniqueKey, DEFAULT_SHUTDOWN_GRACE,
 };
-use crate::sql::Pool;
+use crate::sql::{DialectKind, Pool};
 
 /// Database-backed job queue over [`crate::sql::Pool`] (PostgreSQL,
 /// MySQL 8+ or SQLite).
@@ -243,10 +243,10 @@ impl ContextColumn {
 
 /// The `context` column's type on `pool`'s backend.
 fn context_type(pool: &Pool) -> &'static str {
-    match pool.dialect().name() {
-        "mysql" => "JSON",
-        "sqlite" => "TEXT",
-        _ => "JSONB",
+    match pool.dialect().kind() {
+        DialectKind::Mysql => "JSON",
+        DialectKind::Sqlite => "TEXT",
+        DialectKind::Postgres => "JSONB",
     }
 }
 
@@ -484,10 +484,10 @@ impl PgJobQueue {
     /// # Errors
     /// Underlying sqlx DDL error.
     pub async fn ensure_table_pool(pool: &Pool) -> Result<(), sqlx::Error> {
-        let ddl = match pool.dialect().name() {
-            "mysql" => CREATE_JOBS_TABLE_SQL_MYSQL.to_owned(),
-            "sqlite" => create_jobs_table_sql_sqlite(pool.dialect()),
-            _ => CREATE_JOBS_TABLE_SQL_PG.to_owned(),
+        let ddl = match pool.dialect().kind() {
+            DialectKind::Mysql => CREATE_JOBS_TABLE_SQL_MYSQL.to_owned(),
+            DialectKind::Sqlite => create_jobs_table_sql_sqlite(pool.dialect()),
+            DialectKind::Postgres => CREATE_JOBS_TABLE_SQL_PG.to_owned(),
         };
         crate::sql::run_ddl_idempotent(pool, &ddl).await?;
         // An older table lacks `context` (before 0.60.1) or
@@ -496,7 +496,7 @@ impl PgJobQueue {
         let cols = crate::migrate::ensure::live_columns(pool, "rustango_jobs")
             .await
             .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
-        let mysql = pool.dialect().name() == "mysql";
+        let mysql = pool.dialect().kind() == DialectKind::Mysql;
         let queue_type = if mysql { "VARCHAR(255)" } else { "TEXT" };
         // Binary on MySQL, so keys compare as on the other backends.
         let unique_type = if mysql {

@@ -613,7 +613,7 @@ mod store {
         let used_up = |r: &SsoInvite| r.max_uses.is_some_and(|m| r.uses >= m);
         if let Some((_, r)) = fits.iter().find(|(_, r)| !expired(r) && !used_up(r)) {
             return Ok(Ok(Invite {
-                id: r.id.get().copied().unwrap_or_default(),
+                id: r.id.require().map_err(|e| e.to_string())?,
                 max_uses: r.max_uses,
                 roles: RoleNames::parse_opt(r.roles.as_deref()).unwrap_or_default(),
                 link_user_id: r.link_user_id,
@@ -994,7 +994,7 @@ mod store {
     ) -> Result<Vec<String>, ExecError> {
         let found = roles_named_tx(tx, names).await?;
         for r in &found {
-            let role_id = r.id.get().copied().unwrap_or_default();
+            let role_id = r.id.require()?;
             crate::tenancy::permissions::assign_role_tx(tx, user_id, role_id).await?;
         }
         Ok(names
@@ -1045,7 +1045,7 @@ mod store {
                 .collect()
         };
         for r in &roles {
-            let id = r.id.get().copied().unwrap_or_default();
+            let id = r.id.require()?;
             match (wanted.contains(&r.name), held.contains(&id)) {
                 (true, false) => {
                     crate::tenancy::permissions::assign_role_tx(&mut tx, user_id, id)
@@ -1166,7 +1166,7 @@ mod store {
                 "roles": names,
             }),
         };
-        if let Err(e) = crate::audit::emit_one(pool, &entry).await {
+        if let Err(e) = crate::audit::emit_security(pool, &entry).await {
             tracing::error!(target: "rustango::sso", error = %e, "an unknown SSO role was NOT written to the audit log");
         }
     }

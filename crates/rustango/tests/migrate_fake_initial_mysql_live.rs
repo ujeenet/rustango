@@ -325,8 +325,8 @@ async fn tenants_after_the_registry_restore_the_schema_on_mysql() {
         let mut org = rustango::testkit::org_with(|o| {
             o.slug = (*slug).into();
             o.display_name = (*slug).into();
-            o.storage_mode = "database".into();
-            o.backend_kind = "mysql".into();
+            o.storage_mode = rustango::tenancy::StorageMode::Database;
+            o.backend_kind = rustango::tenancy::BackendKind::MySql;
             o.database_url = Some(db.url().to_owned());
         });
         org.insert(&registry).await.unwrap();

@@ -121,7 +121,7 @@ pub(crate) async fn request_pool(
     ext: &axum::http::Extensions,
     org: &Org,
 ) -> Option<Result<Pool, TenancyError>> {
-    Some(MountedTenantContext::of(ext)?.pool_for(org).await)
+    Some(MountedTenantContext::of(ext)?.pool_for(ext, org).await)
 }
 
 /// The tenant and pool this request's credential must be checked

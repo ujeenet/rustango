@@ -160,6 +160,11 @@ el login nuevo, registra el tenant, ejecuta sus migraciones y lo activa. Un
 fallo después de que exista la base de datos elimina lo que creó la ejecución.
 La URL del tenant contiene la contraseña del login nuevo y se guarda sellada.
 
+El `backend_kind` del tenant es el backend del registro, guardado como
+`postgres`, `mysql` o `sqlite`. Las filas antiguas con `pg`, `postgresql`, `mariadb`
+o `sqlite3` se siguen leyendo; `check-tenants` las lista y `repair-tenant` las
+reescribe.
+
 Para darle al tenant su primer administrador, rellena el email del
 administrador en el formulario (el nombre de usuario es opcional; por defecto
 es el email), o en la CLI:

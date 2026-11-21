@@ -252,7 +252,7 @@ mod scenarios {
             .annotate("sd", stddev("price").into())
             .fetch(pool)
             .await;
-        if pool.dialect().name() == "sqlite" {
+        if pool.dialect().kind() == rustango::sql::DialectKind::Sqlite {
             let err = res.expect_err("stddev must be rejected on sqlite");
             match err {
                 ExecError::Sql(SqlError::AggregateNotSupported { aggregate, dialect }) => {

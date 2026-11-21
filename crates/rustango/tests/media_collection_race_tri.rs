@@ -142,7 +142,7 @@ async fn media_cannot_go_into_a_dead_collection(pool: &Pool) {
 
 /// A move that waits on a collection being deleted is refused.
 async fn move_waits_and_sees_the_deleted_collection(pool: &Pool) {
-    if pool.dialect().name() == "sqlite" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Sqlite {
         return; // One writer at a time; the sequential scenario covers it.
     }
     let mgr = manager(pool);
@@ -208,7 +208,7 @@ async fn insert_waits_and_sees_the_deleted_collection(pool: &Pool) {
 
 /// A child committed while the delete waits on its parent is deleted too.
 async fn delete_takes_a_child_created_meanwhile(pool: &Pool) {
-    if pool.dialect().name() == "sqlite" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Sqlite {
         return; // One writer at a time; `dead_parent_is_refused` covers it.
     }
     let mgr = manager(pool);
@@ -258,7 +258,7 @@ async fn delete_takes_a_child_created_meanwhile(pool: &Pool) {
 
 /// A create that waits on a parent being deleted is refused.
 async fn create_waits_and_sees_the_deleted_parent(pool: &Pool) {
-    if pool.dialect().name() == "sqlite" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Sqlite {
         return; // One writer at a time; `dead_parent_is_refused` covers it.
     }
     let mgr = manager(pool);

@@ -67,7 +67,6 @@ use crate::Model;
     access = "never",
     managed = false
 )]
-#[allow(dead_code)]
 pub struct WebauthnCredential {
     /// Surrogate primary key (a user may have many credentials).
     #[rustango(primary_key)]

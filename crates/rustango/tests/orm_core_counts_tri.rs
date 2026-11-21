@@ -615,16 +615,16 @@ async fn grouped_aggregate_order_by_ungrouped_join_column(pool: &Pool) {
         .order_by(&[("a.id", true)])
         .fetch(pool)
         .await;
-    let strict = match pool.backend_name() {
-        "sqlite" => false,
-        "mysql" => {
+    let strict = match pool.dialect().kind() {
+        rustango::sql::DialectKind::Sqlite => false,
+        rustango::sql::DialectKind::Mysql => {
             let mode: Vec<(String,)> =
                 raw_query_pool("SELECT CAST(@@SESSION.sql_mode AS CHAR)", vec![], pool)
                     .await
                     .expect("sql_mode");
             mode[0].0.contains("ONLY_FULL_GROUP_BY")
         }
-        _ => true,
+        rustango::sql::DialectKind::Postgres => true,
     };
     if strict {
         // Rejected for the grouping, not for a column the rows lack.

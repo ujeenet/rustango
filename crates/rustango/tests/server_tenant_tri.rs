@@ -853,8 +853,8 @@ async fn an_unreadable_tenant_url_blocks_the_drop(pool: &Pool) {
     };
     let mut other = rustango::testkit::org_with(|o| {
         o.slug = slug("bad");
-        o.storage_mode = "database".into();
-        o.backend_kind = env.backend().as_str().into();
+        o.storage_mode = rustango::tenancy::StorageMode::Database;
+        o.backend_kind = env.backend();
         o.database_url = Some(format!("{scheme}://u:p@db.internal:notaport/x"));
     });
     other

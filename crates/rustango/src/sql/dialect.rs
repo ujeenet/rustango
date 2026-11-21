@@ -10,7 +10,8 @@
 //!   `serial_type`, `bool_literal` and the rest, used by
 //!   `migrate::ddl`. Most have an ANSI-shaped default; a dialect
 //!   overrides only what differs.
-//! * **Identity** — `name()`, for error messages and logs.
+//! * **Identity** — `kind()` for the branches no method covers,
+//!   `name()` for error messages and logs.
 
 use std::borrow::Cow;
 
@@ -18,6 +19,7 @@ use crate::core::{
     AggregateQuery, BulkInsertQuery, BulkUpdateQuery, ConflictClause, CountQuery, DeleteQuery,
     FieldType, InsertQuery, ModelSchema, Op, SelectQuery, UpdateQuery,
 };
+use crate::query::{DateKind, DateTimeKind};
 
 use super::server::{AdminRight, Collation, DatabaseName, Login, LoginPassword, ServerAccount};
 use super::{CompiledStatement, SqlError};
@@ -127,30 +129,49 @@ pub(crate) fn quote_qualified(d: &dyn Dialect, name: &str) -> String {
     }
 }
 
-/// Refuse a bind whose bind arm can only panic: a `List` (the writer
-/// expands those) anywhere, a Postgres-only value off Postgres. The one
-/// check for both compiled and raw statements.
-pub(crate) fn refuse_unbindable_values(
-    d: &dyn Dialect,
-    params: &[crate::core::SqlValue],
-) -> Result<(), SqlError> {
-    let pg = d.binds_pg_only_values();
-    // Off Postgres a PG-only item names itself, even inside a list.
-    let kind = params.iter().find_map(|v| {
-        let pg_only = if pg { None } else { v.pg_only_kind() };
-        pg_only.or(matches!(v, crate::core::SqlValue::List(_)).then_some("list"))
-    });
+/// The strftime-style mask for a timestamp bucket; `min` / `sec` are the
+/// minute and second tokens, which MySQL and SQLite spell differently.
+pub(crate) fn datetime_bucket_mask(kind: DateTimeKind, min: &str, sec: &str) -> String {
     match kind {
-        Some(value) => Err(SqlError::ValueNotSupportedInDialect {
-            value,
-            dialect: d.name(),
-        }),
-        None => Ok(()),
+        DateTimeKind::Year => "%Y-01-01 00:00:00".to_owned(),
+        DateTimeKind::Month => "%Y-%m-01 00:00:00".to_owned(),
+        DateTimeKind::Day => "%Y-%m-%d 00:00:00".to_owned(),
+        DateTimeKind::Hour => "%Y-%m-%d %H:00:00".to_owned(),
+        DateTimeKind::Minute => format!("%Y-%m-%d %H:{min}:00"),
+        DateTimeKind::Second => format!("%Y-%m-%d %H:{min}:{sec}"),
     }
 }
 
 pub(crate) mod sealed {
     pub trait Sealed {}
+}
+
+/// Which built-in dialect a [`Dialect`] is. Match on it (never on
+/// [`Dialect::name`]) where no trait method covers a fork, so the compiler
+/// checks every backend. MariaDB shares the `Mysql` dialect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DialectKind {
+    Postgres,
+    Mysql,
+    Sqlite,
+}
+
+impl DialectKind {
+    /// The short name: `"postgres"`, `"mysql"` or `"sqlite"`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Postgres => "postgres",
+            Self::Mysql => "mysql",
+            Self::Sqlite => "sqlite",
+        }
+    }
+}
+
+impl std::fmt::Display for DialectKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
 }
 
 /// Turns the dialect-neutral query IR into a parameterized statement,
@@ -163,10 +184,15 @@ pub(crate) mod sealed {
 /// The trait is sealed: only the built-in dialects implement it, so
 /// adding a method is not a breaking change.
 pub trait Dialect: Send + Sync + sealed::Sealed {
+    /// Which built-in dialect this is. Prefer a trait method for new
+    /// SQL shapes; match on this where only a branch will do.
+    fn kind(&self) -> DialectKind;
+
     /// This dialect's short name: `"postgres"`, `"sqlite"` or
-    /// `"mysql"`. For logs, errors, and the dialect checks no trait
-    /// method covers yet; prefer a method for new SQL shapes.
-    fn name(&self) -> &'static str;
+    /// `"mysql"`. For logs and errors only; branch on [`Self::kind`].
+    fn name(&self) -> &'static str {
+        self.kind().name()
+    }
 
     // ---- DDL primitives, defaulting to the ANSI shape ----
 
@@ -430,6 +456,30 @@ pub trait Dialect: Send + Sync + sealed::Sealed {
     /// SQLite, `RAND` on MySQL.
     fn random_fn(&self) -> &'static str {
         "RANDOM"
+    }
+
+    /// Truncate the quoted `col` to a `DATE` bucket, for `.dates()`.
+    fn date_bucket_sql(&self, kind: DateKind, col: &str) -> String {
+        match kind {
+            DateKind::Year => format!("DATE_TRUNC('year', {col})::date"),
+            DateKind::Month => format!("DATE_TRUNC('month', {col})::date"),
+            DateKind::Day => format!("DATE({col})"),
+        }
+    }
+
+    /// Truncate the quoted `col` to a timestamp bucket that decodes as
+    /// `DateTime<Utc>`. `utc` truncates a PG `TIMESTAMPTZ` in UTC.
+    fn datetime_bucket_sql(&self, kind: DateTimeKind, col: &str, utc: bool) -> String {
+        let unit = match kind {
+            DateTimeKind::Year => "year",
+            DateTimeKind::Month => "month",
+            DateTimeKind::Day => "day",
+            DateTimeKind::Hour => "hour",
+            DateTimeKind::Minute => "minute",
+            DateTimeKind::Second => "second",
+        };
+        let zone = if utc { ", 'UTC'" } else { "" };
+        format!("DATE_TRUNC('{unit}', {col}{zone})")
     }
 
     /// The `LIMIT` clause to add when a query has an `OFFSET` but no
@@ -1455,14 +1505,15 @@ mod quote_with_tests {
 }
 
 #[cfg(test)]
-mod refuse_unbindable_values_tests {
-    use super::{refuse_unbindable_values, Dialect};
+mod bind_params_check_tests {
+    use super::Dialect;
     use crate::core::SqlValue;
+    use crate::sql::BindParams;
     use crate::sql::{MySql, Postgres, SqlError, Sqlite};
 
     fn refused(d: &dyn Dialect, v: SqlValue) -> Option<&'static str> {
-        match refuse_unbindable_values(d, &[SqlValue::I64(1), v]) {
-            Ok(()) => None,
+        match BindParams::check(d, vec![SqlValue::I64(1), v]) {
+            Ok(_) => None,
             Err(SqlError::ValueNotSupportedInDialect { value, dialect }) => {
                 assert_eq!(dialect, d.name());
                 Some(value)
@@ -1502,7 +1553,7 @@ mod refuse_unbindable_values_tests {
             let list = SqlValue::List(vec![SqlValue::I64(1)]);
             assert_eq!(refused(d, list), Some("list"), "{}", d.name());
             // Off Postgres the PG-only item is the clearer name.
-            let inner = if d.name() == "postgres" {
+            let inner = if d.kind() == super::DialectKind::Postgres {
                 "list"
             } else {
                 "array"
@@ -1510,6 +1561,16 @@ mod refuse_unbindable_values_tests {
             let list = SqlValue::List(vec![SqlValue::Array(vec![])]);
             assert_eq!(refused(d, list), Some(inner), "{}", d.name());
             assert_eq!(refused(d, SqlValue::String("x".into())), None);
+        }
+    }
+
+    /// Postgres binds typed arrays of a few element types; others used to panic.
+    #[test]
+    fn a_postgres_array_of_an_unbindable_element_is_refused() {
+        let floats = SqlValue::Array(vec![SqlValue::F64(1.0)]);
+        assert_eq!(refused(&Postgres, floats), Some("array element"));
+        for ok in [vec![], vec![SqlValue::I32(1)], vec![SqlValue::Bool(true)]] {
+            assert_eq!(refused(&Postgres, SqlValue::Array(ok)), None);
         }
     }
 }

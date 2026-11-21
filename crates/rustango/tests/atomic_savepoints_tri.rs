@@ -133,8 +133,8 @@ async fn drop_once_flagged<F: Future>(fut: F, flag: Arc<AtomicBool>) {
     .await;
 }
 
-fn dialect(pool: &Pool) -> &'static str {
-    pool.dialect().name()
+fn dialect(pool: &Pool) -> rustango::sql::DialectKind {
+    pool.dialect().kind()
 }
 
 async fn outer_rollback_drops_inner_write(pool: &Pool) {
@@ -496,7 +496,7 @@ async fn swallowed_statement_error_is_not_committed_on_pg(pool: &Pool) {
         Ok(())
     }))
     .await;
-    if dialect(pool) == "postgres" {
+    if dialect(pool) == rustango::sql::DialectKind::Postgres {
         // PG aborted the transaction; its COMMIT would silently roll back.
         assert!(matches!(res, Err(ExecError::AtomicAborted)), "got {res:?}");
         assert_eq!(
@@ -514,7 +514,7 @@ async fn swallowed_statement_error_is_not_committed_on_pg(pool: &Pool) {
 }
 
 async fn failed_savepoint_open_poisons_on_pg(pool: &Pool) {
-    if dialect(pool) != "postgres" {
+    if dialect(pool) != rustango::sql::DialectKind::Postgres {
         return; // Only PG refuses a SAVEPOINT (in an aborted transaction).
     }
     let p = one_conn(pool).await;
@@ -681,7 +681,7 @@ async fn on_commit_in_the_closures_sync_part_belongs_to_its_block(pool: &Pool) {
 }
 
 async fn sqlite_rollback_refuses_later_statements(pool: &Pool) {
-    if dialect(pool) != "sqlite" {
+    if dialect(pool) != rustango::sql::DialectKind::Sqlite {
         return; // The hook is SQLite's; PG and MySQL have their own checks.
     }
     let p = one_conn(pool).await;
@@ -712,7 +712,7 @@ async fn sqlite_rollback_refuses_later_statements(pool: &Pool) {
 }
 
 async fn mysql_ddl_implicit_commit_is_reported(pool: &Pool) {
-    if dialect(pool) != "mysql" {
+    if dialect(pool) != rustango::sql::DialectKind::Mysql {
         return; // Only MySQL commits implicitly on DDL.
     }
     use rustango::sql::{raw_execute_pool, raw_execute_tx};
@@ -811,7 +811,7 @@ async fn on_reads_refuse_a_dead_atomic_block(pool: &Pool) {
         put(tx, 1).await?;
         let mut guard = tx.lock().await?;
         // End the transaction on the server, the way each backend can.
-        if dialect(&registry) == "mysql" {
+        if dialect(&registry) == rustango::sql::DialectKind::Mysql {
             // A lock-wait timeout (1205), which rustango treats as ending the block;
             // the server keeps the transaction open by default (innodb_rollback_on_timeout=OFF).
             let lock = || Note::objects().filter("id", 5_i64).select_for_update();
@@ -849,7 +849,7 @@ async fn on_reads_refuse_a_dead_atomic_block(pool: &Pool) {
         // PG: the first read meets the terminated backend (FATAL 57P01)
         // and is recorded as ending the transaction.
         let first = Note::objects().fetch_on(&mut *guard).await;
-        if dialect(&registry) == "postgres" {
+        if dialect(&registry) == rustango::sql::DialectKind::Postgres {
             assert!(matches!(first, Err(ExecError::Driver(_))), "got {first:?}");
             let next = Note::objects().fetch_on(&mut *guard).await;
             assert!(

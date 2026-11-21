@@ -339,15 +339,27 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
                 .collect(),
             body_b64: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes),
         };
-        // A failed write is logged and ignored, so the caller still
-        // gets the successful response.
         if let Ok(json) = serde_json::to_string(&stored) {
-            if let Err(e) = cfg.cache.set(&cache_key, &json, Some(cfg.ttl)).await {
-                tracing::warn!(error = %e, key = %cache_key, "idempotency: cache write failed");
+            let (cache, ttl) = (cfg.cache.clone(), cfg.ttl);
+            let store = async move {
+                // A failed write is logged and ignored, so the caller still
+                // gets the successful response.
+                if let Err(e) = cache.set(&cache_key, &json, Some(ttl)).await {
+                    tracing::warn!(error = %e, key = %cache_key, "idempotency: cache write failed");
+                }
+                // Released after the store, so a waiting retry finds the stored answer.
+                release(in_flight).await;
+            };
+            if crate::sql::in_any_block() {
+                // Inside a request's `atomic` block: a response whose COMMIT
+                // fails is never replayed. A rollback drops the marker.
+                crate::sql::on_commit(move || drop(tokio::spawn(store)));
+            } else {
+                store.await;
             }
+            return Response::from_parts(parts, Body::from(bytes));
         }
     }
-    // Released after the store, so a waiting retry finds the stored answer.
     release(in_flight).await;
 
     Response::from_parts(parts, Body::from(bytes))

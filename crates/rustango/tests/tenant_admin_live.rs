@@ -89,7 +89,7 @@ async fn database_mode_admin_serves_tenant_data() {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = org_slug.clone();
         o.display_name = "ACME".into();
-        o.storage_mode = StorageMode::Database.as_str().into();
+        o.storage_mode = StorageMode::Database;
         o.database_url = Some(url.clone());
         o.host_pattern = Some(format!("{org_slug}.app.test"));
     });
@@ -199,7 +199,7 @@ async fn schema_mode_admin_dispatches_with_search_path_set() {
     let mut acme_org = rustango::testkit::org_with(|o| {
         o.slug = acme_slug.clone();
         o.display_name = "ACME".into();
-        o.storage_mode = StorageMode::Schema.as_str().into();
+        o.storage_mode = StorageMode::Schema;
         o.schema_name = Some(acme_schema.clone());
     });
     acme_org.insert(&pool.clone().into()).await.unwrap();
@@ -207,7 +207,7 @@ async fn schema_mode_admin_dispatches_with_search_path_set() {
     let mut globex_org = rustango::testkit::org_with(|o| {
         o.slug = globex_slug.clone();
         o.display_name = "Globex".into();
-        o.storage_mode = StorageMode::Schema.as_str().into();
+        o.storage_mode = StorageMode::Schema;
         o.schema_name = Some(globex_schema.clone());
     });
     globex_org.insert(&pool.clone().into()).await.unwrap();
@@ -304,7 +304,7 @@ async fn subdomain_chain_resolves_via_host_header() {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = slug.clone();
         o.display_name = "ACME".into();
-        o.storage_mode = StorageMode::Database.as_str().into();
+        o.storage_mode = StorageMode::Database;
         o.database_url = Some(url.clone());
         o.host_pattern = Some(host.clone());
     });

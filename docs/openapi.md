@@ -145,7 +145,8 @@ PATCH, DELETE), and it stays in sync with the ViewSet's configuration:
   `Auto` id, `read_only` or soft-delete column; `write_only` fields included;
   nothing required on PATCH. Responses reference the registered schema. A field
   a filter backend pins per request still shows (and may show required); the
-  server ignores the body's value for it.
+  server ignores the body's value for it. A `choices` or `text_enum` field
+  carries an `enum` of its stored names (an enum's aliases are not listed).
 - **Bodies and errors** → create, PUT and PATCH accept JSON or urlencoded
   bodies and document `422 validation_failed`, `400` for a malformed body and
   `413` for one too large. The create operation describes the bulk array form

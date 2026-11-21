@@ -5,10 +5,7 @@
 //! the existing row or invoke the caller's `create_fn` / `update_fn`
 //! closure.
 
-use super::{
-    atomic, select_rows_tx_with_related, ExecError, FetcherPool, LoadRelated, MaybeMyFromRow,
-    MaybeMyLoadRelated, MaybePgFromRow, MaybeSqliteFromRow, MaybeSqliteLoadRelated, PoolTx,
-};
+use super::{atomic, select_rows_tx_with_related, DecodeModel, ExecError, FetcherPool, PoolTx};
 use crate::core::{Model, SelectQuery};
 use crate::sql::Pool;
 
@@ -63,15 +60,7 @@ pub async fn get_or_create<T, F, Fut>(
     pool: &Pool,
 ) -> Result<(T, bool), ExecError>
 where
-    T: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    T: Model + DecodeModel,
     F: FnOnce(Pool) -> Fut,
     Fut: std::future::Future<Output = Result<T, ExecError>>,
 {
@@ -110,15 +99,7 @@ pub async fn get_or_create_tx<'t, T, F>(
     tx: &mut PoolTx<'t>,
 ) -> Result<(T, bool), ExecError>
 where
-    T: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    T: Model + DecodeModel,
     F: for<'a> FnOnce(
         &'a mut PoolTx<'t>,
     ) -> std::pin::Pin<
@@ -149,15 +130,7 @@ pub async fn update_or_create_tx<'t, T, UF, CF>(
     tx: &mut PoolTx<'t>,
 ) -> Result<(T, bool), ExecError>
 where
-    T: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    T: Model + DecodeModel,
     UF: for<'a> FnOnce(
         &'a mut PoolTx<'t>,
         T,
@@ -194,15 +167,7 @@ async fn create_or_winner_tx<'t, T, F>(
     share: bool,
 ) -> Result<(T, bool), ExecError>
 where
-    T: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    T: Model + DecodeModel,
     F: for<'a> FnOnce(
         &'a mut PoolTx<'t>,
     ) -> std::pin::Pin<
@@ -235,7 +200,7 @@ where
 /// the winner's row, so it reads with a lock (`share`, else for update). A
 /// lock the caller set is kept.
 fn winner_read(mut select: SelectQuery, dialect: &dyn super::Dialect, share: bool) -> SelectQuery {
-    if dialect.name() == "mysql" && select.lock_mode.is_none() {
+    if dialect.kind() == crate::sql::DialectKind::Mysql && select.lock_mode.is_none() {
         let mut lock = crate::core::LockMode::default();
         lock.share = share;
         lock.of = vec![select.model.table];
@@ -262,15 +227,7 @@ async fn fetch_at_most_one<T>(
     pool: &Pool,
 ) -> Result<Option<T>, ExecError>
 where
-    T: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    T: Model + DecodeModel,
 {
     at_most_one(qs.fetch(pool).await?, op)
 }
@@ -298,15 +255,7 @@ async fn lost_race<T>(
     share: bool,
 ) -> Result<T, ExecError>
 where
-    T: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    T: Model + DecodeModel,
 {
     if !err.is_unique_violation() {
         return Err(err);
@@ -364,15 +313,7 @@ pub async fn update_or_create<T, UF, UFut, CF, CFut>(
     pool: &Pool,
 ) -> Result<(T, bool), ExecError>
 where
-    T: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    T: Model + DecodeModel,
     UF: FnOnce(Pool, T) -> UFut,
     UFut: std::future::Future<Output = Result<T, ExecError>>,
     CF: FnOnce(Pool) -> CFut,
@@ -390,15 +331,7 @@ where
 
 impl<T> crate::query::QuerySet<T>
 where
-    T: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    T: Model + DecodeModel,
 {
     /// Chainable form of [`get_or_create`]. Sugar for
     /// `get_or_create(self, create_fn, pool)` so call sites read as

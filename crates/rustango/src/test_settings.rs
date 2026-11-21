@@ -45,7 +45,7 @@ use std::sync::OnceLock;
 use crate::config::Settings;
 
 tokio::task_local! {
-    static OVERLAY: Settings;
+    pub(crate) static OVERLAY: Settings;
 }
 
 /// What [`current`] returns when no overlay is active. Set it with

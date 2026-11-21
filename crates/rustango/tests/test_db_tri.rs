@@ -135,16 +135,16 @@ async fn truncate_empty_slice_is_a_no_op(pool: &Pool) {
 async fn truncate_unlisted_child_follows_the_dialect(pool: &Pool) {
     seed_parent_and_child(pool).await;
     let res = truncate_tables(pool, &["tdb1959_parent"]).await;
-    match pool.dialect().name() {
-        "postgres" => {
+    match pool.dialect().kind() {
+        rustango::sql::DialectKind::Postgres => {
             res.expect("truncate");
             assert_eq!(counts(pool).await, (0, 0), "CASCADE clears the child");
         }
-        "mysql" => {
+        rustango::sql::DialectKind::Mysql => {
             res.expect("truncate");
             assert_eq!(counts(pool).await, (0, 1), "the orphan child stays");
         }
-        _ => {
+        rustango::sql::DialectKind::Sqlite => {
             assert!(res.is_err(), "the deferred FK check fails at COMMIT");
             assert_eq!(counts(pool).await, (1, 1), "rolled back");
             return;
@@ -156,7 +156,7 @@ async fn truncate_unlisted_child_follows_the_dialect(pool: &Pool) {
     };
     p.insert(pool).await.expect("parent");
     let id = p.id.get().copied().expect("pk");
-    if pool.dialect().name() == "postgres" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Postgres {
         assert_eq!(id, 1, "RESTART IDENTITY");
     } else {
         assert!(id > 1, "MySQL ids keep counting: {id}");

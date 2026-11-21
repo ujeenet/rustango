@@ -42,7 +42,7 @@ fn binary_xor_emits_canonical_form_on_pg() {
         stmt.sql
     );
     // Each operand is written, and bound, once.
-    assert_eq!(stmt.params.len(), 2);
+    assert_eq!(stmt.params().len(), 2);
 }
 
 #[test]
@@ -94,7 +94,7 @@ fn ternary_xor_emits_parity_tally_on_pg() {
         "PG: ternary XOR parity tally: {}",
         stmt.sql
     );
-    assert_eq!(stmt.params.len(), 3);
+    assert_eq!(stmt.params().len(), 3);
 }
 
 #[test]

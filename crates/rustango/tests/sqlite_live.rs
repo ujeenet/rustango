@@ -53,7 +53,7 @@ async fn fresh_pool() -> Pool {
     // is about one model's round trip, and creating the framework's
     // schema alongside it would widen what a failure here could mean.
     let dialect = pool.dialect();
-    assert_eq!(dialect.name(), "sqlite");
+    assert_eq!(dialect.kind(), rustango::sql::DialectKind::Sqlite);
     let create = ddl::create_table_sql_with_dialect(dialect, LiveUser::SCHEMA);
     rustango::sql::raw_execute_pool(&pool, &create, vec![])
         .await

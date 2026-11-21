@@ -83,9 +83,9 @@ fn order_random_emits_no_param_bindings() {
         .compile_select(&Post::objects().order_random().compile().unwrap())
         .unwrap();
     assert!(
-        stmt.params.is_empty(),
+        stmt.params().is_empty(),
         "order_random binds no params: {:?}",
-        stmt.params
+        stmt.params()
     );
 }
 

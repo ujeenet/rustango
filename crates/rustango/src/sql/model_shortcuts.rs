@@ -20,11 +20,8 @@
 
 use crate::core::{Expr, Model, QueryError, SqlValue, UpdateQuery, F};
 use crate::query::{QuerySet, Q};
-use crate::sql::executor::{
-    FetcherPool as _, MaybeMyFromRow, MaybeMyLoadRelated, MaybePgFromRow, MaybeSqliteFromRow,
-    MaybeSqliteLoadRelated, UpdaterPool as _,
-};
-use crate::sql::{ExecError, LoadRelated, Pool};
+use crate::sql::executor::{DecodeModel, FetcherPool as _, UpdaterPool as _};
+use crate::sql::{ExecError, Pool};
 
 /// Resolve a runtime `&str` column name to the SCHEMA-registered
 /// `&'static str` for use in `F()` expressions and the strongly-
@@ -80,15 +77,7 @@ pub async fn increment_one_pool<T>(
     pool: &Pool,
 ) -> Result<u64, ExecError>
 where
-    T: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    T: Model + DecodeModel,
 {
     increment_one::<T>(pk_field, this_pk, col, by)?
         .execute_pool(pool)
@@ -163,15 +152,7 @@ pub async fn where_multi_pool<T>(
     pool: &Pool,
 ) -> Result<Vec<T>, ExecError>
 where
-    T: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    T: Model + DecodeModel,
 {
     if cols.is_empty() {
         return if all {

@@ -19,6 +19,7 @@ use std::fmt::Write as _;
 use serde::{Deserialize, Serialize};
 
 use super::snapshot::{FieldSnapshot, RelationSnapshot, SchemaSnapshot, TableSnapshot};
+use crate::sql::DialectKind;
 
 fn default_index_method_diff() -> String {
     "btree".to_owned()
@@ -1313,7 +1314,7 @@ impl FkNames {
     fn new(current: &SchemaSnapshot, dialect: &dyn crate::sql::Dialect) -> Self {
         let mut names = Self {
             holders: std::collections::HashMap::new(),
-            per_database: dialect.name() == "mysql",
+            per_database: dialect.kind() == DialectKind::Mysql,
         };
         // SQLite's inline FK names need not be unique.
         if dialect.inline_fks_in_create_table() {
@@ -1429,7 +1430,7 @@ fn render_changes_split_inner(
                 if let Some(name) = unique_names
                     .get(table, column)
                     .ok()
-                    .filter(|_| dialect.name() == "sqlite")
+                    .filter(|_| dialect.kind() == DialectKind::Sqlite)
                 {
                     out.immediate.push(format!(
                         "DROP INDEX IF EXISTS {}",
@@ -1500,10 +1501,10 @@ fn render_changes_split_inner(
                     ));
                 }
                 // MySQL with a binlog refuses `ADD COLUMN … DEFAULT (UUID())` (1674).
-                if dialect.name() == "mysql" && is_uuid_default(f) {
+                if dialect.kind() == DialectKind::Mysql && is_uuid_default(f) {
                     out.immediate
                         .extend(add_column_backfilled(table, f, dialect));
-                } else if dialect.name() == "mysql"
+                } else if dialect.kind() == DialectKind::Mysql
                     && !f.nullable
                     && f.default.is_none()
                     && f.generated_as.is_none()
@@ -1549,7 +1550,7 @@ fn render_changes_split_inner(
                 // CASCADE is Postgres-only — MySQL's parser rejects the
                 // keyword and SQLite has no equivalent. (Mirrors the gate in
                 // `ddl::drop_table_sql_with_dialect` / `drop_all_pool`.)
-                let cascade = if dialect.name() == "postgres" {
+                let cascade = if dialect.kind() == DialectKind::Postgres {
                     " CASCADE"
                 } else {
                     ""
@@ -1876,11 +1877,11 @@ fn render_changes_split_inner(
                 // Postgres's `supports` override advertises it under
                 // the same name (`expression_index`-adjacent), but
                 // PG-specific. The simplest gate is the existing
-                // `dialect.name() == "postgres"` since covering
+                // `dialect.kind() == DialectKind::Postgres` since covering
                 // indexes are PG-only across rustango's matrix.
                 let include_suffix = if include.is_empty() {
                     String::new()
-                } else if dialect.name() == "postgres" {
+                } else if dialect.kind() == DialectKind::Postgres {
                     let cols = include
                         .iter()
                         .map(|c| dialect.quote_ident(c))
@@ -1909,7 +1910,7 @@ fn render_changes_split_inner(
             SchemaChange::DropIndex { name, table } => {
                 // MySQL needs `DROP INDEX <name> ON <table>` and rejects
                 // `IF EXISTS` on it. PostgreSQL and SQLite drop by name.
-                if dialect.name() == "mysql" {
+                if dialect.kind() == DialectKind::Mysql {
                     if table.is_empty() {
                         return Err(format!(
                             "DropIndex for `{name}` carries no table, and MySQL needs one \
@@ -1964,7 +1965,7 @@ fn render_changes_split_inner(
                 // constraint at all, and how it spells it. `None` is
                 // SQLite saying it has no `ALTER TABLE DROP CONSTRAINT`.
                 //
-                // This arm used to test `dialect.name() == "sqlite"`
+                // This arm used to branch on SQLite
                 // itself and then hand-write the statement — which is
                 // how it came to send PostgreSQL syntax to MySQL (#559).
                 let Some(sql) = dialect.drop_check_constraint_sql(target(schema, table), name)
@@ -1986,7 +1987,7 @@ fn render_changes_split_inner(
                 elements,
                 where_clause,
             } => {
-                if dialect.name() != "postgres" {
+                if dialect.kind() != DialectKind::Postgres {
                     // MySQL + SQLite have no EXCLUDE constraint. Emit
                     // nothing and warn so the rest of the migration
                     // applies cleanly; the user's app is responsible
@@ -2019,7 +2020,7 @@ fn render_changes_split_inner(
                 out.immediate.push(stmt);
             }
             SchemaChange::DropExclusionConstraint { name, table } => {
-                if dialect.name() != "postgres" {
+                if dialect.kind() != DialectKind::Postgres {
                     tracing::warn!(
                         constraint = %name,
                         table = %table,
@@ -2086,7 +2087,7 @@ fn render_changes_split_inner(
                 }
             }
             SchemaChange::DropM2MTable { through } => {
-                let cascade = if dialect.name() == "postgres" {
+                let cascade = if dialect.kind() == DialectKind::Postgres {
                     " CASCADE"
                 } else {
                     ""

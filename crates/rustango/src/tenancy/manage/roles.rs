@@ -87,7 +87,7 @@ where
     writeln!(w, "{:<6} {:<30} {:<8} description", "id", "name", "perms")?;
     writeln!(w, "{}", "-".repeat(60))?;
     for role in &roles {
-        let id = role.id.get().copied().unwrap_or(0);
+        let id = role.id.require()?;
         let perms: Vec<RolePermission> = RolePermission::objects()
             .where_(RolePermission::role_id.eq(id))
             .fetch(&pool)
@@ -438,7 +438,7 @@ async fn user_id_by_username(username: &str, pool: &crate::sql::Pool) -> Result<
     rows.into_iter()
         .next()
         .ok_or_else(|| TenancyError::Validation(format!("user `{username}` not found")))
-        .map(|u| u.id.get().copied().unwrap_or(0))
+        .and_then(|u| u.id.require().map_err(Into::into))
 }
 
 async fn role_id_by_name(name: &str, pool: &crate::sql::Pool) -> Result<i64, TenancyError> {
@@ -450,5 +450,5 @@ async fn role_id_by_name(name: &str, pool: &crate::sql::Pool) -> Result<i64, Ten
     rows.into_iter()
         .next()
         .ok_or_else(|| TenancyError::Validation(format!("role `{name}` not found")))
-        .map(|r| r.id.get().copied().unwrap_or(0))
+        .and_then(|r| r.id.require().map_err(Into::into))
 }

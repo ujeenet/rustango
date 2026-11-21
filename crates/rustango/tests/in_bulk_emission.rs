@@ -51,7 +51,7 @@ fn in_bulk_emits_where_in_on_pg() {
         "PG: WHERE id = ANY(array): {}",
         stmt.sql
     );
-    assert_eq!(stmt.params.len(), 1);
+    assert_eq!(stmt.params().len(), 1);
 }
 
 #[cfg(feature = "mysql")]

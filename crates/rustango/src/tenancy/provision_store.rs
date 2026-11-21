@@ -27,6 +27,7 @@
 //! reading path that can forget it. The same goes for event messages,
 //! which carry connection diagnoses.
 
+use crate::core::TextEnum as _;
 use serde::Serialize;
 
 use crate::core::Column as _;
@@ -745,7 +746,7 @@ pub async fn open_operation_run(
     requested_by: Option<&str>,
 ) -> Result<ProvisioningRun, TenancyError> {
     let run = insert_operation_run(registry, kind, org, requested_by).await?;
-    let id = run.id.get().copied().unwrap_or_default();
+    let id = run.id.require()?;
     // Inserted first, then compared by id: of two racing opens the later one yields.
     let earlier: Vec<ProvisioningRun> = ProvisioningRun::objects()
         .where_(ProvisioningRun::org_id.eq(org.id.get().copied()))
@@ -761,7 +762,7 @@ pub async fn open_operation_run(
         if operation && !close_if_stale(registry, &other).await? {
             let why = RunText(format!(
                 "another purge or password change (run {}) is running for this tenant; wait for it",
-                other.id.get().copied().unwrap_or_default()
+                other.id.require()?
             ));
             finish_run_text(registry, id, RunState::Failed, Some(&why)).await?;
             return Err(TenancyError::Validation(why.0));
@@ -782,8 +783,8 @@ async fn insert_operation_run(
         slug: org.slug.clone(),
         org_id: org.id.get().copied(),
         state: RunState::Running.as_str().to_owned(),
-        storage_mode: org.storage_mode.clone(),
-        backend_kind: org.backend_kind.clone(),
+        storage_mode: org.storage_mode.as_str().to_owned(),
+        backend_kind: org.backend_kind.as_str().to_owned(),
         database_url: None,
         requested_by: requested_by.map(ToOwned::to_owned),
         idempotency_key: None,
@@ -913,7 +914,7 @@ pub(crate) async fn close_if_stale(
     if !is_stale(registry, run, STALE_RUN_AFTER).await? {
         return Ok(false);
     }
-    close_interrupted(registry, run.id.get().copied().unwrap_or_default()).await
+    close_interrupted(registry, run.id.require()?).await
 }
 
 /// Close every `running` run with no progress for `after` (see
@@ -932,7 +933,7 @@ pub async fn reap_stale_runs(
     let mut closed = 0;
     for run in running {
         if is_stale(registry, &run, after).await?
-            && close_interrupted(registry, run.id.get().copied().unwrap_or_default()).await?
+            && close_interrupted(registry, run.id.require()?).await?
         {
             closed += 1;
         }

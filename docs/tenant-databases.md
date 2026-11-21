@@ -160,6 +160,11 @@ login, registers the tenant, runs its migrations and activates it. A failure
 after the database exists drops what the run made. The tenant's URL holds the
 new login's password and is stored sealed.
 
+The tenant's `backend_kind` is the registry's backend, stored as `postgres`,
+`mysql` or `sqlite`. Older rows that say `pg`, `postgresql`, `mariadb` or
+`sqlite3` still read; `check-tenants` lists them and `repair-tenant` rewrites
+them.
+
 To give the tenant its first admin, fill in the admin email on the form
 (username optional; it defaults to the email), or on the CLI:
 

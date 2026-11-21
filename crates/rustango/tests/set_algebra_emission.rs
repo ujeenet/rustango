@@ -347,10 +347,10 @@ fn each_branch_contributes_its_own_params() {
         .unwrap();
     let stmt = Postgres.compile_select(&q).unwrap();
     assert_eq!(
-        stmt.params.len(),
+        stmt.params().len(),
         3,
         "three branches × one param each: {:?}",
-        stmt.params
+        stmt.params()
     );
     // PG placeholders $1, $2, $3 in textual order.
     assert!(stmt.sql.contains("$1") && stmt.sql.contains("$2") && stmt.sql.contains("$3"));

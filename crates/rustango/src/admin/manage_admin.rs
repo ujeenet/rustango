@@ -157,7 +157,7 @@ pub async fn create_admin_cmd<W: Write + Send>(
     user.save(pool)
         .await
         .map_err(|e| MigrateError::Validation(format!("insert failed: {e}")))?;
-    let user_id = user.id.get().copied().unwrap_or_default();
+    let user_id = user.id.require()?;
 
     writeln!(
         w,
@@ -313,7 +313,9 @@ pub async fn set_admin_active_cmd<W: Write + Send>(
         // Reactivating later must not revive a cookie minted before this.
         update = update.set_typed(AdminUser::sessions_revoked_at.set(Some(chrono::Utc::now())));
     }
-    update.execute_pool(pool).await?;
+    // The revocation commits on its own, whatever block the caller runs.
+    let on = pool.clone();
+    crate::sql::outside_atomic(async move { update.execute_pool(&on).await }).await?;
     let action = if active { "activate" } else { "deactivate" };
     audit_account(pool, &user, action).await?;
     writeln!(w, "{action}d `{username}`")?;

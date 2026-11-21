@@ -1002,7 +1002,7 @@ async fn sliced_in_bulk_past_the_bind_cap_is_refused(pool: &Pool) {
     ];
     for (what, qs) in sliced {
         let got = qs.in_bulk(Row::id, 0..70_000_i64, |r| r.id, pool).await;
-        if pool.dialect().name() == "postgres" {
+        if pool.dialect().kind() == rustango::sql::DialectKind::Postgres {
             got.unwrap_or_else(|e| panic!("{what}: one array bind on PG: {e}"));
             continue;
         }

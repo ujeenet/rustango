@@ -367,15 +367,7 @@ where
 
 impl<T, K> ForeignKey<T, K>
 where
-    T: Model
-        + crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + Send
-        + Unpin
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated,
+    T: Model + crate::sql::DecodeModel,
     K: Clone + Into<SqlValue> + Send + Sync + 'static,
 {
     /// Resolve the parent row on a [`crate::sql::SqlExecutor`] and cache
@@ -430,15 +422,7 @@ where
 /// can lazy-load FK targets without going through the PG-typed `get`.
 impl<T, K> ForeignKey<T, K>
 where
-    T: Model
-        + crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    T: Model + crate::sql::DecodeModel,
     K: Clone + Into<SqlValue> + Send + Sync + 'static,
 {
     /// Resolve the parent row and cache it on the field. Backend-

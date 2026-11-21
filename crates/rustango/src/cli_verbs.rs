@@ -67,6 +67,8 @@ pub(crate) const TENANCY_VERBS: &[&str] = &[
     "purge-tenant",
     "rotate-tenant-password",
     "list-tenants",
+    "check-tenants",
+    "repair-tenant",
     "edit-tenant",
     "reseal-tenant-secrets",
     "list-hosts",

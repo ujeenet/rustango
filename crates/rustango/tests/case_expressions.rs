@@ -51,7 +51,7 @@ fn pg_emits_standard_case_when_then_else_end() {
         stmt.sql
     );
     assert_eq!(
-        stmt.params,
+        stmt.params(),
         vec![
             SqlValue::String("draft".into()),
             SqlValue::String("Draft Title".into()),
@@ -106,7 +106,7 @@ fn multiple_when_branches_emit_in_chained_order() {
     let positions: Vec<_> = ["draft", "review", "published"]
         .iter()
         .map(|s| {
-            stmt.params
+            stmt.params()
                 .iter()
                 .position(|p| matches!(p, SqlValue::String(v) if v == s))
         })
@@ -115,7 +115,7 @@ fn multiple_when_branches_emit_in_chained_order() {
         positions,
         vec![Some(0), Some(2), Some(4)],
         "WHEN-value placeholders should appear in chain order: {:?}",
-        stmt.params
+        stmt.params()
     );
 }
 
@@ -263,7 +263,7 @@ fn then_branch_can_be_column_ref() {
     // Two params: the "draft" literal in the WHEN predicate, plus
     // the WHERE id=1 literal — but no params for the bare column
     // refs in the THEN/ELSE branches.
-    assert_eq!(stmt.params.len(), 2);
+    assert_eq!(stmt.params().len(), 2);
 }
 
 // ---------- UpdateBuilder::set_expr schema-validates column refs ----------

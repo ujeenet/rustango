@@ -122,6 +122,11 @@ Post::objects().where_(Post::deleted_at.is_null()).fetch(&pool).await?;
 Post::objects().where_(Post::published_at.between(start, end)).fetch(&pool).await?;
 ```
 
+Sur un champ enum (`text_enum`, voir [modèles](models.md#champs-enum-stockés-en-texte)),
+un filtre prend l'enum, pas une chaîne : `Post::stage.eq(Stage::Live)`,
+`Post::stage.is_in([Stage::Draft, Stage::Live])`. Il lie le nom stocké.
+`pluck::<Stage>("stage")` lit aussi l'enum.
+
 ### Tri des résultats
 
 Trie les lignes selon une ou plusieurs colonnes, selon une expression, ou avec un contrôle explicite de l'emplacement des NULL. Au-delà du `.order_by(&[("col", desc)])` de base, vous disposez de trois dimensions supplémentaires :
@@ -1211,7 +1216,7 @@ HAVING COUNT(*) FILTER (WHERE "status" = $2) > $3
               -- "published" bound twice (once at $1, once at $2)
 ```
 
-La sémantique SQL est inchangée (les mêmes comptages de lignes reviennent), mais `stmt.params.len()` croît à chaque appel `.filter()` qui cible un alias non trivial. Pour les alias `COUNT(*)` (sans littéraux internes), le gonflement est nul. Documentez-le si votre suite de tests verrouille le nombre de paramètres.
+La sémantique SQL est inchangée (les mêmes comptages de lignes reviennent), mais `stmt.params().len()` croît à chaque appel `.filter()` qui cible un alias non trivial. Pour les alias `COUNT(*)` (sans littéraux internes), le gonflement est nul. Documentez-le si votre suite de tests verrouille le nombre de paramètres.
 
 ---
 
