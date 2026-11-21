@@ -148,7 +148,7 @@ untouched.
 
 ---
 
-## Unreleased
+## 0.69.0
 
 - A ViewSet update that moves its row out of a queryset scope or the "view" hook now answers 403 and writes nothing, where it answered 204. Template `CreateView` and `UpdateView` do the same, and `CreateView` runs your "add" hook.
 - A model with a hand-written `ModelEntry` audited only on a pool can no longer be edited through `UpdateView`, or through a ViewSet when it has queryset scopes or hooks: the write needs an in-transaction audit.

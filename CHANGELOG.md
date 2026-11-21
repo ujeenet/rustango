@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.69.0] — 2026-11-21
+
 ### Changed
 
 - **Breaking:** a ViewSet PUT or PATCH whose row would leave a queryset scope or be hidden by the "view" hook is refused with 403 and rolled back; it used to answer 204.
