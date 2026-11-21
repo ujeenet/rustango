@@ -127,7 +127,7 @@ async fn tenant_at(prefixed: bool) -> Tenant {
     .expect("save favicon");
     let tenant_url = format!("sqlite://{}?mode=rwc", tmp.path().join("t.db").display());
     let mut org = Org::new(slug.clone());
-    org.backend_kind = "sqlite".into();
+    org.backend_kind = rustango::tenancy::BackendKind::Sqlite;
     org.database_url = Some(tenant_url);
     org.host_pattern = (!prefixed).then(|| format!("{slug}.localhost"));
     org.path_prefix = prefixed.then(|| format!("/{slug}"));

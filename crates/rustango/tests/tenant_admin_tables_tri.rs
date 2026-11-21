@@ -177,7 +177,7 @@ async fn database_mode_tenant_admin(backend: Backend) {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = "t1".into();
         o.display_name = "t1".into();
-        o.backend_kind = backend.kind().into();
+        o.backend_kind = backend.kind().parse().unwrap();
         o.database_url = Some(tenant_url);
     });
     org.insert(&registry).await.unwrap();
@@ -404,8 +404,8 @@ async fn schema_mode_tenant_admin() {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = "t1".into();
         o.display_name = "t1".into();
-        o.storage_mode = rustango::tenancy::StorageMode::Schema.as_str().into();
-        o.backend_kind = "postgres".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Schema;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.schema_name = Some("t1".into());
         o.database_url = None;
     });
@@ -459,8 +459,8 @@ async fn schema_mode_passkeys_stay_per_tenant() {
         let mut org = rustango::testkit::org_with(|o| {
             o.slug = slug.into();
             o.display_name = slug.into();
-            o.storage_mode = rustango::tenancy::StorageMode::Schema.as_str().into();
-            o.backend_kind = "postgres".into();
+            o.storage_mode = rustango::tenancy::StorageMode::Schema;
+            o.backend_kind = rustango::tenancy::BackendKind::Postgres;
             o.schema_name = Some(slug.into());
             o.database_url = None;
         });

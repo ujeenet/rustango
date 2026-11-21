@@ -7,10 +7,7 @@
 use super::{run_on, ExecError, RowRef, SqlExecutor};
 use crate::core::{AggregateQuery, SelectQuery, SqlValue};
 use crate::sql::Pool;
-use crate::sql::{
-    MaybeMyFromRow, MaybeMyLoadRelated, MaybePgFromRow, MaybeSqliteFromRow, MaybeSqliteLoadRelated,
-    UpdaterPool as _,
-};
+use crate::sql::{DecodeModel, UpdaterPool as _};
 
 use super::decode::{RowReader, TypedCol};
 use crate::core::joins::joined_key;
@@ -447,6 +444,34 @@ impl FlatScalar for Option<uuid::Uuid> {
     type Cell = UuidCell;
     fn from_cell(cell: UuidCell) -> Self {
         Some(cell.0)
+    }
+    fn from_null(_: &str) -> Result<Self, sqlx::Error> {
+        Ok(None)
+    }
+}
+
+// A `TextEnum` decodes through its own sqlx impls, which the derive emits.
+impl<E: crate::core::TextEnum> flat_sealed::Sealed for E {}
+impl<E: crate::core::TextEnum> flat_sealed::Sealed for Option<E> {}
+impl<E> FlatScalar for E
+where
+    E: crate::core::TextEnum + MaybePgScalar + MaybeMyScalar + MaybeSqliteScalar,
+{
+    type Cell = E;
+    fn from_cell(cell: E) -> Self {
+        cell
+    }
+    fn from_null(column: &str) -> Result<Self, sqlx::Error> {
+        Err(unexpected_null(column))
+    }
+}
+impl<E> FlatScalar for Option<E>
+where
+    E: crate::core::TextEnum + MaybePgScalar + MaybeMyScalar + MaybeSqliteScalar,
+{
+    type Cell = E;
+    fn from_cell(cell: E) -> Self {
+        Some(cell)
     }
     fn from_null(_: &str) -> Result<Self, sqlx::Error> {
         Ok(None)
@@ -940,15 +965,7 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
         pool: &Pool,
     ) -> Result<(Vec<T>, i64), ExecError>
     where
-        T: crate::core::Model
-            + crate::sql::MaybePgFromRow
-            + crate::sql::MaybeMyFromRow
-            + crate::sql::MaybeSqliteFromRow
-            + crate::sql::LoadRelated
-            + crate::sql::MaybeMyLoadRelated
-            + crate::sql::MaybeSqliteLoadRelated
-            + Send
-            + Unpin,
+        T: crate::core::Model + crate::sql::DecodeModel,
     {
         use crate::sql::{CounterPool as _, FetcherPool as _};
         let total = <crate::query::QuerySet<T> as ::core::clone::Clone>::clone(&self)
@@ -1055,15 +1072,7 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
 
 impl<T> crate::query::QuerySet<T>
 where
-    T: crate::core::Model
-        + Send
-        + Unpin
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated,
+    T: crate::core::Model + DecodeModel,
 {
     /// `UPDATE … SET col = col + by` over the matching rows.
     /// Returns the number of rows affected. Unlike

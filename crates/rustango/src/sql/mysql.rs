@@ -13,12 +13,14 @@ use crate::core::{
     FieldSchema, FieldType, InsertQuery, ModelSchema, SelectQuery, UpdateQuery,
 };
 
+use super::dialect::datetime_bucket_mask;
 use super::server::{AdminRight, Collation, DatabaseName, Login, LoginPassword, ServerAccount};
 use super::writers::{
     write_aggregate, write_bulk_insert, write_count, write_delete, write_insert, write_select,
     write_update, Sql,
 };
-use super::{CompiledStatement, Dialect, SqlError, TableTarget};
+use super::{CompiledStatement, Dialect, DialectKind, SqlError, TableTarget};
+use crate::query::{DateKind, DateTimeKind};
 
 /// The insert id a skipped `DoNothing` insert reports. No auto-increment
 /// column reaches it: a signed BIGINT stops at 2^63 - 1.
@@ -111,8 +113,8 @@ impl MySql {
 impl super::dialect::sealed::Sealed for MySql {}
 
 impl Dialect for MySql {
-    fn name(&self) -> &'static str {
-        "mysql"
+    fn kind(&self) -> DialectKind {
+        DialectKind::Mysql
     }
 
     fn binds_pg_only_values(&self) -> bool {
@@ -132,6 +134,20 @@ impl Dialect for MySql {
     /// MySQL spells the random function `RAND()`.
     fn random_fn(&self) -> &'static str {
         "RAND"
+    }
+
+    fn date_bucket_sql(&self, kind: DateKind, col: &str) -> String {
+        match kind {
+            DateKind::Year => format!("DATE(DATE_FORMAT({col}, '%Y-01-01'))"),
+            DateKind::Month => format!("DATE(DATE_FORMAT({col}, '%Y-%m-01'))"),
+            DateKind::Day => format!("DATE({col})"),
+        }
+    }
+
+    /// CAST back so the decoder sees a DATETIME.
+    fn datetime_bucket_sql(&self, kind: DateTimeKind, col: &str, _utc: bool) -> String {
+        let fmt = datetime_bucket_mask(kind, "%i", "%s");
+        format!("CAST(DATE_FORMAT({col}, '{fmt}') AS DATETIME)")
     }
 
     /// MySQL rejects an `OFFSET` with no `LIMIT`, so pair it with
@@ -199,11 +215,11 @@ impl Dialect for MySql {
     }
 
     fn collation_exists_sql(&self, collation: &Collation) -> Option<CompiledStatement> {
-        Some(CompiledStatement {
-            sql: "SELECT count(*) FROM information_schema.COLLATIONS WHERE COLLATION_NAME = ?"
+        Some(CompiledStatement::with_text(
+            "SELECT count(*) FROM information_schema.COLLATIONS WHERE COLLATION_NAME = ?"
                 .to_owned(),
-            params: vec![crate::core::SqlValue::String(collation.as_str().to_owned())],
-        })
+            [collation.as_str().to_owned()],
+        ))
     }
 
     /// `retain_current` needs MySQL 8.0.14+; MariaDB has no dual passwords.
@@ -233,22 +249,18 @@ impl Dialect for MySql {
     }
 
     fn database_exists_sql(&self, db: &DatabaseName) -> Option<CompiledStatement> {
-        Some(CompiledStatement {
-            sql: "SELECT count(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?"
-                .to_owned(),
-            params: vec![crate::core::SqlValue::String(db.as_str().to_owned())],
-        })
+        Some(CompiledStatement::with_text(
+            "SELECT count(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?".to_owned(),
+            [db.as_str().to_owned()],
+        ))
     }
 
     /// Needs SELECT on `mysql.user`; callers treat a refusal as unknown.
     fn login_exists_sql(&self, login: &Login) -> Option<CompiledStatement> {
-        Some(CompiledStatement {
-            sql: "SELECT count(*) FROM mysql.user WHERE User = ? AND Host = ?".to_owned(),
-            params: vec![
-                crate::core::SqlValue::String(login.name().as_str().to_owned()),
-                crate::core::SqlValue::String(login.host().to_owned()),
-            ],
-        })
+        Some(CompiledStatement::with_text(
+            "SELECT count(*) FROM mysql.user WHERE User = ? AND Host = ?".to_owned(),
+            [login.name().as_str().to_owned(), login.host().to_owned()],
+        ))
     }
 
     /// `DatabaseName` holds no `_` or `%`, the wildcards of `db.*`.
@@ -273,18 +285,18 @@ impl Dialect for MySql {
         };
         let (name, params) = match db {
             Some(db) => {
-                let v = crate::core::SqlValue::String(db.to_owned());
+                let v = db.to_owned();
                 ("?", vec![v.clone(), v])
             }
             None => ("DATABASE()", Vec::new()),
         };
-        Some(CompiledStatement {
-            sql: format!(
+        Some(CompiledStatement::with_text(
+            format!(
                 "SELECT CAST({key} AS CHAR), \
                  CAST(IF(@@lower_case_table_names = 0, {name}, LOWER({name})) AS CHAR)"
             ),
             params,
-        })
+        ))
     }
 
     /// Rows of (`PRIVILEGE_TYPE`, `IS_GRANTABLE`): the current account's
@@ -528,15 +540,15 @@ impl Dialect for MySql {
     // None where `cs_text_type` gets no collation (MariaDB before 10.10),
     // or every run would restate the column.
     fn ci_columns_sql(&self, table: &str) -> Option<CompiledStatement> {
-        Some(CompiledStatement {
-            sql: "SELECT CAST(COLUMN_NAME AS CHAR) FROM information_schema.COLUMNS \
+        Some(CompiledStatement::with_text(
+            "SELECT CAST(COLUMN_NAME AS CHAR) FROM information_schema.COLUMNS \
                   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? \
                   AND RIGHT(COLLATION_NAME, 3) = '_ci' \
                   AND EXISTS (SELECT 1 FROM information_schema.COLLATIONS WHERE COLLATION_NAME \
                   IN ('utf8mb4_0900_as_cs', 'utf8mb4_uca1400_as_cs'))"
                 .to_owned(),
-            params: vec![crate::core::SqlValue::String(table.to_owned())],
-        })
+            [table.to_owned()],
+        ))
     }
 
     // Columns inherit it, and a `_ci` one makes `=` and `unique` ignore
@@ -1841,7 +1853,7 @@ mod tests {
             stmt.sql,
             "SELECT `name` FROM `users` WHERE LOWER(`name`) LIKE LOWER(?)"
         );
-        assert_eq!(stmt.params.len(), 1);
+        assert_eq!(stmt.params().len(), 1);
     }
 
     #[test]
@@ -2063,7 +2075,7 @@ mod tests {
         assert!(stmt
             .sql
             .contains("JSON_CONTAINS_PATH(`meta`, 'one', CONCAT('$.', JSON_QUOTE(?)), CONCAT('$.', JSON_QUOTE(?)))"));
-        assert_eq!(stmt.params.len(), 2);
+        assert_eq!(stmt.params().len(), 2);
     }
 
     #[test]
@@ -2131,7 +2143,7 @@ mod tests {
         assert!(stmt.sql.contains(") AS __data(`id`, `name`)"));
         assert!(stmt.sql.contains("ON `users`.`id` = __data.`id`"));
         assert!(stmt.sql.contains("SET `users`.`name` = __data.`name`"));
-        assert_eq!(stmt.params.len(), 4);
+        assert_eq!(stmt.params().len(), 4);
     }
 
     /// Copy `model` with `pk_col` marked as the primary key, `auto`
@@ -2198,7 +2210,7 @@ mod tests {
             stmt.sql,
             "SELECT `id`, `name` FROM `users` WHERE `name` = ?"
         );
-        assert_eq!(stmt.params.len(), 1);
+        assert_eq!(stmt.params().len(), 1);
     }
 
     #[test]

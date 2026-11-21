@@ -230,8 +230,8 @@ fn regex_binds_pattern_as_single_string_param() {
         .compile()
         .unwrap();
     let stmt = Postgres.compile_select(&q).unwrap();
-    assert_eq!(stmt.params.len(), 1, "one param");
-    match &stmt.params[0] {
+    assert_eq!(stmt.params().len(), 1, "one param");
+    match &stmt.params()[0] {
         rustango::core::SqlValue::String(s) => assert_eq!(s, "^test$"),
         other => panic!("expected SqlValue::String, got {other:?}"),
     }

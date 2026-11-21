@@ -33,7 +33,7 @@ fn bare_field_is_exact_eq() {
         "bare field → Eq: {}",
         stmt.sql
     );
-    assert_eq!(stmt.params, vec![SqlValue::String("draft".into())]);
+    assert_eq!(stmt.params(), vec![SqlValue::String("draft".into())]);
 }
 
 #[test]
@@ -75,7 +75,7 @@ fn contains_wraps_value_in_percent() {
         "got: {}",
         stmt.sql
     );
-    assert_eq!(stmt.params, vec![SqlValue::String("%rust%".into())]);
+    assert_eq!(stmt.params(), vec![SqlValue::String("%rust%".into())]);
 }
 
 #[test]
@@ -87,7 +87,7 @@ fn icontains_uses_ilike_with_percent_wrap() {
         "got: {}",
         stmt.sql
     );
-    assert_eq!(stmt.params, vec![SqlValue::String("%rust%".into())]);
+    assert_eq!(stmt.params(), vec![SqlValue::String("%rust%".into())]);
 }
 
 #[test]
@@ -95,7 +95,7 @@ fn startswith_wraps_value_with_trailing_percent_only() {
     let qs = Post::objects().filter("title__startswith", "Hello");
     let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
     assert!(stmt.sql.contains(r#""title" LIKE $1 ESCAPE '!'"#));
-    assert_eq!(stmt.params, vec![SqlValue::String("Hello%".into())]);
+    assert_eq!(stmt.params(), vec![SqlValue::String("Hello%".into())]);
 }
 
 #[test]
@@ -104,7 +104,7 @@ fn endswith_wraps_value_with_leading_percent_only() {
     let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
     assert!(stmt.sql.contains(r#""title" LIKE $1 ESCAPE '!'"#));
     // "!" is the escape char, so it is doubled: %!! matches a literal "!".
-    assert_eq!(stmt.params, vec![SqlValue::String("%!!".into())]);
+    assert_eq!(stmt.params(), vec![SqlValue::String("%!!".into())]);
 }
 
 #[test]
@@ -113,7 +113,7 @@ fn iexact_uses_ilike_without_wildcards() {
     let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
     assert!(stmt.sql.contains(r#""title" ILIKE $1"#));
     // No wildcard wrapping for iexact — exact case-insensitive match.
-    assert_eq!(stmt.params, vec![SqlValue::String("Hello World".into())]);
+    assert_eq!(stmt.params(), vec![SqlValue::String("Hello World".into())]);
 }
 
 #[test]
@@ -124,7 +124,7 @@ fn istartswith_iendswith_use_ilike() {
     let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
     assert!(stmt.sql.contains("ILIKE"));
     assert_eq!(
-        stmt.params,
+        stmt.params(),
         vec![
             SqlValue::String("Hello%".into()),
             SqlValue::String("%!!".into()),
@@ -161,7 +161,7 @@ fn contains_escapes_wildcards_in_user_value() {
         stmt.sql
     );
     // 50 !% (escaped %) !_ (escaped _) x, wrapped in unescaped %…%.
-    assert_eq!(stmt.params, vec![SqlValue::String("%50!%!_x%".into())]);
+    assert_eq!(stmt.params(), vec![SqlValue::String("%50!%!_x%".into())]);
 }
 
 #[test]
@@ -182,10 +182,10 @@ fn escaped_like_emits_escape_clause_on_every_dialect() {
     );
     // SQLite's LIKE ignores case, so the same pattern runs as a GLOB.
     assert!(sq.sql.contains("GLOB ?"), "sqlite: {}", sq.sql);
-    assert_eq!(sq.params, vec![SqlValue::String("*a%b*".into())]);
+    assert_eq!(sq.params(), vec![SqlValue::String("*a%b*".into())]);
     // PG and MySQL escape the value identically.
     for stmt in [&pg, &my] {
-        assert_eq!(stmt.params, vec![SqlValue::String("%a!%b%".into())]);
+        assert_eq!(stmt.params(), vec![SqlValue::String("%a!%b%".into())]);
     }
 }
 
@@ -209,7 +209,7 @@ fn icontains_escape_clause_survives_the_ilike_fallback() {
         sq.sql
     );
     for stmt in [&my, &sq] {
-        assert_eq!(stmt.params, vec![SqlValue::String("%x!_y%".into())]);
+        assert_eq!(stmt.params(), vec![SqlValue::String("%x!_y%".into())]);
     }
 }
 
@@ -225,7 +225,7 @@ fn iexact_escapes_wildcards_as_literal_equality() {
         "{}",
         stmt.sql
     );
-    assert_eq!(stmt.params, vec![SqlValue::String("50!%".into())]);
+    assert_eq!(stmt.params(), vec![SqlValue::String("50!%".into())]);
 }
 
 #[test]
@@ -236,8 +236,8 @@ fn q_builder_contains_escapes_wildcards() {
         QuerySet::default().where_(Q::icontains("title", "a%b") | Q::contains("status", "x_y"));
     let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
     assert!(stmt.sql.contains("ESCAPE '!'"), "{}", stmt.sql);
-    assert!(stmt.params.contains(&SqlValue::String("%a!%b%".into())));
-    assert!(stmt.params.contains(&SqlValue::String("%x!_y%".into())));
+    assert!(stmt.params().contains(&SqlValue::String("%a!%b%".into())));
+    assert!(stmt.params().contains(&SqlValue::String("%x!_y%".into())));
 }
 
 #[test]
@@ -252,7 +252,7 @@ fn raw_like_lookup_is_not_escaped() {
         "raw like must NOT add ESCAPE: {}",
         stmt.sql
     );
-    assert_eq!(stmt.params, vec![SqlValue::String("%foo_bar%".into())]);
+    assert_eq!(stmt.params(), vec![SqlValue::String("%foo_bar%".into())]);
 }
 
 // ---------- __in / __isnull / __between ----------
@@ -370,7 +370,7 @@ fn like_passes_pattern_verbatim() {
     let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
     assert!(stmt.sql.contains(r#""title" LIKE $1"#), "got: {}", stmt.sql);
     assert_eq!(
-        stmt.params,
+        stmt.params(),
         vec![SqlValue::String("ru%t".into())],
         "pattern should NOT be auto-wrapped"
     );
@@ -385,7 +385,7 @@ fn ilike_passes_pattern_verbatim() {
         "got: {}",
         stmt.sql
     );
-    assert_eq!(stmt.params, vec![SqlValue::String("Ru%t".into())]);
+    assert_eq!(stmt.params(), vec![SqlValue::String("Ru%t".into())]);
 }
 
 #[test]

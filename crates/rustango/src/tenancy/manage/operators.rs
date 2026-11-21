@@ -144,7 +144,7 @@ where
     let op = ops::by_username(&registry, &username)
         .await
         .map_err(explain)?;
-    let id = op.id.get().copied().unwrap_or_default();
+    let id = op.id.require()?;
     operator_totp::ensure_table(&registry).await?;
     if operator_totp::reset(&registry, &op).await? == 0 {
         writeln!(

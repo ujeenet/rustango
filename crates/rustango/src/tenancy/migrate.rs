@@ -67,6 +67,19 @@ pub struct TenantMigrationReport {
 }
 
 impl TenantMigrationReport {
+    /// A report that starts with one failed outcome per row the sweep could not read.
+    fn unreadable(rows: Vec<super::org::BadOrgRow>) -> Self {
+        let tenants = rows
+            .into_iter()
+            .map(|row| TenantMigrationOutcome {
+                slug: row.slug.clone(),
+                applied: Vec::new(),
+                error: Some(row.into()),
+            })
+            .collect();
+        Self { tenants }
+    }
+
     /// `true` when every tenant migrated cleanly.
     #[must_use]
     pub fn all_ok(&self) -> bool {
@@ -491,10 +504,11 @@ async fn migrate_tenants_opts(
         .map(|m| m.len())
         .unwrap_or(0);
 
-    let orgs: Vec<Org> = Org::objects()
-        .where_(Org::active.eq(true))
-        .fetch_on(pools.registry())
-        .await?;
+    let (orgs, unreadable) = Org::fetch_reporting(
+        Org::objects().where_(Org::active.eq(true)),
+        &pools.registry_pool(),
+    )
+    .await?;
 
     info!(
         target: "rustango::tenancy",
@@ -522,7 +536,7 @@ async fn migrate_tenants_opts(
         observer.on_event(TenantMigrationEvent::Planned { tenants: total });
     }
 
-    let mut report = TenantMigrationReport::default();
+    let mut report = TenantMigrationReport::unreadable(unreadable);
     for (i, org) in orgs.iter().enumerate() {
         let index = i + 1;
         if let Some(observer) = observer {
@@ -661,10 +675,7 @@ where
     // how to build a `search_path`-scoped pool for it. Route the same
     // way the batch does.
     #[cfg(feature = "postgres")]
-    if matches!(
-        StorageMode::parse(&org.storage_mode),
-        Ok(StorageMode::Schema)
-    ) {
+    if org.storage_mode == StorageMode::Schema {
         let pg_pools = (pools as &dyn std::any::Any)
             .downcast_ref::<TenantPools<sqlx::Postgres>>()
             .ok_or_else(|| {
@@ -689,15 +700,12 @@ async fn migrate_tenants_db_opts<DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    use crate::sql::FetcherPool as _;
     let project = ScopedProject::of(dir, MigrationScope::Tenant).await?;
     let chain = project.system_chain(crate::core::ModelScope::Tenant)?;
 
     let registry_pool = pools.registry_pool();
-    let orgs: Vec<Org> = Org::objects()
-        .where_(Org::active.eq(true))
-        .fetch(&registry_pool)
-        .await?;
+    let (orgs, unreadable) =
+        Org::fetch_reporting(Org::objects().where_(Org::active.eq(true)), &registry_pool).await?;
 
     info!(
         target: "rustango::tenancy",
@@ -711,7 +719,7 @@ where
         observer.on_event(TenantMigrationEvent::Planned { tenants: total });
     }
 
-    let mut report = TenantMigrationReport::default();
+    let mut report = TenantMigrationReport::unreadable(unreadable);
     for (i, org) in orgs.iter().enumerate() {
         let index = i + 1;
         if let Some(observer) = observer {
@@ -771,12 +779,7 @@ async fn run_for_one_tenant_db<DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    let mode = StorageMode::parse(&org.storage_mode).map_err(|got| {
-        TenancyError::Validation(format!(
-            "org `{}` has unknown storage_mode `{got}`",
-            org.slug
-        ))
-    })?;
+    let mode = org.storage_mode;
     if !matches!(mode, StorageMode::Database) {
         return Err(TenancyError::Validation(format!(
             "org `{}` is schema-mode but migrate_tenants_db only handles \
@@ -974,12 +977,7 @@ async fn run_for_one_tenant(
         .as_ref()
         .map(|o| o as &dyn crate::migrate::MigrationObserver);
     let project_progress = chain_observer(observer, &org.slug, Chain::Project);
-    let mode = StorageMode::parse(&org.storage_mode).map_err(|got| {
-        TenancyError::Validation(format!(
-            "org `{}` has unknown storage_mode `{got}`",
-            org.slug
-        ))
-    })?;
+    let mode = org.storage_mode;
     match mode {
         StorageMode::Schema => {
             let schema = org.effective_schema().to_owned();

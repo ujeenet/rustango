@@ -43,8 +43,8 @@ async fn seed_org(
         o.id = Auto::default();
         o.slug = slug.into();
         o.display_name = slug.to_uppercase();
-        o.storage_mode = mode.as_str().into();
-        o.backend_kind = "postgres".to_owned();
+        o.storage_mode = mode;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = database_url.map(str::to_owned);
         o.schema_name = schema_name.map(str::to_owned);
         o.host_pattern = Some(format!("{slug}.app.test"));
@@ -837,8 +837,8 @@ fn tenant_parts(pools: std::sync::Arc<TenantPools>, org: Org) -> axum::http::req
 fn schema_org(schema: &str) -> Org {
     rustango::testkit::org_with(|o| {
         o.slug = schema.into();
-        o.storage_mode = StorageMode::Schema.as_str().into();
-        o.backend_kind = "postgres".to_owned();
+        o.storage_mode = StorageMode::Schema;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.schema_name = Some(schema.to_owned());
     })
 }
@@ -960,8 +960,8 @@ async fn database_mode_tenants_using_pool_do_not_starve_it() {
     let pools = Arc::new(TenantPools::new(registry).config(cfg));
     let org = rustango::testkit::org_with(|o| {
         o.slug = "dbm_tp_many".into();
-        o.storage_mode = StorageMode::Database.as_str().into();
-        o.backend_kind = "postgres".to_owned();
+        o.storage_mode = StorageMode::Database;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = Some(url);
     });
     let barrier = Arc::new(tokio::sync::Barrier::new(n));

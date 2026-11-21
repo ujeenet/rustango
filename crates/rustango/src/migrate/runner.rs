@@ -397,7 +397,7 @@ pub async fn apply_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError>
 pub async fn drop_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError> {
     let dialect = pool.dialect();
     // Cascade only emitted for PG — MySQL parses it as syntax error.
-    let cascade = dialect.name() == "postgres";
+    let cascade = dialect.kind() == crate::sql::DialectKind::Postgres;
     let models = bootstrap_models();
     // Phase 1 — drop FK constraints, so table drop order can't matter.
     // The mirror of `apply_all`'s two-phase create. Without it MySQL, which

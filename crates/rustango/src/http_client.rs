@@ -388,10 +388,9 @@ impl RequestBuilder {
     }
 }
 
+/// A safe method is safe to repeat.
 fn is_method_idempotent(m: &Method) -> bool {
-    // QUERY (RFC 10008) is safe to repeat, like GET. Matched by name so this
-    // does not depend on the `admin`-gated `http_query` module.
-    matches!(*m, Method::GET | Method::HEAD | Method::OPTIONS) || m.as_str() == "QUERY"
+    crate::urls::is_safe_method(m.as_str())
 }
 
 fn is_status_retryable(s: StatusCode) -> bool {

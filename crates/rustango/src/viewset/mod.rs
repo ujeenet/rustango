@@ -368,14 +368,7 @@ struct Bridge<S>(PhantomData<S>);
 impl<S> SerializerBridge for Bridge<S>
 where
     S: crate::serializer::ModelSerializer + Send + Sync + 'static,
-    S::Model: crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    S::Model: crate::sql::DecodeModel,
 {
     fn render_rows<'a>(
         &'a self,
@@ -842,14 +835,7 @@ impl ViewSet {
     pub fn serializer<S>(mut self) -> Self
     where
         S: crate::serializer::ModelSerializer + Send + Sync + 'static,
-        S::Model: crate::sql::MaybePgFromRow
-            + crate::sql::MaybeMyFromRow
-            + crate::sql::MaybeSqliteFromRow
-            + crate::sql::LoadRelated
-            + crate::sql::MaybeMyLoadRelated
-            + crate::sql::MaybeSqliteLoadRelated
-            + Send
-            + Unpin,
+        S::Model: crate::sql::DecodeModel,
     {
         self.serializer = Some(Arc::new(Bridge::<S>(PhantomData)));
         self
@@ -1555,14 +1541,7 @@ impl AcquiredConn {
         q: &SelectQuery,
     ) -> Result<Vec<T>, crate::sql::ExecError>
     where
-        T: crate::sql::MaybePgFromRow
-            + crate::sql::MaybeMyFromRow
-            + crate::sql::MaybeSqliteFromRow
-            + crate::sql::LoadRelated
-            + crate::sql::MaybeMyLoadRelated
-            + crate::sql::MaybeSqliteLoadRelated
-            + Send
-            + Unpin,
+        T: crate::sql::DecodeModel,
     {
         crate::sql::select_rows_pool_with_related::<T>(&self.pool, q).await
     }
@@ -1821,10 +1800,23 @@ fn json_response(body: Value) -> Response {
     json_with_status(StatusCode::OK, body)
 }
 
+/// A list envelope: `head` plus `results`, moved in rather than copied as `json!` would.
+fn page_response(mut head: Value, results: Vec<Value>) -> Response {
+    head["results"] = Value::Array(results);
+    json_response(head)
+}
+
 /// An [`ApiError`](crate::api_errors::ApiError) body; a 5xx message is
 /// logged rather than sent.
 fn json_error(status: StatusCode, msg: &str) -> Response {
-    crate::api_errors::ApiError::logged(status, "viewset", msg).into_response()
+    let mut resp = crate::api_errors::ApiError::logged(status, "viewset", msg).into_response();
+    if status == StatusCode::SERVICE_UNAVAILABLE {
+        resp.headers_mut().insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from_static("1"),
+        );
+    }
+    resp
 }
 
 /// A 500 whose cause is logged under `context`, not sent.
@@ -3041,13 +3033,15 @@ async fn run_list(
             } else {
                 (None, None)
             };
-            json_response(json!({
-                "count": count,
-                "page": page,
-                "page_size": page_size,
-                "last_page": last_page,
-                "results": results,
-            }))
+            page_response(
+                json!({
+                    "count": count,
+                    "page": page,
+                    "page_size": page_size,
+                    "last_page": last_page,
+                }),
+                results,
+            )
         }
         PaginationStyle::Cursor {
             field: cursor_field,
@@ -3110,12 +3104,14 @@ async fn run_list(
             } else {
                 None
             };
-            json_response(json!({
-                "count": count,
-                "limit": limit,
-                "offset": offset,
-                "results": results,
-            }))
+            page_response(
+                json!({
+                    "count": count,
+                    "limit": limit,
+                    "offset": offset,
+                }),
+                results,
+            )
         }
     }
 }
@@ -3372,14 +3368,11 @@ async fn handle_list_cursor(
         limit: Some(page_size + 1),
         ..SelectQuery::new(state.vs.schema)
     };
-    let rows = or_500!(render_list(state, acq, &select_q, &fields).await);
+    let mut rows = or_500!(render_list(state, acq, &select_q, &fields).await);
 
     let has_more = rows.len() as i64 > page_size;
-    let page_rows: &[Value] = if has_more {
-        &rows[..page_size as usize]
-    } else {
-        &rows[..]
-    };
+    rows.truncate(usize::try_from(page_size).unwrap_or(usize::MAX));
+    let page_rows: &[Value] = &rows;
 
     let next_cursor = if has_more {
         // Read the cursor field value from the last JSON row.
@@ -3449,12 +3442,13 @@ async fn handle_list_cursor(
         None
     };
 
-    let results: Vec<Value> = page_rows.to_vec();
-    json_response(json!({
-        "page_size": page_size,
-        "next": next_cursor,
-        "results": results,
-    }))
+    page_response(
+        json!({
+            "page_size": page_size,
+            "next": next_cursor,
+        }),
+        rows,
+    )
 }
 
 /// `col > v OR (col = v AND pk > pk_v)` (`<` when descending): strictly
@@ -3578,11 +3572,13 @@ async fn cursor_page_admitted(
             pk.as_deref(),
         ))
     });
-    json_response(json!({
-        "page_size": page_size,
-        "next": next,
-        "results": results,
-    }))
+    page_response(
+        json!({
+            "page_size": page_size,
+            "next": next,
+        }),
+        results,
+    )
 }
 
 /// Can this column be a cursor?
@@ -4249,10 +4245,18 @@ async fn update_claimed(
     }
 }
 
-/// A failed INSERT/UPDATE: a duplicate key is a `409`, any other database
-/// rejection a `400`, driver text withheld; anything else (an audit write) is a logged `500`.
+/// A failed INSERT/UPDATE: a lost conflict (deadlock, lock timeout,
+/// serialization failure, `SQLITE_BUSY`) is a `503`, a duplicate key a `409`,
+/// any other database rejection a `400`, driver text withheld; anything else
+/// (an audit write) is a logged `500`.
 /// Field rules are checked before the write, by `WriteSet::check`.
 fn write_failure(context: &str, e: &crate::sql::ExecError) -> (StatusCode, String) {
+    if e.is_transient() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "conflict, try again".to_owned(),
+        );
+    }
     let client_caused = matches!(e, crate::sql::ExecError::Driver(sqlx::Error::Database(_)));
     let body = crate::error::client_error_body(context, e, client_caused);
     let status = if e.is_unique_violation() {
@@ -5260,6 +5264,17 @@ mod envelope_tests {
     async fn body(r: axum::response::Response) -> serde_json::Value {
         let b = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
         serde_json::from_slice(&b).unwrap()
+    }
+
+    /// A write that lost a conflict a retry can win is a 503 with
+    /// `Retry-After`, not a 400.
+    #[test]
+    fn a_lost_conflict_is_a_503() {
+        let e = crate::sql::ExecError::Driver(sqlx::Error::PoolTimedOut);
+        let (status, msg) = super::write_failure("t", &e);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let resp = json_error(status, &msg);
+        assert_eq!(resp.headers()[axum::http::header::RETRY_AFTER], "1");
     }
 
     #[tokio::test]

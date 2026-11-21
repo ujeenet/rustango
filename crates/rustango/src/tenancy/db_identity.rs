@@ -115,10 +115,9 @@ impl DbIdentity {
         let Some(stmt) = d.database_identity_sql(&version, db) else {
             return Ok(None);
         };
-        let rows: Vec<(String, Option<String>)> =
-            crate::sql::raw_query_pool(&stmt.sql, stmt.params, pool)
-                .await
-                .map_err(|e| e.to_string())?;
+        let rows: Vec<(String, Option<String>)> = crate::sql::raw_query_stmt(stmt, pool)
+            .await
+            .map_err(|e| e.to_string())?;
         let (key, database) = rows
             .into_iter()
             .next()

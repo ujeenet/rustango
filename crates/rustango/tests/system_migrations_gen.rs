@@ -308,8 +308,8 @@ fn sqlite_org(dir: &std::path::Path, slug: &str) -> rustango::tenancy::Org {
     let mut o = rustango::testkit::org();
     o.slug = slug.to_owned();
     o.display_name = slug.to_owned();
-    o.storage_mode = "database".into();
-    o.backend_kind = "sqlite".into();
+    o.storage_mode = rustango::tenancy::StorageMode::Database;
+    o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
     o.database_url = Some(format!(
         "sqlite:{}?mode=rwc",
         dir.join(format!("{slug}.db")).display()

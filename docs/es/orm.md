@@ -122,6 +122,11 @@ Post::objects().where_(Post::deleted_at.is_null()).fetch(&pool).await?;
 Post::objects().where_(Post::published_at.between(start, end)).fetch(&pool).await?;
 ```
 
+En un campo enum (`text_enum`, ver [modelos](models.md#campos-enum-guardados-como-texto))
+un filtro toma el enum, no una cadena: `Post::stage.eq(Stage::Live)`,
+`Post::stage.is_in([Stage::Draft, Stage::Live])`. Vincula el nombre guardado.
+`pluck::<Stage>("stage")` también lee el enum.
+
 ### Ordenar resultados
 
 Ordena filas por una o más columnas, por una expresión, o con control explícito sobre dónde caen los NULL. Más allá del `.order_by(&[("col", desc)])` básico, obtienes tres dimensiones extra:
@@ -1211,7 +1216,7 @@ HAVING COUNT(*) FILTER (WHERE "status" = $2) > $3
               -- "published" bound twice (once at $1, once at $2)
 ```
 
-La semántica SQL no cambia (vuelven los mismos conteos de filas), pero `stmt.params.len()` crece por cada llamada `.filter()` que apunte a un alias no trivial. Para alias `COUNT(*)` (sin literales internos) el inflado es cero. Documéntalo si tu suite de tests fija conteos de parámetros.
+La semántica SQL no cambia (vuelven los mismos conteos de filas), pero `stmt.params().len()` crece por cada llamada `.filter()` que apunte a un alias no trivial. Para alias `COUNT(*)` (sin literales internos) el inflado es cero. Documéntalo si tu suite de tests fija conteos de parámetros.
 
 ---
 

@@ -11,7 +11,7 @@
 //! it silences nothing and costs 3.4x, because the no-op now succeeds
 //! and is binlogged.
 
-use crate::sql::Pool;
+use crate::sql::{DialectKind, Pool};
 
 /// MySQL `ER_TABLE_EXISTS_ERROR`, `ER_DUP_KEYNAME`, `ER_FK_DUP_NAME`.
 /// Error *numbers*, not `SQLSTATE`s — see [`is_already_exists`].
@@ -67,15 +67,21 @@ fn is_add_column(stmt: &str) -> bool {
 /// * **SQLite** reports nothing usable either way, so it keeps the text
 ///   match. Its messages are not localised.
 #[cfg_attr(not(feature = "mysql"), allow(unused_variables))]
-pub(crate) fn is_already_exists(e: &crate::sql::ExecError, dialect: &str, stmt: &str) -> bool {
+pub(crate) fn is_already_exists(
+    e: &crate::sql::ExecError,
+    dialect: DialectKind,
+    stmt: &str,
+) -> bool {
     let crate::sql::ExecError::Driver(err) = e else {
         return false;
     };
     match dialect {
         // 42710 on CREATE TABLE is a type of that name: the table is not there.
-        "postgres" => crate::sql::is_pg_dup_object_error(err) && !is_type_clash(err, stmt),
+        DialectKind::Postgres => {
+            crate::sql::is_pg_dup_object_error(err) && !is_type_clash(err, stmt)
+        }
         #[cfg(feature = "mysql")]
-        "mysql" => err
+        DialectKind::Mysql => err
             .as_database_error()
             .and_then(|db| db.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>())
             .is_some_and(|my| is_mysql_duplicate(my.number(), my.message(), stmt)),
@@ -109,8 +115,8 @@ fn is_type_clash(err: &sqlx::Error, stmt: &str) -> bool {
 /// `ADD CONSTRAINT` has no `IF NOT EXISTS`, so PG runs it in a `DO` block
 /// that catches the duplicate, which logs nothing. A statement
 /// holding the tag runs bare, and the client-side check catches it.
-fn idempotent<'a>(stmt: &'a str, dialect: &str) -> std::borrow::Cow<'a, str> {
-    if dialect != "postgres" {
+fn idempotent(stmt: &str, dialect: DialectKind) -> std::borrow::Cow<'_, str> {
+    if dialect != DialectKind::Postgres {
         return std::borrow::Cow::Borrowed(stmt);
     }
     if is_add_constraint(stmt) && !stmt.contains("$rustango$") {
@@ -162,7 +168,7 @@ pub(crate) fn idempotent_ddl(
     let batch = super::diff::render_changes_split_in_schema(&changes, snapshot, dialect, None)?;
     Ok(as_run(
         batch.immediate.iter().chain(&batch.deferred_fks),
-        dialect.name(),
+        dialect.kind(),
     )
     .collect())
 }
@@ -202,7 +208,7 @@ pub(crate) fn bootstrap_tables(holder: BootstrapHolder) -> Vec<&'static Bootstra
 }
 
 /// `stmts` as [`run_statements`] sends them, for a `--dry-run`.
-pub(crate) fn as_run<'a, I>(stmts: I, dialect: &'a str) -> impl Iterator<Item = String> + 'a
+pub(crate) fn as_run<'a, I>(stmts: I, dialect: DialectKind) -> impl Iterator<Item = String> + 'a
 where
     I: IntoIterator<Item = &'a String>,
     I::IntoIter: 'a,
@@ -350,7 +356,7 @@ pub(crate) async fn column_drift(
         unique: unique.as_ref(),
         on_delete: on_delete.as_ref(),
     };
-    Ok(drift_lines(dialect.name(), t, indexes, &live))
+    Ok(drift_lines(dialect.kind(), t, indexes, &live))
 }
 
 /// What the catalog says about one table, for [`drift_lines`].
@@ -363,7 +369,7 @@ struct LiveTable<'a> {
 /// [`column_drift`]'s comparison. A primary key, serial or generated column
 /// is skipped, as is an FK the database lacks: converge reports neither.
 fn drift_lines(
-    dialect: &str,
+    dialect: DialectKind,
     t: &super::TableSnapshot,
     indexes: &[super::IndexSnapshot],
     live: &LiveTable<'_>,
@@ -391,7 +397,7 @@ fn drift_lines(
             ));
         };
         // SQLite adds a UUID column to a filled table nullable, with no DEFAULT.
-        let backfilled = dialect == "sqlite" && super::diff::is_uuid_default(f);
+        let backfilled = dialect == DialectKind::Sqlite && super::diff::is_uuid_default(f);
         if col.nullable != f.nullable && !(backfilled && col.nullable) {
             differs("nullability", null(col.nullable), null(f.nullable));
         }
@@ -630,7 +636,8 @@ pub(super) fn filled_table_retry(
     render: impl Fn(&super::SchemaSnapshot) -> Result<super::diff::RenderedBatch, String>,
 ) -> Option<Result<FilledTableRetry, String>> {
     #[cfg(feature = "sqlite")]
-    if let ("sqlite", [super::SchemaChange::AddColumn { table, column }]) = (dialect.name(), group)
+    if let (DialectKind::Sqlite, [super::SchemaChange::AddColumn { table, column }]) =
+        (dialect.kind(), group)
     {
         let mut t = snapshot.table(table)?.clone();
         let field = t.fields.iter_mut().find(|f| &f.column == column)?;
@@ -674,7 +681,7 @@ async fn apply_batch(pool: &Pool, batch: &super::RenderedBatch) -> Result<(), sq
 pub(crate) async fn run_statements(pool: &Pool, stmts: &[String]) -> Result<(), sqlx::Error> {
     crate::sql::refuse_ddl_in_block(pool, crate::sql::Ddl::Transactional)
         .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
-    let dialect = pool.dialect().name();
+    let dialect = pool.dialect().kind();
     for stmt in stmts {
         let stmt = idempotent(stmt, dialect);
         // Errors below are caught: in a block each statement gets a savepoint.
@@ -686,7 +693,7 @@ pub(crate) async fn run_statements(pool: &Pool, stmts: &[String]) -> Result<(), 
         let retry = match &res {
             Err(e) if e.is_deadlock() => true,
             Err(crate::sql::ExecError::Driver(e)) => {
-                dialect == "postgres" && is_type_clash(e, &stmt)
+                dialect == DialectKind::Postgres && is_type_clash(e, &stmt)
             }
             _ => false,
         };
@@ -708,7 +715,7 @@ pub(crate) async fn run_statements(pool: &Pool, stmts: &[String]) -> Result<(), 
 
 #[cfg(test)]
 mod tests {
-    use super::{idempotent, is_mysql_duplicate};
+    use super::{idempotent, is_mysql_duplicate, DialectKind};
 
     /// A CREATE TABLE that failed for another reason is not "already there".
     #[cfg(feature = "sqlite")]
@@ -770,7 +777,10 @@ mod tests {
     #[test]
     fn create_table_gains_if_not_exists_on_postgres() {
         assert_eq!(
-            idempotent(r#"CREATE TABLE "t" ("id" BIGSERIAL)"#, "postgres"),
+            idempotent(
+                r#"CREATE TABLE "t" ("id" BIGSERIAL)"#,
+                DialectKind::Postgres
+            ),
             r#"CREATE TABLE IF NOT EXISTS "t" ("id" BIGSERIAL)"#
         );
     }
@@ -781,14 +791,18 @@ mod tests {
     #[test]
     fn other_dialects_are_left_alone() {
         let s = r#"CREATE TABLE "t" ("id" BIGSERIAL)"#;
-        assert_eq!(idempotent(s, "mysql"), s);
-        assert_eq!(idempotent(s, "sqlite"), s);
+        assert_eq!(idempotent(s, DialectKind::Mysql), s);
+        assert_eq!(idempotent(s, DialectKind::Sqlite), s);
     }
 
     #[test]
     fn already_guarded_create_is_left_alone() {
         let s = r#"CREATE TABLE IF NOT EXISTS "t" ("id" BIGSERIAL)"#;
-        assert_eq!(idempotent(s, "postgres"), s, "must not double up the guard");
+        assert_eq!(
+            idempotent(s, DialectKind::Postgres),
+            s,
+            "must not double up the guard"
+        );
     }
 
     #[test]
@@ -797,7 +811,7 @@ mod tests {
         // still rely on the code check.
         let s =
             r#"ALTER TABLE "a" ADD CONSTRAINT "a_b_fkey" FOREIGN KEY ("b") REFERENCES "b" ("id")"#;
-        let wrapped = idempotent(s, "postgres");
+        let wrapped = idempotent(s, DialectKind::Postgres);
         assert!(
             wrapped.starts_with("DO $rustango$ BEGIN ALTER TABLE"),
             "{wrapped}"
@@ -809,16 +823,16 @@ mod tests {
             ),
             "{wrapped}"
         );
-        assert_eq!(idempotent(s, "mysql"), s);
+        assert_eq!(idempotent(s, DialectKind::Mysql), s);
         let idx = r#"CREATE UNIQUE INDEX "i" ON "t" ("a")"#;
-        assert_eq!(idempotent(idx, "postgres"), idx);
+        assert_eq!(idempotent(idx, DialectKind::Postgres), idx);
     }
 
     /// A statement holding the tag would end the `DO` body early.
     #[test]
     fn a_statement_holding_the_do_tag_runs_bare() {
         let s = r#"ALTER TABLE "a" ADD CONSTRAINT "ck" CHECK ("b" <> '$rustango$')"#;
-        assert_eq!(idempotent(s, "postgres"), s);
+        assert_eq!(idempotent(s, DialectKind::Postgres), s);
     }
 
     /// The dry-run prints the statements as they run, guards included.
@@ -845,9 +859,9 @@ mod tests {
     fn add_column_gains_if_not_exists_on_postgres_only() {
         let s = r#"ALTER TABLE "t" ADD COLUMN "c" BIGINT"#;
         let guarded = r#"ALTER TABLE "t" ADD COLUMN IF NOT EXISTS "c" BIGINT"#;
-        assert_eq!(idempotent(s, "postgres"), guarded);
-        assert_eq!(idempotent(guarded, "postgres"), guarded);
-        assert_eq!(idempotent(s, "mysql"), s);
+        assert_eq!(idempotent(s, DialectKind::Postgres), guarded);
+        assert_eq!(idempotent(guarded, DialectKind::Postgres), guarded);
+        assert_eq!(idempotent(s, DialectKind::Mysql), s);
     }
 
     /// The tests above feed in hand-written SQL, so they would pass even
@@ -881,7 +895,7 @@ mod tests {
         assert!(!creates.is_empty(), "expected at least one CREATE TABLE");
         for stmt in creates {
             assert!(
-                idempotent(stmt, "postgres").starts_with("CREATE TABLE IF NOT EXISTS"),
+                idempotent(stmt, DialectKind::Postgres).starts_with("CREATE TABLE IF NOT EXISTS"),
                 "renderer emits a shape `idempotent` does not rewrite, so the \
                  ensure paths are back to erroring per call: {stmt}"
             );

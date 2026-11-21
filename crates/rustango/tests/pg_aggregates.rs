@@ -90,7 +90,7 @@ fn string_agg_emits_pg_call_with_bound_delimiter() {
         "expected bound delimiter: {}",
         stmt.sql
     );
-    assert_eq!(stmt.params, vec![SqlValue::String(", ".into())]);
+    assert_eq!(stmt.params(), vec![SqlValue::String(", ".into())]);
 }
 
 #[test]
@@ -102,7 +102,7 @@ fn string_agg_distinct_emits_distinct() {
         "got: {}",
         stmt.sql
     );
-    assert_eq!(stmt.params, vec![SqlValue::String("; ".into())]);
+    assert_eq!(stmt.params(), vec![SqlValue::String("; ".into())]);
 }
 
 #[test]
@@ -123,7 +123,7 @@ fn string_agg_lowers_on_mysql_and_sqlite() {
         "SQLite group_concat: {}",
         sq.sql
     );
-    assert_eq!(sq.params, vec![SqlValue::String(", ".into())]);
+    assert_eq!(sq.params(), vec![SqlValue::String(", ".into())]);
 }
 
 // ---------- any_value (#1025) ----------
@@ -310,7 +310,7 @@ fn lag_with_a_json_default_has_a_mariadb_arm() {
         "{}",
         stmt.sql
     );
-    assert_eq!(stmt.params.len(), 1);
+    assert_eq!(stmt.params().len(), 1);
 }
 
 /// An integer default needs no unwrapping: the MySQL arm is the old call.

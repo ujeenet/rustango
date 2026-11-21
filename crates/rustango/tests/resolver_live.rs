@@ -46,8 +46,8 @@ async fn seed_orgs(pool: &sqlx::PgPool) {
         o.id = Auto::default();
         o.slug = "acme".into();
         o.display_name = "ACME".into();
-        o.storage_mode = StorageMode::Schema.as_str().into();
-        o.backend_kind = "postgres".to_owned();
+        o.storage_mode = StorageMode::Schema;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = None;
         o.schema_name = Some("acme".into());
         o.host_pattern = Some("acme.app.test".into());
@@ -61,8 +61,8 @@ async fn seed_orgs(pool: &sqlx::PgPool) {
         o.id = Auto::default();
         o.slug = "globex".into();
         o.display_name = "Globex".into();
-        o.storage_mode = StorageMode::Database.as_str().into();
-        o.backend_kind = "postgres".to_owned();
+        o.storage_mode = StorageMode::Database;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = Some("env://TENANT_GLOBEX_DB_URL".into());
         o.schema_name = None;
         o.host_pattern = None;
@@ -76,8 +76,8 @@ async fn seed_orgs(pool: &sqlx::PgPool) {
         o.id = Auto::default();
         o.slug = "initech".into();
         o.display_name = "Initech".into();
-        o.storage_mode = StorageMode::Schema.as_str().into();
-        o.backend_kind = "postgres".to_owned();
+        o.storage_mode = StorageMode::Schema;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = None;
         o.schema_name = Some("initech".into());
         o.host_pattern = None;
@@ -91,8 +91,8 @@ async fn seed_orgs(pool: &sqlx::PgPool) {
         o.id = Auto::default();
         o.slug = "frozen".into();
         o.display_name = "Frozen".into();
-        o.storage_mode = StorageMode::Schema.as_str().into();
-        o.backend_kind = "postgres".to_owned();
+        o.storage_mode = StorageMode::Schema;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = None;
         o.schema_name = Some("frozen".into());
         o.host_pattern = Some("frozen.app.test".into());

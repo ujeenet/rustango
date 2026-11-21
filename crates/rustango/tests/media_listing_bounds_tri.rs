@@ -226,7 +226,7 @@ async fn case_variants_resolve(pool: &Pool) {
 
 /// Concurrent `set_tags` creating overlapping new tags both succeed.
 async fn parallel_set_tags_overlap(pool: &Pool) {
-    if pool.dialect().name() == "sqlite" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Sqlite {
         return; // One writer at a time.
     }
     let mgr = manager(pool);
@@ -324,7 +324,7 @@ async fn recursive_listing_spans_bind_cap(pool: &Pool) {
     };
     let n = pool.dialect().max_bind_params();
     seed_collections(pool, "w", n, Some(root)).await;
-    if pool.dialect().name() == "postgres" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Postgres {
         // Unanalyzed, PG walks the tree with a nested loop: ~40s, not ~40ms.
         raw_execute_pool(pool, "ANALYZE rustango_media_collections", vec![])
             .await
@@ -422,7 +422,7 @@ async fn recursive_listing_without_the_parent_index(pool: &Pool) {
     let d = pool.dialect();
     // MySQL names an index within its table; PG and SQLite name it alone.
     let mut drop = format!("DROP INDEX {}", d.quote_ident(index));
-    if d.name() == "mysql" {
+    if d.kind() == rustango::sql::DialectKind::Mysql {
         drop.push_str(&format!(
             " ON {}",
             d.quote_ident(MediaCollection::SCHEMA.table)

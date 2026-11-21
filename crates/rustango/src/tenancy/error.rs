@@ -70,6 +70,19 @@ pub enum TenancyError {
     TenantConnBusy { slug: String, max: u32 },
 }
 
+/// A storage mode or backend name that names no variant.
+impl From<crate::core::UnknownVariant> for TenancyError {
+    fn from(e: crate::core::UnknownVariant) -> Self {
+        Self::Validation(e.to_string())
+    }
+}
+
+impl From<rustango::sql::UnsavedRow> for TenancyError {
+    fn from(e: rustango::sql::UnsavedRow) -> Self {
+        Self::Exec(e.into())
+    }
+}
+
 impl TenancyError {
     /// The 503 for [`Self::PoolBusy`], with `Retry-After`.
     pub(crate) fn pool_busy_response() -> axum::response::Response {

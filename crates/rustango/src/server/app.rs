@@ -40,6 +40,7 @@ pub struct AppBuilder {
     schemas: Vec<&'static ModelSchema>,
     #[cfg(feature = "template_views")]
     error_pages: Option<crate::errors::ErrorPagesLayer>,
+    atomic_requests: Option<crate::atomic_request::AtomicRequests>,
 }
 
 impl AppBuilder {
@@ -82,6 +83,7 @@ impl AppBuilder {
             schemas: Vec::new(),
             #[cfg(feature = "template_views")]
             error_pages: None,
+            atomic_requests: None,
         }
     }
 
@@ -165,6 +167,15 @@ impl AppBuilder {
         self
     }
 
+    /// Run each write request to `api` in one `atomic` block on the pool: a
+    /// response that is not 2xx/3xx, or a panic, rolls back every write it
+    /// made there. See [`crate::atomic_request`].
+    #[must_use]
+    pub fn atomic_requests(mut self, requests: crate::atomic_request::AtomicRequests) -> Self {
+        self.atomic_requests = Some(requests);
+        self
+    }
+
     /// Dress every 4xx/5xx, panics and unknown paths included, with an
     /// error page. Off by default.
     #[cfg(feature = "template_views")]
@@ -196,8 +207,14 @@ impl AppBuilder {
 
     /// The router `serve` runs. A handler panic is a logged 500 (#2069).
     fn into_app(self) -> Router {
-        let pool = Arc::new(self.pool);
-        let app = self.api.unwrap_or_else(Router::new).layer(Extension(pool));
+        let app = self.api.unwrap_or_else(Router::new);
+        let app = match &self.atomic_requests {
+            Some(requests) => app.layer(
+                crate::atomic_request::AtomicRequestLayer::new(self.pool.clone()).with(requests),
+            ),
+            None => app,
+        };
+        let app = app.layer(Extension(Arc::new(self.pool)));
         let app = crate::panic_guard::catch_panics(app);
         // Outside the panic guard, so its 500 is dressed too.
         #[cfg(feature = "template_views")]
@@ -229,7 +246,10 @@ mod tests {
             .unwrap();
         let pool: Pool = sqlx_pool.into();
         let builder = AppBuilder::from_pool(pool);
-        assert_eq!(builder.pool().backend_name(), "sqlite");
+        assert_eq!(
+            builder.pool().dialect().kind(),
+            crate::sql::DialectKind::Sqlite
+        );
         assert!(builder.pool().as_sqlite().is_some());
     }
 

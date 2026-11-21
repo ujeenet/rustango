@@ -59,7 +59,7 @@ tokio::task_local! {
     /// happens below the read: the resolver runs inside the handler and
     /// the logging middleware sits outside it. Set-once matches the
     /// rule of one request, one tenant.
-    static TENANT: Arc<OnceLock<TenantLabel>>;
+    pub(crate) static TENANT: Arc<OnceLock<TenantLabel>>;
 }
 
 /// Run `fut` with a fresh tenant slot in scope.

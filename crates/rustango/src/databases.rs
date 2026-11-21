@@ -240,15 +240,7 @@ pub struct UsingQuerySet<T: crate::core::Model> {
 
 impl<T> UsingQuerySet<T>
 where
-    T: crate::core::Model
-        + crate::sql::MaybePgFromRow
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    T: crate::core::Model + crate::sql::DecodeModel,
 {
     /// Run the query on the chosen connection.
     ///

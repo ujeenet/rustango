@@ -292,6 +292,7 @@ mit `select_related` (ebenfalls im ORM-Leitfaden).
 | `default = "…"` | `#[rustango(default = "'draft'")]` | DB-Spaltenstandard (rohes SQL: Text in Anführungszeichen wie `'draft'`; ein nacktes Wort oder eine Nicht-Zahl auf einem Zahlenfeld ist ein Compile-Fehler) |
 | `unique` | `#[rustango(unique)]` | Unique-Constraint auf der Spalte |
 | `choices = "…"` | `#[rustango(choices = "draft:Draft, published:Published")]` | aufgezählte Werte (`value:Label`); Admin-`<select>` + Validierung |
+| `text_enum` | `#[rustango(text_enum, max_length = 16)]` | das Feld ist ein Rust-Enum, als Text gespeichert; siehe [Enum-Felder](#enum-felder-als-text-gespeichert) |
 | `auto_now_add` | `#[rustango(auto_now_add)]` | beim **Einfügen** auf jetzt setzen (auf einem `Auto<DateTime<Utc>>`) |
 | `auto_now` | `#[rustango(auto_now)]` | bei **jedem Speichern** auf jetzt setzen |
 | `column = "…"` | `#[rustango(column = "account_no")]` | die SQL-Spalte umbenennen |
@@ -313,6 +314,52 @@ pub created_at: Auto<DateTime<Utc>>,
 #[rustango(soft_delete)]
 pub deleted_at: Option<DateTime<Utc>>,
 ```
+
+### Enum-Felder als Text gespeichert
+
+Wenn Code nach dem Wert verzweigt, nehmen Sie ein Enum statt `choices`. Leiten
+Sie `TextEnum` auf einem Enum ohne Daten ab und markieren Sie das Feld mit `text_enum`:
+
+```rust
+use rustango::core::TextEnum as _; // für `.as_str()`
+
+#[derive(rustango::TextEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[text_enum(rename_all = "snake_case")] // auch lowercase, kebab-case, SCREAMING_SNAKE_CASE
+pub enum Status {
+    Draft,
+    #[text_enum(rename = "live", alias = "published", label = "Published")]
+    Live,
+}
+
+#[derive(Model)]
+pub struct Post {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(text_enum, max_length = 16, default = "'draft'")]
+    pub status: Status,
+    #[rustango(text_enum, max_length = 16)]
+    pub review: Option<Status>,
+}
+
+let live = Post::objects().where_(Post::status.eq(Status::Live)).fetch(&pool).await?;
+```
+
+- Die Spalte ist einfacher Text (`VARCHAR(max_length)`) auf jedem Backend.
+  `max_length` ist Pflicht und muss den längsten gespeicherten Wert fassen; ein
+  `default` ist ein gespeicherter Name in Hochkommas. Beides wird beim Kompilieren geprüft.
+- Das Derive liefert auch `Display`, `FromStr` und serde als gespeicherten String.
+  Leiten Sie serde nicht zusätzlich auf dem Enum ab.
+- Admin-Formular, Formularvalidierung und das OpenAPI-`enum` bieten die
+  gespeicherten Namen an (`choices` kommt aus den Varianten). `choices`, `blank`,
+  `citext` und `validators` werden auf dem Feld abgelehnt.
+- Ein Lesen lehnt einen gespeicherten Wert ab, den keine Variante nennt, exakt und
+  mit Groß-/Kleinschreibung: die Zeile scheitert mit einem `ColumnDecode`-Fehler mit
+  der Quelle `UnknownVariant`. Ein leerer String ist so ein Wert, nicht `None`. Ein
+  `alias` wird als seine Variante gelesen; Speichern schreibt den gespeicherten Namen zurück.
+- Die Standard-Collation von MySQL ignoriert Groß-/Kleinschreibung: ein Filter
+  findet dort `Draft` für `draft`, und das Lesen dieser Zeile scheitert dann.
+- Um einem laufenden System eine Variante hinzuzufügen, liefern Sie zuerst den
+  lesenden Code aus und den schreibenden in einem späteren Release.
 
 ---
 
@@ -445,6 +492,7 @@ spezifischer.
 | `unique` | Flag | Unique-Constraint |
 | `index` / `index(...)` | Flag, oder `unique`, `name`, `method` | Einspaltiger Index auf diesem Feld |
 | `choices` | `"v:Label, …"` | aufgezählte Werte |
+| `text_enum` | Flag | der Feldtyp ist ein `TextEnum`, als Text gespeichert; braucht `max_length` |
 | `min` / `max` | Zahl | Bereichsvalidierung |
 | `blank` | Flag | Leereingabe in Formularen/Admin erlauben |
 | `editable` | `true`/`false` | Bearbeitbarkeit in Formular/Admin |

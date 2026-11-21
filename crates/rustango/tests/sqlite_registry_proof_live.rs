@@ -47,7 +47,7 @@ fn fake_sqlite_org(slug: &str) -> Org {
     let mut o = rustango::testkit::org();
     o.slug = slug.to_owned();
     o.display_name = slug.to_owned();
-    o.backend_kind = "sqlite".into();
+    o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
     o.database_url = Some(format!(
         "sqlite:file:tenant_{slug}?mode=memory&cache=shared"
     ));
@@ -85,8 +85,14 @@ async fn org_insert_and_fetch_against_sqlite_registry() {
         .expect("filtered fetch");
     assert_eq!(just_acme.len(), 1);
     let acme_row = just_acme.pop().unwrap();
-    assert_eq!(acme_row.backend_kind, "sqlite");
-    assert_eq!(acme_row.storage_mode, "database");
+    assert_eq!(
+        acme_row.backend_kind,
+        rustango::tenancy::BackendKind::Sqlite
+    );
+    assert_eq!(
+        acme_row.storage_mode,
+        rustango::tenancy::StorageMode::Database
+    );
 }
 
 #[tokio::test]

@@ -53,7 +53,7 @@ tokio::task_local! {
     /// The active timezone for this request / task. `None` (no
     /// task-local set) means "fall back to UTC" — i.e. behave as
     /// if no override is active.
-    static ACTIVE_TZ: FixedOffset;
+    pub(crate) static ACTIVE_TZ: FixedOffset;
 }
 
 /// The active timezone for the current task. Returns `UTC` when no

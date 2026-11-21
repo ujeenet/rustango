@@ -291,7 +291,7 @@ pub enum ExecError {
     },
 
     /// A write keyed on the primary key of a row never saved (#2467).
-    #[error("`{table}` row has no primary key yet; save it first")]
+    #[error("{}", super::auto::UnsavedRow { table: *table })]
     UnsavedRow { table: &'static str },
 
     /// `insert_returning` was called with an `InsertQuery` carrying no
@@ -401,6 +401,12 @@ pub enum ExecError {
     },
 }
 
+impl From<super::auto::UnsavedRow> for ExecError {
+    fn from(e: super::auto::UnsavedRow) -> Self {
+        Self::UnsavedRow { table: e.table }
+    }
+}
+
 /// The declared constraint a database refused a write on (#2345).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Refusal {
@@ -469,6 +475,16 @@ impl ExecError {
         db.table().filter(|_| db.is_foreign_key_violation())
     }
 
+    /// A row came back but a column did not decode, such as a stored
+    /// value no `TextEnum` variant names: the row's fault, not the database's.
+    #[must_use]
+    pub fn is_row_decode(&self) -> bool {
+        matches!(
+            self,
+            Self::Driver(sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_))
+        )
+    }
+
     /// A deadlock the database broke by aborting this transaction:
     /// MySQL 1213, PG 40P01.
     pub(crate) fn is_deadlock(&self) -> bool {
@@ -483,6 +499,33 @@ impl ExecError {
             return true;
         }
         db.code().as_deref() == Some("40P01")
+    }
+
+    /// A conflict a retry can win: a deadlock, a serialization failure
+    /// (40001), a MySQL lock-wait timeout (1205), `SQLITE_BUSY`, or no free
+    /// pool connection.
+    pub(crate) fn is_transient(&self) -> bool {
+        if self.is_deadlock() {
+            return true;
+        }
+        let db = match self {
+            Self::Driver(sqlx::Error::PoolTimedOut) => return true,
+            Self::Driver(sqlx::Error::Database(db)) => db,
+            _ => return false,
+        };
+        #[cfg(feature = "mysql")]
+        if let Some(m) = db.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>() {
+            return m.number() == 1205;
+        }
+        #[cfg(feature = "sqlite")]
+        if db.try_downcast_ref::<sqlx::sqlite::SqliteError>().is_some() {
+            // Every extended code of SQLITE_BUSY (5).
+            return db
+                .code()
+                .and_then(|c| c.parse::<i32>().ok())
+                .is_some_and(|c| c & 0xff == 5);
+        }
+        db.code().as_deref() == Some("40001")
     }
 }
 

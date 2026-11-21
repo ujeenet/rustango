@@ -69,7 +69,7 @@ fn pg_emits_views_plus_one() {
         stmt.sql,
         r#"UPDATE "counter" SET "views" = ("views" + $1) WHERE "id" = $2"#
     );
-    assert_eq!(stmt.params, vec![SqlValue::I64(1), SqlValue::I64(7)]);
+    assert_eq!(stmt.params(), vec![SqlValue::I64(1), SqlValue::I64(7)]);
 }
 
 #[test]
@@ -79,7 +79,7 @@ fn mysql_emits_views_plus_one_with_backticks_and_question_marks() {
         stmt.sql,
         "UPDATE `counter` SET `views` = (`views` + ?) WHERE `id` = ?"
     );
-    assert_eq!(stmt.params, vec![SqlValue::I64(1), SqlValue::I64(7)]);
+    assert_eq!(stmt.params(), vec![SqlValue::I64(1), SqlValue::I64(7)]);
 }
 
 #[test]
@@ -89,7 +89,7 @@ fn sqlite_emits_views_plus_one() {
         stmt.sql,
         r#"UPDATE "counter" SET "views" = ("views" + ?) WHERE "id" = ?"#
     );
-    assert_eq!(stmt.params, vec![SqlValue::I64(1), SqlValue::I64(7)]);
+    assert_eq!(stmt.params(), vec![SqlValue::I64(1), SqlValue::I64(7)]);
 }
 
 // ---------- UPDATE: column-to-column copy (no arithmetic) ----------
@@ -104,9 +104,9 @@ fn pg_set_column_to_column_copies_without_param() {
     let stmt = Postgres.compile_update(&q).unwrap();
     assert_eq!(stmt.sql, r#"UPDATE "counter" SET "views" = "threshold""#);
     assert!(
-        stmt.params.is_empty(),
+        stmt.params().is_empty(),
         "column-to-column copy must not bind any params, got {:?}",
-        stmt.params
+        stmt.params()
     );
 }
 
@@ -135,7 +135,7 @@ fn pg_where_column_gt_column() {
         "missing column-vs-column predicate: {}",
         stmt.sql
     );
-    assert!(stmt.params.is_empty());
+    assert!(stmt.params().is_empty());
 }
 
 #[test]
@@ -146,7 +146,7 @@ fn mysql_where_column_gt_column() {
         "missing column-vs-column predicate: {}",
         stmt.sql
     );
-    assert!(stmt.params.is_empty());
+    assert!(stmt.params().is_empty());
 }
 
 #[test]
@@ -157,7 +157,7 @@ fn sqlite_where_column_gt_column() {
         "missing column-vs-column predicate: {}",
         stmt.sql
     );
-    assert!(stmt.params.is_empty());
+    assert!(stmt.params().is_empty());
 }
 
 // ---------- WHERE: column-vs-arithmetic ----------
@@ -176,7 +176,7 @@ fn pg_where_column_compared_to_arithmetic_expr() {
         "got: {}",
         stmt.sql
     );
-    assert_eq!(stmt.params, vec![SqlValue::I64(2)]);
+    assert_eq!(stmt.params(), vec![SqlValue::I64(2)]);
 }
 
 // ---------- Bitwise ops: PG `#`, MySQL `^`, SQLite errors out ----------

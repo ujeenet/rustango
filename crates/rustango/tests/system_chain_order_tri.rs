@@ -1495,13 +1495,12 @@ async fn tenant_project_table_converges(backend: Backend) {
         o.display_name = "t1".into();
         o.backend_kind = match backend {
             #[cfg(feature = "postgres")]
-            Backend::Postgres => "postgres",
+            Backend::Postgres => rustango::tenancy::BackendKind::Postgres,
             #[cfg(feature = "mysql")]
-            Backend::Mysql => "mysql",
+            Backend::Mysql => rustango::tenancy::BackendKind::MySql,
             #[cfg(feature = "sqlite")]
-            Backend::Sqlite => "sqlite",
-        }
-        .into();
+            Backend::Sqlite => rustango::tenancy::BackendKind::Sqlite,
+        };
         o.database_url = Some(tenant_url.clone());
     });
     org.insert(&registry).await.unwrap();
@@ -1558,8 +1557,8 @@ async fn schema_mode_tenant_converges() {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = "t1".into();
         o.display_name = "t1".into();
-        o.storage_mode = rustango::tenancy::StorageMode::Schema.as_str().into();
-        o.backend_kind = "postgres".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Schema;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.schema_name = Some("t1".into());
         o.database_url = None;
     });
@@ -1610,8 +1609,8 @@ async fn schema_mode_fk_stays_in_the_tenant_schema() {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = "t1".into();
         o.display_name = "t1".into();
-        o.storage_mode = rustango::tenancy::StorageMode::Schema.as_str().into();
-        o.backend_kind = "postgres".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Schema;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.schema_name = Some("t1".into());
         o.database_url = None;
     });
@@ -1703,8 +1702,8 @@ async fn post_migrate_receiver_can_migrate() {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = "t1".into();
         o.display_name = "t1".into();
-        o.storage_mode = rustango::tenancy::StorageMode::Schema.as_str().into();
-        o.backend_kind = "postgres".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Schema;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.schema_name = Some("t1".into());
         o.database_url = None;
     });

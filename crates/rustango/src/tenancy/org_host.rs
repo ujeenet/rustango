@@ -159,7 +159,7 @@ pub async fn list_for_org(registry: &Pool, org_slug: &str) -> Result<Vec<TenantH
     else {
         return Err(HostError::NoSuchOrg(org_slug.to_owned()));
     };
-    let org_id = org.id.get().copied().unwrap_or_default();
+    let org_id = org.id.require()?;
     let mut out = Vec::new();
     if let Some(base) = org.host_pattern.as_deref().filter(|h| !h.trim().is_empty()) {
         out.push(TenantHost {
@@ -206,7 +206,7 @@ pub async fn add_host(
     else {
         return Err(HostError::NoSuchOrg(org_slug.to_owned()));
     };
-    let org_id = org.id.get().copied().unwrap_or_default();
+    let org_id = org.id.require()?;
     let Claimed { tx, row } = claim_extra_host(registry, &host, org_id).await?;
     tx.commit().await.map_err(crate::sql::ExecError::from)?;
     super::invalidate_host_cache();
@@ -376,7 +376,7 @@ impl Claimant<'_> {
                 // A retry re-inserts: the deadlock rolled the first INSERT back.
                 org.id = crate::sql::Auto::Unset;
                 org.insert_tx(tx).await?;
-                org.id.get().copied().unwrap_or_default()
+                org.id.require()?
             }
         })
     }
@@ -589,20 +589,21 @@ async fn held_elsewhere(
 ///
 /// # Errors
 /// The first value another tenant holds, or the INSERT's driver failure.
+/// Returns the new row's id.
 pub(crate) async fn insert_org(
     registry: &Pool,
     org: &mut super::Org,
-) -> Result<(), super::TenancyError> {
+) -> Result<i64, super::TenancyError> {
     let keys = routing_keys(org);
     if keys.is_empty() {
         org.insert(registry).await?;
-        return Ok(());
+        return Ok(org.id.require()?);
     }
     let tx = claim_routing(registry, &keys, Claimant::NewOrg(org))
         .await
         .map_err(ClaimError::into_tenancy)?;
     tx.commit().await?;
-    Ok(())
+    Ok(org.id.require()?)
 }
 
 /// The routing values `org` holds alone.
@@ -655,18 +656,18 @@ pub(crate) async fn schema_claimed(
     schema: &str,
     except_org: Option<i64>,
 ) -> Result<bool, crate::sql::ExecError> {
-    let mut rows: Vec<super::Org> = super::Org::objects()
-        .where_(
-            super::Org::schema_name
-                .eq(Some(schema.to_owned()))
-                .or(super::Org::slug.eq(schema.to_owned())),
-        )
-        .fetch(registry)
-        .await?;
+    let matching = super::Org::objects().where_(
+        super::Org::schema_name
+            .eq(Some(schema.to_owned()))
+            .or(super::Org::slug.eq(schema.to_owned())),
+    );
+    let (mut rows, bad) = super::Org::fetch_reporting(matching, registry).await?;
+    // Its mode is unknown, so it may own the schema: refuse rather than share.
+    if bad.iter().any(|b| except_org != Some(b.id)) {
+        return Ok(true);
+    }
     // Exact, and through the one rule: MySQL's `=` ignores case.
-    rows.retain(|o| {
-        o.storage_mode == super::StorageMode::Schema.as_str() && o.effective_schema() == schema
-    });
+    rows.retain(|o| o.storage_mode == super::StorageMode::Schema && o.effective_schema() == schema);
     Ok(other_org(&rows, except_org))
 }
 
@@ -695,7 +696,7 @@ pub async fn remove_host(registry: &Pool, org_slug: &str, hostname: &str) -> Res
     if org.host_pattern.as_deref() == Some(host.as_str()) {
         return Err(HostError::IsBaseHost(host));
     }
-    let org_id = org.id.get().copied().unwrap_or_default();
+    let org_id = org.id.require()?;
     // Scoped to the org on purpose: one tenant must not be able to unbind
     // another's host by guessing the name.
     let Some(row) = OrgHost::objects()
@@ -732,7 +733,7 @@ pub async fn set_host_enabled(
     if org.host_pattern.as_deref() == Some(host.as_str()) {
         return Err(HostError::IsBaseHost(host));
     }
-    let org_id = org.id.get().copied().unwrap_or_default();
+    let org_id = org.id.require()?;
     let Some(mut row) = OrgHost::objects()
         .where_(OrgHost::hostname.eq(host))
         .where_(OrgHost::org_id.eq(org_id))
@@ -845,6 +846,12 @@ pub struct Generation {
     /// Sum of the enabled rows' ids. Says which rows are on, so
     /// swapping one for another still moves the fingerprint.
     pub enabled_id_sum: i64,
+}
+
+impl From<crate::sql::UnsavedRow> for HostError {
+    fn from(e: crate::sql::UnsavedRow) -> Self {
+        Self::Driver(e.into())
+    }
 }
 
 #[cfg(test)]

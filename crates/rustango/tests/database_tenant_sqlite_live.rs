@@ -48,8 +48,8 @@ fn fake_sqlite_org() -> Org {
         o.id = rustango::sql::Auto::default();
         o.slug = "acme".into();
         o.display_name = "Acme".into();
-        o.storage_mode = "database".into();
-        o.backend_kind = "sqlite".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Database;
+        o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
         o.database_url = Some("sqlite::memory:".into());
     })
 }

@@ -2,6 +2,7 @@
 //! `purge-tenant`, `list-tenants`. Plus their parsers + the
 //! database-mode admin-DROP helper.
 
+use crate::core::TextEnum as _;
 use std::io::Write;
 use std::path::Path;
 
@@ -11,7 +12,7 @@ use crate::core::Column as _;
 use crate::sql::FetcherPool;
 
 use crate::tenancy::error::TenancyError;
-use crate::tenancy::manage::args::{next_value, reject_leading_flag};
+use crate::tenancy::manage::args::{flag_error, next_value, reject_leading_flag};
 use crate::tenancy::manage_interactive;
 use crate::tenancy::org::{BackendKind, Org, StorageMode};
 use crate::tenancy::pools::TenantPools;
@@ -360,19 +361,12 @@ fn parse_create_tenant_args(
         match flag.as_str() {
             "--mode" => {
                 let v = next_value(&mut iter, "--mode")?;
-                mode = Some(StorageMode::parse(&v).map_err(|got| {
-                    TenancyError::Validation(format!(
-                        "--mode must be `schema` or `database`, got `{got}`"
-                    ))
-                })?);
+                mode = Some(StorageMode::from_db(&v).map_err(|e| flag_error("--mode", &e))?);
             }
             "--backend" => {
                 let v = next_value(&mut iter, "--backend")?;
-                out.backend = Some(BackendKind::parse(&v).map_err(|got| {
-                    TenancyError::Validation(format!(
-                        "--backend must be `postgres`, `mysql`, or `sqlite`, got `{got}`"
-                    ))
-                })?);
+                out.backend =
+                    Some(BackendKind::from_db(&v).map_err(|e| flag_error("--backend", &e))?);
             }
             "--display-name" => out.display_name = Some(next_value(&mut iter, "--display-name")?),
             "--database-url" => database_url = Some(next_value(&mut iter, "--database-url")?),
@@ -647,9 +641,7 @@ where
             "purge-tenant: no tenant with slug `{slug}`"
         )));
     };
-    let mode = StorageMode::parse(&org.storage_mode).map_err(|got| {
-        TenancyError::Validation(format!("org `{slug}` has unknown storage_mode `{got}`"))
-    })?;
+    let mode = org.storage_mode;
     if mode == StorageMode::Database && !purge_database {
         return Err(TenancyError::Validation(format!(
             "tenant `{slug}` is database-mode — `DROP DATABASE` is unrecoverable. \
@@ -784,7 +776,10 @@ pub(super) async fn list_tenants<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    let orgs: Vec<Org> = Org::objects().fetch(&pools.registry_pool()).await?;
+    let (orgs, bad) = Org::fetch_reporting(Org::objects(), &pools.registry_pool()).await?;
+    for row in &bad {
+        writeln!(w, "unreadable: {row}")?;
+    }
     if orgs.is_empty() {
         writeln!(w, "(no tenants)")?;
         return Ok(());
@@ -834,7 +829,7 @@ pub(crate) async fn ensure_tenant_roles<W: Write + Send>(
     }
     crate::tenancy::schema_role::check_can_create_roles(pools.registry()).await?;
     let orgs: Vec<Org> = Org::objects()
-        .where_(Org::storage_mode.eq(StorageMode::Schema.as_str()))
+        .where_(Org::storage_mode.eq(StorageMode::Schema))
         .fetch_on(pools.registry())
         .await?;
     for org in &orgs {

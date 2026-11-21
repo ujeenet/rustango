@@ -38,6 +38,15 @@
 //! [`super::FileCache`]. A `get` or `exists` that lands on an expired
 //! row deletes it and reports a miss.
 //!
+//! ## Inside an `atomic` block
+//!
+//! On the pool of an open block (a request under `atomic_requests`), reads
+//! run in the block, writes are queued by
+//! [`outside_atomic`](crate::sql::outside_atomic) and land when it ends,
+//! rollback or not, and `incr`, `add` and the table DDL are refused: they
+//! would need a second connection while the block holds one. A cache on its
+//! own pool is never affected.
+//!
 //! ## Why not a migration?
 //!
 //! The cache table does not follow the app's data. You can drop it,
@@ -54,28 +63,9 @@ use async_trait::async_trait;
 
 use super::{Cache, CacheError};
 use crate::core::SqlValue;
-use crate::sql::{detached, ExecError, MaybeMyFromRow, MaybePgFromRow, MaybeSqliteFromRow, Pool};
-
-// The cache stays independent of the caller's `atomic` block on the same
-// pool: its writes commit on their own. In-memory SQLite can then deadlock.
-async fn raw_execute_pool(pool: &Pool, sql: &str, binds: Vec<SqlValue>) -> Result<u64, ExecError> {
-    detached(crate::sql::raw_execute_pool(pool, sql, binds)).await
-}
-
-async fn raw_query_pool<T>(
-    sql: &str,
-    binds: Vec<SqlValue>,
-    pool: &Pool,
-) -> Result<Vec<T>, ExecError>
-where
-    T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
-{
-    detached(crate::sql::raw_query_pool(sql, binds, pool)).await
-}
-
-async fn run_ddl_idempotent(pool: &Pool, ddl: &str) -> Result<(), sqlx::Error> {
-    detached(crate::sql::run_ddl_idempotent(pool, ddl)).await
-}
+use crate::sql::{
+    DialectKind, ExecError, MaybeMyFromRow, MaybePgFromRow, MaybeSqliteFromRow, Pool,
+};
 
 /// Longest key stored as-is: MySQL's `VARBINARY(255)` column.
 const MAX_RAW_KEY_BYTES: usize = 255;
@@ -167,6 +157,44 @@ impl DatabaseCache {
         &self.table
     }
 
+    // Inside an `atomic` block on the cache's own pool, the cache never takes
+    // a second connection while the block holds one: reads join the block,
+    // writes are queued until it ends, and writes whose result is needed now
+    // are refused. Its writes so never roll back with the block.
+
+    /// Run a write; `Ok(None)` when queued by [`crate::sql::outside_atomic`].
+    async fn write(&self, sql: String, binds: Vec<SqlValue>) -> Result<Option<u64>, ExecError> {
+        if !crate::sql::in_block(&self.pool) {
+            return crate::sql::raw_execute_pool(&self.pool, &sql, binds)
+                .await
+                .map(Some);
+        }
+        let pool = self.pool.clone();
+        crate::sql::outside_atomic(
+            async move { crate::sql::raw_execute_pool(&pool, &sql, binds).await },
+        )
+        .await
+    }
+
+    /// Run a read; in a block, in a savepoint so a failure cannot abort it.
+    async fn read<T>(&self, sql: &str, binds: Vec<SqlValue>) -> Result<Vec<T>, ExecError>
+    where
+        T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
+    {
+        let read = crate::sql::raw_query_pool(sql, binds, &self.pool);
+        crate::sql::caught(&self.pool, read).await
+    }
+
+    /// Refuse `op`, which needs its result at once, inside a block on the pool.
+    fn refuse_in_block(&self, op: &'static str) -> Result<(), CacheError> {
+        crate::sql::refuse_in_block(
+            &self.pool,
+            op,
+            "the cache's writes must outlive the block; give the cache its own pool",
+        )
+        .map_err(|e| CacheError::Refused(e.to_string()))
+    }
+
     /// Create the cache table if it is missing. Safe to call at every
     /// boot.
     ///
@@ -174,17 +202,18 @@ impl DatabaseCache {
     /// [`CacheError::Connection`] when the table DDL fails, for example on a
     /// permission problem. A failed `expires` index only logs a warning.
     pub async fn ensure_table(&self) -> Result<(), CacheError> {
+        self.refuse_in_block("DatabaseCache::ensure_table")?;
         let dialect = self.pool.dialect();
         let table = crate::sql::quote_qualified(dialect, &self.table);
-        let sql = match dialect.name() {
-            "postgres" => format!(
+        let sql = match dialect.kind() {
+            DialectKind::Postgres => format!(
                 "CREATE TABLE IF NOT EXISTS {table} (\
                  cache_key TEXT PRIMARY KEY, \
                  value TEXT NOT NULL, \
                  expires BIGINT NOT NULL DEFAULT 0\
                  )"
             ),
-            "mysql" => format!(
+            DialectKind::Mysql => format!(
                 "CREATE TABLE IF NOT EXISTS {table} (\
                  cache_key VARBINARY(255) PRIMARY KEY, \
                  value LONGTEXT NOT NULL, \
@@ -192,7 +221,7 @@ impl DatabaseCache {
                  )"
             ),
             // SQLite, and a reasonable default for anything else.
-            _ => format!(
+            DialectKind::Sqlite => format!(
                 "CREATE TABLE IF NOT EXISTS {table} (\
                  cache_key TEXT PRIMARY KEY, \
                  value TEXT NOT NULL, \
@@ -201,12 +230,9 @@ impl DatabaseCache {
             ),
         };
         // PG's `IF NOT EXISTS` is not atomic: a racing boot loses on a catalog row.
-        detached(crate::migrate::ensure::run_statements(
-            &self.pool,
-            std::slice::from_ref(&sql),
-        ))
-        .await
-        .map_err(|e| CacheError::Connection(format!("ensure_table: {e}")))?;
+        crate::migrate::ensure::run_statements(&self.pool, std::slice::from_ref(&sql))
+            .await
+            .map_err(|e| CacheError::Connection(format!("ensure_table: {e}")))?;
         // `purge_expired` scans by `expires`; existing tables get it too.
         let mut index = dialect.quote_ident(&self.expires_index());
         let guard = if dialect.supports_create_index_if_not_exists() {
@@ -216,15 +242,15 @@ impl DatabaseCache {
         };
         // SQLite puts the schema on the index name and takes a bare table.
         let mut on = table;
-        if let ("sqlite", (Some(schema), bare)) =
-            (dialect.name(), crate::sql::split_qualified(&self.table))
+        if let (DialectKind::Sqlite, (Some(schema), bare)) =
+            (dialect.kind(), crate::sql::split_qualified(&self.table))
         {
             index = format!("{}.{index}", dialect.quote_ident(schema));
             on = dialect.quote_ident(bare);
         }
         // Best effort: a non-owner PG role or a MySQL role without INDEX still gets a cache.
         let ddl = format!("CREATE INDEX {guard}{index} ON {on} (expires)");
-        if let Err(e) = run_ddl_idempotent(&self.pool, &ddl).await {
+        if let Err(e) = crate::sql::run_ddl_idempotent(&self.pool, &ddl).await {
             static WARNED: AtomicBool = AtomicBool::new(false);
             if !WARNED.swap(true, Ordering::Relaxed) {
                 tracing::warn!(
@@ -265,9 +291,10 @@ impl DatabaseCache {
     /// # Errors
     /// [`CacheError::Connection`] when the statement fails.
     pub async fn drop_table(&self) -> Result<(), CacheError> {
+        self.refuse_in_block("DatabaseCache::drop_table")?;
         let table = crate::sql::quote_qualified(self.pool.dialect(), &self.table);
         let sql = format!("DROP TABLE IF EXISTS {table}");
-        raw_execute_pool(&self.pool, &sql, vec![])
+        crate::sql::raw_execute_pool(&self.pool, &sql, vec![])
             .await
             .map_err(|e| CacheError::Connection(format!("drop_table: {e}")))?;
         Ok(())
@@ -304,7 +331,7 @@ impl DatabaseCache {
         // agree on what "expired" means.
         let expired = format!("expires <> 0 AND expires < {p1}");
         // MySQL rejects LIMIT inside IN (…); PG has no DELETE … LIMIT.
-        let sql = if dialect.name() == "mysql" {
+        let sql = if dialect.kind() == DialectKind::Mysql {
             format!("DELETE FROM {table} WHERE {expired} LIMIT {PURGE_BATCH}")
         } else {
             format!(
@@ -312,8 +339,9 @@ impl DatabaseCache {
                  (SELECT cache_key FROM {table} WHERE {expired} LIMIT {PURGE_BATCH})"
             )
         };
-        raw_execute_pool(&self.pool, &sql, vec![SqlValue::I64(now)])
+        self.write(sql, vec![SqlValue::I64(now)])
             .await
+            .map(Option::unwrap_or_default)
             .map_err(|e| CacheError::Connection(format!("purge_expired: {e}")))
     }
 
@@ -342,8 +370,9 @@ impl DatabaseCache {
             StoredKey::new(key).into_value(),
             SqlValue::I64(Self::now_unix_ms()),
         ];
-        raw_execute_pool(&self.pool, &sql, binds)
+        self.write(sql, binds)
             .await
+            .map(Option::unwrap_or_default)
             .map_err(|e| CacheError::Connection(format!("get: {e}")))
     }
 
@@ -374,10 +403,10 @@ impl Cache for DatabaseCache {
         let table = crate::sql::quote_qualified(dialect, &self.table);
         let p1 = dialect.placeholder(1);
         let sql = format!("SELECT value, expires FROM {table} WHERE cache_key = {p1} LIMIT 1");
-        let rows: Vec<(String, i64)> =
-            raw_query_pool(&sql, vec![StoredKey::new(key).into_value()], &self.pool)
-                .await
-                .map_err(|e| CacheError::Connection(format!("get: {e}")))?;
+        let rows: Vec<(String, i64)> = self
+            .read(&sql, vec![StoredKey::new(key).into_value()])
+            .await
+            .map_err(|e| CacheError::Connection(format!("get: {e}")))?;
         let Some((value, expires)) = rows.into_iter().next() else {
             return Ok(None);
         };
@@ -399,21 +428,20 @@ impl Cache for DatabaseCache {
         let p3 = dialect.placeholder(3);
         let expires = Self::expires_for(ttl);
         // Per-dialect upsert. MySQL has no ON CONFLICT clause.
-        let sql = match dialect.name() {
-            "mysql" => format!(
+        let sql = match dialect.kind() {
+            DialectKind::Mysql => format!(
                 "INSERT INTO {table} (cache_key, value, expires) \
                  VALUES ({p1}, {p2}, {p3}) \
                  ON DUPLICATE KEY UPDATE value = VALUES(value), expires = VALUES(expires)"
             ),
-            _ => format!(
+            DialectKind::Postgres | DialectKind::Sqlite => format!(
                 "INSERT INTO {table} (cache_key, value, expires) \
                  VALUES ({p1}, {p2}, {p3}) \
                  ON CONFLICT (cache_key) DO UPDATE SET value = EXCLUDED.value, expires = EXCLUDED.expires"
             ),
         };
-        raw_execute_pool(
-            &self.pool,
-            &sql,
+        self.write(
+            sql,
             vec![
                 StoredKey::new(key).into_value(),
                 SqlValue::String(value.to_owned()),
@@ -440,6 +468,7 @@ impl Cache for DatabaseCache {
     /// loser's `WHERE` no longer matches.
     async fn add(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
         super::check_text(value)?;
+        self.refuse_in_block("DatabaseCache::add")?;
         let dialect = self.pool.dialect();
         let table = crate::sql::quote_qualified(dialect, &self.table);
         let p1 = dialect.placeholder(1);
@@ -453,12 +482,12 @@ impl Cache for DatabaseCache {
         // MySQL and SQLite use positional `?`. Postgres' `$n` would
         // accept any order, which is how a MySQL-only mismatch hides
         // until a MySQL test runs.
-        if dialect.name() == "mysql" {
+        if dialect.kind() == DialectKind::Mysql {
             // MySQL's `ON DUPLICATE KEY UPDATE` takes no WHERE, so
             // this needs two statements. Still race-free: the INSERT
             // covers the absent case, and the UPDATE's own predicate
             // is the compare-and-swap for the expired one.
-            let inserted = raw_execute_pool(
+            let inserted = crate::sql::raw_execute_pool(
                 &self.pool,
                 &format!(
                     "INSERT IGNORE INTO {table} (cache_key, value, expires) \
@@ -476,7 +505,7 @@ impl Cache for DatabaseCache {
                 self.after_write().await;
                 return Ok(true);
             }
-            let took = raw_execute_pool(
+            let took = crate::sql::raw_execute_pool(
                 &self.pool,
                 &format!(
                     "UPDATE {table} SET value = {p1}, expires = {p2} \
@@ -498,7 +527,7 @@ impl Cache for DatabaseCache {
         // WHERE`, so one statement does it: insert, or overwrite only
         // an expired row. A failed predicate writes nothing and
         // reports 0 rows.
-        let took = raw_execute_pool(
+        let took = crate::sql::raw_execute_pool(
             &self.pool,
             &format!(
                 "INSERT INTO {table} (cache_key, value, expires) \
@@ -527,6 +556,7 @@ impl Cache for DatabaseCache {
     /// is set on insert only; an expired or non-i64 value restarts at `by`.
     /// Overflow is an error, not a saturation: PG and MySQL raise it.
     async fn incr(&self, key: &str, by: i64, ttl: Option<Duration>) -> Result<i64, CacheError> {
+        self.refuse_in_block("DatabaseCache::incr")?;
         let dialect = self.pool.dialect();
         let table = crate::sql::quote_qualified(dialect, &self.table);
         let (p1, p2, p3, p4, p5, p6) = (
@@ -552,7 +582,7 @@ impl Cache for DatabaseCache {
             }
             CacheError::Connection(format!("incr: {e}"))
         };
-        let mysql = dialect.name() == "mysql";
+        let mysql = dialect.kind() == DialectKind::Mysql;
         let excluded = |col: &str| {
             if mysql {
                 format!("VALUES({col})")
@@ -581,10 +611,10 @@ impl Cache for DatabaseCache {
                 i64::MAX
             )
         };
-        let (not_int, int) = match dialect.name() {
-            "mysql" => (in_i64("REGEXP", "DECIMAL(20,0)"), "SIGNED"),
-            "postgres" => (in_i64("~", "NUMERIC"), "BIGINT"),
-            _ => (
+        let (not_int, int) = match dialect.kind() {
+            DialectKind::Mysql => (in_i64("REGEXP", "DECIMAL(20,0)"), "SIGNED"),
+            DialectKind::Postgres => (in_i64("~", "NUMERIC"), "BIGINT"),
+            DialectKind::Sqlite => (
                 format!("CAST(CAST({table}.value AS INTEGER) AS TEXT) <> {table}.value"),
                 "INTEGER",
             ),
@@ -602,7 +632,7 @@ impl Cache for DatabaseCache {
         let insert =
             format!("INSERT INTO {table} (cache_key, value, expires) VALUES ({p1}, {p2}, {p3})");
         self.after_write().await;
-        let value: String = if dialect.name() == "mysql" {
+        let value: String = if dialect.kind() == DialectKind::Mysql {
             // No RETURNING: read back in the same transaction, which still
             // holds the row lock the upsert took.
             // The cache's own transaction: it never rolls back with a caller.
@@ -628,7 +658,7 @@ impl Cache for DatabaseCache {
         } else {
             // SQLite turns an overflowing sum into a REAL; skip that update
             // instead, and report it as PG and MySQL do.
-            let guard = if dialect.name() == "sqlite" {
+            let guard = if dialect.kind() == DialectKind::Sqlite {
                 binds.push(SqlValue::I64(now));
                 format!(
                     " WHERE ({}) OR {not_int} OR typeof(CAST({table}.value AS INTEGER) + \
@@ -638,7 +668,7 @@ impl Cache for DatabaseCache {
             } else {
                 String::new()
             };
-            let rows: Vec<(String,)> = raw_query_pool(
+            let rows: Vec<(String,)> = crate::sql::raw_query_pool(
                 &format!(
                     "{insert} ON CONFLICT (cache_key) DO UPDATE SET {set}{guard} RETURNING value"
                 ),
@@ -658,7 +688,10 @@ impl Cache for DatabaseCache {
     }
 
     /// One `UPDATE` of a live row, so a racing `delete` stays deleted (#2300).
+    /// Inside a block on the cache's pool: whether the row is live now, and
+    /// the `UPDATE` queued.
     async fn touch(&self, key: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
+        let live = crate::sql::in_block(&self.pool) && self.get(key).await?.is_some();
         let dialect = self.pool.dialect();
         let table = crate::sql::quote_qualified(dialect, &self.table);
         let (p1, p2, p3) = (
@@ -676,10 +709,11 @@ impl Cache for DatabaseCache {
             StoredKey::new(key).into_value(),
             SqlValue::I64(Self::now_unix_ms()),
         ];
-        let n = raw_execute_pool(&self.pool, &sql, binds)
+        let n = self
+            .write(sql, binds)
             .await
             .map_err(|e| CacheError::Connection(format!("touch: {e}")))?;
-        Ok(n == 1)
+        Ok(n.map_or(live, |n| n == 1))
     }
 
     async fn delete(&self, key: &str) -> Result<(), CacheError> {
@@ -687,7 +721,7 @@ impl Cache for DatabaseCache {
         let table = crate::sql::quote_qualified(dialect, &self.table);
         let p1 = dialect.placeholder(1);
         let sql = format!("DELETE FROM {table} WHERE cache_key = {p1}");
-        raw_execute_pool(&self.pool, &sql, vec![StoredKey::new(key).into_value()])
+        self.write(sql, vec![StoredKey::new(key).into_value()])
             .await
             .map_err(|e| CacheError::Connection(format!("delete: {e}")))?;
         Ok(())
@@ -701,7 +735,7 @@ impl Cache for DatabaseCache {
         let dialect = self.pool.dialect();
         let table = crate::sql::quote_qualified(dialect, &self.table);
         let sql = format!("DELETE FROM {table}");
-        raw_execute_pool(&self.pool, &sql, vec![])
+        self.write(sql, vec![])
             .await
             .map_err(|e| CacheError::Connection(format!("clear: {e}")))?;
         Ok(())
@@ -728,7 +762,7 @@ impl Cache for DatabaseCache {
         // drift between the cache and the ORM's LIKE lookups.
         // A hashed key keeps only its head, so a longer prefix matches on that
         // head: this may drop extra entries, never fewer.
-        let (sql, arg) = if dialect.name() == "sqlite" {
+        let (sql, arg) = if dialect.kind() == DialectKind::Sqlite {
             (
                 format!("DELETE FROM {table} WHERE instr(cache_key, {p}) = 1"),
                 head(prefix).to_owned(),
@@ -742,7 +776,7 @@ impl Cache for DatabaseCache {
                 format!("{}%", crate::core::escape_like(head(prefix))),
             )
         };
-        raw_execute_pool(&self.pool, &sql, vec![SqlValue::String(arg)])
+        self.write(sql, vec![SqlValue::String(arg)])
             .await
             .map_err(|e| CacheError::Connection(format!("delete_prefix: {e}")))?;
         Ok(())

@@ -142,7 +142,7 @@ mod scenarios {
     /// `lag("points", default 0)` partitioned per player —
     /// previous-row navigation with an out-of-range default.
     async fn is_mariadb(pool: &Pool) -> bool {
-        pool.dialect().name() == "mysql" && {
+        pool.dialect().kind() == rustango::sql::DialectKind::Mysql && {
             let v: Vec<(String,)> = rustango::sql::raw_query_pool("SELECT VERSION()", vec![], pool)
                 .await
                 .expect("version");
@@ -364,7 +364,7 @@ mod scenarios {
             .join_lateral(top2, "top", WhereExpr::And(vec![]))
             .fetch(pool)
             .await;
-        if pool.dialect().name() == "sqlite" {
+        if pool.dialect().kind() == rustango::sql::DialectKind::Sqlite {
             let err = res
                 .map(|rows: Vec<Tenant>| rows.len())
                 .expect_err("LATERAL must be rejected on sqlite");

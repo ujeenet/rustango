@@ -25,6 +25,7 @@ consulta la [guía del ORM](orm.md).
 - [DDL en un bloque](#ddl-en-un-bloque)
 - [Iterar en un bloque](#iterar-en-un-bloque)
 - [Cancelación](#cancelación)
+- [Una transacción por petición](#una-transacción-por-petición)
 - [Errores](#errores)
 
 ## Un primer bloque
@@ -90,10 +91,14 @@ en MySQL con su nivel por defecto (repeatable read), todas las lecturas del
 bloque ven una sola instantánea.
 
 Estas se ejecutan **fuera** del bloque, en su propia conexión:
-`pool.acquire()`, `Tenant::conn`, la caché, la toma de jobs, los cambios del
-registro de tenancy, una tarea lanzada con `tokio::spawn` y un pool conectado
-aparte (aunque sea a la misma base de datos). No ven las escrituras del bloque
-y pueden esperar bloqueos que el bloque retiene.
+`pool.acquire()`, la toma de jobs, una tarea lanzada con `tokio::spawn` y un
+pool conectado aparte (aunque sea a la misma base de datos). No ven las
+escrituras del bloque y pueden esperar bloqueos que el bloque retiene.
+
+Un `DatabaseCache` sobre el pool del bloque lee dentro del bloque y deja sus
+escrituras en cola hasta que el bloque termina; ahí rechaza `incr`, `add` y el
+DDL. Un cambio del registro de tenancy dentro de un bloque sobre el pool del
+registro se rechaza.
 
 El argumento de la closure es un `AtomicTx`. `tx.lock().await?` da un
 `TxGuard` que se desreferencia a `PoolTx`, para los helpers `_tx` y las formas
@@ -169,7 +174,9 @@ atomic(pool, move |_tx| {
 
 El callback es síncrono: lanza el trabajo asíncrono desde él. Un callback que
 hace panic se registra en el log y los demás corren igualmente. `on_commit`
-fuera de un bloque hace panic.
+fuera de un bloque hace panic. Los callbacks corren en la tarea del commit,
+con los task-locals del framework (origen de auditoría, zona horaria, señales
+silenciadas) que tenían al encolarse.
 
 ## Cuando una sentencia falla
 
@@ -236,8 +243,10 @@ escriben esperan `busy_timeout` (5 segundos por defecto) y luego fallan con
 `SQLITE_BUSY`; en una base de datos en memoria esperan sin límite de tiempo.
 Mantén cortos los bloques de SQLite.
 
-`atomic_immediate` hacía esto antes que `atomic`. Está obsoleto: llama a
-`atomic`.
+`AtomicOptions::deferred()` empieza con un `BEGIN` simple: un bloque que solo
+lee no toma el bloqueo de escritura, y su primera escritura tras una lectura
+falla enseguida con `SQLITE_BUSY` si otra conexión escribió entretanto. No
+afecta a PostgreSQL ni a MySQL, cuyo `BEGIN` nunca bloquea.
 
 ## Niveles de aislamiento y ajustes
 
@@ -493,6 +502,113 @@ la detiene. La conexión sigue ocupada hasta que el servidor termina esa
 sentencia; luego corre el rollback y la conexión vuelve al pool. Mientras tanto,
 a un pool pequeño le pueden faltar conexiones. Un bloque anidado descartado se
 revierte en el siguiente uso del bloque.
+
+## Una transacción por petición
+
+`atomic_requests` ejecuta cada petición de escritura a las rutas de tu
+aplicación en un bloque `atomic` sobre el pool de la petición. Una respuesta
+que no es 2xx ni 3xx, o un panic, deshace todas las escrituras que el handler
+hizo allí.
+
+```rust
+use rustango::atomic_request::AtomicRequests;
+use rustango::sql::{AtomicOptions, Isolation};
+
+// Tenancy: each block runs on the request's tenant pool.
+let app = rustango::server::Builder::from_env().await?
+    .api(routes)
+    .atomic_requests(AtomicRequests::new())
+    .into_router()
+    .await?;
+
+// One database: each block runs on the builder's pool.
+rustango::server::AppBuilder::from_env().await?
+    .api(other_routes)
+    .atomic_requests(AtomicRequests::new().options(
+        AtomicOptions::new().isolation(Isolation::ReadCommitted),
+    ))
+    .serve("0.0.0.0:8080")
+    .await?;
+```
+
+- Solo POST, PUT, PATCH, DELETE y los demás métodos no seguros. GET, HEAD,
+  OPTIONS, TRACE y QUERY se ejecutan sin transacción: una ruta GET que escribe
+  (un callback de SSO) sigue en autocommit.
+- Solo las rutas propias de tu aplicación: el admin del tenant, el login, el
+  SSO y la consola del operador no se envuelven, ni las rutas pasadas a
+  `.auth_routes(..)`. Monta ahí `JwtAuth::router()` en lugar de fusionarlo en
+  `.api()`.
+- Cada extractor de tenant de la petición (`TenantScope`, `Tenant`) sirve el
+  pool del bloque, aunque la caché de pools lo desaloje entretanto. Una
+  petición sin tenant pasa tal cual; un tenant cuyo pool no se encuentra
+  recibe 500, nunca el pool del registro.
+- Cada petición de escritura retiene una conexión desde el inicio hasta el
+  final de su handler, así que como mucho `max_connections` peticiones de
+  escritura corren a la vez por pool. Dimensiona el pool para tus escrituras
+  simultáneas en el pico más las lecturas, y saca las llamadas salientes
+  lentas (HTTP, correo) de los handlers de escritura o pásalas a
+  `on_commit`. El arranque rechaza `max_cached_scoped_pools = 0` o
+  `max_cached_database_pools = 0`, y avisa cuando
+  `scoped_pool_max_connections` es menor que 8.
+
+**Orden.** El builder pone el bloque dentro de sus propias capas (guarda de
+panic, log de accesos, tracing, reparto de tenants) y alrededor de tu router.
+Las capas de tu router (sesiones, CSRF, auth, idempotencia) se ejecutan dentro
+del bloque: lo que escriben en el pool se confirma o se deshace con la
+petición. Un `IdempotencyLayer` dentro del bloque guarda una respuesta solo
+después del `COMMIT`, así que un estado no 2xx que deba guardar no se guarda
+ahí: esa respuesta se deshace. En un router hecho a mano, añade
+`AtomicRequestLayer::new(pool)` o `AtomicRequestLayer::tenant()` antes de las
+capas que deben ver la respuesta final.
+
+**Un commit que falla.** La respuesta del handler se descarta, con sus cookies
+y su redirección, y se envía una nueva. No se reintenta nada: los handlers
+tienen efectos secundarios.
+
+| Causa | Respuesta |
+|---|---|
+| Fallo de serialización (40001), interbloqueo, espera de bloqueo de MySQL (1205), `SQLITE_BUSY`, ninguna conexión libre | 503 con `Retry-After: 1` |
+| `AtomicAborted`, `AtomicEndedEarly`, cualquier otro error | 500, registrado con el id de la petición |
+
+El mismo 503 sustituye a una respuesta que se deshace después de que una
+sentencia del bloque perdiera un conflicto así: una escritura de SQLite tras
+una lectura, un interbloqueo de MySQL. Una escritura de ViewSet que pierde uno
+responde 503 por sí misma.
+
+**Lo que escapa al bloque.**
+
+- Una tarea lanzada con `tokio::spawn` confirma por su cuenta; lánzala desde
+  `on_commit(|| ..)`.
+- Un cuerpo en streaming se ejecuta después del `COMMIT`.
+- Dos sentencias a la vez en un handler (`join!`) devuelven `NestedAtomic`.
+- `outside_atomic(work)` deja `work` en cola hasta que el bloque termina y
+  lo ejecuta después del `COMMIT` o el `ROLLBACK`, en su propia conexión: así
+  sobrevive a un rollback y nunca espera los bloqueos del bloque. Devuelve
+  `Ok(None)` cuando lo encola; un fallo en cola se registra en el log. El
+  framework escribe así las filas de auditoría de seguridad, las marcas de
+  cierre de sesión y los informes del limitador de login. Una escritura cuyo
+  resultado se necesita al momento no puede esperar: un `DatabaseCache` sobre
+  el pool de la petición rechaza ahí `incr` y `add`, y el limitador de login
+  cuenta entonces en el proceso.
+
+**`Tenant::conn`.** Dentro de un bloque sobre el pool del tenant, `t.conn()`
+presta la conexión del bloque, así que sus sentencias se confirman o se
+deshacen con la petición. Las llamadas ORM sobre el pool devuelven
+`NestedAtomic` mientras está prestada; `t.pool()` la devuelve.
+`t.pool_conn()` y `t.into_conn()` devuelven ahí `InAtomic`.
+
+**Según el backend.** PostgreSQL: un error de sentencia que el handler ignora
+aborta el bloque, y la petición responde 500. MySQL: `REPEATABLE READ`
+mantiene una sola instantánea para toda la petición, así que
+`Isolation::ReadCommitted` suele encajar mejor; un DDL confirma el bloque
+antes de tiempo (500). SQLite: los bloques empiezan diferidos, así que un POST
+que solo lee no toma el bloqueo de escritura; una escritura tras una lectura
+falla enseguida con `SQLITE_BUSY` (503) si otra conexión escribió entretanto.
+
+**Coste.** `BEGIN` y `COMMIT` por petición de escritura, una comprobación
+antes del commit y un savepoint alrededor de cada escritura ORM. En un
+PostgreSQL local, un POST con una escritura añade alrededor de 1 ms al p99 en
+solitario, más bajo carga.
 
 ## Errores
 

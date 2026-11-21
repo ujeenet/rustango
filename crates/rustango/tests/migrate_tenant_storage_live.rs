@@ -67,8 +67,8 @@ async fn migrate_tenant_storage_dry_run_prints_plan() {
         o.id = Auto::default();
         o.slug = "acme_dryrun".into();
         o.display_name = "ACME Dry Run".into();
-        o.storage_mode = StorageMode::Schema.as_str().into();
-        o.backend_kind = "postgres".to_owned();
+        o.storage_mode = StorageMode::Schema;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = None;
         o.schema_name = Some("acme_dryrun".into());
         o.host_pattern = None;
@@ -132,8 +132,8 @@ async fn migrate_tenant_storage_rejects_same_mode_no_op() {
         o.id = Auto::default();
         o.slug = "noop_tenant".into();
         o.display_name = "No-op".into();
-        o.storage_mode = StorageMode::Schema.as_str().into();
-        o.backend_kind = "postgres".to_owned();
+        o.storage_mode = StorageMode::Schema;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = None;
         o.schema_name = Some("noop_tenant".into());
         o.host_pattern = None;
@@ -184,8 +184,8 @@ async fn migrate_tenant_storage_rejects_database_target_without_url() {
         o.id = Auto::default();
         o.slug = "needs_url".into();
         o.display_name = "Needs URL".into();
-        o.storage_mode = StorageMode::Schema.as_str().into();
-        o.backend_kind = "postgres".to_owned();
+        o.storage_mode = StorageMode::Schema;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = None;
         o.schema_name = Some("needs_url".into());
         o.host_pattern = None;
@@ -296,8 +296,8 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
         o.id = Auto::default();
         o.slug = "t1864".into();
         o.display_name = "Moved".into();
-        o.storage_mode = StorageMode::Database.as_str().into();
-        o.backend_kind = "postgres".to_owned();
+        o.storage_mode = StorageMode::Database;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = Some("env://RUSTANGO_T2384_SRC".into());
         o.schema_name = None;
         o.host_pattern = None;
@@ -439,7 +439,7 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
         .fetch_on(&pool)
         .await
         .unwrap();
-    assert_eq!(moved[0].storage_mode, StorageMode::Schema.as_str());
+    assert_eq!(moved[0].storage_mode, StorageMode::Schema);
     assert_eq!(moved[0].schema_name.as_deref(), Some("t1864_moved"));
     pool.close().await;
     assert_eq!(
@@ -499,8 +499,8 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
         o.id = Auto::default();
         o.slug = "t2189".into();
         o.display_name = "Moved".into();
-        o.storage_mode = StorageMode::Schema.as_str().into();
-        o.backend_kind = "postgres".to_owned();
+        o.storage_mode = StorageMode::Schema;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = None;
         o.schema_name = Some("t2189_src".into());
         o.host_pattern = None;
@@ -703,7 +703,7 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
         .fetch_on(&pool)
         .await
         .unwrap();
-    assert_eq!(moved[0].storage_mode, StorageMode::Database.as_str());
+    assert_eq!(moved[0].storage_mode, StorageMode::Database);
     assert!(moved[0].active, "left inactive");
     assert_eq!(moved[0].display_name, "Renamed", "the edit was overwritten");
     let held: i64 = rustango::sql::sqlx::query_scalar(source_roles)
@@ -832,8 +832,8 @@ async fn a_foreign_owned_extension_on_the_target_is_refused_up_front() {
         o.id = Auto::default();
         o.slug = "tforeign".into();
         o.display_name = "Moved".into();
-        o.storage_mode = StorageMode::Schema.as_str().into();
-        o.backend_kind = "postgres".to_owned();
+        o.storage_mode = StorageMode::Schema;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = None;
         o.schema_name = Some("tforeign_src".into());
         o.host_pattern = None;
@@ -889,7 +889,7 @@ async fn migrate_tenant_storage_refuses_a_schema_another_tenant_uses() {
     let mut owner = rustango::testkit::org_with(|o| {
         o.slug = "taken_schema".into();
         o.display_name = "Owner".into();
-        o.storage_mode = StorageMode::Schema.as_str().into();
+        o.storage_mode = StorageMode::Schema;
         o.schema_name = None;
     });
     owner.insert(&pool.clone().into()).await.unwrap();
@@ -948,8 +948,8 @@ async fn movable_tenant(pool: &PgPool, slug: &str, src_url: &str) {
         o.id = Auto::default();
         o.slug = slug.into();
         o.display_name = slug.into();
-        o.storage_mode = StorageMode::Database.as_str().into();
-        o.backend_kind = "postgres".to_owned();
+        o.storage_mode = StorageMode::Database;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = Some(src_url.into());
         o.schema_name = None;
         o.host_pattern = None;
@@ -1030,7 +1030,7 @@ async fn migrate_into_an_existing_schema_is_refused_up_front() {
     assert!(err.contains(SCHEMA_EXISTS), "{err}");
     let org = org_row(&pool, "t1487").await;
     assert!(org.active, "left inactive");
-    assert_eq!(org.storage_mode, StorageMode::Database.as_str());
+    assert_eq!(org.storage_mode, StorageMode::Database);
     let kept: i64 = rustango::sql::sqlx::query_scalar("SELECT count(*) FROM t1487_other.keep")
         .fetch_one(&pool)
         .await

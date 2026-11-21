@@ -86,15 +86,11 @@ pub(super) enum Owed {
     Enrollment,
 }
 
-fn oid(op: &auth::Operator) -> i64 {
-    op.id.get().copied().unwrap_or_default()
-}
-
 pub(super) async fn owed(
     state: &ConsoleState,
     op: &auth::Operator,
 ) -> Result<Owed, crate::sql::ExecError> {
-    state.totp.owed(&state.registry, oid(op)).await
+    state.totp.owed(&state.registry, op.id.require()?).await
 }
 
 impl Gate {
@@ -160,7 +156,11 @@ pub(super) fn challenge(
     op: &auth::PasswordVerified<auth::Operator>,
     next: &str,
 ) -> Response<Body> {
-    let mut pending = Pending::new(&state.session_secret, oid(op), &op.password_hash);
+    let oid = match super::operator_id(op) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    let mut pending = Pending::new(&state.session_secret, oid, &op.password_hash);
     pending.upgrade = op.upgrade().and_then(|new| {
         crate::aead::encrypt_with(Some(&upgrade_key(state)), new.as_bytes(), TAG).ok()
     });
@@ -220,7 +220,11 @@ async fn enrollment_secret(
         return Err("RUSTANGO_SECRET_KEY is not set, so a second factor cannot be stored.");
     }
     state.totp.ensure(&state.registry).await;
-    match operator_totp::pending(&state.registry, oid(op)).await {
+    let oid = op
+        .id
+        .require()
+        .map_err(|_| "Your account has no id; sign in again.")?;
+    match operator_totp::pending(&state.registry, oid).await {
         Ok(Some(s)) => return Ok(s.secret),
         Ok(None) => {}
         Err(e) => {
@@ -229,7 +233,7 @@ async fn enrollment_secret(
         }
     }
     let secret = TotpSecret::generate();
-    match operator_totp::start(&state.registry, oid(op), &secret).await {
+    match operator_totp::start(&state.registry, oid, &secret).await {
         Ok(()) => Ok(secret),
         Err(e) => {
             tracing::warn!(target: LOG, error = %e, "TOTP enrollment start");
@@ -253,8 +257,10 @@ async fn audit(state: &ConsoleState, op: &auth::Operator, verb: &str, step: &str
     emit_registry_audit(
         &state.registry,
         "rustango_operators",
-        &oid(op).to_string(),
-        oid(op),
+        &op.id
+            .require()
+            .map_or_else(|_| String::new(), |id| id.to_string()),
+        op,
         verb,
         detail,
     )
@@ -342,6 +348,10 @@ pub(super) async fn code_submit(
     let Some(op) = pending_operator(&state, &headers).await else {
         return expired(&next);
     };
+    let oid = match super::operator_id(&op) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
     // The same lock and limits as the password step.
     let attempt = match crate::login_throttle::shared()
         .begin(&LoginScope::Operator, &ip, &op.username)
@@ -354,18 +364,18 @@ pub(super) async fn code_submit(
     let (accepted, enrolled) = match owed(&state, &op).await {
         Ok(Owed::Code(device)) => {
             let ok = !code.is_empty()
-                && operator_totp::redeem(&state.registry, oid(&op), &device, code)
+                && operator_totp::redeem(&state.registry, oid, &device, code)
                     .await
                     .unwrap_or(false);
             (ok, false)
         }
         Ok(Owed::Enrollment) => {
-            let pending = operator_totp::pending(&state.registry, oid(&op))
+            let pending = operator_totp::pending(&state.registry, oid)
                 .await
                 .ok()
                 .flatten();
             let ok = match (&pending, code.is_empty()) {
-                (Some(s), false) => operator_totp::confirm(&state.registry, oid(&op), s, code)
+                (Some(s), false) => operator_totp::confirm(&state.registry, oid, s, code)
                     .await
                     .unwrap_or(false),
                 _ => false,
@@ -452,7 +462,11 @@ pub(super) async fn account_form(
     Extension(op): Extension<auth::Operator>,
 ) -> Response<Body> {
     state.totp.ensure(&state.registry).await;
-    match operator_totp::confirmed(&state.registry, oid(&op)).await {
+    let oid = match super::operator_id(&op) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    match operator_totp::confirmed(&state.registry, oid).await {
         Ok(Some(_)) => account_page(&state, &op, true, None, None, None),
         Ok(None) => match enrollment_secret(&state, &op).await {
             Ok(secret) => account_page(&state, &op, false, Some(&secret), None, None),
@@ -494,12 +508,16 @@ pub(super) async fn account_confirm(
         Err(resp) => return resp,
     };
     let code = form.totp_code.as_deref().unwrap_or("").trim();
-    let Ok(Some(pending)) = operator_totp::pending(&state.registry, oid(&op)).await else {
+    let oid = match super::operator_id(&op) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    let Ok(Some(pending)) = operator_totp::pending(&state.registry, oid).await else {
         attempt.prompted().await;
         return account_form(State(state), Extension(op)).await;
     };
     let ok = !code.is_empty()
-        && operator_totp::confirm(&state.registry, oid(&op), &pending, code)
+        && operator_totp::confirm(&state.registry, oid, &pending, code)
             .await
             .unwrap_or(false);
     settle(attempt, ok, code).await;
@@ -539,7 +557,11 @@ pub(super) async fn account_disable(
         Err(resp) => return resp,
     };
     let code = form.totp_code.as_deref().unwrap_or("").trim();
-    let device = match operator_totp::confirmed(&state.registry, oid(&op)).await {
+    let oid = match super::operator_id(&op) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    let device = match operator_totp::confirmed(&state.registry, oid).await {
         Ok(Some(d)) => d,
         Ok(None) => {
             attempt.prompted().await;
@@ -551,7 +573,7 @@ pub(super) async fn account_disable(
         }
     };
     let ok = !code.is_empty()
-        && operator_totp::redeem(&state.registry, oid(&op), &device, code)
+        && operator_totp::redeem(&state.registry, oid, &device, code)
             .await
             .unwrap_or(false);
     settle(attempt, ok, code).await;
@@ -568,7 +590,7 @@ pub(super) async fn account_disable(
             None,
         );
     }
-    match operator_totp::remove(&state.registry, oid(&op), &device).await {
+    match operator_totp::remove(&state.registry, oid, &device).await {
         Ok(true) => {}
         Ok(false) => {
             return account_page(

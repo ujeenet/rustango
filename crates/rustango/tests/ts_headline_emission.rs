@@ -66,11 +66,11 @@ fn pg_emits_ts_headline_with_options() {
     );
     // Options string bound as a param.
     assert!(
-        stmt.params
+        stmt.params()
             .iter()
             .any(|p| matches!(p, SqlValue::String(s) if s.contains("StartSel"))),
         "options bound as param: {:?}",
-        stmt.params
+        stmt.params()
     );
 }
 

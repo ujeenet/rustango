@@ -208,7 +208,7 @@ async fn api_app(url: &str, backend: &str) -> axum::Router {
     let mut org = Org::new("acme");
     org.id = rustango::sql::Auto::Set(1);
     org.display_name = "Acme".into();
-    org.backend_kind = backend.into();
+    org.backend_kind = backend.parse().expect("a backend kind");
     org.database_url = Some(url.to_owned());
     let registry = rustango::sql::sqlx::Pool::<DefaultTenantDb>::connect(url)
         .await

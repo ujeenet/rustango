@@ -25,6 +25,7 @@ For a plain transaction handle (`transaction_pool`) and row locks, see the
 - [DDL in a block](#ddl-in-a-block)
 - [Iterating in a block](#iterating-in-a-block)
 - [Cancellation](#cancellation)
+- [One transaction per request](#one-transaction-per-request)
 - [Errors](#errors)
 
 ## A first block
@@ -90,10 +91,13 @@ and on MySQL at its default level (repeatable read), all reads in the block
 see one snapshot.
 
 These run **outside** the block, on their own connection: `pool.acquire()`,
-`Tenant::conn`, the cache, the job claim, tenancy registry changes, a task
-started with `tokio::spawn`, and a pool connected on its own (even to the same
-database). They do not see the block's writes, and they can wait on locks the
-block holds.
+the job claim, a task started with `tokio::spawn`, and a pool connected on its
+own (even to the same database). They do not see the block's writes, and they
+can wait on locks the block holds.
+
+A `DatabaseCache` on the block's own pool reads in the block and queues its
+writes until the block ends; it refuses `incr`, `add` and DDL there. A tenancy
+registry change inside a block on the registry pool is refused.
 
 The closure's argument is an `AtomicTx`. `tx.lock().await?` gives a `TxGuard`
 that derefs to `PoolTx`, for the `_tx` helpers and the `_on` forms:
@@ -165,6 +169,8 @@ atomic(pool, move |_tx| {
 
 The callback is sync: spawn async work from it. A callback that panics is
 logged and the others still run. `on_commit` outside a block panics.
+Callbacks run on the commit's own task, with the framework task-locals (audit
+source, timezone, signal suppression) they had when queued.
 
 ## When a statement fails
 
@@ -227,8 +233,10 @@ second writer waits at its own `BEGIN`. Other connections that write wait
 `busy_timeout` (5 seconds by default) and then fail with `SQLITE_BUSY`; on an
 in-memory database they wait with no timeout. Keep SQLite blocks short.
 
-`atomic_immediate` did this before `atomic` did. It is deprecated: call
-`atomic`.
+`AtomicOptions::deferred()` begins with a plain `BEGIN` instead: a block that
+only reads takes no write lock, and its first write after a read fails at once
+with `SQLITE_BUSY` if another connection wrote meanwhile. It has no effect on
+PostgreSQL and MySQL, whose `BEGIN` never locks.
 
 ## Isolation levels and settings
 
@@ -480,6 +488,105 @@ stop it. The connection stays busy until the server finishes that statement;
 then the rollback runs and the connection goes back to the pool. Meanwhile a
 small pool can be short of connections. A dropped nested block is rolled back
 on the block's next use.
+
+## One transaction per request
+
+`atomic_requests` runs each write request to your app's routes in one `atomic`
+block on the request's pool. A response that is not 2xx or 3xx, or a panic,
+rolls back every write the handler made there.
+
+```rust
+use rustango::atomic_request::AtomicRequests;
+use rustango::sql::{AtomicOptions, Isolation};
+
+// Tenancy: each block runs on the request's tenant pool.
+let app = rustango::server::Builder::from_env().await?
+    .api(routes)
+    .atomic_requests(AtomicRequests::new())
+    .into_router()
+    .await?;
+
+// One database: each block runs on the builder's pool.
+rustango::server::AppBuilder::from_env().await?
+    .api(other_routes)
+    .atomic_requests(AtomicRequests::new().options(
+        AtomicOptions::new().isolation(Isolation::ReadCommitted),
+    ))
+    .serve("0.0.0.0:8080")
+    .await?;
+```
+
+- Only POST, PUT, PATCH, DELETE and other unsafe methods. GET, HEAD, OPTIONS,
+  TRACE and QUERY run without a transaction, so a GET route that writes (an
+  SSO callback) keeps autocommit.
+- Only your app's own routes: the tenant admin, login, SSO and operator
+  console are not wrapped, nor routes given to `.auth_routes(..)`. Mount
+  `JwtAuth::router()` there rather than merging it into `.api()`.
+- Every tenant extractor in the request (`TenantScope`, `Tenant`) serves the
+  pool the block runs on, even when the pool cache evicts it meanwhile. A
+  request with no tenant passes through; a tenant whose pool cannot be found
+  gets 500, never the registry pool.
+- Each write request holds one pool connection from the start of its handler
+  to its end, so at most `max_connections` write requests run at once per
+  pool. Size the pool for your peak concurrent writes plus reads, and keep
+  slow outbound calls (HTTP, email) out of write handlers or move them to
+  `on_commit`. Boot refuses `max_cached_scoped_pools = 0` or
+  `max_cached_database_pools = 0`, and warns when
+  `scoped_pool_max_connections` is below 8.
+
+**Order.** The builder puts the block inside its own layers (panic guard,
+access log, tracing, tenant dispatch) and around your router. Layers on your
+router (sessions, CSRF, auth, idempotency) run inside the block: what they
+write on the pool commits or rolls back with the request. An
+`IdempotencyLayer` inside the block stores a response only after the
+`COMMIT`, so a non-2xx status it is set to store is not stored there: that
+response rolls back. On a hand-built router, add `AtomicRequestLayer::new(pool)` or
+`AtomicRequestLayer::tenant()` before the layers that must see the final
+response.
+
+**A failed commit.** The handler's response is dropped, with its cookies and
+redirect, and a new one is sent. Nothing is retried: handlers have side
+effects.
+
+| Cause | Response |
+|---|---|
+| Serialization failure (40001), deadlock, MySQL lock-wait timeout (1205), `SQLITE_BUSY`, no free connection | 503 with `Retry-After: 1` |
+| `AtomicAborted`, `AtomicEndedEarly`, any other error | 500, logged with the request id |
+
+The same 503 replaces a response that rolls back after a statement in the
+block lost such a conflict: a SQLite write after a read, a MySQL deadlock. A
+ViewSet write that loses one answers 503 on its own.
+
+**What escapes the block.**
+
+- A `tokio::spawn`ed task commits on its own; spawn from `on_commit(|| ..)`.
+- A streaming body runs after the `COMMIT`.
+- Two statements at once in a handler (`join!`) return `NestedAtomic`.
+- `outside_atomic(work)` queues `work` until the block ends and runs it after
+  the `COMMIT` or `ROLLBACK`, on its own connection, so it survives a rollback
+  and never waits on the block's locks. It returns `Ok(None)` when queued; a
+  queued failure is logged. The framework writes security audit rows, logout
+  stamps and login throttle reports this way. A write that needs its result at
+  once cannot wait: a `DatabaseCache` on the request's pool refuses `incr` and
+  `add` there, and the login throttle then counts in process.
+
+**`Tenant::conn`.** Inside a block on the tenant's pool, `t.conn()` lends the
+block's own connection, so its statements commit or roll back with the
+request. ORM calls on the pool return `NestedAtomic` while it is lent;
+`t.pool()` gives it back. `t.pool_conn()` and `t.into_conn()` return
+`InAtomic` there.
+
+**Per backend.** PostgreSQL: a statement error the handler ignores aborts the
+block, and the request answers 500. MySQL: `REPEATABLE READ` keeps one
+snapshot for the whole request, so `Isolation::ReadCommitted` usually fits a
+web request better; DDL commits the block early (500). SQLite: blocks begin
+deferred, so a POST that only reads takes no write lock; a write after a read
+fails at once with `SQLITE_BUSY` (503) when another connection wrote
+meanwhile.
+
+**Cost.** `BEGIN` and `COMMIT` per write request, a check before the commit,
+and a savepoint around each ORM write. On a local PostgreSQL a one-write POST
+adds about 1 ms at p99 alone, more under load.
 
 ## Errors
 

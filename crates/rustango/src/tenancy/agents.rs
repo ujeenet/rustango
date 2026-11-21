@@ -487,7 +487,7 @@ pub async fn create_skill_pool(
         data: serde_json::json!({}),
     };
     skill.insert(pool).await?;
-    let skill_id = skill.id.get().copied().unwrap_or_default();
+    let skill_id = skill.id.require()?;
 
     for tool in tools {
         let mut row = AgentSkillTool {
@@ -674,10 +674,7 @@ async fn resolve_ids(
         .into_iter()
         .next()
         .ok_or_else(|| AgentError::NotFound(skill_codename.to_owned()))?;
-    Ok((
-        agent.id.get().copied().unwrap_or_default(),
-        skill.id.get().copied().unwrap_or_default(),
-    ))
+    Ok((agent.id.require()?, skill.id.require()?))
 }
 
 /// Resolve an agent's granted skills → `(skill codenames, flattened+deduped
@@ -869,7 +866,7 @@ async fn user_entitled_skill_ids(
     if owner.is_superuser {
         return Ok(None);
     }
-    let uid = owner.id.get().copied().unwrap_or_default();
+    let uid = owner.id.require()?;
     let perms = super::permissions::permissions_of_active_user(uid, pool).await?;
     if perms.is_empty() {
         return Ok(Some(Vec::new()));
@@ -928,7 +925,7 @@ async fn user_key_grants(
     if !owner.active {
         return Ok((Vec::new(), Vec::new()));
     }
-    let agent_id = agent.id.get().copied().unwrap_or_default();
+    let agent_id = agent.id.require()?;
     let entitled = user_entitled_skill_ids(pool, owner).await?;
     // Skills pinned onto THIS key at creation (the per-key scope).
     let pinned = granted_skill_ids(pool, agent_id).await?;
@@ -1047,7 +1044,7 @@ pub async fn create_user_key_pool(
                 .into_iter()
                 .next()
                 .ok_or_else(|| AgentError::NotFound(codename.clone()))?;
-            let sid = skill.id.get().copied().unwrap_or_default();
+            let sid = skill.id.require()?;
             let entitled_to_it = match &entitled {
                 None => true, // superuser
                 Some(ids) => ids.contains(&sid),
@@ -1081,7 +1078,7 @@ pub async fn create_user_key_pool(
         }),
     };
     agent.insert(pool).await?;
-    let agent_id = agent.id.get().copied().unwrap_or_default();
+    let agent_id = agent.id.require()?;
 
     // Pin the scoped skills as grants (the per-key scope).
     for sid in skill_ids {
@@ -1163,7 +1160,7 @@ pub async fn delete_user_keys_pool(pool: &Pool, user_id: i64) -> Result<(), Agen
         .fetch(pool)
         .await?;
     for agent in agents {
-        let agent_id = agent.id.get().copied().unwrap_or_default();
+        let agent_id = agent.id.require()?;
         let grants: Vec<AgentGrant> = AgentGrant::objects()
             .filter("agent_id", agent_id)
             .fetch(pool)
@@ -1304,8 +1301,8 @@ impl LiveAgent {
         Ok(Some(Self { agent, owner }))
     }
 
-    pub(crate) fn id(&self) -> i64 {
-        self.agent.id.get().copied().unwrap_or_default()
+    pub(crate) fn id(&self) -> Result<i64, crate::sql::UnsavedRow> {
+        self.agent.id.require()
     }
 
     /// `(skill codenames, tools)`: the owner's entitlement for a user
@@ -1319,7 +1316,7 @@ impl LiveAgent {
     ) -> Result<(Vec<String>, Vec<String>), AgentError> {
         match &self.owner {
             Some(owner) => user_key_grants(pool, &self.agent, owner).await,
-            None => resolve_agent_grants_pool(pool, self.id()).await,
+            None => resolve_agent_grants_pool(pool, self.id()?).await,
         }
     }
 }
@@ -1428,8 +1425,8 @@ pub async fn resources_for_skills_pool(
         .fetch(pool)
         .await?
         .into_iter()
-        .map(|s| s.id.get().copied().unwrap_or_default())
-        .collect();
+        .map(|s| s.id.require())
+        .collect::<Result<_, _>>()?;
     if skill_ids.is_empty() {
         return Ok(vec![]);
     }
@@ -1437,4 +1434,10 @@ pub async fn resources_for_skills_pool(
         .where_(AgentSkillResource::skill_id.is_in(skill_ids))
         .fetch(pool)
         .await?)
+}
+
+impl From<crate::sql::UnsavedRow> for AgentError {
+    fn from(e: crate::sql::UnsavedRow) -> Self {
+        Self::Db(e.into())
+    }
 }

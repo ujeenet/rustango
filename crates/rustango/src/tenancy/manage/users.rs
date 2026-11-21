@@ -124,7 +124,7 @@ where
         sessions_revoked_at: None,
     };
     op.insert(&registry).await?;
-    let id = op.id.get().copied().unwrap_or_default();
+    let id = op.id.require()?;
     if generated {
         writeln!(w, "created operator `{username}` (id {id})")?;
         manage_interactive::print_secret_once(w, "generated password", &plain)?;
@@ -237,7 +237,7 @@ where
     }
     .insert(&scoped)
     .await?;
-    let row_id: i64 = user.id.get().copied().unwrap_or_default();
+    let row_id: i64 = user.id.require()?;
     if auto_promoted {
         writeln!(
             w,
@@ -385,7 +385,7 @@ where
                 "revoke-passkey: no user `{username}` in tenant `{slug}`"
             ))
         })?;
-    let uid = user.id.get().copied().unwrap_or_default();
+    let uid = user.id.require()?;
     match parsed.value("--credential")? {
         Some(cred) => {
             if !crate::passkey::revoke::<User>(&pool, uid, cred)
@@ -703,9 +703,7 @@ where
         .next()
         .ok_or_else(|| TenancyError::Validation(format!("no tenant with slug `{slug}`")))?;
     use crate::tenancy::org::StorageMode;
-    let mode = StorageMode::parse(&org.storage_mode).map_err(|got| {
-        TenancyError::Validation(format!("org `{slug}` has unknown storage_mode `{got}`"))
-    })?;
+    let mode = org.storage_mode;
     match mode {
         StorageMode::Schema => {
             #[cfg(feature = "postgres")]

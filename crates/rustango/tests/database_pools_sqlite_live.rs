@@ -19,8 +19,8 @@ fn fake_sqlite_org(slug: &str) -> Org {
         o.id = rustango::sql::Auto::default();
         o.slug = slug.to_owned();
         o.display_name = slug.to_owned();
-        o.storage_mode = "database".to_owned();
-        o.backend_kind = "sqlite".to_owned();
+        o.storage_mode = rustango::tenancy::StorageMode::Database;
+        o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
         o.database_url = Some("sqlite::memory:".to_owned());
     })
 }
@@ -66,7 +66,7 @@ async fn pool_cached_on_repeat_acquire() {
 async fn rejects_postgres_org() {
     let pools: DatabasePools<sqlx::Sqlite> = DatabasePools::new(BackendKind::Sqlite);
     let mut org = fake_sqlite_org("acme");
-    org.backend_kind = "postgres".to_owned();
+    org.backend_kind = rustango::tenancy::BackendKind::Postgres;
 
     let err = pools.pool_for_org(&org).await.expect_err("should reject");
     let msg = err.to_string();
@@ -82,7 +82,7 @@ async fn rejects_postgres_org() {
 async fn rejects_schema_mode() {
     let pools: DatabasePools<sqlx::Sqlite> = DatabasePools::new(BackendKind::Sqlite);
     let mut org = fake_sqlite_org("acme");
-    org.storage_mode = "schema".to_owned();
+    org.storage_mode = rustango::tenancy::StorageMode::Schema;
 
     let err = pools.pool_for_org(&org).await.expect_err("should reject");
     let msg = err.to_string();

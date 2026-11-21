@@ -6,10 +6,7 @@
 use std::collections::VecDeque;
 use std::marker::PhantomData;
 
-use super::{
-    select_rows_keyed_on, select_rows_pool_with_related, ExecError, LoadRelated, MaybeMyFromRow,
-    MaybeMyLoadRelated, MaybePgFromRow, MaybeSqliteFromRow, MaybeSqliteLoadRelated,
-};
+use super::{select_rows_keyed_on, select_rows_pool_with_related, DecodeModel, ExecError};
 use crate::core::{Filter, Model, NullsOrder, Op, OrderItem, SelectQuery, SqlValue};
 use crate::sql::Pool;
 
@@ -64,15 +61,7 @@ pub struct ChunkedIter<T> {
 
 impl<T> ChunkedIter<T>
 where
-    T: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    T: Model + DecodeModel,
 {
     /// Fetch the next chunk. Returns `Ok(None)` when iteration is done.
     ///

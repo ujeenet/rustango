@@ -1133,10 +1133,7 @@ struct MediaResponse {
 
 impl MediaResponse {
     async fn from_row(manager: &MediaManager, m: Media) -> Result<Self, MediaError> {
-        let id = match m.id {
-            crate::sql::Auto::Set(v) => v,
-            _ => 0,
-        };
+        let id = m.id.require()?;
         let tags = manager
             .tags_for(id)
             .await?
@@ -1496,10 +1493,7 @@ async fn collection_contents_handler(
     let mut tags = manager.tags_for_many(&ids).await?;
     let mut out = Vec::with_capacity(media.len());
     for m in media {
-        let id = match m.id {
-            crate::sql::Auto::Set(v) => v,
-            _ => 0,
-        };
+        let id = m.id.require()?;
         let row_tags = tags.remove(&id).unwrap_or_default();
         out.push(MediaResponse::from_row_with_tags(&manager, m, row_tags).await);
     }
@@ -1561,10 +1555,7 @@ async fn media_with_tag_handler(
     let mut tags = manager.tags_for_many(&ids).await?;
     let mut out = Vec::with_capacity(rows.len());
     for m in rows {
-        let id = match m.id {
-            crate::sql::Auto::Set(v) => v,
-            _ => 0,
-        };
+        let id = m.id.require()?;
         let row_tags = tags.remove(&id).unwrap_or_default();
         out.push(MediaResponse::from_row_with_tags(&manager, m, row_tags).await);
     }

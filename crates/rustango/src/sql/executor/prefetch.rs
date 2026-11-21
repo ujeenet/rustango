@@ -9,9 +9,8 @@
 //! in mod.rs proper.
 
 use super::{
-    extract_pk_value, ExecError, FkPkAccess, HasPkValue, LoadRelated, MaybeMyFromRow,
-    MaybeMyLoadRelated, MaybePgFromRow, MaybeSqliteFromRow, MaybeSqliteLoadRelated,
-    ReusableExecutor, SqlExecutor as _,
+    extract_pk_value, DecodeModel, ExecError, FkPkAccess, HasPkValue, ReusableExecutor,
+    SqlExecutor as _,
 };
 use crate::core::Model;
 use crate::sql::Pool;
@@ -22,9 +21,8 @@ use futures_util::FutureExt as _;
 /// `fetch_with_prefetch` against either backend. Bi-dialect counterpart
 /// of `fetch_with_prefetch` — fetches parents + children in two
 /// round trips and stitches each child onto its parent via
-/// [`FkPkAccess`]. Bounds add [`MaybeMyFromRow`] + [`MaybeMyLoadRelated`]
-/// over the `&PgPool` version's bounds; every `#[derive(Model)]`
-/// type satisfies them automatically.
+/// [`FkPkAccess`]. Every `#[derive(Model)]` type meets the
+/// [`DecodeModel`] bound automatically.
 ///
 /// `FkPkAccess` doesn't need a MySQL counterpart — it reads i64
 /// values from struct fields after decoding, with no Row dependency,
@@ -38,26 +36,8 @@ pub async fn fetch_with_prefetch_pool<P, C>(
     pool: &Pool,
 ) -> Result<Vec<(P, Vec<C>)>, ExecError>
 where
-    P: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + HasPkValue
-        + Send
-        + Unpin,
-    C: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + FkPkAccess
-        + Send
-        + Unpin,
+    P: Model + DecodeModel + HasPkValue,
+    C: Model + DecodeModel + FkPkAccess,
 {
     fetch_with_prefetch_on(parent_qs, child_fk_column, pool).await
 }
@@ -74,26 +54,8 @@ pub async fn fetch_with_prefetch_on<P, C, E>(
 ) -> Result<Vec<(P, Vec<C>)>, ExecError>
 where
     E: ReusableExecutor,
-    P: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + HasPkValue
-        + Send
-        + Unpin,
-    C: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + FkPkAccess
-        + Send
-        + Unpin,
+    P: Model + DecodeModel + HasPkValue,
+    C: Model + DecodeModel + FkPkAccess,
 {
     filtered_on(
         parent_qs,
@@ -144,26 +106,8 @@ pub async fn fetch_with_prefetch_filtered<P, C>(
     pool: &Pool,
 ) -> Result<Vec<(P, Vec<C>)>, ExecError>
 where
-    P: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + HasPkValue
-        + Send
-        + Unpin,
-    C: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + FkPkAccess
-        + Send
-        + Unpin,
+    P: Model + DecodeModel + HasPkValue,
+    C: Model + DecodeModel + FkPkAccess,
 {
     filtered_on(parent_qs, child_fk_column, child_qs, pool).await
 }
@@ -177,26 +121,8 @@ async fn filtered_on<P, C, E>(
 ) -> Result<Vec<(P, Vec<C>)>, ExecError>
 where
     E: ReusableExecutor,
-    P: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + HasPkValue
-        + Send
-        + Unpin,
-    C: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + FkPkAccess
-        + Send
-        + Unpin,
+    P: Model + DecodeModel + HasPkValue,
+    C: Model + DecodeModel + FkPkAccess,
 {
     let parents: Vec<P> = parent_qs.fetch_on(exec.again()).boxed().await?;
     let on = target_column::<P, C>(child_fk_column);
@@ -215,7 +141,7 @@ where
                 .collect(),
         );
     }
-    stitch.finish()
+    Ok(stitch.finish())
 }
 
 /// `child_qs` narrowed to rows whose `child_fk_column` is one of `keys`.
@@ -227,15 +153,7 @@ async fn reverse_children<C, E>(
 ) -> Result<super::Chunked<C>, ExecError>
 where
     E: ReusableExecutor,
-    C: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    C: Model + DecodeModel,
 {
     let batches = super::key_batches(exec.again().dialect(), child_qs, keys)?;
     let split = batches.len() > 1;
@@ -275,26 +193,8 @@ pub async fn fetch_with_prefetch_related<P, C>(
     pool: &Pool,
 ) -> Result<Vec<(P, Vec<C>)>, ExecError>
 where
-    P: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + HasPkValue
-        + Send
-        + Unpin,
-    C: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + HasPkValue
-        + Send
-        + Unpin,
+    P: Model + DecodeModel + HasPkValue,
+    C: Model + DecodeModel + HasPkValue,
 {
     let child_qs = crate::query::QuerySet::<C>::new();
     fetch_with_prefetch_related_filtered(parent_qs, relation, child_qs, pool).await
@@ -312,26 +212,8 @@ pub async fn fetch_with_prefetch_related_filtered<P, C>(
     pool: &Pool,
 ) -> Result<Vec<(P, Vec<C>)>, ExecError>
 where
-    P: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + HasPkValue
-        + Send
-        + Unpin,
-    C: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + HasPkValue
-        + Send
-        + Unpin,
+    P: Model + DecodeModel + HasPkValue,
+    C: Model + DecodeModel + HasPkValue,
 {
     related_filtered_on(parent_qs, relation, child_qs, pool).await
 }
@@ -345,26 +227,8 @@ async fn related_filtered_on<P, C, E>(
 ) -> Result<Vec<(P, Vec<C>)>, ExecError>
 where
     E: ReusableExecutor,
-    P: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + HasPkValue
-        + Send
-        + Unpin,
-    C: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + HasPkValue
-        + Send
-        + Unpin,
+    P: Model + DecodeModel + HasPkValue,
+    C: Model + DecodeModel + HasPkValue,
 {
     // Resolved first, so a bad name costs no query.
     let named = Named::resolve::<P, C>(relation)?;
@@ -383,14 +247,14 @@ where
                         .collect::<Result<_, ExecError>>()?,
                 );
             }
-            stitch.finish()
+            Ok(stitch.finish())
         }
         Named::M2m(rel) => {
             let mut stitch = Stitch::new(parents, None)?;
             while let Some(keys) = stitch.next_keys() {
                 stitch.push(m2m_children(&mut exec, rel, &child_qs, keys).await?);
             }
-            stitch.finish()
+            Ok(stitch.finish())
         }
     }
 }
@@ -463,15 +327,7 @@ async fn m2m_children<C, E>(
 ) -> Result<Vec<(crate::core::SqlValue, C)>, ExecError>
 where
     E: ReusableExecutor,
-    C: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
+    C: Model + DecodeModel,
 {
     use crate::core::joins::aliased;
     use crate::core::{Filter, Join, JoinKind, Op, SqlValue, WhereExpr};
@@ -521,41 +377,45 @@ where
 /// is not `Clone`.
 struct Stitch<P, C> {
     parents: Vec<P>,
-    on: Option<&'static str>,
+    /// Each parent's index into `keys`; `None` for a NULL key.
+    slots: Vec<Option<usize>>,
     /// Each distinct key in first-seen order, with how many parents carry it.
-    keys: Vec<(String, crate::core::SqlValue, usize)>,
-    rounds: Vec<std::collections::HashMap<String, Vec<C>>>,
+    keys: Vec<(crate::core::SqlValue, usize)>,
+    at: std::collections::HashMap<StitchKey, usize>,
+    /// Per fetch round, the children of each key, by key index.
+    rounds: Vec<Vec<Vec<C>>>,
 }
 
 impl<P: Model + HasPkValue, C> Stitch<P, C> {
     fn new(parents: Vec<P>, on: Option<&'static str>) -> Result<Self, ExecError> {
-        let mut keys: Vec<(String, crate::core::SqlValue, usize)> = Vec::new();
+        let mut keys: Vec<(crate::core::SqlValue, usize)> = Vec::new();
+        let mut at = std::collections::HashMap::new();
+        let mut slots = Vec::with_capacity(parents.len());
         if !parents.is_empty() {
             P::SCHEMA
                 .primary_key()
                 .ok_or(ExecError::MissingPrimaryKey {
                     table: P::SCHEMA.table,
                 })?;
-            let mut at: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-            for parent in &parents {
-                let pk = parent_key(parent, on)?;
-                if matches!(pk, crate::core::SqlValue::Null) {
-                    continue;
-                }
-                let text = pk.to_display_string();
-                match at.get(&text) {
-                    Some(&i) => keys[i].2 += 1,
-                    None => {
-                        at.insert(text.clone(), keys.len());
-                        keys.push((text, pk, 1));
-                    }
-                }
+        }
+        for parent in &parents {
+            let pk = parent_key(parent, on)?;
+            if matches!(pk, crate::core::SqlValue::Null) {
+                slots.push(None);
+                continue;
             }
+            let i = *at.entry(StitchKey::of(&pk)).or_insert_with(|| {
+                keys.push((pk, 0));
+                keys.len() - 1
+            });
+            keys[i].1 += 1;
+            slots.push(Some(i));
         }
         Ok(Self {
             parents,
-            on,
+            slots,
             keys,
+            at,
             rounds: Vec::new(),
         })
     }
@@ -566,42 +426,82 @@ impl<P: Model + HasPkValue, C> Stitch<P, C> {
         let batch: Vec<_> = self
             .keys
             .iter()
-            .filter(|k| k.2 > round)
-            .map(|k| k.1.clone())
+            .filter(|k| k.1 > round)
+            .map(|k| k.0.clone())
             .collect();
         (!batch.is_empty()).then_some(batch)
     }
 
     /// The children the last [`Self::next_keys`] read, each with its key.
     fn push(&mut self, children: Vec<(crate::core::SqlValue, C)>) {
-        let mut grouped: std::collections::HashMap<String, Vec<C>> =
-            std::collections::HashMap::new();
+        let mut grouped: Vec<Vec<C>> = std::iter::repeat_with(Vec::new)
+            .take(self.keys.len())
+            .collect();
         for (fk, child) in children {
-            grouped
-                .entry(fk.to_display_string())
-                .or_default()
-                .push(child);
+            if let Some(&i) = self.at.get(&StitchKey::owned(fk)) {
+                grouped[i].push(child);
+            }
         }
         self.rounds.push(grouped);
     }
 
-    fn finish(mut self) -> Result<Vec<(P, Vec<C>)>, ExecError> {
-        let mut taken: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    fn finish(mut self) -> Vec<(P, Vec<C>)> {
+        let mut taken = vec![0_usize; self.keys.len()];
         let mut out = Vec::with_capacity(self.parents.len());
-        for parent in self.parents {
-            let pk = parent_key(&parent, self.on)?;
-            if matches!(pk, crate::core::SqlValue::Null) {
-                out.push((parent, Vec::new()));
-                continue;
-            }
-            let text = pk.to_display_string();
-            let copy = taken.entry(text.clone()).or_insert(0);
-            let kids = self.rounds[*copy].remove(&text).unwrap_or_default();
-            *copy += 1;
+        for (parent, slot) in self.parents.into_iter().zip(self.slots) {
+            let kids = slot.map_or_else(Vec::new, |i| {
+                let copy = taken[i];
+                taken[i] += 1;
+                std::mem::take(&mut self.rounds[copy][i])
+            });
             out.push((parent, kids));
         }
-        Ok(out)
+        out
     }
+}
+
+/// A stitch key: two values match when their display text does, so an
+/// `I32` pk meets its `I64` junction key, with no string built for an int.
+#[derive(Debug, PartialEq, Eq, Hash)]
+enum StitchKey {
+    Int(i64),
+    Text(String),
+}
+
+impl StitchKey {
+    fn of(v: &crate::core::SqlValue) -> Self {
+        use crate::core::SqlValue;
+        match v {
+            SqlValue::I16(n) => Self::Int(i64::from(*n)),
+            SqlValue::I32(n) => Self::Int(i64::from(*n)),
+            SqlValue::I64(n) => Self::Int(*n),
+            SqlValue::String(s) => {
+                canonical_int(s).map_or_else(|| Self::Text(s.clone()), Self::Int)
+            }
+            other => Self::text(other.to_display_string()),
+        }
+    }
+
+    /// [`Self::of`], moving a string in rather than copying it.
+    fn owned(v: crate::core::SqlValue) -> Self {
+        match v {
+            crate::core::SqlValue::String(s) => Self::text(s),
+            other => Self::of(&other),
+        }
+    }
+
+    fn text(s: String) -> Self {
+        canonical_int(&s).map_or(Self::Text(s), Self::Int)
+    }
+}
+
+/// `s` as the `i64` whose display text it is exactly.
+fn canonical_int(s: &str) -> Option<i64> {
+    let n: i64 = s.parse().ok()?;
+    let digits = s.strip_prefix('-').unwrap_or(s);
+    let canonical =
+        !s.starts_with('+') && !(digits.len() > 1 && digits.starts_with('0')) && s != "-0";
+    canonical.then_some(n)
 }
 
 /// The value `C.child_fk_column` stores for `parent`, for the reverse
@@ -662,7 +562,7 @@ fn child_key<C: Model + HasPkValue>(
 
 #[cfg(test)]
 mod tests {
-    use super::{child_key, parent_key, ExecError, HasPkValue};
+    use super::{child_key, parent_key, ExecError, HasPkValue, Stitch};
     use crate::core::{Model, ModelSchema, SqlValue};
 
     /// A parent with a hand-written `HasPkValue`, which reads only its pk.
@@ -704,6 +604,57 @@ mod tests {
                 }
             ),
             "{err}"
+        );
+    }
+
+    /// A parent whose pk is any value.
+    struct Keyed(SqlValue);
+
+    impl Model for Keyed {
+        const SCHEMA: &'static ModelSchema = <crate::contenttypes::ContentType as Model>::SCHEMA;
+    }
+
+    impl HasPkValue for Keyed {
+        fn __rustango_pk_value_impl(&self) -> SqlValue {
+            self.0.clone()
+        }
+    }
+
+    /// Keys match as their display text does: an `I32` pk meets an `I64` or
+    /// `"1"` key, never `"01"`; a repeated parent takes the next round.
+    #[test]
+    fn stitch_keys_match_by_display_text() {
+        use SqlValue::{Null, String as S, I16, I32, I64};
+        let parents = [I32(1), I64(2), S("x".into()), I32(1), Null, S("3".into())];
+        let mut stitch = Stitch::new(parents.into_iter().map(Keyed).collect(), None).unwrap();
+        assert_eq!(
+            stitch.next_keys().unwrap(),
+            vec![I32(1), I64(2), S("x".into()), S("3".into())]
+        );
+        stitch.push(vec![
+            (I64(1), "a"),
+            (I16(2), "b"),
+            (S("x".into()), "c"),
+            (S("1".into()), "d"),
+            (I64(3), "e"),
+            (S("01".into()), "g"),
+            (I64(9), "z"),
+        ]);
+        assert_eq!(stitch.next_keys().unwrap(), vec![I32(1)]);
+        stitch.push(vec![(I64(1), "f")]);
+        assert_eq!(stitch.next_keys(), None);
+        let got: Vec<(SqlValue, Vec<&str>)> =
+            stitch.finish().into_iter().map(|(p, k)| (p.0, k)).collect();
+        assert_eq!(
+            got,
+            vec![
+                (I32(1), vec!["a", "d"]),
+                (I64(2), vec!["b"]),
+                (S("x".into()), vec!["c"]),
+                (I32(1), vec!["f"]),
+                (Null, vec![]),
+                (S("3".into()), vec!["e"]),
+            ]
         );
     }
 }

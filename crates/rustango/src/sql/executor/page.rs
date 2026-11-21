@@ -65,7 +65,7 @@ pub(super) fn paginated_statement(
     // Off PG, DISTINCT ON is a window rewrite whose outer level counts right.
     let distinct = match select.distinct {
         Some(crate::core::DistinctMode::All) => true,
-        Some(crate::core::DistinctMode::On(_)) => d.name() == "postgres",
+        Some(crate::core::DistinctMode::On(_)) => d.kind() == crate::sql::DialectKind::Postgres,
         None => false,
     };
     if select.compound.is_empty() && distinct {
@@ -74,11 +74,9 @@ pub(super) fn paginated_statement(
         return b.finish();
     }
     if select.compound.is_empty() {
-        let stmt = d.compile_select(select)?;
-        return Ok(crate::sql::CompiledStatement {
-            sql: inject_total_count(&stmt.sql),
-            params: stmt.params,
-        });
+        let mut stmt = d.compile_select(select)?;
+        stmt.sql = inject_total_count(&stmt.sql);
+        return Ok(stmt);
     }
     let mut b = crate::sql::writers::Sql::new(d);
     crate::sql::writers::write_compound_with_total(&mut b, select)?;

@@ -128,6 +128,97 @@ impl TaskContext {
     }
 }
 
+/// Every framework task-local of the running request, for work that
+/// finishes the request on another task right after it (an `on_commit`
+/// callback, an `outside_atomic` write). Unlike [`TaskContext`] it keeps
+/// the request-only ones too; never the `atomic` block.
+pub(crate) struct Inherited {
+    source: Option<AuditSource>,
+    source_tenant: Option<Option<String>>,
+    write_tenant: Option<crate::audit::WriteScope>,
+    offset: Option<chrono::FixedOffset>,
+    #[cfg(feature = "signals")]
+    quiet: Option<bool>,
+    #[cfg(feature = "_http_layers")]
+    tenant_label: Option<std::sync::Arc<std::sync::OnceLock<crate::tenant_log::TenantLabel>>>,
+    #[cfg(feature = "config")]
+    settings: Option<crate::config::Settings>,
+}
+
+fn grab<T: Clone + 'static>(key: &'static tokio::task::LocalKey<T>) -> Option<T> {
+    key.try_with(Clone::clone).ok()
+}
+
+async fn scoped<T: 'static, F: std::future::Future>(
+    key: &'static tokio::task::LocalKey<T>,
+    value: Option<T>,
+    fut: F,
+) -> F::Output {
+    match value {
+        Some(v) => key.scope(v, fut).await,
+        None => fut.await,
+    }
+}
+
+fn sync_scoped<T: 'static, R>(
+    key: &'static tokio::task::LocalKey<T>,
+    value: Option<T>,
+    f: impl FnOnce() -> R,
+) -> R {
+    match value {
+        Some(v) => key.sync_scope(v, f),
+        None => f(),
+    }
+}
+
+impl Inherited {
+    /// Snapshot the running task's framework task-locals.
+    pub(crate) fn capture() -> Self {
+        Self {
+            source: grab(&crate::audit::AUDIT_SOURCE),
+            source_tenant: grab(&crate::audit::SOURCE_TENANT),
+            write_tenant: grab(&crate::audit::WRITE_TENANT),
+            offset: crate::i18n::timezone::active_override(),
+            #[cfg(feature = "signals")]
+            quiet: grab(&crate::signals::SUPPRESS_SIGNALS),
+            #[cfg(feature = "_http_layers")]
+            tenant_label: grab(&crate::tenant_log::TENANT),
+            #[cfg(feature = "config")]
+            settings: grab(&crate::test_settings::OVERLAY),
+        }
+    }
+
+    /// Run `fut` with the snapshot installed.
+    pub(crate) async fn scope<F: std::future::Future>(self, fut: F) -> F::Output {
+        let fut = scoped(&crate::audit::AUDIT_SOURCE, self.source, fut);
+        let fut = scoped(&crate::audit::SOURCE_TENANT, self.source_tenant, fut);
+        let fut = scoped(&crate::audit::WRITE_TENANT, self.write_tenant, fut);
+        let fut = scoped(&crate::i18n::timezone::ACTIVE_TZ, self.offset, fut);
+        #[cfg(feature = "signals")]
+        let fut = scoped(&crate::signals::SUPPRESS_SIGNALS, self.quiet, fut);
+        #[cfg(feature = "_http_layers")]
+        let fut = scoped(&crate::tenant_log::TENANT, self.tenant_label, fut);
+        #[cfg(feature = "config")]
+        let fut = scoped(&crate::test_settings::OVERLAY, self.settings, fut);
+        fut.await
+    }
+
+    /// [`Self::scope`] for a sync `f`.
+    pub(crate) fn sync_scope<R>(self, f: impl FnOnce() -> R) -> R {
+        let f = move || sync_scoped(&crate::audit::AUDIT_SOURCE, self.source, f);
+        let f = move || sync_scoped(&crate::audit::SOURCE_TENANT, self.source_tenant, f);
+        let f = move || sync_scoped(&crate::audit::WRITE_TENANT, self.write_tenant, f);
+        let f = move || sync_scoped(&crate::i18n::timezone::ACTIVE_TZ, self.offset, f);
+        #[cfg(feature = "signals")]
+        let f = move || sync_scoped(&crate::signals::SUPPRESS_SIGNALS, self.quiet, f);
+        #[cfg(feature = "_http_layers")]
+        let f = move || sync_scoped(&crate::tenant_log::TENANT, self.tenant_label, f);
+        #[cfg(feature = "config")]
+        let f = move || sync_scoped(&crate::test_settings::OVERLAY, self.settings, f);
+        f()
+    }
+}
+
 /// `rustango_jobs.context`. A fixed shape of its own, so changing
 /// `AuditSource` cannot silently change what old rows decode to.
 #[cfg(feature = "jobs-postgres")]

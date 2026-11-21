@@ -3,6 +3,11 @@
 
 use crate::tenancy::error::TenancyError;
 
+/// A flag value that names no variant, with the flag in front.
+pub(super) fn flag_error(flag: &str, e: &crate::core::UnknownVariant) -> TenancyError {
+    TenancyError::Validation(format!("{flag}: {e}"))
+}
+
 /// Consume the next argument from `iter` as the value for `flag`.
 /// Yields a uniform `Validation` error when the flag was passed with
 /// no following value.

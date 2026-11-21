@@ -13,6 +13,38 @@
 //! `From<T>` for ergonomics: `let mut u = User { id: Auto::default(), … };`
 //! or `let mut u = User { id: 42_i64.into(), … };`.
 
+/// A row's primary key was read before the row was saved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct UnsavedRow {
+    /// The model's table, `""` when the reader did not name it.
+    pub table: &'static str,
+}
+
+impl UnsavedRow {
+    /// Name the table, for the error message.
+    #[must_use]
+    pub fn in_table(self, table: &'static str) -> Self {
+        Self { table }
+    }
+}
+
+impl std::fmt::Display for UnsavedRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.table.is_empty() {
+            f.write_str("row has no primary key yet; save it first")
+        } else {
+            write!(
+                f,
+                "`{}` row has no primary key yet; save it first",
+                self.table
+            )
+        }
+    }
+}
+
+impl std::error::Error for UnsavedRow {}
+
 /// Server-assigned primary key wrapper. See module docs.
 ///
 /// JSON shape (REST-friendly, since v0.29): `Auto::Set(v)` serializes
@@ -118,6 +150,21 @@ impl<T> Auto<T> {
         match std::mem::replace(self, Self::Unset) {
             Self::Set(v) => Some(v),
             Self::Unset => None,
+        }
+    }
+
+    /// The value, or [`UnsavedRow`] when the row was never saved. Use it
+    /// where `0` would silently name the wrong row.
+    ///
+    /// # Errors
+    /// [`UnsavedRow`] when `Unset`.
+    pub fn require(&self) -> Result<T, UnsavedRow>
+    where
+        T: Copy,
+    {
+        match self {
+            Self::Set(v) => Ok(*v),
+            Self::Unset => Err(UnsavedRow { table: "" }),
         }
     }
 
@@ -353,5 +400,29 @@ mod tests {
         assert_eq!(json, r#"{"id":7,"name":"x"}"#);
         let back: Row = serde_json::from_str(&json).unwrap();
         assert_eq!(back, row);
+    }
+}
+
+#[cfg(test)]
+mod require_tests {
+    use super::*;
+
+    #[test]
+    fn require_reads_a_set_key_and_refuses_an_unset_one() {
+        assert_eq!(Auto::Set(7_i64).require(), Ok(7));
+        assert_eq!(Auto::<i64>::Unset.require(), Err(UnsavedRow { table: "" }));
+    }
+
+    #[test]
+    fn the_error_converts_into_exec_error_keeping_its_table() {
+        let e: crate::sql::ExecError = UnsavedRow { table: "t" }.into();
+        assert!(matches!(
+            e,
+            crate::sql::ExecError::UnsavedRow { table: "t" }
+        ));
+        assert!(e.to_string().contains("`t`"), "{e}");
+        assert!(UnsavedRow { table: "" }
+            .to_string()
+            .starts_with("row has no"));
     }
 }

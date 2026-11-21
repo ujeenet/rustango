@@ -157,8 +157,8 @@ impl rustango::tenancy::OrgResolver for SoleTenant {
             o.id = rustango::sql::Auto::Set(1);
             o.slug = "sole".into();
             o.display_name = "sole".into();
-            o.storage_mode = "database".into();
-            o.backend_kind = "sqlite".into();
+            o.storage_mode = rustango::tenancy::StorageMode::Database;
+            o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
             o.database_url = Some(SOLE_TENANT_URL.to_owned());
         })))
     }

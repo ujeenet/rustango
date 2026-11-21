@@ -119,8 +119,8 @@ pub(crate) fn ddl(dialect: &dyn crate::sql::Dialect) -> String {
         dialect.cs_text_type(LOCALE_LEN),
         dialect.cs_text_type(KEY_LEN),
     );
-    match dialect.name() {
-        "mysql" => format!(
+    match dialect.kind() {
+        crate::sql::DialectKind::Mysql => format!(
             r"
 CREATE TABLE IF NOT EXISTS `rustango_translations` (
     `id`         BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -134,7 +134,7 @@ CREATE TABLE IF NOT EXISTS `rustango_translations` (
 );
 "
         ),
-        "sqlite" => format!(
+        crate::sql::DialectKind::Sqlite => format!(
             r#"
 CREATE TABLE IF NOT EXISTS "rustango_translations" (
     "id"         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -149,7 +149,7 @@ CREATE TABLE IF NOT EXISTS "rustango_translations" (
 "#
         ),
         // Postgres + any future dialect: the standard `"`-quoted DDL.
-        _ => format!(
+        crate::sql::DialectKind::Postgres => format!(
             r#"
 CREATE TABLE IF NOT EXISTS "rustango_translations" (
     "id"         BIGSERIAL PRIMARY KEY,
@@ -228,7 +228,7 @@ async fn case_sensitive_keys(pool: &Pool) -> Result<(), ExecError> {
     let Some(probe) = d.ci_columns_sql("rustango_translations") else {
         return Ok(());
     };
-    let found: Vec<(String,)> = crate::sql::raw_query_pool(&probe.sql, probe.params, pool).await?;
+    let found: Vec<(String,)> = crate::sql::raw_query_stmt(probe, pool).await?;
     for (column,) in found {
         let len = match column.as_str() {
             "locale" => LOCALE_LEN,

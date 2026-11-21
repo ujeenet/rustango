@@ -229,7 +229,7 @@ mod scenarios {
             total: 0, // placeholder — DB computes 12
         };
         inv.save(pool).await.expect("insert");
-        if pool.dialect().name() == "mysql" {
+        if pool.dialect().kind() == rustango::sql::DialectKind::Mysql {
             // No `INSERT … RETURNING` on MySQL — the generated column
             // stays at its placeholder — the refresh is deferred.
             assert_eq!(inv.total, 0, "MySQL: generated-column refresh deferred");

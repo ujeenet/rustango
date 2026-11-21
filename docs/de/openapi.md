@@ -146,6 +146,8 @@ PATCH, DELETE), und es bleibt mit der Konfiguration des ViewSet synchron:
   `?search=`, wenn konfiguriert, und `?ordering=` (unten).
 - **`read_only()`** → die Schreiboperationen (POST/PUT/PATCH/DELETE) werden
   weggelassen.
+- **Auswahlwerte** → ein `choices`- oder `text_enum`-Feld trägt ein `enum` seiner
+  gespeicherten Namen (die Aliase eines Enums stehen nicht darin).
 - **Bodies und Fehler** → Create, PUT und PATCH nehmen JSON- oder
   urlencoded-Bodies an und dokumentieren `422 validation_failed`, `400` für einen
   fehlerhaften Body und `413` für einen zu großen. Die Create-Operation

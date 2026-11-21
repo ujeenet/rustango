@@ -104,7 +104,7 @@ async fn lifecycle(admin: &ServerAdmin, admin_url: Option<&str>) {
     rustango::sql::raw_execute_pool(&tenant, "INSERT INTO notes (id) VALUES (1)", vec![])
         .await
         .expect("tenant writes");
-    if tenant.dialect().name() == "mysql" {
+    if tenant.dialect().kind() == rustango::sql::DialectKind::Mysql {
         // Not the server default, which is latin1 on older MariaDB.
         let cs: Vec<(String,)> =
             rustango::sql::raw_query_pool("SELECT @@character_set_database", vec![], &tenant)

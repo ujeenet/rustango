@@ -4,6 +4,38 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.68.0] — 2026-11-20
+
+### Added
+
+- `sql::DialectKind` and `Dialect::kind()`: match on the backend so the compiler checks every arm. `Dialect::date_bucket_sql` / `datetime_bucket_sql` hold the `.dates()` / `.datetimes()` truncation; `testkit::matrix::Backend::kind()`.
+- `sql::DecodeModel`: one bound for every row-decoding executor, in place of the eight marker traits. `CompiledStatement::new(dialect, sql, params)` and `sql::BindParams`: a hand-written statement checked for its dialect.
+- `#[derive(TextEnum)]` and `#[rustango(text_enum, max_length = N)]`: a model field that is a fieldless Rust enum, stored as text on every backend. Filters, `pluck`, admin choices and the OpenAPI `enum` take the enum's values; a stored value no variant names is a `ColumnDecode` error with an `UnknownVariant` source. `#[text_enum(alias = "...")]` reads old spellings.
+- `server::Builder::atomic_requests` and `AppBuilder::atomic_requests` (`atomic_request::AtomicRequests`, `AtomicRequestLayer`): each write request to the app's routes runs in one `atomic` block on its pool, holding one connection until it ends. A response that is not 2xx/3xx, or a panic, rolls it back; a failed COMMIT, or a failure after a statement lost a conflict, answers 503 with `Retry-After`, else 500. Boot refuses a tenant pool cache cap of 0 with it on. `server::Builder::auth_routes` mounts framework auth routes (`JwtAuth::router()`) outside it.
+- `sql::AtomicOptions::deferred()`: a plain SQLite `BEGIN`, so a block that only reads takes no write lock. `sql::outside_atomic(work)`: a write that survives the block's rollback, queued until the outermost block ends. `Tenant::conn` on SQLite and MySQL.
+- `TextEnum::spellings()` and `Column::eq_any_spelling`: filter on a variant's stored name and its aliases. `testkit::matrix::Backend::admin_url` / `skip_arm`.
+- `manage check-tenants` lists `rustango_orgs` rows whose storage mode or backend cannot be read; `manage repair-tenant <slug>` rewrites such a value, or an old spelling, from the raw text. `Org::fetch_reporting` reads orgs and returns the unreadable rows apart. `ExecError::is_row_decode`.
+
+### Changed
+
+- Framework code branches on `Dialect::kind()` instead of comparing `name()` strings; a structural test refuses new comparisons. Emitted SQL is unchanged.
+- Audit list, count and facets, a user's roles, media get/tag reads and the notifications table insert now run through the ORM instead of per-dialect hand-built SQL. Results are unchanged.
+- `allow(dead_code)` removed from the framework models and the SQLite marker traits, so an unused field on them warns again.
+- **Breaking:** `CompiledStatement::params` is private: read it with `params()`, build a statement with `CompiledStatement::new`. The hidden `audit::__bind_value_pg` / `_my` / `_sqlite` are gone.
+- A value a backend cannot bind (a Postgres-only value off Postgres, a raw `List`, a Postgres array of floats) returns `SqlError::ValueNotSupportedInDialect` instead of panicking in the binder.
+- **Breaking:** `Org.storage_mode` is a `StorageMode` and `Org.backend_kind` a `BackendKind` (both `TextEnum`), not `String`. Stored values and the table are unchanged. `StorageMode::parse` / `BackendKind::parse` are gone (use `from_db` or `str::parse`); `as_str` is the `TextEnum` trait method.
+- A saved row's primary key is read with `Auto::require()`, which returns `UnsavedRow` for a row never saved, where about a hundred sites read `0`. The operator console, tenant provisioning and decommission, SSO links, agents and media now refuse such a row (the console answers 500) instead of acting on id 0 or writing an audit row for operator 0. `UnsavedRow` converts into `ExecError`, `TenancyError`, `MigrateError` and the other error types those paths return.
+- **Breaking:** `AuditEntry` is built from an `AuditLog` with `TryFrom` (was `From`). `JwtBackend::issue_for_user` and `issue_for_tenant_user` return `Result<String, UnsavedRow>`: a user never saved gets no token, instead of one with `sub` 0. Login and role paths read a user or role id the same way.
+- One `rustango_orgs` row with an unreadable storage mode or backend fails only that tenant: it no longer opens the registry breaker, and migrate-all, pre-warm, the per-tenant sweep, `list-tenants` and the console list skip and report it. Cast fields decode the cell without copying it first.
+- Every tenant extractor in a request serves one pool, looked up once, also when the pool cache evicts it mid-request. Inside an `atomic` block on that pool `Tenant::conn` lends the block's connection.
+- An `atomic` block commits and runs its `on_commit` callbacks on its own task: a caller dropped during COMMIT no longer commits the data and skips them.
+- Security audit rows (TOTP, SSO account changes, agent tool calls, audit cleanup), logout stamps and login throttle reports inside an `atomic` block are written when it ends, after its COMMIT or ROLLBACK, on every backend: they are kept on a rollback and never wait on the block's locks. A `DatabaseCache` on the block's pool reads in the block, queues its writes the same way, and refuses `incr`, `add` and DDL. A tenant registry edit inside a block on the registry pool is refused. An `IdempotencyLayer` inside a block stores its response only after the commit, so a non-2xx status it is set to store is not stored there.
+- `on_commit` callbacks keep the framework task-locals (audit source, timezone, signal suppression, tenant log label, test settings) they had when queued.
+- The shared-database purge guard and `DbServer::used_by` see tenants whose backend is stored as an alias (`pg`, `mariadb`). `repair-tenant --storage-mode schema` refuses a schema another tenant uses. A ViewSet write that loses a conflict answers 503 with `Retry-After`, not 400.
+- `#[derive(TextEnum)]` refuses stored names or aliases that differ only by case, which MySQL's default collation compares equal.
+- **Breaking:** `sql::atomic_immediate`, deprecated in 0.67.0, is removed: call `atomic`.
+- List pages and prefetch copy rows less (100-row pages on SQLite): admin list 15% faster with 30% fewer allocations, ListView 11% (18% with an `ExtraContext`), ViewSet lists 11–15%; prefetch stitching makes 17–20% fewer allocations. Output is unchanged.
+
 ## [0.67.0] — 2026-11-19
 
 ### Added

@@ -367,10 +367,10 @@ async fn m2m_prefetch_past_the_bind_cap(pool: &Pool) {
     for (post, tags) in &rows {
         assert_eq!(tags.len() as i64, post.id % 4, "post {}", post.id);
     }
-    let want = match pool.dialect().name() {
-        "postgres" => 2,
-        "mysql" => 3,
-        _ => 4,
+    let want = match pool.dialect().kind() {
+        rustango::sql::DialectKind::Postgres => 2,
+        rustango::sql::DialectKind::Mysql => 3,
+        rustango::sql::DialectKind::Sqlite => 4,
     };
     assert_eq!(queries, want, "one parent query, then one per IN chunk");
 }

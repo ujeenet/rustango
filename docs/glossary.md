@@ -220,6 +220,11 @@ at an `Author`. It's how rows reference each other.
 **NULL / nullable** — `NULL` is the database's word for "no value / empty". A
 **nullable** field is allowed to be empty; a non-nullable one is required.
 
+**Enum field (`TextEnum`)** — a field whose Rust type is an enum such as
+`Status::Draft`, stored as a short text like `draft`. Reading a value that
+names no variant is an error, not a guess. See
+[enum fields](models.md#enum-fields-stored-as-text).
+
 **ORM** — *Object-Relational Mapper.* The part of the framework that turns your
 Rust structs into database rows and back, so you query in Rust instead of
 writing SQL by hand. See the [ORM guide](orm.md).

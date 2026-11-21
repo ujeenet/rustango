@@ -131,7 +131,7 @@ async fn fixture(pool: sqlx::PgPool) -> (String, sqlx::PgPool, axum::Router) {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = slug.clone();
         o.display_name = "VS Test".into();
-        o.storage_mode = StorageMode::Database.as_str().into();
+        o.storage_mode = StorageMode::Database;
         o.database_url = Some(url.clone());
         o.host_pattern = Some(format!("{slug}.app.test"));
     });
@@ -177,7 +177,7 @@ async fn throttle_budgets_are_per_tenant() {
     let slug_b = unique("vstest");
     let mut org_b = rustango::testkit::org_with(|o| {
         o.slug = slug_b.clone();
-        o.storage_mode = StorageMode::Database.as_str().into();
+        o.storage_mode = StorageMode::Database;
         o.database_url = Some(std::env::var("DATABASE_URL").unwrap());
     });
     org_b.insert(&pool.clone().into()).await.unwrap();
@@ -208,7 +208,7 @@ async fn throttled_with_dead_tenant() -> Option<(String, axum::Router)> {
     let dead = unique("vsdead");
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = dead.clone();
-        o.storage_mode = StorageMode::Database.as_str().into();
+        o.storage_mode = StorageMode::Database;
         o.database_url = Some("postgres://nobody:x@127.0.0.1:1/none".into());
     });
     org.insert(&pool.clone().into()).await.unwrap();

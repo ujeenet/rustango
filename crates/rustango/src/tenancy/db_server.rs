@@ -6,6 +6,7 @@
 //! legacy rows need the fallback, and this login can drop every database.
 //! The admin URL is built in memory when a connection is made.
 
+use crate::core::TextEnum as _;
 use std::time::Duration;
 
 use crate::core::Column as _;
@@ -353,8 +354,7 @@ impl DbServer {
     /// # Errors
     /// [`DbServerError::Invalid`] for a row holding an unknown backend.
     pub fn backend_kind(&self) -> Result<BackendKind, DbServerError> {
-        BackendKind::parse(&self.backend)
-            .map_err(|b| DbServerError::Invalid(format!("unknown backend `{b}`")))
+        BackendKind::from_db(&self.backend).map_err(|e| DbServerError::Invalid(e.to_string()))
     }
 
     /// The row as a spec, for an edit that changes some fields.
@@ -520,8 +520,8 @@ impl DbServer {
     ) -> Result<Vec<String>, DbServerError> {
         let backend = self.backend_kind()?;
         let orgs: Vec<Org> = Org::objects()
-            .where_(Org::storage_mode.eq(StorageMode::Database.as_str().to_owned()))
-            .where_(Org::backend_kind.eq(backend.as_str().to_owned()))
+            .where_(Org::storage_mode.eq(StorageMode::Database))
+            .where_(Org::backend_kind.eq_any_spelling(backend))
             .fetch(registry)
             .await?;
         let mut out = Vec::new();
@@ -906,7 +906,7 @@ async fn write_if_unchanged(
         column,
         value: value.into(),
     };
-    let id = row.id.get().copied().unwrap_or_default();
+    let id = row.id.require()?;
     let mut filters = vec![Filter {
         column: "id",
         op: Op::Eq,
@@ -998,6 +998,10 @@ pub(crate) async fn reseal_password(registry: &Pool, row: &DbServer, apply: bool
         Ok(s) => s,
         Err(e) => return Resealed::Failed(e.to_string()),
     };
+    let id = match row.id.require() {
+        Ok(id) => id,
+        Err(e) => return Resealed::Failed(e.to_string()),
+    };
     let query = UpdateQuery {
         model: DbServer::SCHEMA,
         set: vec![
@@ -1014,7 +1018,7 @@ pub(crate) async fn reseal_password(registry: &Pool, row: &DbServer, apply: bool
             Filter {
                 column: "id",
                 op: Op::Eq,
-                value: SqlValue::I64(row.id.get().copied().unwrap_or_default()),
+                value: SqlValue::I64(id),
             },
             Filter {
                 column: "admin_password",
@@ -1156,6 +1160,12 @@ fn validate(
         sqlite_dir,
         active: spec.active,
     })
+}
+
+impl From<crate::sql::UnsavedRow> for DbServerError {
+    fn from(e: crate::sql::UnsavedRow) -> Self {
+        Self::Exec(e.into())
+    }
 }
 
 #[cfg(test)]

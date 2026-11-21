@@ -17,8 +17,8 @@ pub struct Note {
     pub id: i64,
 }
 
-fn dialect(pool: &Pool) -> &'static str {
-    pool.dialect().name()
+fn dialect(pool: &Pool) -> rustango::sql::DialectKind {
+    pool.dialect().kind()
 }
 
 /// A second, one-connection pool on the same database.
@@ -85,7 +85,7 @@ async fn sees_a_concurrent_commit(
 async fn isolation_level_is_read_back_in_the_block(pool: &Pool) {
     let p = one_conn(pool).await;
     match dialect(pool) {
-        "postgres" => {
+        rustango::sql::DialectKind::Postgres => {
             let q = p.clone();
             let opts = AtomicOptions::new().isolation(Isolation::Serializable);
             let inside = atomic_with(&p, opts, |_tx| {
@@ -100,7 +100,7 @@ async fn isolation_level_is_read_back_in_the_block(pool: &Pool) {
                 .unwrap();
             assert_ne!(next, "serializable", "the level leaked");
         }
-        "mysql" => {
+        rustango::sql::DialectKind::Mysql => {
             // Proven by behaviour: performance_schema may not be readable.
             let other = one_conn(pool).await;
             let rc = AtomicOptions::new().isolation(Isolation::ReadCommitted);
@@ -110,7 +110,7 @@ async fn isolation_level_is_read_back_in_the_block(pool: &Pool) {
             assert_eq!(next, (1, 1), "the level leaked");
         }
         // SQLite is always serializable: any level is accepted.
-        _ => {
+        rustango::sql::DialectKind::Sqlite => {
             let opts = AtomicOptions::new().isolation(Isolation::ReadCommitted);
             atomic_with(&p, opts, |_tx| Box::pin(async move { Ok(()) }))
                 .await
@@ -136,7 +136,7 @@ async fn settings_are_transaction_local(pool: &Pool) {
         rows.into_iter().next().and_then(|(v,)| v)
     };
     let res = atomic_with(&p, opts, |_tx| Box::pin(async move { Ok(read(q).await) })).await;
-    if dialect(pool) != "postgres" {
+    if dialect(pool) != rustango::sql::DialectKind::Postgres {
         assert!(
             matches!(
                 res,

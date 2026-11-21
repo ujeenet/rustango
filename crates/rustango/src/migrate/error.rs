@@ -78,3 +78,9 @@ pub enum MigrateError {
         source: Box<sqlx::Error>,
     },
 }
+
+impl From<crate::sql::UnsavedRow> for MigrateError {
+    fn from(e: crate::sql::UnsavedRow) -> Self {
+        Self::Exec(e.into())
+    }
+}

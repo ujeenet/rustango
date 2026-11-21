@@ -25,8 +25,8 @@ fn db_org(slug: &str, url: &str, active: bool) -> Org {
         o.id = Auto::default();
         o.slug = slug.to_owned();
         o.display_name = slug.to_owned();
-        o.storage_mode = "database".into();
-        o.backend_kind = "sqlite".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Database;
+        o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
         o.database_url = Some(url.to_owned());
         o.active = active;
     })

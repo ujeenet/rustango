@@ -977,15 +977,15 @@ impl LoginAttempt {
     }
 }
 
-/// Run a report on its own task and wait for it, so a request cancelled
-/// half-way still finishes it (as [`QuietSlot::give_back`]).
+/// Run a report through [`crate::sql::outside_atomic`]: on its own task, so
+/// a request cancelled half-way still finishes it, and kept when the
+/// request's `atomic` block rolls back.
 async fn detached(report: impl std::future::Future<Output = ()> + Send + 'static) {
-    match tokio::runtime::Handle::try_current() {
-        Ok(rt) => {
-            let _ = rt.spawn(report).await;
-        }
-        Err(_) => report.await,
-    }
+    let report = async move {
+        report.await;
+        Ok::<(), std::convert::Infallible>(())
+    };
+    let Ok(_) = crate::sql::outside_atomic(report).await;
 }
 
 /// A per-request credential admitted by [`LoginThrottle::begin_per_request`].

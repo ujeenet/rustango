@@ -37,7 +37,6 @@ use crate::sql::Auto;
         formfield_overrides = "client_secret: password, label: text, client_id: text, issuer_url: text, scopes: text, role_claims: text",
     )
 )]
-#[allow(dead_code)]
 pub struct SsoProvider {
     #[rustango(primary_key)]
     pub id: Auto<i64>,

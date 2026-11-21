@@ -87,7 +87,7 @@ impl Normalised {
 /// migration run.
 pub async fn normalise_sqlite_datetimes(pool: &Pool) -> Result<Normalised, MigrateError> {
     let mut out = Normalised::default();
-    if pool.dialect().name() != "sqlite" {
+    if pool.dialect().kind() != crate::sql::DialectKind::Sqlite {
         return Ok(out);
     }
 

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "postgres")]
 use std::time::Duration;
 
-use rustango::core::Column as _;
+use rustango::core::{Column as _, TextEnum as _};
 use rustango::sql::{FetcherPool as _, Pool};
 use rustango::tenancy::manage::api::{create_tenant, create_tenant_if_missing, CreateTenantOpts};
 use rustango::tenancy::provision::{provision_tenant, ProvisionOutcome, ProvisionRequest};
@@ -103,7 +103,7 @@ impl Env {
     async fn tenant_opts(&mut self, tag: &str) -> CreateTenantOpts {
         let org = self.own_tenant(tag).await;
         CreateTenantOpts {
-            mode: StorageMode::parse(&org.storage_mode).unwrap(),
+            mode: org.storage_mode,
             backend: Some(self.backend()),
             database_url: org.database_url,
             schema_name: org.schema_name,
@@ -121,7 +121,7 @@ impl Env {
         match self.backend() {
             BackendKind::Postgres => {
                 let mut o = base;
-                o.storage_mode = "schema".into();
+                o.storage_mode = rustango::tenancy::StorageMode::Schema;
                 o.schema_name = Some(format!("mt_{tag}"));
                 o
             }
@@ -129,13 +129,13 @@ impl Env {
             BackendKind::MySql => {
                 let url = scratch(&mut self.guards, "MYSQL_TEST_URL").await;
                 let mut o = base;
-                o.backend_kind = "mysql".into();
+                o.backend_kind = rustango::tenancy::BackendKind::MySql;
                 o.database_url = Some(url);
                 o
             }
             _ => {
                 let mut o = base;
-                o.backend_kind = "sqlite".into();
+                o.backend_kind = rustango::tenancy::BackendKind::Sqlite;
                 o.database_url = Some(format!(
                     "sqlite://{}?mode=rwc",
                     self.tmp.path().join(format!("{tag}.db")).display()
@@ -343,7 +343,7 @@ async fn create_tenant_if_missing_leaves_a_suspended_tenant(pool: &Pool) {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = "paused".into();
         o.display_name = "paused".into();
-        o.backend_kind = env.backend().as_str().into();
+        o.backend_kind = env.backend();
         o.database_url = Some(env.url.clone());
         o.active = false;
     });
@@ -560,7 +560,7 @@ async fn forget_pending_refuses_an_unreadable_tenant(pool: &Pool) {
     let mut org = rustango::testkit::org();
     org.slug = "gone".into();
     org.display_name = "gone".into();
-    org.backend_kind = "sqlite".into();
+    org.backend_kind = rustango::tenancy::BackendKind::Sqlite;
     org.database_url = Some(format!("sqlite://{}?mode=rwc", missing.display()));
     org.save(&env.registry).await.expect("insert org");
     let dir = env.dir("migrations");
@@ -716,7 +716,7 @@ async fn check_deploy_names_a_role_named_schema(pool: &Pool) {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = "rolehome".into();
         o.display_name = "rolehome".into();
-        o.storage_mode = "schema".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Schema;
         o.schema_name = Some(role[0].0.clone());
     });
     org.save(&env.registry).await.expect("insert org");
@@ -1096,7 +1096,7 @@ async fn a_url_of_another_backend_is_refused(pool: &Pool) {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = "edited".into();
         o.display_name = "edited".into();
-        o.backend_kind = env.backend().as_str().into();
+        o.backend_kind = env.backend();
         o.database_url = Some(url.clone());
     });
     org.save(&env.registry).await.expect("insert org");
@@ -1188,7 +1188,7 @@ async fn a_resolved_secret_is_never_echoed(pool: &Pool) {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = "leak-edit".into();
         o.display_name = "leak-edit".into();
-        o.backend_kind = env.backend().as_str().into();
+        o.backend_kind = env.backend();
         o.database_url = Some(env.unreachable_url());
     });
     org.save(&env.registry).await.expect("insert org");
@@ -1265,7 +1265,7 @@ async fn the_registry_under_an_alias_is_refused(pool: &Pool) {
     let mut other = rustango::testkit::org_with(|o| {
         o.slug = "aliased".into();
         o.display_name = "aliased".into();
-        o.backend_kind = env.backend().as_str().into();
+        o.backend_kind = env.backend();
         o.database_url = Some("unused".into());
     });
     other.save(&env.registry).await.expect("insert org");
@@ -1284,7 +1284,7 @@ async fn reseal_seals_a_plain_password_url(pool: &Pool) {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = "plain".into();
         o.display_name = "plain".into();
-        o.backend_kind = env.backend().as_str().into();
+        o.backend_kind = env.backend();
         o.database_url = Some(url.clone());
         o.host_pattern = Some("plain.localhost".into());
     });
@@ -1473,9 +1473,9 @@ async fn reseal_leaves_a_schema_mode_url_alone(pool: &Pool) {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = "schemaurl".into();
         o.display_name = "schemaurl".into();
-        o.storage_mode = "schema".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Schema;
         o.schema_name = Some("mt_schemaurl".into());
-        o.backend_kind = env.backend().as_str().into();
+        o.backend_kind = env.backend();
         o.database_url = Some(url.into());
     });
     org.save(&env.registry).await.expect("insert org");
@@ -1515,7 +1515,7 @@ async fn reseal_creates_no_missing_tenant_file(pool: &Pool) {
     let mut org = rustango::testkit::org();
     org.slug = "gone".into();
     org.display_name = "gone".into();
-    org.backend_kind = "sqlite".into();
+    org.backend_kind = rustango::tenancy::BackendKind::Sqlite;
     org.database_url = Some(format!("sqlite://{}?mode=rwc", path.display()));
     org.save(&env.registry).await.expect("insert org");
     let dir = env.dir("migrations");
@@ -1538,7 +1538,7 @@ async fn reseal_leaves_a_sealed_url_without_a_password(pool: &Pool) {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = "nopw".into();
         o.display_name = "nopw".into();
-        o.backend_kind = env.backend().as_str().into();
+        o.backend_kind = env.backend();
         o.database_url = Some(sealed.clone());
     });
     org.save(&env.registry).await.expect("insert org");
@@ -1630,7 +1630,7 @@ async fn check_bounds_an_unreachable_tenant(pool: &Pool) {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = "blackhole".into();
         o.display_name = "blackhole".into();
-        o.backend_kind = env.backend().as_str().into();
+        o.backend_kind = env.backend();
         o.database_url = Some(url);
     });
     org.save(&env.registry).await.expect("insert org");
@@ -2198,7 +2198,7 @@ async fn check_deploy_names_a_port_only_tenant(pool: &Pool) {
         o.host_pattern = None;
         o.path_prefix = None;
         o.port = Some(8444);
-        o.backend_kind = env.backend().as_str().into();
+        o.backend_kind = env.backend();
     });
     org.save(&env.registry).await.expect("insert org");
     let dir = env.dir("migrations");
@@ -2244,9 +2244,9 @@ async fn ignored_tenancy_flags_are_refused(pool: &Pool) {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = "schemy".into();
         o.display_name = "schemy".into();
-        o.storage_mode = "schema".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Schema;
         o.schema_name = Some("mt_schemy".into());
-        o.backend_kind = env.backend().as_str().into();
+        o.backend_kind = env.backend();
     });
     org.save(&env.registry).await.expect("insert org");
     let err = env

@@ -167,7 +167,7 @@ impl SharedOverride {
         let parsed = Self::parse(row)?;
         {
             use crate::sql::UpdaterPool as _;
-            let row_id = row.id.get().copied().unwrap_or_default();
+            let row_id = row.id.require()?;
             // Only while still unbound: a concurrent first use binds it the same way.
             SsoSharedOverride::objects()
                 .filter("id", row_id)

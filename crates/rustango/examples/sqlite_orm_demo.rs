@@ -347,7 +347,7 @@ async fn bootstrap_schema(pool: &Pool) -> Result<(), Box<dyn std::error::Error>>
     // time. The framework's emitter is built for PG/MySQL, so we
     // skip this on SQLite. The demo doesn't depend on FK enforcement
     // (every insert references an already-inserted parent).
-    if dialect.name() != "sqlite" {
+    if dialect.kind() != rustango::sql::DialectKind::Sqlite {
         for schema in [Author::SCHEMA, Post::SCHEMA] {
             for sql in ddl::create_constraints_sql_with_dialect(dialect, schema) {
                 raw_execute_pool(pool, &sql, vec![]).await?;

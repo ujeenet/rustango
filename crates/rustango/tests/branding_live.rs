@@ -112,8 +112,8 @@ async fn seed_and_login(pool: &sqlx::PgPool) -> (axum::Router, String, String, S
         o.id = Auto::default();
         o.slug = slug.clone();
         o.display_name = "Acme Inc".into();
-        o.storage_mode = StorageMode::Schema.as_str().into();
-        o.backend_kind = "postgres".to_owned();
+        o.storage_mode = StorageMode::Schema;
+        o.backend_kind = rustango::tenancy::BackendKind::Postgres;
         o.database_url = None;
         o.schema_name = Some(slug.clone());
         o.host_pattern = Some(format!("{slug}.app.test"));
@@ -394,7 +394,7 @@ async fn tenant_admin_renders_brand_overrides() {
     let mut org = rustango::testkit::org_with(|o| {
         o.slug = slug.clone();
         o.display_name = "Acme Inc".into();
-        o.storage_mode = StorageMode::Database.as_str().into();
+        o.storage_mode = StorageMode::Database;
         o.database_url = Some(url.clone());
         o.host_pattern = Some(format!("{slug}.app.test"));
         o.brand_name = Some("Acme Branded".into());

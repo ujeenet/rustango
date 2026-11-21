@@ -706,7 +706,7 @@ async fn a_hidden_row_is_404_before_its_fk_check(pool: &Pool) {
 /// locked in the write's transaction. SQLite already serializes writers.
 async fn a_concurrent_edit_is_judged_after_it_lands(pool: &Pool) {
     use rustango::core::{Assignment, UpdateQuery, WhereExpr};
-    if pool.dialect().name() == "sqlite" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Sqlite {
         return;
     }
     let ids = docs(pool, &["open-1", "open-2"]).await;

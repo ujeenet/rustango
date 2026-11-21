@@ -267,7 +267,7 @@ async fn raw_helpers_refuse_pg_only_values(pool: &Pool) {
         ),
         "{r:?}"
     );
-    if pool.dialect().name() == "postgres" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Postgres {
         return;
     }
     fn refused<T>(r: Result<T, ExecError>) -> bool {

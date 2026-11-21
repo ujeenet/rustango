@@ -245,7 +245,7 @@ async fn save_partial_audits_only_its_fields(pool: &Pool) {
 async fn failed_pre_read_fails_the_save(pool: &Pool) {
     // SQLite reads a missing double-quoted column as a string literal,
     // so its pre-read cannot be made to fail this way.
-    if pool.dialect().name() == "sqlite" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Sqlite {
         return;
     }
     let mut stamp = Stamp {
@@ -301,9 +301,9 @@ async fn wait_until_blocked_on(pool: &Pool, table: &str, n: i64) {
     let _ = table;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        let blocked: i64 = match pool.dialect().name() {
+        let blocked: i64 = match pool.dialect().kind() {
             #[cfg(feature = "postgres")]
-            "postgres" => rustango::sql::sqlx::query_scalar(
+            rustango::sql::DialectKind::Postgres => rustango::sql::sqlx::query_scalar(
                 "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' \
                  AND query LIKE $1 AND query LIKE '%FOR UPDATE%'",
             )
@@ -312,7 +312,7 @@ async fn wait_until_blocked_on(pool: &Pool, table: &str, n: i64) {
             .await
             .unwrap(),
             #[cfg(feature = "mysql")]
-            "mysql" => rustango::sql::sqlx::query_scalar(
+            rustango::sql::DialectKind::Mysql => rustango::sql::sqlx::query_scalar(
                 "SELECT COUNT(*) FROM information_schema.PROCESSLIST \
                  WHERE ID <> CONNECTION_ID() AND INFO LIKE ?",
             )
@@ -321,11 +321,12 @@ async fn wait_until_blocked_on(pool: &Pool, table: &str, n: i64) {
             .await
             .unwrap(),
             #[cfg(feature = "sqlite")]
-            "sqlite" => {
+            rustango::sql::DialectKind::Sqlite => {
                 let p = pool.as_sqlite().unwrap();
                 // The writer holds one connection.
                 i64::from(p.size()) - p.num_idle() as i64 - 1
             }
+            #[allow(unreachable_patterns)]
             other => panic!("no lock probe for {other}"),
         };
         if blocked >= n {
@@ -337,7 +338,7 @@ async fn wait_until_blocked_on(pool: &Pool, table: &str, n: i64) {
         );
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    if pool.dialect().name() == "sqlite" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Sqlite {
         // Covers the step from acquire to `BEGIN IMMEDIATE`.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
@@ -349,7 +350,7 @@ async fn save_waits_for_a_concurrent_writer(pool: &Pool) {
     #[cfg(feature = "sqlite")]
     let file;
     #[cfg(feature = "sqlite")]
-    let pool = if pool.dialect().name() == "sqlite" {
+    let pool = if pool.dialect().kind() == rustango::sql::DialectKind::Sqlite {
         file = rustango::testkit::matrix::sqlite_file_pool().await;
         setup(&file).await;
         &file
@@ -819,7 +820,7 @@ async fn cascading_delete_waits_for_a_concurrent_writer(pool: &Pool) {
     #[cfg(feature = "sqlite")]
     let file;
     #[cfg(feature = "sqlite")]
-    let pool = if pool.dialect().name() == "sqlite" {
+    let pool = if pool.dialect().kind() == rustango::sql::DialectKind::Sqlite {
         file = rustango::testkit::matrix::sqlite_file_pool().await;
         setup(&file).await;
         &file

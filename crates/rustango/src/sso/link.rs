@@ -141,7 +141,6 @@ impl ProviderKey {
         actions = "unlink, relink",
     )
 )]
-#[allow(dead_code)]
 pub struct SsoLink {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
@@ -349,7 +348,7 @@ pub async fn linked_user(
     }
     let want = key_sha256(&key.issuer, subject);
     if link.key_sha256 != want {
-        let id = link.id.get().copied().unwrap_or_default();
+        let id = link.id.require().map_err(|e| e.to_string())?;
         SsoLink::objects()
             .filter("id", id)
             .update()
@@ -437,7 +436,13 @@ async fn links_for(pool: &Pool, key: &ProviderKey, subject: &str) -> Result<Vec<
 /// Stamp `last_used_at`. Best effort: a table not yet migrated only warns.
 pub(crate) async fn touch(pool: &Pool, link: &SsoLink) {
     use crate::sql::UpdaterPool as _;
-    let id = link.id.get().copied().unwrap_or_default();
+    let id = match link.id.require() {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!(target: "rustango::sso", "last_used_at not stamped: {e}");
+            return;
+        }
+    };
     if let Err(e) = SsoLink::objects()
         .filter("id", id)
         .update()
@@ -451,7 +456,7 @@ pub(crate) async fn touch(pool: &Pool, link: &SsoLink) {
 
 /// Delete one link by id (works on a table not yet migrated).
 pub(crate) async fn drop_link(pool: &Pool, link: &SsoLink) -> Result<(), String> {
-    let id = link.id.get().copied().unwrap_or_default();
+    let id = link.id.require().map_err(|e| e.to_string())?;
     let query = SsoLink::objects()
         .filter("id", id)
         .compile_delete()
@@ -685,7 +690,7 @@ pub(crate) async fn stale(pool: &Pool, link: &SsoLink, account: &Account) -> Res
     tracing::warn!(
         target: "rustango::sso",
         user_id = account.user_id,
-        link_id = link.id.get().copied().unwrap_or_default(),
+        link_id = ?link.id.get(),
         link_created = ?link.created_at.get(),
         account_created = ?account.created_at,
         ?policy,

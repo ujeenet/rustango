@@ -381,7 +381,7 @@ async fn in_bulk_on_past_the_bind_cap(pool: &Pool) {
     let got = Bucket::objects()
         .in_bulk_on(Bucket::id, 0..70_000_i64, |b| b.id, &mut conn)
         .await;
-    if pool.dialect().name() == "postgres" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Postgres {
         assert_eq!(got.expect("one array bind on PG").len(), 2);
         return;
     }
@@ -477,11 +477,11 @@ async fn in_lists_match_alike_and_share_a_statement(pool: &Pool) {
         pool.dialect().compile_select(&q).expect("sql")
     };
     let (two, four) = (sql(2), sql(4));
-    if pool.dialect().name() == "postgres" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Postgres {
         assert_eq!(two.sql, four.sql);
-        assert_eq!(four.params.len(), 1);
+        assert_eq!(four.params().len(), 1);
     } else {
-        assert_eq!(four.params.len(), 4);
+        assert_eq!(four.params().len(), 4);
     }
 }
 
@@ -1065,7 +1065,7 @@ async fn find_many_or_fail_follows_the_collation(pool: &Pool) {
         .await
         .expect("code");
     let got = Code::find_many_or_fail(["abc", "ABC"], pool).await;
-    if pool.dialect().name() == "mysql" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Mysql {
         assert_eq!(got.expect("both keys match").len(), 1);
     } else {
         assert!(
@@ -1242,7 +1242,7 @@ async fn where_not_in_past_the_bind_cap(pool: &Pool) {
         .expect("duplicates fit");
     assert_eq!(ids(left), [1, 3]);
     let got = Bucket::where_not_in("id", 3..70_003_i64, pool).await;
-    if pool.dialect().name() == "postgres" {
+    if pool.dialect().kind() == rustango::sql::DialectKind::Postgres {
         assert_eq!(ids(got.expect("one array bind on PG")), [1, 2]);
         return;
     }

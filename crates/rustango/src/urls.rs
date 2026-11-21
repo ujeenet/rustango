@@ -309,6 +309,14 @@ fn check_host_and_scheme(trimmed: &str, allowed_hosts: &[&str], require_https: b
         .any(|a| a.strip_suffix('.').unwrap_or(a).eq_ignore_ascii_case(&host))
 }
 
+/// A safe method (RFC 9110 GET, HEAD, OPTIONS, TRACE, and RFC 10008
+/// `QUERY`): it reads and never writes. Takes the name, so it needs no
+/// `http` type from one feature or another.
+#[cfg(any(feature = "_axum", feature = "http-client"))]
+pub(crate) fn is_safe_method(method: &str) -> bool {
+    matches!(method, "GET" | "HEAD" | "OPTIONS" | "TRACE" | "QUERY")
+}
+
 /// `localhost`, `*.localhost`, or a loopback IP, with or without a port.
 #[cfg(any(feature = "tenancy", feature = "sso"))]
 pub(crate) fn is_loopback_host(host: &str) -> bool {

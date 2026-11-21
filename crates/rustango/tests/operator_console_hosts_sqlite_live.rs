@@ -92,8 +92,8 @@ async fn boot() -> Booted {
     // as undeletable.
     let slug = unique("acme");
     let mut org = Org::new(slug.clone());
-    org.storage_mode = "schema".into();
-    org.backend_kind = "sqlite".into();
+    org.storage_mode = rustango::tenancy::StorageMode::Schema;
+    org.backend_kind = rustango::tenancy::BackendKind::Sqlite;
     org.schema_name = Some(slug.clone());
     org.host_pattern = Some(format!("{slug}.example.com"));
     org.insert(&registry).await.expect("seed org");
@@ -446,8 +446,8 @@ async fn a_host_belonging_to_another_tenant_cannot_be_touched() {
 
     let other = unique("other");
     let mut org = Org::new(other.clone());
-    org.storage_mode = "schema".into();
-    org.backend_kind = "sqlite".into();
+    org.storage_mode = rustango::tenancy::StorageMode::Schema;
+    org.backend_kind = rustango::tenancy::BackendKind::Sqlite;
     org.schema_name = Some(other.clone());
     org.host_pattern = Some(format!("{other}.example.com"));
     org.insert(&b.registry).await.expect("seed other org");

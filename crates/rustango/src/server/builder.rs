@@ -126,6 +126,10 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     /// Wraps both Host branches, inside the security headers.
     #[cfg(feature = "template_views")]
     error_pages: Option<crate::errors::ErrorPagesLayer>,
+    /// Wraps the app's own routes in one transaction per write request.
+    atomic_requests: Option<crate::atomic_request::AtomicRequests>,
+    /// Framework auth routes merged with `api`, outside `atomic_requests`.
+    auth_routes: Option<ApiRouter>,
     _phantom: PhantomData<DB>,
 }
 
@@ -214,8 +218,27 @@ impl<DB: Database> Builder<DB> {
             brand_storage: None,
             #[cfg(feature = "template_views")]
             error_pages: None,
+            atomic_requests: None,
+            auth_routes: None,
             _phantom: PhantomData,
         }
+    }
+
+    /// Run each write request to the [`Self::api`] routes in one `atomic`
+    /// block on its tenant's pool: a response that is not 2xx/3xx, or a
+    /// panic, rolls back every write it made there. The tenant admin, login,
+    /// SSO, operator console and [`Self::auth_routes`] are not wrapped. See
+    /// [`crate::atomic_request`].
+    ///
+    /// Each write request holds one tenant pool connection until it ends;
+    /// on Postgres boot warns when `scoped_pool_max_connections` is below 8.
+    ///
+    /// # Errors (at [`Self::into_router`])
+    /// A tenant pool cache cap of 0, which would rebuild a pool per lookup.
+    #[must_use]
+    pub fn atomic_requests(mut self, requests: crate::atomic_request::AtomicRequests) -> Self {
+        self.atomic_requests = Some(requests);
+        self
     }
 
     /// Dress every 4xx/5xx with an error page: the api, login, tenant
@@ -628,6 +651,15 @@ impl<DB: Database> Builder<DB> {
         self
     }
 
+    /// Mount framework auth routes, such as `JwtAuth::router()`, next to
+    /// [`Self::api`] but never inside [`Self::atomic_requests`], so a
+    /// failed login is counted and a logout kept.
+    #[must_use]
+    pub fn auth_routes(mut self, router: ApiRouter) -> Self {
+        self.auth_routes = Some(router);
+        self
+    }
+
     /// Register a custom bulk admin action that runs against the
     /// tenant pool of whichever tenant the request resolves to. The
     /// action name must also appear in the model's
@@ -789,6 +821,9 @@ impl<DB: Database> Builder<DB> {
         }
         #[cfg(feature = "postgres")]
         crate::tenancy::boot_checks(self.pools.as_ref()).await?;
+        if self.atomic_requests.is_some() {
+            check_atomic_requests(self.pools.pool_config(), schema_tenants::<DB>())?;
+        }
         let resolver_for_admin = self.resolver();
         // Picks the prefixed admin routes for a path under its tenant's prefix.
         let dispatch_resolver = Arc::new(self.resolver());
@@ -924,6 +959,17 @@ impl<DB: Database> Builder<DB> {
             self.body_limit.clone(),
             self.request_timeout.clone(),
         );
+        // Inside the context, so the layer finds the tenant's pool.
+        let api = match (api, &self.atomic_requests) {
+            (Some(router), Some(requests)) => Some(
+                router.layer(crate::atomic_request::AtomicRequestLayer::tenant().with(requests)),
+            ),
+            (api, _) => api,
+        };
+        let api = match (api, self.auth_routes) {
+            (Some(api), Some(auth)) => Some(api.merge(auth)),
+            (api, auth) => api.or(auth),
+        };
         let tenant_app = match api {
             Some(router) => router.layer(Extension(ctx.clone())).merge(admin_routes),
             None => admin_routes,
@@ -1280,6 +1326,37 @@ impl<DB: Database> Builder<DB> {
 }
 
 /// The standard chain plus path-prefix tenants on the apex; `run-server` uses it too.
+/// Whether `DB` can serve schema-mode tenants (Postgres only).
+fn schema_tenants<DB: Database>() -> bool {
+    #[cfg(feature = "postgres")]
+    if std::any::TypeId::of::<DB>() == std::any::TypeId::of::<sqlx::Postgres>() {
+        return true;
+    }
+    false
+}
+
+/// Refuse uncached tenant pools under [`Builder::atomic_requests`]; warn on a
+/// schema pool too small for one connection per concurrent write request.
+fn check_atomic_requests(
+    cfg: &crate::tenancy::TenantPoolsConfig,
+    schema_tenants: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if cfg.max_cached_database_pools == 0 || (schema_tenants && cfg.max_cached_scoped_pools == 0) {
+        return Err("atomic_requests needs cached tenant pools: set \
+                    max_cached_scoped_pools and max_cached_database_pools above 0"
+            .into());
+    }
+    if schema_tenants && cfg.scoped_pool_max_connections < 8 {
+        tracing::warn!(
+            target: "rustango::server",
+            scoped_pool_max_connections = cfg.scoped_pool_max_connections,
+            "atomic_requests holds one schema-tenant connection per write request: \
+             raise scoped_pool_max_connections to 8 or more"
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn apex_resolver(apex: &str) -> ChainResolver {
     ChainResolver::standard(apex.to_owned())
         .push(crate::tenancy::ApexPathPrefixResolver::new(apex.to_owned()))
@@ -1618,7 +1695,7 @@ pub(crate) mod resolver_tests {
         let mut org = crate::testkit::org_with(|o| {
             o.slug = "acme".into();
             o.display_name = "acme".into();
-            o.backend_kind = "sqlite".into();
+            o.backend_kind = crate::tenancy::BackendKind::Sqlite;
         });
         org.insert(&pool).await.expect("insert org");
         (tmp, sq, url)
@@ -1659,7 +1736,7 @@ pub(crate) mod resolver_tests {
             .expect("orgs");
         if with_org {
             let mut org = crate::testkit::org_with(|o| {
-                o.backend_kind = "sqlite".into();
+                o.backend_kind = crate::tenancy::BackendKind::Sqlite;
                 o.host_pattern = Some("acme.localhost".into());
             });
             org.insert(&pool).await.expect("insert org");
@@ -2225,7 +2302,7 @@ mod prefix_tests {
         let tenant_url = format!("sqlite://{}?mode=rwc", tmp.path().join("t.db").display());
         let mut org = crate::tenancy::Org::new("pfx-acme");
         org.display_name = "Acme".into();
-        org.backend_kind = "sqlite".into();
+        org.backend_kind = crate::tenancy::BackendKind::Sqlite;
         org.database_url = Some(tenant_url);
         org.path_prefix = Some("/acme".into());
         org.logo_path = logo_path;

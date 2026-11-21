@@ -174,8 +174,10 @@ mod scenarios {
                 rhs: Expr::Literal(SqlValue::String("c".into())),
             })
         };
-        let name = pool.dialect().name();
-        if name == "postgres" || name == "sqlite" {
+        if matches!(
+            pool.dialect().kind(),
+            rustango::sql::DialectKind::Postgres | rustango::sql::DialectKind::Sqlite
+        ) {
             let rows: Vec<Doc> = qs()
                 .fetch(pool)
                 .await

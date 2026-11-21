@@ -162,6 +162,11 @@ ihn. Ein Fehler, nachdem die Datenbank existiert, löscht, was der Lauf
 angelegt hat. Die URL des Tenants enthält das Passwort des neuen Logins und
 wird versiegelt gespeichert.
 
+Der `backend_kind` des Tenants ist das Backend der Registry, gespeichert als
+`postgres`, `mysql` oder `sqlite`. Ältere Zeilen mit `pg`, `postgresql`, `mariadb`
+oder `sqlite3` lassen sich weiter lesen; `check-tenants` listet sie und
+`repair-tenant` schreibt sie neu.
+
 Um dem Tenant seinen ersten Admin zu geben, trag im Formular die Admin-E-Mail
 ein (Benutzername optional; Standard ist die E-Mail), oder per CLI:
 

@@ -338,7 +338,7 @@ async fn audit_tool_call(pool: &Pool, agent_id: i64, tool: &str, args: &Value) {
         source: crate::audit::AuditSource::Custom(format!("mcp:agent:{agent_id}")),
         changes: json!({ "tool": tool, "arguments": audit_arguments(args) }),
     };
-    if let Err(e) = crate::audit::emit_one(pool, &entry).await {
+    if let Err(e) = crate::audit::emit_security(pool, &entry).await {
         tracing::warn!(error = %e, tool, "mcp tools/call audit not recorded");
     }
 }

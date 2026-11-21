@@ -102,14 +102,12 @@ async fn date_buckets_read_on_the_transaction(pool: &Pool) {
 /// `UPDATE eof_item SET n = <n> WHERE id = <id>` in the pool's dialect.
 fn set_n(pool: &Pool, id: i64, n: SqlValue) -> rustango::sql::CompiledStatement {
     let d = pool.dialect();
-    rustango::sql::CompiledStatement {
-        sql: format!(
-            "UPDATE eof_item SET n = {} WHERE id = {}",
-            d.placeholder(1),
-            d.placeholder(2)
-        ),
-        params: vec![n, SqlValue::I64(id)],
-    }
+    let sql = format!(
+        "UPDATE eof_item SET n = {} WHERE id = {}",
+        d.placeholder(1),
+        d.placeholder(2)
+    );
+    rustango::sql::CompiledStatement::new(d, sql, vec![n, SqlValue::I64(id)]).unwrap()
 }
 
 /// Several batches run all or none on a pool and a held connection, and in

@@ -334,7 +334,10 @@ async fn mint_session(
     ttl_secs: i64,
     next: Option<&str>,
 ) -> Response {
-    let uid = user.id.get().copied().unwrap_or_default();
+    let Ok(uid) = user.id.require() else {
+        tracing::error!(target: "rustango::admin::sso", "signed-in user has no id");
+        return login_error(state, "config");
+    };
     let auth_hash = crate::session::PasswordFingerprint::of(secret, &user.password_hash);
     let cookie_value = session::encode_for(
         secret,
@@ -417,11 +420,11 @@ mod second_factor {
         session_ttl: i64,
         next: Option<String>,
     ) -> Response {
-        let mut pending = Pending::new(
-            secret,
-            user.id.get().copied().unwrap_or_default(),
-            &user.password_hash,
-        );
+        let Ok(uid) = user.id.require() else {
+            tracing::error!(target: "rustango::admin::sso", "signed-in user has no id");
+            return login_error(state, "config");
+        };
+        let mut pending = Pending::new(secret, uid, &user.password_hash);
         // Signed with the rest, so the code step keeps the provider's lifetime.
         pending.session_ttl = Some(session_ttl);
         pending.next = next;

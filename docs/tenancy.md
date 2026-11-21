@@ -153,7 +153,9 @@ operators off tenant pages in the browser they use for the console.
 
 ## Storage modes
 
-Each tenant has a `storage_mode`: `schema` or `database`.
+Each tenant has a `storage_mode`: `schema` or `database`. In Rust,
+`Org.storage_mode` is a `StorageMode` and `Org.backend_kind` a `BackendKind`,
+both stored as text (see [enum fields](models.md#enum-fields-stored-as-text)).
 
 [![Schema mode: one Postgres database with a schema per tenant, search_path is the tenant schema plus extension-only schemas, and the pool refuses a missing schema, a role-named schema, or public holding a tenant table the schema lacks. Database mode: each tenant has its own database on the same backend as the registry](img/tenancy-storage-modes.png)](img/tenancy-storage-modes.png)
 
@@ -383,3 +385,21 @@ stays taken until a purge. A purge drops the schema or database, then the
 
 Details: [the operator console](operator-console.md) and
 [tenancy commands](manage.md#tenancy-commands).
+
+### A row that cannot be read
+
+If a tenant's stored `storage_mode` or `backend_kind` is not a value this
+version knows (a typo written by hand, say `Schema`), that tenant fails to
+resolve with a clear error. Other tenants keep working, and a bad row never
+opens the registry's fail-fast breaker. Sweeps (migrate all tenants, pre-warm,
+the tenant list in the console and the CLI, the per-tenant job fan-out) skip
+the row and report it.
+
+```bash
+cargo run -- check-tenants                                # lists bad rows (fails) and old spellings
+cargo run -- repair-tenant acme --storage-mode schema     # rewrites the bad value
+cargo run -- repair-tenant globex                         # rewrites an old spelling such as `pg`
+```
+
+`repair-tenant` reads the row as raw text and only fixes a value that cannot
+be read or is an old spelling; it never moves a tenant to another mode.
