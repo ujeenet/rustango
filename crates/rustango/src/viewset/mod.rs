@@ -4552,13 +4552,18 @@ async fn update_inner(
     // field or FK check can answer. Locked in the UPDATE's transaction, so
     // the hooks judge the row the write changes. A model audited
     // only on a pool is read and updated unlocked, rather than lose its
-    // audit entry.
-    let mut locked = match crate::audit::TxUpdate::for_model(state.vs.schema) {
-        Some(u) => match crate::sql::write_tx(&acq.pool).await {
+    // audit entry, and only when it has no row to re-check.
+    let rechecks = state.vs.hooks.update_rechecks(state.vs.schema.table);
+    let mut locked = match crate::audit::TxUpdate::for_model(state.vs.schema, rechecks) {
+        Ok(Some(u)) => match crate::sql::write_tx(&acq.pool).await {
             Ok(tx) => Some((u, tx)),
             Err(e) => return json_server_error("viewset::update::begin", &e),
         },
-        None => None,
+        Ok(None) => None,
+        Err(e) => {
+            let (status, msg) = write_failure("viewset::update", &e);
+            return json_error(status, &msg);
+        }
     };
     let item = (pk_field, &pk_val);
     let read = (
@@ -4705,12 +4710,12 @@ async fn update_inner(
             },
             Err(e) => Err(write_failure("viewset::update", &e)),
         },
-        // No transaction to re-check the row or claim in: refuse rather than skip it.
-        None if written_row.on_rows() || claims.any() => Err(write_failure(
+        // No transaction to claim in: refuse rather than skip it.
+        None if claims.any() => Err(write_failure(
             "viewset::update",
             &crate::sql::ExecError::AuditUnsupported {
                 table: state.vs.schema.table,
-                reason: "a scoped, hooked or claimed update needs an in-transaction audit",
+                reason: "a claimed update needs an in-transaction audit",
             },
         )),
         None => acq

@@ -2794,6 +2794,23 @@ pub(crate) async fn update_submit(
             Ok(tx) => tx,
             Err(e) => return Ok(refused(write_error(model, &e)).await),
         };
+        // `change` judged again on the row locked here: the read above may be stale.
+        if crate::object_permissions::Hooks::All.judges(model.table, Some("change")) {
+            let pks = std::slice::from_ref(&pk_value);
+            let scope = RowScope::of(model, &parts);
+            let at = (model, pk_field);
+            match lock_judged(&mut tx, &parts, at, &scope, pks, ("change", None)).await {
+                Ok(rows) if !rows.is_empty() => {}
+                Ok(_) => {
+                    rollback_quietly(tx, model.table).await;
+                    return Err(AdminError::RowNotFound { table, pk: pk_raw });
+                }
+                Err(e) => {
+                    rollback_quietly(tx, model.table).await;
+                    return Err(e);
+                }
+            }
+        }
         #[cfg(feature = "tenancy")]
         let operators = match crate::tenancy::operators::AdminOperatorWrite::lock(
             &mut tx,
@@ -2923,7 +2940,7 @@ pub(crate) async fn update_submit(
 pub(super) enum Written {
     /// Scope, "view" and the `add` hook: no row existed before.
     Created,
-    /// Scope and "view": `change` already judged the row before the edit.
+    /// Scope and "view": `change` judged the locked row before the edit.
     Edited,
 }
 
@@ -3046,13 +3063,36 @@ pub(crate) async fn delete_submit(
     })
     .await;
     let list_url = format!("{}/{}", state.config.admin_prefix, model.table);
-    let entry =
-        super::audit::admin_row_snapshot_entry(model, pk_text.clone(), audit_op, &before_row, None);
     // An `audit(...)` model's entry commits with the write, as on edit (#2390).
     let emit = crate::audit::DiffEmit::for_model(model);
     #[cfg(feature = "sso")]
     let links = user_links(&state, model).await?;
     let mut tx = crate::sql::write_tx(&state.pool).await?;
+    // Judged again on the row locked here: the read above may be stale.
+    let scope = RowScope::of(model, &parts);
+    let pks = std::slice::from_ref(&pk_value);
+    let locked = lock_judged(
+        &mut tx,
+        &parts,
+        (model, pk_field),
+        &scope,
+        pks,
+        ("delete", None),
+    );
+    let before_row = match locked.await {
+        Ok(rows) => rows.into_iter().next(),
+        Err(e) => {
+            rollback_quietly(tx, model.table).await;
+            return Err(e);
+        }
+    };
+    // Deleted or moved out of scope since the read: keep their write (#1929).
+    let Some(before_row) = before_row else {
+        rollback_quietly(tx, model.table).await;
+        return Ok(Redirect::to(&list_url).into_response());
+    };
+    let entry =
+        super::audit::admin_row_snapshot_entry(model, pk_text.clone(), audit_op, &before_row, None);
     #[cfg(feature = "tenancy")]
     let operators = match crate::tenancy::operators::AdminOperatorWrite::lock(
         &mut tx,
@@ -3069,7 +3109,9 @@ pub(crate) async fn delete_submit(
     };
     let written = if let Some(col) = model.soft_delete_column {
         let now = Some(chrono::Utc::now());
-        let stamp = crate::soft_delete::__mark_query(model, col, pk_field.column, pk_value, now);
+        let mut stamp =
+            crate::soft_delete::__mark_query(model, col, pk_field.column, pk_value, now);
+        stamp.where_clause = scope.constrain(stamp.where_clause);
         crate::sql::update_tx(&mut tx, &stamp).await
     } else {
         #[cfg(feature = "sso")]
@@ -3082,7 +3124,8 @@ pub(crate) async fn delete_submit(
                 return Err(e.into());
             }
         }
-        let query = DeleteQuery::by_pk(model, pk_field.column, pk_value);
+        let by_pk = DeleteQuery::by_pk(model, pk_field.column, pk_value).where_clause;
+        let query = DeleteQuery::new(model, scope.constrain(by_pk));
         crate::sql::delete_tx(&mut tx, &query).await
     };
     let affected = match written {
@@ -3092,7 +3135,6 @@ pub(crate) async fn delete_submit(
             return refused_delete(&state, &parts, model, e);
         }
     };
-    // Deleted by someone else since the read: keep their stamp and audit row (#1929).
     if affected == 0 {
         rollback_quietly(tx, model.table).await;
         return Ok(Redirect::to(&list_url).into_response());
@@ -3308,40 +3350,25 @@ pub(crate) async fn action_submit(
     // Read every selected row before the action runs, so the audit
     // emit records what it ran against. For `delete_selected` this
     // is the only copy of the rows that are about to go.
+    // Only `restore_selected` acts on soft-deleted rows.
+    let scope = if matches!(write, BulkWrite::Restore(_)) {
+        RowScope::trashed(model, &parts)
+    } else {
+        RowScope::of(model, &parts)
+    };
     let action_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
-    let mut before_rows = crate::sql::select_rows_as_json(
-        &state.pool,
-        // Only `restore_selected` acts on soft-deleted rows.
-        &if matches!(write, BulkWrite::Restore(_)) {
-            RowScope::trashed(model, &parts)
-        } else {
-            RowScope::of(model, &parts)
-        }
-        .by_pk_in(model, pk_field.column, pk_values.clone()),
-        &action_fields,
-    )
-    .await?;
-
+    let read = scope.by_pk_in(model, pk_field.column, pk_values.clone());
+    let read = crate::sql::select_rows_as_json(&state.pool, &read, &action_fields).await?;
     // A row the `view` hook hides is dropped like one outside the scope:
     // acting on it, or refusing because of it, would confirm it exists.
-    before_rows.retain(|row| {
-        crate::admin::object_permissions::is_allowed(model.table, "view", &parts, Some(row))
-    });
     // Every action runs the per-row hooks, as the single-row pages do. One
     // refused row refuses the whole action.
     let (perm, named) = row_perms(&write, &action);
-    let allowed = |row: &serde_json::Value| {
-        let is_allowed = |p: &str| {
-            crate::admin::object_permissions::is_allowed(model.table, p, &parts, Some(row))
-        };
-        is_allowed(perm) && named.map_or(true, is_allowed)
-    };
-    if !before_rows.iter().all(allowed) {
-        return Err(AdminError::Forbidden {
-            table: model.table.to_owned(),
-            action: perm,
-        });
-    }
+    let judged = read.into_iter().map(|row| {
+        let v = crate::object_permissions::Hooks::All.judge(model.table, &parts, &row, Some(perm));
+        (row, v)
+    });
+    let mut before_rows = admitted_rows(&parts, model, judged, (perm, named))?;
     // Write only the rows that were checked, and audit exactly those.
     let pk_values = rows_with_pk(&mut before_rows, pk_field, &pk_values);
     if pk_values.is_empty() {
@@ -3374,55 +3401,81 @@ pub(crate) async fn action_submit(
             .collect::<Vec<_>>()
     };
     let builtin = match &write {
-        BulkWrite::Custom(a) => {
-            let entries = entries_for(&before_rows, &row_pks);
-            // The handler writes in the action's transaction; an audited
-            // model's entries commit with it.
-            let emit = crate::audit::DiffEmit::for_model(model);
-            let mut tx = crate::sql::write_tx(&state.pool).await?;
-            // The principal the hooks above saw, and only the rows they passed.
-            let actor = crate::object_permissions::Actor::of(&parts);
-            let ctx = super::ActionCtx::new(
-                &mut tx,
-                &pk_values,
-                &actor,
-                #[cfg(feature = "tenancy")]
-                state.config.org.as_ref(),
-                &parts,
-            );
-            if let Err(e) = (a.handler)(ctx).await {
-                rollback_quietly(tx, model.table).await;
-                return Err(e);
-            }
-            if emit == crate::audit::DiffEmit::InTx {
-                if let Err(e) = crate::audit::emit_in_tx(&mut tx, &entries).await {
-                    rollback_quietly(tx, model.table).await;
-                    return Err(e.into());
-                }
-            }
-            tx.commit().await.map_err(crate::sql::ExecError::from)?;
-            if emit == crate::audit::DiffEmit::Deferred {
-                super::audit::emit_many_best_effort(&state, &entries, &action).await;
-            }
-            send_row_signals(&state, model.table, &row_pks, is_delete, false).await;
-            return back();
-        }
-        BulkWrite::Delete => match model.soft_delete_column {
+        BulkWrite::Custom(_) => None,
+        BulkWrite::Delete => Some(match model.soft_delete_column {
             // Soft delete: stamp the column instead of a DELETE.
             Some(col) => BuiltinWrite::Mark(col, Some(chrono::Utc::now())),
             None => BuiltinWrite::HardDelete,
-        },
+        }),
         // Built-in restore: clear the soft-delete column, where NULL means live.
-        BulkWrite::Restore(col) => BuiltinWrite::Mark(*col, None),
+        BulkWrite::Restore(col) => Some(BuiltinWrite::Mark(*col, None)),
     };
     // An `audit(...)` model's entries commit with the write (#2390).
     let emit = crate::audit::DiffEmit::for_model(model);
     #[cfg(feature = "sso")]
     let links = match builtin {
-        BuiltinWrite::HardDelete => user_links(&state, model).await?,
-        BuiltinWrite::Mark(..) => None,
+        Some(BuiltinWrite::HardDelete) => user_links(&state, model).await?,
+        _ => None,
     };
     let mut tx = crate::sql::write_tx(&state.pool).await?;
+    // Judged again on the rows locked here: the read above may be stale. A
+    // row deleted or moved out of scope since keeps its own write (#1929).
+    let locked = lock_judged(
+        &mut tx,
+        &parts,
+        (model, pk_field),
+        &scope,
+        &pk_values,
+        (perm, named),
+    );
+    let mut before_rows = match locked.await {
+        Ok(rows) => rows,
+        Err(e) => {
+            rollback_quietly(tx, model.table).await;
+            return Err(e);
+        }
+    };
+    let pk_values = rows_with_pk(&mut before_rows, pk_field, &pk_values);
+    if pk_values.is_empty() {
+        rollback_quietly(tx, model.table).await;
+        return back();
+    }
+    let row_pks: Vec<String> = before_rows
+        .iter()
+        .map(|row| render::read_value_as_string_json(row, pk_field).unwrap_or_default())
+        .collect();
+    let entries = entries_for(&before_rows, &row_pks);
+    let Some(builtin) = builtin else {
+        let BulkWrite::Custom(a) = &write else {
+            unreachable!("only a custom action has no built-in write")
+        };
+        // The principal the hooks saw, and only the rows they passed.
+        let actor = crate::object_permissions::Actor::of(&parts);
+        let ctx = super::ActionCtx::new(
+            &mut tx,
+            &pk_values,
+            &actor,
+            #[cfg(feature = "tenancy")]
+            state.config.org.as_ref(),
+            &parts,
+        );
+        if let Err(e) = (a.handler)(ctx).await {
+            rollback_quietly(tx, model.table).await;
+            return Err(e);
+        }
+        if emit == crate::audit::DiffEmit::InTx {
+            if let Err(e) = crate::audit::emit_in_tx(&mut tx, &entries).await {
+                rollback_quietly(tx, model.table).await;
+                return Err(e.into());
+            }
+        }
+        tx.commit().await.map_err(crate::sql::ExecError::from)?;
+        if emit == crate::audit::DiffEmit::Deferred {
+            super::audit::emit_many_best_effort(&state, &entries, &action).await;
+        }
+        send_row_signals(&state, model.table, &row_pks, is_delete, false).await;
+        return back();
+    };
     #[cfg(feature = "tenancy")]
     let operators = match crate::tenancy::operators::AdminOperatorWrite::lock(
         &mut tx,
@@ -3444,27 +3497,19 @@ pub(crate) async fn action_submit(
             return Err(e.into());
         }
     }
-    let changed = match builtin.run(&mut tx, model, pk_field, &pk_values).await {
-        Ok(changed) => changed,
-        Err(e) => {
-            rollback_quietly(tx, model.table).await;
-            // Only a hard delete can hit an FK; else this is `Err(e.into())`.
-            return refused_delete(&state, &parts, model, e);
-        }
-    };
+    if let Err(e) = builtin
+        .run(&mut tx, (model, pk_field), &scope, &pk_values)
+        .await
+    {
+        rollback_quietly(tx, model.table).await;
+        // Only a hard delete can hit an FK; else this is `Err(e.into())`.
+        return refused_delete(&state, &parts, model, e);
+    }
     #[cfg(feature = "tenancy")]
     if let Err(e) = operators.check(&mut tx).await {
         rollback_quietly(tx, model.table).await;
         return Err(operator_refusal(e, String::new()));
     }
-    // A row someone else deleted or marked since the read keeps their
-    // stamp and audit row (#1929).
-    let (before_rows, row_pks): (Vec<_>, Vec<_>) = before_rows
-        .into_iter()
-        .zip(row_pks)
-        .filter(|(_, pk)| changed.contains(pk))
-        .unzip();
-    let entries = entries_for(&before_rows, &row_pks);
     if emit == crate::audit::DiffEmit::InTx {
         if let Err(e) = crate::audit::emit_in_tx(&mut tx, &entries).await {
             rollback_quietly(tx, model.table).await;
@@ -3478,6 +3523,55 @@ pub(crate) async fn action_submit(
     send_row_signals(&state, model.table, &row_pks, is_delete, false).await;
 
     back()
+}
+
+/// The rows of `pks` inside `scope`, locked in `tx` and judged there by the
+/// "view" hook (hidden ones drop out) and by `perm` and `named` (one refused
+/// row refuses the write, a 403). A write in `tx` then changes the rows judged.
+async fn lock_judged(
+    tx: &mut crate::sql::PoolTx<'_>,
+    parts: &axum::http::request::Parts,
+    (model, pk_field): (&'static crate::core::ModelSchema, &'static FieldSchema),
+    scope: &RowScope,
+    pks: &[SqlValue],
+    (perm, named): (&'static str, Option<&str>),
+) -> Result<Vec<serde_json::Value>, AdminError> {
+    let mut admitted = Vec::with_capacity(pks.len());
+    for chunk in pks.chunks(BULK_WRITE_CHUNK) {
+        let q = scope.by_pk_in(model, pk_field.column, chunk.to_vec());
+        let judged = crate::object_permissions::Hooks::All
+            .judge_locked_rows(tx, parts, q, Some(perm))
+            .await?;
+        admitted.extend(admitted_rows(parts, model, judged, (perm, named))?);
+    }
+    Ok(admitted)
+}
+
+/// The judged rows a write may change: hidden ones drop out, and one that
+/// `perm`'s hook or the action's own (`named`) refuses refuses all, a 403.
+fn admitted_rows(
+    parts: &axum::http::request::Parts,
+    model: &'static crate::core::ModelSchema,
+    judged: impl IntoIterator<Item = (serde_json::Value, crate::object_permissions::Verdict)>,
+    (perm, named): (&'static str, Option<&str>),
+) -> Result<Vec<serde_json::Value>, AdminError> {
+    use crate::object_permissions::{Hooks, Verdict};
+    let mut admitted = Vec::new();
+    for (row, verdict) in judged {
+        let refused = verdict == Verdict::Refused
+            || named.is_some_and(|a| !Hooks::All.allows(model.table, a, parts, Some(&row)));
+        match verdict {
+            Verdict::Hidden => {}
+            _ if refused => {
+                return Err(AdminError::Forbidden {
+                    table: model.table.to_owned(),
+                    action: perm,
+                })
+            }
+            _ => admitted.push(row),
+        }
+    }
+    Ok(admitted)
 }
 
 /// A refused last-active-operator write: a 400; a driver error stays one.
@@ -3577,7 +3671,7 @@ fn row_perms<'a>(write: &BulkWrite, action: &'a str) -> (&'static str, Option<&'
     }
 }
 
-/// Keys a bulk write locks and writes per statement.
+/// Keys a bulk write locks, judges and writes per statement.
 const BULK_WRITE_CHUNK: usize = 500;
 
 /// The write of a built-in bulk action.
@@ -3589,46 +3683,18 @@ enum BuiltinWrite {
 }
 
 impl BuiltinWrite {
-    /// Run in `tx`: per chunk, lock the rows it would change, then write
-    /// those by key. Returns the keys written, as the PK strings.
+    /// Write `pks`, which [`lock_judged`] locked in `tx`, per chunk by key
+    /// inside `scope`.
     async fn run(
         self,
         tx: &mut crate::sql::PoolTx<'_>,
-        model: &'static crate::core::ModelSchema,
-        pk_field: &'static FieldSchema,
+        (model, pk_field): (&'static crate::core::ModelSchema, &'static FieldSchema),
+        scope: &RowScope,
         pks: &[SqlValue],
-    ) -> Result<std::collections::HashSet<String>, crate::sql::ExecError> {
-        let pk_in =
-            |keys: Vec<SqlValue>| Filter::new(pk_field.column, Op::In, SqlValue::List(keys));
-        let mut written = std::collections::HashSet::new();
+    ) -> Result<(), crate::sql::ExecError> {
         for chunk in pks.chunks(BULK_WRITE_CHUNK) {
-            let mut filters = vec![pk_in(chunk.to_vec())];
-            if let Self::Mark(col, deleted_at) = self {
-                // Only rows the mark changes: live ones to delete, trashed to restore.
-                filters.push(Filter::new(
-                    col,
-                    Op::IsNull,
-                    SqlValue::Bool(deleted_at.is_some()),
-                ));
-            }
-            let select = SelectQuery {
-                where_clause: WhereExpr::and_predicates(filters),
-                lock_mode: Some(crate::core::LockMode {
-                    silent_on_sqlite: true,
-                    ..crate::core::LockMode::default()
-                }),
-                ..SelectQuery::new(model)
-            };
-            let mut rows = crate::sql::select_rows_as_json_tx(tx, &select, &[pk_field]).await?;
-            let keys = rows_with_pk(&mut rows, pk_field, chunk);
-            if keys.is_empty() {
-                continue;
-            }
-            written.extend(
-                rows.iter()
-                    .filter_map(|row| render::read_value_as_string_json(row, pk_field)),
-            );
-            let target = WhereExpr::Predicate(pk_in(keys));
+            let keys = Filter::new(pk_field.column, Op::In, SqlValue::List(chunk.to_vec()));
+            let target = scope.constrain(WhereExpr::Predicate(keys));
             match self {
                 Self::HardDelete => {
                     crate::sql::delete_tx(tx, &DeleteQuery::new(model, target)).await?;
@@ -3640,7 +3706,7 @@ impl BuiltinWrite {
                 }
             }
         }
-        Ok(written)
+        Ok(())
     }
 }
 

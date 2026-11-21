@@ -250,7 +250,7 @@ fn verdict(v: Option<crate::object_permissions::Verdict>) -> Result<(), Response
 }
 
 /// The row an item view shows, `fields` of it: inside [`row_scope`] and
-/// judged as [`gate_row`] does, `action` beside "view". One read: when hooked,
+/// judged by the "view" hook, and `action`'s. One read: when hooked,
 /// the whole row is judged and the same row rendered.
 async fn item_object(
     pool: &Pool,
@@ -2745,25 +2745,12 @@ async fn update_row(
     values: Vec<SqlValue>,
     (pk_field, key): (&'static FieldSchema, SqlValue),
 ) -> Result<u64, WriteFailed> {
-    let Some(update) = crate::audit::TxUpdate::for_model(schema) else {
-        let e = crate::sql::ExecError::AuditUnsupported {
-            table: schema.table,
-            reason: "an UpdateView needs an in-transaction audit",
-        };
-        return Err(WriteFailed::Error(template_error(&format!(
-            "update row: {e}"
-        ))));
-    };
-    let row = SelectQuery::by_pk(schema, pk_field.column, key.clone()).visible(parts);
-    let mut tx = lock_row(pool, parts, row, Some("change"))
-        .await
-        .map_err(WriteFailed::Error)?;
-    let stored = Some((pk_field, &key));
-    let at = (pool, Some(&mut *tx), parts);
-    if let Err(e) = hidden_fk(at, schema, (&columns, &values), stored).await {
-        let _ = tx.rollback().await;
-        return Err(e);
-    }
+    #[cfg(feature = "admin")]
+    let rechecks = crate::object_permissions::Hooks::All.update_rechecks(schema.table);
+    #[cfg(not(feature = "admin"))]
+    let rechecks = false;
+    let update = crate::audit::TxUpdate::for_model(schema, rechecks)
+        .map_err(|e| WriteFailed::Error(template_error(&format!("update row: {e}"))))?;
     let this_row = WhereExpr::Predicate(Filter::new(pk_field.column, Op::Eq, key.clone()));
     let mut stamped: Vec<(&'static str, SqlValue)> = columns
         .iter()
@@ -2779,6 +2766,22 @@ async fn update_row(
         .map(|(column, value)| crate::core::Assignment::new(column, value))
         .collect();
     let update_q = crate::core::UpdateQuery::new(schema, set, this_row.clone()).visible(parts);
+    let stored = Some((pk_field, &key));
+    // Audited only on a pool, with nothing to re-check: one unlocked write.
+    let Some(update) = update else {
+        hidden_fk((pool, None, parts), schema, (&columns, &values), stored).await?;
+        let written = crate::audit::update(pool, &update_q).await.map(Some);
+        return update_outcome(written, (pool, schema), (columns, &values), &this_row).await;
+    };
+    let row = SelectQuery::by_pk(schema, pk_field.column, key.clone()).visible(parts);
+    let mut tx = lock_row(pool, parts, row, Some("change"))
+        .await
+        .map_err(WriteFailed::Error)?;
+    let at = (pool, Some(&mut *tx), parts);
+    if let Err(e) = hidden_fk(at, schema, (&columns, &values), stored).await {
+        let _ = tx.rollback().await;
+        return Err(e);
+    }
     let check = WrittenCheck::of(schema, parts, None);
     let written = match update.run(&mut tx, &update_q, key.clone()).await {
         // A write may not move the row out of the scopes or the "view" hook.
@@ -2798,6 +2801,17 @@ async fn update_row(
             other
         }
     };
+    update_outcome(written, (pool, schema), (columns, &values), &this_row).await
+}
+
+/// An UpdateView write's result as the view answers it: `Ok(None)` is a row
+/// the re-check refused.
+async fn update_outcome(
+    written: Result<Option<u64>, crate::sql::ExecError>,
+    (pool, schema): (&Pool, &'static ModelSchema),
+    (columns, values): (Vec<&'static str>, &[SqlValue]),
+    this_row: &WhereExpr,
+) -> Result<u64, WriteFailed> {
     match written {
         Ok(Some(n)) => Ok(n),
         Ok(None) => Err(WriteFailed::Error(refused())),
@@ -2806,8 +2820,8 @@ async fn update_row(
             duplicate_errors(
                 pool,
                 schema,
-                columns.into_iter().zip(&values),
-                Some(&this_row),
+                columns.into_iter().zip(values),
+                Some(this_row),
             )
             .await,
         )),

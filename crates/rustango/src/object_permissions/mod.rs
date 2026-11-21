@@ -224,6 +224,12 @@ impl Hooks {
             .collect())
     }
 
+    /// Whether an update of `table` has a row to judge or re-check (a queryset
+    /// scope, the "view" or "change" hook), so it must run locked in a transaction.
+    pub(crate) fn update_rechecks(self, table: &str) -> bool {
+        !self.scope_filters_empty(table) || self.judges(table, Some("change"))
+    }
+
     /// Whether [`Self::admits_written`] has anything to check.
     pub(crate) fn checks_written(
         self,

@@ -1671,21 +1671,34 @@ pub(crate) struct TxUpdate(Option<AuditedUpdateRecord>);
 
 #[cfg_attr(not(any(feature = "admin", feature = "tenancy")), allow(dead_code))]
 impl TxUpdate {
-    /// `None` when `model` audits updates but has no in-transaction
+    /// `Ok(None)` when `model` audits updates but has no in-transaction
     /// recorder (a hand-written `ModelEntry`): its update must go through
-    /// [`update`], or its audit entry would be lost.
-    pub(crate) fn for_model(model: &crate::core::ModelSchema) -> Option<Self> {
-        Self::for_entry(crate::core::ModelEntry::for_schema(model))
+    /// [`update`], or its audit entry would be lost. That unlocked write is
+    /// refused when the row needs a locked re-check (`rechecks`).
+    pub(crate) fn for_model(
+        model: &'static crate::core::ModelSchema,
+        rechecks: bool,
+    ) -> Result<Option<Self>, crate::sql::ExecError> {
+        let entry = crate::core::ModelEntry::for_schema(model);
+        Self::for_entry(entry, model.table, rechecks)
     }
 
-    fn for_entry(entry: Option<&crate::core::ModelEntry>) -> Option<Self> {
+    fn for_entry(
+        entry: Option<&crate::core::ModelEntry>,
+        table: &'static str,
+        rechecks: bool,
+    ) -> Result<Option<Self>, crate::sql::ExecError> {
         let Some(entry) = entry else {
-            return Some(Self(None));
+            return Ok(Some(Self(None)));
         };
         match (entry.audited_update_record(), entry.audited_update()) {
-            (Some(record), _) => Some(Self(Some(record))),
-            (None, Some(_)) => None,
-            (None, None) => Some(Self(None)),
+            (Some(record), _) => Ok(Some(Self(Some(record)))),
+            (None, Some(_)) if rechecks => Err(crate::sql::ExecError::AuditUnsupported {
+                table,
+                reason: "a scoped or hooked update needs an in-transaction audit",
+            }),
+            (None, Some(_)) => Ok(None),
+            (None, None) => Ok(Some(Self(None))),
         }
     }
 
@@ -1714,7 +1727,8 @@ impl TxUpdate {
 
 /// Delete, or soft delete by `stamp`, the rows `row` selects in the caller's
 /// `tx`, audited as [`delete`] and [`update_as`] audit them.
-/// `by_pk` re-reads the rows after a soft delete, which leaves their scope.
+/// `by_pk` re-reads the rows after a soft delete, which leaves their scope;
+/// only those the stamp changed are audited.
 ///
 /// # Errors
 /// As the write and the emit; an audited model with no in-transaction
@@ -1752,11 +1766,22 @@ pub(crate) async fn remove_rows_tx(
             (crate::sql::delete_tx(tx, &q).await?, entries)
         }
         Some(stamp) => {
+            // The rows the stamp will change, by its own WHERE: a selected
+            // row already trashed or out of scope is not audited.
+            let stamped: Vec<crate::core::SqlValue> = match reader {
+                Some(read) => read(tx, stamp.where_clause.clone())
+                    .await?
+                    .into_iter()
+                    .map(|(pk, _)| pk)
+                    .collect(),
+                None => Vec::new(),
+            };
             let n = crate::sql::update_tx(tx, stamp).await?;
             let mut entries = match reader {
                 Some(read) if n > 0 => read(tx, by_pk).await?,
                 _ => Vec::new(),
             };
+            entries.retain(|(pk, _)| stamped.contains(pk));
             for (_, e) in &mut entries {
                 e.operation = AuditOp::SoftDelete;
             }
@@ -2265,9 +2290,16 @@ mod tx_update_tests {
         let schema = crate::i18n::db::Translation::SCHEMA;
         let audited =
             ModelEntry::new(schema, "app").with_audited(|| Some(runner as AuditedUpdate), || None);
-        assert!(TxUpdate::for_entry(Some(&audited)).is_none());
-        assert!(TxUpdate::for_entry(Some(&ModelEntry::new(schema, "app"))).is_some());
-        assert!(TxUpdate::for_entry(None).is_some());
+        let plain = ModelEntry::new(schema, "app");
+        let of = |e, rechecks| TxUpdate::for_entry(e, "t", rechecks);
+        assert!(matches!(of(Some(&audited), false), Ok(None)));
+        // With a row to re-check, its unlocked write is refused.
+        assert!(matches!(
+            of(Some(&audited), true),
+            Err(crate::sql::ExecError::AuditUnsupported { .. })
+        ));
+        assert!(matches!(of(Some(&plain), true), Ok(Some(_))));
+        assert!(matches!(of(None, true), Ok(Some(_))));
     }
 }
 

@@ -40,6 +40,20 @@ pub struct Pin {
     pub note: ForeignKey<Note>,
 }
 
+/// Audited, soft-deleted and scoped to owner 1, with no row hook.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "tvop_trash", app = "tvop", audit(track = "title"))]
+pub struct Trash {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub owner_id: i64,
+    #[rustango(max_length = 32)]
+    pub title: String,
+    #[rustango(soft_delete)]
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+rustango::register_queryset_scope!("tvop_trash", owner_one);
+
 /// A UUID key, seeded as upper-case text where the column keeps text.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "tvop_tag", app = "tvop")]
@@ -84,6 +98,13 @@ async fn setup(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Pin>(pool).await;
     rustango::testkit::matrix::fresh_table::<Owned>(pool).await;
     rustango::testkit::matrix::fresh_table::<Tag>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Trash>(pool).await;
+    rustango::audit::ensure_table_pool(pool)
+        .await
+        .expect("audit table");
+    rustango::audit::AuditLog::delete_where("entity_table", "tvop_trash", pool)
+        .await
+        .expect("clear audit rows");
 }
 
 fn app(pool: &Pool) -> axum::Router {
@@ -101,7 +122,13 @@ fn app(pool: &Pool) -> axum::Router {
     ])
     .unwrap();
     let t = Arc::new(t);
-    let mut app = axum::Router::new();
+    let mut app = axum::Router::new().merge(
+        ListView::for_model(Trash::SCHEMA)
+            .allow_anonymous()
+            .template("list.html")
+            .bulk_actions(true)
+            .router("/trash", t.clone(), pool.clone()),
+    );
     for (prefix, schema) in [("/notes", Note::SCHEMA), ("/owned", Owned::SCHEMA)] {
         let fields: &[&str] = if prefix == "/notes" {
             &["title"]
@@ -513,9 +540,45 @@ async fn a_concurrent_change_is_judged_after_it_lands(pool: &Pool) {
     );
 }
 
+/// A bulk soft delete audits only the rows it stamped: not a row already
+/// in the trash, nor one outside the queryset scope.
+async fn a_bulk_soft_delete_audits_only_the_rows_it_stamps(pool: &Pool) {
+    let mut ids = Vec::new();
+    for (owner, title, trashed) in [(1, "live", false), (1, "gone", true), (2, "theirs", false)] {
+        let mut t = Trash {
+            id: Auto::default(),
+            owner_id: owner,
+            title: title.to_owned(),
+            deleted_at: trashed.then(chrono::Utc::now),
+        };
+        t.insert(pool).await.expect("seed");
+        ids.push(*t.id.get().expect("pk"));
+    }
+    rustango::audit::AuditLog::delete_where("entity_table", "tvop_trash", pool)
+        .await
+        .expect("clear audit rows");
+    let picks: Vec<String> = ids
+        .iter()
+        .map(|id| format!("_selected_action={id}"))
+        .collect();
+    let form = format!("action=delete_selected&{}", picks.join("&"));
+    let (status, body) = send(&app(pool), Method::POST, "/trash", &form).await;
+    assert!(status.is_redirection(), "{status}: {body}");
+    let audited: Vec<(String, String)> = rustango::audit::AuditLog::objects()
+        .filter("entity_table", "tvop_trash")
+        .fetch(pool)
+        .await
+        .expect("audit rows")
+        .into_iter()
+        .map(|r| (r.operation, r.entity_pk))
+        .collect();
+    assert_eq!(audited, [("soft_delete".to_owned(), ids[0].to_string())]);
+}
+
 tri_dialect_test!(
     setup: setup,
     scenarios: [
+        a_bulk_soft_delete_audits_only_the_rows_it_stamps,
         a_create_runs_the_add_hook,
         an_edit_cannot_hide_its_row,
         a_concurrent_change_is_judged_after_it_lands,
