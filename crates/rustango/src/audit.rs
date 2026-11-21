@@ -1719,7 +1719,7 @@ impl TxUpdate {
 /// # Errors
 /// As the write and the emit; an audited model with no in-transaction
 /// reader is [`crate::sql::ExecError::AuditUnsupported`].
-#[cfg(feature = "admin")]
+#[cfg(any(feature = "admin", feature = "template_views"))]
 pub(crate) async fn remove_one_tx(
     tx: &mut crate::sql::PoolTx<'_>,
     model: &'static crate::core::ModelSchema,
@@ -1915,7 +1915,7 @@ pub(crate) async fn insert_tx_on(
     not(any(feature = "admin", feature = "tenancy", feature = "forms")),
     allow(dead_code)
 )]
-async fn insert_returning_tx(
+pub(crate) async fn insert_returning_tx(
     tx: &mut crate::sql::PoolTx<'_>,
     query: &crate::core::InsertQuery,
     pk_field: &crate::core::FieldSchema,

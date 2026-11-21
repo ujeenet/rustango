@@ -65,6 +65,10 @@ fn delete(_: &axum::http::request::Parts, row: Option<&Value>) -> bool {
 rustango::register_object_permission!("tvop_note", "view", view);
 rustango::register_object_permission!("tvop_note", "change", change);
 rustango::register_object_permission!("tvop_note", "delete", delete);
+fn add(_: &axum::http::request::Parts, row: Option<&Value>) -> bool {
+    !title(row).starts_with("noadd")
+}
+rustango::register_object_permission!("tvop_note", "add", add);
 rustango::register_object_permission!("tvop_tag", "view", view);
 
 fn owner_one(_: &axum::http::request::Parts) -> Vec<Filter> {
@@ -120,6 +124,13 @@ fn app(pool: &Pool) -> axum::Router {
             )
             .merge(
                 UpdateView::for_model(schema, fields)
+                    .allow_anonymous()
+                    .template("page.html")
+                    .success_url("/done")
+                    .router(prefix, t.clone(), pool.clone()),
+            )
+            .merge(
+                CreateView::for_model(schema, fields)
                     .allow_anonymous()
                     .template("page.html")
                     .success_url("/done")
@@ -404,9 +415,95 @@ async fn a_hooked_bulk_action_matches_uuid_keys(pool: &Pool) {
     assert_eq!(left, ["hidden-u"], "the visible row was not deleted");
 }
 
+/// A create runs the "add" hook, and may not write a row the "view" hook or
+/// a queryset scope would hide: 403 and no row.
+async fn a_create_runs_the_add_hook(pool: &Pool) {
+    let app = app(pool);
+    for title in ["noadd-a", "hidden-b"] {
+        let (status, body) =
+            send(&app, Method::POST, "/notes/new", &format!("title={title}")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{title}: {body}");
+    }
+    let (status, _) = send(&app, Method::POST, "/owned/new", "owner_id=2").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(titles(pool).await.is_empty(), "a refused create wrote");
+    assert!(Owned::objects()
+        .fetch(pool)
+        .await
+        .expect("fetch")
+        .is_empty());
+    let (status, _) = send(&app, Method::POST, "/notes/new", "title=open-c").await;
+    assert!(status.is_redirection(), "{status}");
+    assert_eq!(titles(pool).await, ["open-c"]);
+}
+
+/// An edit that would move a row out of view or out of a queryset scope is
+/// refused and rolled back.
+async fn an_edit_cannot_hide_its_row(pool: &Pool) {
+    let id = notes(pool, &["open-a"]).await[0];
+    let mut own = Owned {
+        id: Auto::default(),
+        owner_id: 1,
+    };
+    own.insert(pool).await.expect("seed");
+    let app = app(pool);
+    let uri = format!("/notes/{id}/edit");
+    let (status, _) = send(&app, Method::POST, &uri, "title=hidden-now").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let uri = format!("/owned/{}/edit", own.id.get().unwrap());
+    let (status, _) = send(&app, Method::POST, &uri, "owner_id=2").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(titles(pool).await, ["open-a"], "a refused edit wrote");
+    let left = Owned::objects().fetch(pool).await.expect("fetch");
+    assert_eq!(left[0].owner_id, 1, "a refused edit wrote");
+}
+
+/// The hooks judge the row locked in the write's transaction: an edit or
+/// delete that waits on a concurrent change sees it. SQLite serializes writers.
+async fn a_concurrent_change_is_judged_after_it_lands(pool: &Pool) {
+    use rustango::core::{Assignment, UpdateQuery, WhereExpr};
+    if pool.dialect().kind() == rustango::sql::DialectKind::Sqlite {
+        return;
+    }
+    let ids = notes(pool, &["open-1", "open-2"]).await;
+    let app = app(pool);
+    for (id, title, action, form) in [
+        (ids[0], "locked-1", "edit", "title=open-x"),
+        (ids[1], "keep-2", "delete", ""),
+    ] {
+        let mut tx = rustango::sql::write_transaction(pool).await.expect("tx");
+        let edit = UpdateQuery::new(
+            Note::SCHEMA,
+            vec![Assignment::new("title", SqlValue::from(title))],
+            WhereExpr::Predicate(Filter::new("id", Op::Eq, SqlValue::I64(id))),
+        );
+        rustango::sql::update_tx(&mut tx, &edit)
+            .await
+            .expect("edit");
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let call = tokio::spawn({
+            let (app, barrier) = (app.clone(), barrier.clone());
+            let uri = format!("/notes/{id}/{action}");
+            async move {
+                barrier.wait().await;
+                send(&app, Method::POST, &uri, form).await.0
+            }
+        });
+        barrier.wait().await;
+        // Long enough for the request to block on the row lock.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        tx.commit().await.expect("commit");
+        assert_eq!(call.await.unwrap(), StatusCode::FORBIDDEN, "{action}");
+    }
+    assert_eq!(titles(pool).await, ["keep-2", "locked-1"]);
+}
+
 tri_dialect_test!(
     setup: setup,
     scenarios: [
+        a_create_runs_the_add_hook,
+        an_edit_cannot_hide_its_row,
+        a_concurrent_change_is_judged_after_it_lands,
         a_list_past_its_scan_cap_is_refused,
         a_form_fk_to_a_hidden_target_is_refused,
         a_hooked_bulk_action_matches_uuid_keys,

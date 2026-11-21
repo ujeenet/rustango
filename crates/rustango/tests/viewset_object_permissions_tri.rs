@@ -248,15 +248,25 @@ async fn item_routes_hide_with_404_and_refuse_with_403(pool: &Pool) {
         left.contains(&"locked-b".to_owned()) && left.contains(&"keep-2".to_owned()),
         "{left:?}"
     );
-    // An update that moves a row out of view answers 204, not the row.
-    let (status, _) = send(
-        &app,
-        "PATCH",
-        &format!("/docs/{keep}"),
-        Some(json!({ "title": "hidden-now" })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+/// An update that would move a row out of view is refused and rolled back.
+async fn an_update_cannot_hide_its_row(pool: &Pool) {
+    let id = docs(pool, &["open-a"]).await[0];
+    let app = doc_app(pool, |v| v);
+    for method in ["PUT", "PATCH"] {
+        let body = Some(json!({ "title": "hidden-now" }));
+        let (status, body) = send(&app, method, &format!("/docs/{id}"), body).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method}: {body}");
+    }
+    let titles: Vec<String> = Doc::objects()
+        .fetch(pool)
+        .await
+        .expect("fetch")
+        .into_iter()
+        .map(|d| d.title)
+        .collect();
+    assert_eq!(titles, ["open-a"], "a refused update wrote");
 }
 
 /// The soft-delete path runs the delete hook too.
@@ -835,6 +845,7 @@ tri_dialect_test!(
         a_hidden_row_is_404_before_its_fk_check,
         a_concurrent_edit_is_judged_after_it_lands,
         item_routes_hide_with_404_and_refuse_with_403,
+        an_update_cannot_hide_its_row,
         a_soft_delete_runs_the_delete_hook,
         a_page_counts_only_visible_rows,
         past_the_scan_cap_offset_lists_are_refused,

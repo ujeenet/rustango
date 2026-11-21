@@ -807,8 +807,8 @@ layer in full: reads public, writes need a Bearer token.
   queryset scope (which scales) or use cursor pagination;
 - queryset scopes narrow every read and write, and a create or update whose
   row would land outside them is a `403` that writes nothing; an FK may not
-  name a target row its scopes or `view` hook hide (`422`); a create the
-  `view` hook would hide is a `403` that writes nothing.
+  name a target row its scopes or `view` hook hide (`422`); a create or
+  update the `view` hook would hide is a `403` that writes nothing.
 
 `change` checks the stored row only: a queryset scope, or a pinned column
 (`OwnedBy`, `WritePin`), is what stops a row moving to another owner. A

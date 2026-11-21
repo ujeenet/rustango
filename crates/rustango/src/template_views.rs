@@ -142,32 +142,100 @@ impl_visible!(
     crate::core::DeleteQuery
 );
 
-/// The hooks on the row `q` selects, read only when one is registered:
-/// missing or hidden by "view" is a 404, refused by `action`'s hook a 403.
-async fn gate_row(
+/// Open the write's transaction and judge the row `q` selects, locked in it,
+/// when a hook is registered: the write then changes the row the hooks saw.
+/// Missing or hidden by "view" is a 404, refused by `action`'s hook a 403.
+async fn lock_row(
     pool: &Pool,
     parts: &Parts,
-    q: &SelectQuery,
+    q: SelectQuery,
     action: Option<&'static str>,
-) -> Result<(), Response> {
+) -> Result<crate::sql::WriteTx, Response> {
+    let tx = crate::sql::write_tx(pool)
+        .await
+        .map_err(|e| template_error(&format!("begin write: {e}")))?;
+    #[cfg(feature = "admin")]
+    let mut tx = tx;
     #[cfg(feature = "admin")]
     {
         use crate::object_permissions::Hooks;
-        let table = q.model.table;
-        if !Hooks::All.judges(table, action) {
-            return Ok(());
+        if Hooks::All.judges(q.model.table, action) {
+            let judged = match Hooks::All.judge_locked(&mut tx, parts, q, action).await {
+                Ok(v) => verdict(v),
+                Err(e) => Err(template_error(&format!("query row: {e}"))),
+            };
+            if let Err(resp) = judged {
+                let _ = tx.rollback().await;
+                return Err(resp);
+            }
         }
-        let fields: Vec<_> = q.model.scalar_fields().collect();
-        let row = select_one_row_as_json(pool, q, &fields)
-            .await
-            .map_err(|e| template_error(&format!("query row: {e}")))?;
-        verdict(row.map(|row| Hooks::All.judge(table, parts, &row, action)))
     }
     #[cfg(not(feature = "admin"))]
-    {
-        let _ = (pool, parts, q, action);
-        Ok(())
+    let _ = (parts, q, action);
+    Ok(tx)
+}
+
+/// The re-check of the row a write made or changed, in its transaction: in
+/// the queryset scopes, admitted by the "view" hook and `action`'s, as a
+/// ViewSet checks it.
+struct WrittenCheck {
+    scope: Vec<WhereExpr>,
+    action: Option<&'static str>,
+}
+
+impl WrittenCheck {
+    /// For a create: the "add" hook judges the request first, a 403.
+    /// `None` when there is nothing to check.
+    fn created(model: &'static ModelSchema, parts: &Parts) -> Result<Option<Self>, Response> {
+        #[cfg(feature = "admin")]
+        if !crate::object_permissions::Hooks::All.allows(model.table, "add", parts, None) {
+            return Err(refused());
+        }
+        Ok(Self::of(model, parts, Some("add")))
     }
+
+    /// `None` when there is nothing to check; "change" judged an edit before it.
+    fn of(
+        model: &'static ModelSchema,
+        parts: &Parts,
+        action: Option<&'static str>,
+    ) -> Option<Self> {
+        #[cfg(feature = "admin")]
+        {
+            use crate::object_permissions::Hooks;
+            let scope = Hooks::All.scope_where(model.table, parts);
+            Hooks::All
+                .checks_written(model.table, &scope, action)
+                .then_some(Self { scope, action })
+        }
+        #[cfg(not(feature = "admin"))]
+        {
+            let _ = (model, parts, action);
+            None
+        }
+    }
+
+    /// Whether the row `pk` as written in `tx` passes this check.
+    async fn admits(
+        &self,
+        tx: &mut crate::sql::PoolTx<'_>,
+        parts: &Parts,
+        row: (&'static ModelSchema, &'static FieldSchema, SqlValue),
+    ) -> Result<bool, crate::sql::ExecError> {
+        #[cfg(feature = "admin")]
+        return crate::object_permissions::Hooks::All
+            .admits_written(tx, parts, row, &self.scope, self.action)
+            .await;
+        #[cfg(not(feature = "admin"))]
+        {
+            let _ = (&self.scope, self.action, tx, parts, row);
+            Ok(true)
+        }
+    }
+}
+
+fn refused() -> Response {
+    (StatusCode::FORBIDDEN, "permission denied").into_response()
 }
 
 /// Missing or hidden is a 404, refused a 403.
@@ -176,7 +244,7 @@ fn verdict(v: Option<crate::object_permissions::Verdict>) -> Result<(), Response
     use crate::object_permissions::Verdict;
     match v {
         None | Some(Verdict::Hidden) => Err((StatusCode::NOT_FOUND, "not found").into_response()),
-        Some(Verdict::Refused) => Err((StatusCode::FORBIDDEN, "permission denied").into_response()),
+        Some(Verdict::Refused) => Err(refused()),
         Some(Verdict::Allowed) => Ok(()),
     }
 }
@@ -1755,13 +1823,28 @@ async fn delete_submit(vs: &DeleteView, pool: &Pool, parts: &Parts, pk: &str) ->
             vs.schema.table
         ));
     };
-    let key = pk_or_404!(pool, vs.schema, pk_field, pk);
-    let row = SelectQuery::by_pk(vs.schema, pk_field.column, key.clone()).visible(parts);
-    if let Err(resp) = gate_row(pool, parts, &row, Some("delete")).await {
-        return resp;
-    }
-    let delete_q = crate::core::DeleteQuery::by_pk(vs.schema, pk_field.column, key);
-    match delete_rows(pool, parts, delete_q).await {
+    let (schema, key) = (vs.schema, pk_or_404!(pool, vs.schema, pk_field, pk));
+    let by_pk = WhereExpr::Predicate(Filter::new(pk_field.column, Op::Eq, key.clone()));
+    let row = SelectQuery::by_pk(schema, pk_field.column, key.clone()).visible(parts);
+    let row_where = row.where_clause.clone();
+    let mut tx = match lock_row(pool, parts, row, Some("delete")).await {
+        Ok(tx) => tx,
+        Err(resp) => return resp,
+    };
+    // A soft-delete model stamps its column instead, as the admin does.
+    let stamp = schema.soft_delete_column.map(|col| {
+        let now = Some(chrono::Utc::now());
+        crate::soft_delete::__mark_query(schema, col, pk_field.column, key, now).visible(parts)
+    });
+    let deleted = crate::audit::remove_one_tx(&mut tx, schema, (row_where, by_pk), stamp.as_ref());
+    let deleted = match deleted.await {
+        Ok(n) if n > 0 => tx.commit().await.map(|()| n),
+        other => {
+            let _ = tx.rollback().await;
+            other
+        }
+    };
+    match deleted {
         Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Ok(_) => {
             // Note: typically `{pk}` in a delete success_url
@@ -2520,7 +2603,8 @@ async fn create_insert(
     columns: Vec<&'static str>,
     values: Vec<SqlValue>,
 ) -> Result<String, WriteFailed> {
-    hidden_fk((pool, parts), schema, (&columns, &values), None).await?;
+    let check = WrittenCheck::created(schema, parts).map_err(WriteFailed::Error)?;
+    hidden_fk((pool, None, parts), schema, (&columns, &values), None).await?;
     // Placeholders are checked now; their values are read after the write.
     let fields = success_url_fields(success_url, schema)
         .map_err(|e| WriteFailed::Error(template_error(&e)))?;
@@ -2530,7 +2614,7 @@ async fn create_insert(
         .filter(|_| crate::audit::audits_creates(schema));
     let returning: Vec<&'static str> = schema
         .primary_key()
-        .filter(|_| !fields.is_empty() || audited_pk.is_some())
+        .filter(|_| !fields.is_empty() || audited_pk.is_some() || check.is_some())
         .map(|pk| vec![pk.column])
         .unwrap_or_default();
     let insert_q = crate::core::InsertQuery {
@@ -2541,7 +2625,17 @@ async fn create_insert(
         on_conflict: None,
         generated: Vec::new(),
     };
-    let result = if let Some(pk) = audited_pk {
+    let result = if let Some(check) = &check {
+        let Some(pk) = schema.primary_key() else {
+            let msg = format!("model `{}` has no primary key to check", schema.table);
+            return Err(WriteFailed::Error(template_error(&msg)));
+        };
+        match insert_checked((pool, parts), &insert_q, pk, check).await {
+            Ok(Some(row)) => Ok(Some(row)),
+            Ok(None) => return Err(WriteFailed::Error(refused())),
+            Err(e) => Err(e),
+        }
+    } else if let Some(pk) = audited_pk {
         crate::audit::insert_returning(pool, &insert_q, pk)
             .await
             .map(|(_, row)| Some(row))
@@ -2587,11 +2681,36 @@ async fn create_insert(
     }
 }
 
+/// One INSERT in its own transaction, committed only when `check` admits the
+/// written row: `Ok(None)` when it does not.
+async fn insert_checked(
+    (pool, parts): (&Pool, &Parts),
+    query: &crate::core::InsertQuery,
+    pk_field: &'static FieldSchema,
+    check: &WrittenCheck,
+) -> Result<Option<crate::sql::InsertReturningPool>, crate::sql::ExecError> {
+    let mut tx = crate::sql::write_tx(pool).await?;
+    let written = match crate::audit::insert_returning_tx(&mut tx, query, pk_field).await {
+        Ok((pk, row)) => check
+            .admits(&mut tx, parts, (query.model, pk_field, pk))
+            .await
+            .map(|admitted| admitted.then_some(row)),
+        Err(e) => Err(e),
+    };
+    match written {
+        Ok(Some(row)) => tx.commit().await.map(|()| Some(row)),
+        other => {
+            let _ = tx.rollback().await;
+            other
+        }
+    }
+}
+
 /// A form error for the first written FK naming a target row this request
 /// cannot see (its scopes or "view" hook), as a ViewSet refuses it. On
 /// update, `stored` is the row's pk: a value it already holds is kept.
 async fn hidden_fk(
-    (pool, parts): (&Pool, &Parts),
+    (pool, tx, parts): (&Pool, Option<&mut crate::sql::PoolTx<'_>>, &Parts),
     schema: &'static ModelSchema,
     (columns, values): (&[&'static str], &[SqlValue]),
     stored: Option<(&'static FieldSchema, &SqlValue)>,
@@ -2619,7 +2738,7 @@ async fn hidden_fk(
             values: &pairs,
             stored,
         }];
-        match first_hidden_in(pool, None, owner, &targets, &writes, admits).await {
+        match first_hidden_in(pool, tx, owner, &targets, &writes, admits).await {
             Ok(None) => Ok(()),
             Ok(Some((_, field))) => Err(WriteFailed::Refused(HashMap::from([(
                 field.name.to_owned(),
@@ -2632,13 +2751,14 @@ async fn hidden_fk(
     }
     #[cfg(not(feature = "admin"))]
     {
-        let _ = (pool, parts, schema, columns, values, stored);
+        let _ = (pool, tx, parts, schema, columns, values, stored);
         Ok(())
     }
 }
 
-/// The UpdateView UPDATE shared by the static and tenant routers, after the
-/// row's hooks; returns the rows changed, `0` when no visible row has the PK.
+/// The UpdateView UPDATE shared by the static and tenant routers, judged and
+/// written in one transaction; returns the rows changed, `0` when no visible
+/// row has the PK.
 async fn update_row(
     (pool, parts): (&Pool, &Parts),
     schema: &'static ModelSchema,
@@ -2646,13 +2766,26 @@ async fn update_row(
     values: Vec<SqlValue>,
     (pk_field, key): (&'static FieldSchema, SqlValue),
 ) -> Result<u64, WriteFailed> {
+    let Some(update) = crate::audit::TxUpdate::for_model(schema) else {
+        let e = crate::sql::ExecError::AuditUnsupported {
+            table: schema.table,
+            reason: "an UpdateView needs an in-transaction audit",
+        };
+        return Err(WriteFailed::Error(template_error(&format!(
+            "update row: {e}"
+        ))));
+    };
     let row = SelectQuery::by_pk(schema, pk_field.column, key.clone()).visible(parts);
-    gate_row(pool, parts, &row, Some("change"))
+    let mut tx = lock_row(pool, parts, row, Some("change"))
         .await
         .map_err(WriteFailed::Error)?;
     let stored = Some((pk_field, &key));
-    hidden_fk((pool, parts), schema, (&columns, &values), stored).await?;
-    let this_row = WhereExpr::Predicate(Filter::new(pk_field.column, Op::Eq, key));
+    let at = (pool, Some(&mut *tx), parts);
+    if let Err(e) = hidden_fk(at, schema, (&columns, &values), stored).await {
+        let _ = tx.rollback().await;
+        return Err(e);
+    }
+    let this_row = WhereExpr::Predicate(Filter::new(pk_field.column, Op::Eq, key.clone()));
     let mut stamped: Vec<(&'static str, SqlValue)> = columns
         .iter()
         .copied()
@@ -2667,8 +2800,28 @@ async fn update_row(
         .map(|(column, value)| crate::core::Assignment::new(column, value))
         .collect();
     let update_q = crate::core::UpdateQuery::new(schema, set, this_row.clone()).visible(parts);
-    match crate::audit::update(pool, &update_q).await {
-        Ok(n) => Ok(n),
+    let check = WrittenCheck::of(schema, parts, None);
+    let written = match update.run(&mut tx, &update_q, key.clone()).await {
+        // A write may not move the row out of the scopes or the "view" hook.
+        Ok(n) if n > 0 => match &check {
+            Some(c) => c
+                .admits(&mut tx, parts, (schema, pk_field, key))
+                .await
+                .map(|admitted| admitted.then_some(n)),
+            None => Ok(Some(n)),
+        },
+        other => other.map(Some),
+    };
+    let written = match written {
+        Ok(Some(n)) => tx.commit().await.map(|()| Some(n)),
+        other => {
+            let _ = tx.rollback().await;
+            other
+        }
+    };
+    match written {
+        Ok(Some(n)) => Ok(n),
+        Ok(None) => Err(WriteFailed::Error(refused())),
         // A taken unique value is a form error, as on create (#2073).
         Err(e) if e.is_unique_violation() => Err(WriteFailed::Refused(
             duplicate_errors(
