@@ -560,6 +560,11 @@ impl Dialect for MySql {
         )
     }
 
+    /// `CURRENT_TIMESTAMP` follows the session time zone, which a URL may set.
+    fn utc_now_sql(&self) -> String {
+        "UTC_TIMESTAMP(6)".to_owned()
+    }
+
     // CONVERT_TZ returns NULL for a named zone when the server's time
     // zone tables are not loaded.
     fn named_time_zone_sql(&self) -> Option<&'static str> {

@@ -407,6 +407,9 @@ Three more registration macros hook into a model's admin pages:
   `check: fn(&Parts, Option<&Value>) -> bool` allows or denies per row. Built-in
   handlers consult the `add`, `change`, `delete` and `view` actions; multiple
   hooks AND together. A row the `view` hook hides is a 404 on its item pages.
+  A create, edit or inline row whose saved row the `view` hook would hide is a
+  403 that writes nothing. Edits, deletes and bulk actions judge the row locked
+  in the write's transaction.
   ViewSets run the same hooks and scopes (see [viewsets.md](viewsets.md)). A `view` hook also hides rows from the list, autocomplete,
   FK facet names and FK cell names. The list runs it over every row its filters
   and search match, so totals, facets, date buckets and search leave hidden rows

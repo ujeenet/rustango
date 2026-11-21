@@ -3749,49 +3749,22 @@ async fn gate_item(
     let hooked = hooks.judges(schema.table, action);
     let mut q = SelectQuery::by_pk(schema, pk_field.column, pk.clone());
     q.where_clause = narrow(q.where_clause, scope.to_vec());
-    let fields: Vec<_> = schema.scalar_fields().collect();
-    let row = match read {
+    let verdict = match read {
         ItemRead::IfHooked if !hooked => return Ok(()),
-        ItemRead::IfHooked | ItemRead::Always(None) => acq.select_one_as_json(&q, &fields).await,
-        ItemRead::Always(Some(tx)) => {
-            q.lock_mode = Some(crate::core::LockMode {
-                silent_on_sqlite: true,
-                ..crate::core::LockMode::default()
-            });
-            crate::sql::select_one_row_as_json_tx(tx, &q, &fields).await
+        ItemRead::IfHooked | ItemRead::Always(None) => {
+            let fields: Vec<_> = schema.scalar_fields().collect();
+            let row = acq.select_one_as_json(&q, &fields).await;
+            row.map(|row| row.map(|row| hooks.judge(schema.table, parts, &row, action)))
         }
+        ItemRead::Always(Some(tx)) => hooks.judge_locked(tx, parts, q, action).await,
     }
     .map_err(|e| json_server_error("viewset::object_permissions", &e))?;
     use crate::object_permissions::Verdict;
-    match row.map(|row| hooks.judge(schema.table, parts, &row, action)) {
+    match verdict {
         None | Some(Verdict::Hidden) => Err(json_error(StatusCode::NOT_FOUND, "not found")),
         Some(Verdict::Refused) => Err(json_error(StatusCode::FORBIDDEN, "forbidden")),
         Some(Verdict::Allowed) => Ok(()),
     }
-}
-
-/// Whether the row `pk` is still inside the queryset `scope` in `tx`, after
-/// a write: one that moved it out is refused.
-async fn stays_in_scope(
-    state: &ViewSetState,
-    tx: &mut crate::sql::PoolTx<'_>,
-    (pk_field, pk): (&'static crate::core::FieldSchema, &SqlValue),
-    scope: &[WhereExpr],
-) -> Result<bool, crate::sql::ExecError> {
-    if scope.is_empty() {
-        return Ok(true);
-    }
-    let mut q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk.clone());
-    q.where_clause = narrow(q.where_clause, scope.to_vec());
-    let row = crate::sql::select_one_row_as_json_tx(tx, &q, &[pk_field]).await?;
-    Ok(row.is_some())
-}
-
-/// The queryset scopes alone, which every write must stay inside.
-fn queryset_scope(state: &ViewSetState, parts: &axum::http::request::Parts) -> Vec<WhereExpr> {
-    let table = state.vs.schema.table;
-    let filters = state.vs.hooks.scope_filters(table, parts);
-    filters.into_iter().map(WhereExpr::Predicate).collect()
 }
 
 async fn handle_create(
@@ -3810,7 +3783,7 @@ async fn handle_create(
         Ok(w) => w,
         Err(resp) => return resp,
     };
-    let add_hooks = match AddHooks::of(&state, &parts) {
+    let add_hooks = match WrittenRow::created(&state, &parts) {
         Ok(h) => h,
         Err(resp) => return resp,
     };
@@ -3913,7 +3886,7 @@ async fn handle_create(
 async fn insert_and_fetch_one(
     state: &Arc<ViewSetState>,
     acq: &mut AcquiredConn,
-    (add_hooks, claims): (&AddHooks, &RoutingClaims),
+    (add_hooks, claims): (&WrittenRow, &RoutingClaims),
     (columns, values): (Vec<&'static str>, Vec<SqlValue>),
     pk_field: &'static crate::core::FieldSchema,
     fields: &[&'static crate::core::FieldSchema],
@@ -3950,37 +3923,59 @@ async fn insert_and_fetch_one(
         })
 }
 
-/// The `add` hooks for a create, run as the admin runs them: on the
-/// request, then on each written row inside the write's transaction. The
-/// row must also land inside the queryset scopes and pass the "view" hook.
-struct AddHooks {
+/// The re-check of a row a write made or changed, inside the write's
+/// transaction: in the queryset scopes, admitted by the "view" hook and, on a
+/// create, by "add" (which also judges the request first).
+struct WrittenRow {
     hooks: crate::object_permissions::Hooks,
-    /// The request, kept only when an "add" or "view" hook judges the row.
+    /// The request, kept only when there is something to check.
     parts: Option<axum::http::request::Parts>,
     /// The queryset scopes the written row must stay inside.
     scope: Vec<WhereExpr>,
+    action: Option<&'static str>,
 }
 
-impl AddHooks {
-    /// `Err` is a `403` when a hook refuses the request itself.
-    fn of(state: &ViewSetState, parts: &axum::http::request::Parts) -> Result<Self, Response> {
-        let (table, hooks) = (state.vs.schema.table, state.vs.hooks);
-        if !hooks.allows(table, "add", parts, None) {
+impl WrittenRow {
+    /// For a create. `Err` is a `403` when a hook refuses the request itself.
+    fn created(state: &ViewSetState, parts: &axum::http::request::Parts) -> Result<Self, Response> {
+        if !state
+            .vs
+            .hooks
+            .allows(state.vs.schema.table, "add", parts, None)
+        {
             return Err(json_error(StatusCode::FORBIDDEN, "forbidden"));
         }
-        Ok(Self {
+        Ok(Self::of(state, parts, Some("add")))
+    }
+
+    /// For an update: "change" judged the row before the write.
+    fn edited(state: &ViewSetState, parts: &axum::http::request::Parts) -> Self {
+        Self::of(state, parts, None)
+    }
+
+    fn of(
+        state: &ViewSetState,
+        parts: &axum::http::request::Parts,
+        action: Option<&'static str>,
+    ) -> Self {
+        let (table, hooks) = (state.vs.schema.table, state.vs.hooks);
+        // The queryset scopes alone, which every write must stay inside.
+        let scope = hooks.scope_where(table, parts);
+        Self {
             hooks,
-            parts: hooks.judges(table, Some("add")).then(|| parts.clone()),
-            scope: queryset_scope(state, parts),
-        })
+            parts: hooks
+                .checks_written(table, &scope, action)
+                .then(|| parts.clone()),
+            scope,
+            action,
+        }
     }
 
     fn on_rows(&self) -> bool {
-        self.parts.is_some() || !self.scope.is_empty()
+        self.parts.is_some()
     }
 
-    /// Whether the row `pk` as written in `tx` is inside the scopes and
-    /// every hook admits it.
+    /// Whether the row `pk` as written in `tx` passes this check.
     async fn admit(
         &self,
         tx: &mut crate::sql::PoolTx<'_>,
@@ -3988,19 +3983,13 @@ impl AddHooks {
         pk_field: &'static crate::core::FieldSchema,
         pk: SqlValue,
     ) -> Result<bool, crate::sql::ExecError> {
-        if !self.on_rows() {
+        let Some(parts) = &self.parts else {
             return Ok(true);
-        }
-        let fields: Vec<_> = model.scalar_fields().collect();
-        let mut select = SelectQuery::by_pk(model, pk_field.column, pk);
-        select.where_clause = narrow(select.where_clause, self.scope.clone());
-        let row = crate::sql::select_one_row_as_json_tx(tx, &select, &fields).await?;
-        Ok(row.is_some_and(|row| {
-            self.parts.as_ref().is_none_or(|parts| {
-                let verdict = self.hooks.judge(model.table, parts, &row, Some("add"));
-                verdict == crate::object_permissions::Verdict::Allowed
-            })
-        }))
+        };
+        let row = (model, pk_field, pk);
+        self.hooks
+            .admits_written(tx, parts, row, &self.scope, self.action)
+            .await
     }
 }
 
@@ -4144,7 +4133,7 @@ impl RoutingClaims {
 /// admit the written row and its routing claim holds.
 async fn insert_admitted(
     acq: &AcquiredConn,
-    add_hooks: &AddHooks,
+    add_hooks: &WrittenRow,
     claims: &RoutingClaims,
     query: &InsertQuery,
     pk_field: &'static crate::core::FieldSchema,
@@ -4196,55 +4185,6 @@ async fn insert_admitted(
     }
 }
 
-/// A claimed UPDATE in a transaction of its own, retried once on a MySQL
-/// deadlock as the admin's edit is.
-async fn update_claimed(
-    pool: &Pool,
-    claims: &RoutingClaims,
-    query: &UpdateQuery,
-    pk: &SqlValue,
-) -> Result<u64, (StatusCode, String)> {
-    let Some(update) = crate::audit::TxUpdate::for_model(query.model) else {
-        // Not the routing tables: they have no pool-only audit.
-        let e = crate::sql::ExecError::AuditUnsupported {
-            table: query.model.table,
-            reason: "a claimed update needs an in-transaction audit",
-        };
-        return Err(write_failure("viewset::update", &e));
-    };
-    let mut retry = true;
-    loop {
-        let mut tx = match claims.begin(pool, pk).await {
-            Ok(tx) => tx,
-            Err(e) if e.is_deadlock() && std::mem::take(&mut retry) => continue,
-            Err(e) => return Err(e.into_failure("viewset::update")),
-        };
-        let n = match update.run(&mut tx, query, pk.clone()).await {
-            Ok(n) => n,
-            Err(e) => {
-                let _ = tx.rollback().await;
-                if e.is_deadlock() && std::mem::take(&mut retry) {
-                    continue;
-                }
-                return Err(write_failure("viewset::update", &e));
-            }
-        };
-        if n > 0 {
-            if let Err(e) = claims.after_write(&mut tx, pk).await {
-                let _ = tx.rollback().await;
-                if e.is_deadlock() && std::mem::take(&mut retry) {
-                    continue;
-                }
-                return Err(e.into_failure("viewset::update"));
-            }
-        }
-        tx.commit()
-            .await
-            .map_err(|e| write_failure("viewset::update::commit", &e.into()))?;
-        return Ok(n);
-    }
-}
-
 /// A failed INSERT/UPDATE: a lost conflict (deadlock, lock timeout,
 /// serialization failure, `SQLITE_BUSY`) is a `503`, a duplicate key a `409`,
 /// any other database rejection a `400`, driver text withheld; anything else
@@ -4275,7 +4215,7 @@ fn write_failure(context: &str, e: &crate::sql::ExecError) -> (StatusCode, Strin
 async fn create_one(
     state: &Arc<ViewSetState>,
     acq: &mut AcquiredConn,
-    (write_set, add_hooks): (&WriteSet, &AddHooks),
+    (write_set, add_hooks): (&WriteSet, &WrittenRow),
     (form, json, encoding): (&HashMap<String, String>, &Value, Encoding),
     pk_field: &'static crate::core::FieldSchema,
     read_back: &ReadBack,
@@ -4346,7 +4286,7 @@ async fn create_one(
 async fn create_many(
     state: &Arc<ViewSetState>,
     acq: &mut AcquiredConn,
-    (write_set, add_hooks): (&WriteSet, &AddHooks),
+    (write_set, add_hooks): (&WriteSet, &WrittenRow),
     rows: &[(HashMap<String, String>, Value)],
     pk_field: &'static crate::core::FieldSchema,
     read_back: &ReadBack,
@@ -4612,13 +4552,18 @@ async fn update_inner(
     // field or FK check can answer. Locked in the UPDATE's transaction, so
     // the hooks judge the row the write changes. A model audited
     // only on a pool is read and updated unlocked, rather than lose its
-    // audit entry.
-    let mut locked = match crate::audit::TxUpdate::for_model(state.vs.schema) {
-        Some(u) => match crate::sql::write_tx(&acq.pool).await {
+    // audit entry, and only when it has no row to re-check.
+    let rechecks = state.vs.hooks.update_rechecks(state.vs.schema.table);
+    let mut locked = match crate::audit::TxUpdate::for_model(state.vs.schema, rechecks) {
+        Ok(Some(u)) => match crate::sql::write_tx(&acq.pool).await {
             Ok(tx) => Some((u, tx)),
             Err(e) => return json_server_error("viewset::update::begin", &e),
         },
-        None => None,
+        Ok(None) => None,
+        Err(e) => {
+            let (status, msg) = write_failure("viewset::update", &e);
+            return json_error(status, &msg);
+        }
     };
     let item = (pk_field, &pk_val);
     let read = (
@@ -4628,7 +4573,7 @@ async fn update_inner(
     if let Err(resp) = gate_item(&state, &mut acq, &parts, item, read, Some("change")).await {
         return resp;
     }
-    let qs_scope = queryset_scope(&state, &parts);
+    let written_row = WrittenRow::edited(&state, &parts);
     let body = match buffered {
         Ok(bytes) => Body::from(bytes),
         Err(e) => return e.into_response(),
@@ -4751,8 +4696,11 @@ async fn update_inner(
     let updated = match locked.as_mut() {
         Some((u, tx)) => match u.run(tx, &query, pk_val.clone()).await {
             Ok(0) => Ok(0),
-            // A write may not move the row out of the queryset scopes.
-            Ok(n) => match stays_in_scope(&state, tx, item, &qs_scope).await {
+            // A write may not move the row out of the scopes or the "view" hook.
+            Ok(n) => match written_row
+                .admit(tx, state.vs.schema, pk_field, pk_val.clone())
+                .await
+            {
                 Ok(false) => Err((StatusCode::FORBIDDEN, "forbidden".to_owned())),
                 Err(e) => Err(write_failure("viewset::update::scope", &e)),
                 Ok(true) => match claims.claim_in(tx, &pk_val).await {
@@ -4762,7 +4710,14 @@ async fn update_inner(
             },
             Err(e) => Err(write_failure("viewset::update", &e)),
         },
-        None if claims.any() => update_claimed(&acq.pool, &claims, &query, &pk_val).await,
+        // No transaction to claim in: refuse rather than skip it.
+        None if claims.any() => Err(write_failure(
+            "viewset::update",
+            &crate::sql::ExecError::AuditUnsupported {
+                table: state.vs.schema.table,
+                reason: "a claimed update needs an in-transaction audit",
+            },
+        )),
         None => acq
             .update(&query)
             .await
@@ -4782,7 +4737,7 @@ async fn update_inner(
     }
     wrote(&state);
 
-    // The UPDATE committed; a row it moved out of scope answers 204.
+    // The UPDATE committed; a row a filter backend or global scope hides answers 204.
     let fields = state.effective_fields();
     match fetch_by_pk_scoped(&state, &mut acq, pk_field, pk_val, &fields, &read_back).await {
         Ok(Some(obj)) => json_response(obj),
@@ -4841,7 +4796,7 @@ async fn handle_destroy(
         query.where_clause = narrow(query.where_clause, scope.clone());
         query
     });
-    let deleted = crate::audit::remove_one_tx(&mut tx, schema, (row, by_pk), stamp.as_ref()).await;
+    let deleted = crate::audit::remove_rows_tx(&mut tx, schema, (row, by_pk), stamp.as_ref()).await;
     let deleted = match deleted {
         Ok(n) if n > 0 => tx.commit().await.map(|()| n).map_err(Into::into),
         other => other,

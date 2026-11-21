@@ -111,7 +111,9 @@ router in `auth_decorators::login_required("/login")`.
 The views run the same row rules as a ViewSet: `register_queryset_scope!`
 scopes narrow every read and write, and the `view` hook hides rows (a `404` on
 detail, edit and delete pages; left out of lists, bulk actions and FK display
-names). The `change` and `delete` hooks refuse with a `403`, and a
+names). The `add`, `change` and `delete` hooks refuse with a `403`, judged on
+the row locked in the write's transaction, and a create or edit whose row would
+leave the scopes or the `view` hook is a `403` that writes nothing. A
 `delete_selected` that includes a refused row is a `403` as a whole. A form
 may not point an FK at a row the target's scopes or `view` hook hide (a form
 error). A list scans at most `view_hook_scan_cap` rows (default 2 000) for the

@@ -417,7 +417,10 @@ Tres macros de registro más se enganchan al comportamiento de un modelo registr
   `register_object_permission!("posts", "change", check)` donde
   `check: fn(&Parts, Option<&Value>) -> bool` permite o deniega por fila. Los manejadores
   incorporados consultan las acciones `add`, `change`, `delete` y `view`; varios hooks se
-  combinan con Y (AND). Un hook `view` también oculta filas de la lista, del
+  combinan con Y (AND). Una creación, edición o fila inline cuya fila guardada
+  ocultaría el hook `view` es un 403 que no escribe nada. Las ediciones, borrados
+  y acciones masivas juzgan la fila bloqueada en la transacción de escritura. Un
+  hook `view` también oculta filas de la lista, del
   autocompletado, de los nombres de las facetas de FK y de los nombres de las celdas
   de FK. La lista lo ejecuta sobre cada fila que coinciden con sus filtros y su
   búsqueda, así que los totales, las facetas, los grupos de fechas y la búsqueda

@@ -721,7 +721,7 @@ Order::objects()
 
 | Builder | PG | MySQL | SQLite |
 |---|---|---|---|
-| `now()` | `NOW()` | `NOW()` | `CURRENT_TIMESTAMP` |
+| `now()` | `NOW()` | `UTC_TIMESTAMP(6)` | `strftime('%Y-%m-%dT%H:%M:%f000+00:00','now')` |
 | `extract_year(x)` | `CAST(EXTRACT(YEAR FROM x) AS INTEGER)` | `YEAR(x)` | `CAST(strftime('%Y', x) AS INTEGER)` |
 | `extract_week(x)` | `EXTRACT(WEEK FROM x)` — ISO 8601, range 1–53 | `WEEK(x, 3)` — ISO 8601 | ISO 8601, from the week's Thursday |
 | `extract_weekday(x)` | `CAST(EXTRACT(DOW FROM x) AS INTEGER)` | `(DAYOFWEEK(x) - 1)` | `CAST(strftime('%w', x) AS INTEGER)` |
@@ -1645,7 +1645,7 @@ manage audit-cleanup --days 90
 manage audit-cleanup --keep-last 50 --tenant acme
 ```
 
-The `_pool` helpers take `&Pool` and run on all three backends. The `audit-cleanup` verb needs the `tenancy` feature. It trims the registry's log and every active tenant's; `--tenant <slug>` or `--registry` narrows it, and an `N` of 0 or less needs `--yes`.
+The `_pool` helpers take `&Pool` and run on all three backends. The `audit-cleanup` verb trims the app's audit log. Under tenancy it trims the registry's log and every active tenant's; `--tenant <slug>` or `--registry` (both need the `tenancy` feature) narrows it, and an `N` of 0 or less needs `--yes`.
 
 ---
 

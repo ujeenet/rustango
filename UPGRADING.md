@@ -148,6 +148,15 @@ untouched.
 
 ---
 
+## 0.69.0
+
+- A ViewSet update that moves its row out of a queryset scope or the "view" hook now answers 403 and writes nothing, where it answered 204. Template `CreateView` and `UpdateView` do the same, and `CreateView` runs your "add" hook.
+- A model with a hand-written `ModelEntry` audited only on a pool can no longer be edited through `UpdateView` or a ViewSet when it has a queryset scope, a "view" or a "change" hook: the write needs an in-transaction audit.
+- A Postgres array mixing element types (other than NULL), or with only NULL elements, is refused with `ValueNotSupportedInDialect`; build it from one type.
+- The database job queue writes `locked_at` from the database's clock (`UTC_TIMESTAMP(6)` on MySQL) and the reclaim compares against it. A job that waits on `ctx.stopping()` now also wakes when its lease is lost; check `ctx.lease_lost()` to tell it from a shutdown.
+- An admin create or edit (inline rows too) that the "view" hook would hide from its author now answers 403 and writes nothing.
+- On MySQL `now()` is `UTC_TIMESTAMP(6)`, not `NOW(6)`. A query that relied on session-local time should bind the instant it means.
+
 ## 0.68.0
 
 - Branch on `pool.dialect().kind()` (a `DialectKind`) instead of `dialect().name() == "sqlite"`. `DialectKind` is a closed enum, so a match on it with no `_` arm fails to build when a backend is added.

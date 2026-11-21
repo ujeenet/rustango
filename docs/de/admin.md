@@ -413,7 +413,10 @@ Drei weitere Registrierungsmakros hängen sich in das Verhalten eines registrier
   `register_object_permission!("posts", "change", check)`, wobei
   `check: fn(&Parts, Option<&Value>) -> bool` pro Zeile erlaubt oder verweigert.
   Eingebaute Handler konsultieren die Aktionen `add`, `change`, `delete` und `view`;
-  mehrere Hooks werden mit UND verknüpft. Ein `view`-Hook verbirgt Zeilen auch in der
+  mehrere Hooks werden mit UND verknüpft. Ein Create, Edit oder Inline-Eintrag,
+  dessen gespeicherte Zeile der `view`-Hook verbergen würde, ist ein 403 ohne
+  Schreiben. Edits, Löschungen und Sammelaktionen prüfen die in der
+  Schreib-Transaktion gesperrte Zeile. Ein `view`-Hook verbirgt Zeilen auch in der
   Liste, im Autocomplete sowie in FK-Facettennamen und FK-Zellnamen. Die Liste führt
   ihn über jede Zeile aus, die ihre Filter und ihre Suche treffen, sodass Summen,
   Facetten, Datums-Buckets und Suche verborgene Zeilen auslassen; ab 10 000 Zeilen

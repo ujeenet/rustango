@@ -329,11 +329,24 @@ pub struct JobCtx {
     id: JobId,
     attempt: u32,
     stop: StopSignal,
+    lease: LeaseSignal,
 }
 
 impl JobCtx {
     pub(crate) fn new(id: JobId, attempt: u32, stop: StopSignal) -> Self {
-        Self { id, attempt, stop }
+        Self {
+            id,
+            attempt,
+            stop,
+            lease: LeaseSignal::default(),
+        }
+    }
+
+    /// This run, told when another worker takes over its row.
+    #[cfg(feature = "jobs-postgres")]
+    pub(crate) fn with_lease(mut self, lease: LeaseSignal) -> Self {
+        self.lease = lease;
+        self
     }
 
     /// The job's id, stable across its retries.
@@ -356,16 +369,29 @@ impl JobCtx {
         self.attempt
     }
 
-    /// `true` once the queue is shutting down.
+    /// `true` once the queue is shutting down or [`Self::lease_lost`].
     #[must_use]
     pub fn is_stopping(&self) -> bool {
-        self.stop.is_set()
+        self.stop.is_set() || self.lease.is_lost()
     }
 
-    /// Resolves once the queue starts shutting down. The job then has the
+    /// Resolves once the queue starts shutting down: the job then has the
     /// shutdown grace period to finish before it is aborted and re-queued.
+    /// Also resolves when [`Self::lease_lost`].
     pub async fn stopping(&self) {
-        self.stop.clone().wait().await;
+        let mut stop = self.stop.clone();
+        tokio::select! {
+            () = stop.wait() => {}
+            () = self.lease.wait() => {}
+        }
+    }
+
+    /// `true` once a database queue found another worker holding this
+    /// run's row: the job may be running there too, and this run's result
+    /// is dropped. Stop early.
+    #[must_use]
+    pub fn lease_lost(&self) -> bool {
+        self.lease.is_lost()
     }
 }
 
@@ -375,7 +401,44 @@ impl std::fmt::Debug for JobCtx {
             .field("id", &self.id)
             .field("attempt", &self.attempt)
             .field("stopping", &self.is_stopping())
+            .field("lease_lost", &self.lease_lost())
             .finish()
+    }
+}
+
+/// A run's view of its row lease; never fires on the in-memory queue.
+#[derive(Clone, Default)]
+pub(crate) struct LeaseSignal(Option<watch::Receiver<bool>>);
+
+/// The heartbeat's side of a [`LeaseSignal`].
+#[cfg(feature = "jobs-postgres")]
+pub(crate) struct LeaseLoss(watch::Sender<bool>);
+
+#[cfg(feature = "jobs-postgres")]
+impl LeaseLoss {
+    pub(crate) fn new() -> (Self, LeaseSignal) {
+        let (tx, rx) = watch::channel(false);
+        (Self(tx), LeaseSignal(Some(rx)))
+    }
+
+    pub(crate) fn fire(&self) {
+        let _ = self.0.send(true);
+    }
+}
+
+impl LeaseSignal {
+    pub(crate) fn is_lost(&self) -> bool {
+        self.0.as_ref().is_some_and(|rx| *rx.borrow())
+    }
+
+    /// Pends forever unless the lease is lost, even once the heartbeat ends.
+    async fn wait(&self) {
+        if let Some(mut rx) = self.0.clone() {
+            if rx.wait_for(|lost| *lost).await.is_ok() {
+                return;
+            }
+        }
+        std::future::pending::<()>().await;
     }
 }
 

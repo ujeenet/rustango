@@ -484,6 +484,9 @@ es, um Folgendes zu lesen:
 - `ctx.attempt()` — 1 beim ersten Lauf, 2 beim ersten Retry.
 - `ctx.stopping()` / `ctx.is_stopping()` — die Queue fährt herunter; beende den Job
   innerhalb von `shutdown_grace`, sonst wird der Lauf abgebrochen und neu eingereiht.
+  In der Datenbank-Queue feuern sie auch, wenn der Lauf seinen Lease verloren hat
+  (`ctx.lease_lost()`): ein anderer Worker hat die Zeile übernommen, also früh
+  aufhören, denn das Ergebnis dieses Laufs wird verworfen.
 
 Nutze `idempotency_key` als Schlüssel für ein externes System, damit eine
 wiederholte Abbuchung nicht doppelt abbucht. Die ID der Datenbank-Queue ist die
@@ -598,7 +601,18 @@ Builder fegt den eigenen Pool der Queue beim `start` und danach alle
 Heartbeats angehoben.
 
 Ein laufender Job erneuert seine Sperre alle `heartbeat_interval` (Standard 10 s),
-halte die Schwelle also deutlich darüber. Jede Aufnahme verbraucht einen Versuch,
+halte die Schwelle also deutlich darüber. Sperrzeiten kommen von der Uhr der
+Datenbank, daher stimmen Hosts mit abweichenden Uhren überein.
+`reclaim_stuck_jobs_pool` kennt den Heartbeat nicht und hebt seine Schwelle
+daher nicht an; `Duration::ZERO` gibt jede Sperre frei.
+
+**Ein freigegebener, noch laufender Job kann auf zwei Workern gleichzeitig
+laufen.** Stockt ein Heartbeat (erschöpfter Pool, lange SQLite-Schreibsperre),
+gibt ein Sweep einen laufenden Job frei, und ein anderer Worker startet ihn. Die
+Schreibzugriffe des ersten Laufs auf die Zeile werden verworfen, seine Wirkungen
+nach außen nicht. Gib `ctx.idempotency_key(..)` an externe Systeme weiter und
+nutze `(ctx.id(), ctx.attempt())` als Fencing-Token: der Versuch wächst bei
+jeder Aufnahme. Jede Aufnahme verbraucht einen Versuch,
 ein Job, der seinen Worker abstürzen lässt, landet also im Dead-Letter, sobald
 `MAX_ATTEMPTS` Läufe verbraucht sind. Ein Job, der paniert, ist ein
 `Retryable`-Fehlschlag; der Worker läuft weiter.

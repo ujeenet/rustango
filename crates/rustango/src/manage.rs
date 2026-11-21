@@ -2152,6 +2152,13 @@ fn inert_layer_settings(s: &crate::config::Settings) -> Vec<&'static str> {
     if !s.security.csrf_trusted_origins.is_empty() {
         inert.push("security.csrf_trusted_origins");
     }
+    // The access log is mounted either way, but reads these only from applied settings.
+    if !s.audit.redact_query_params.is_empty() {
+        inert.push("audit.redact_query_params");
+    }
+    if s.logging.access_log == Some(false) {
+        inert.push("logging.access_log");
+    }
     inert
 }
 
@@ -2177,7 +2184,8 @@ fn warn_if_settings_inert() {
         settings = %inert.join(", "),
         "these settings are configured but NOT being applied — no settings layer is \
          installed. Add `.with_settings_from_env()` to the `Cli` builder chain to \
-         activate them (CORS, body limit, request timeout, security headers). \
+         activate them (CORS, body limit, request timeout, security headers, \
+         access-log switch, redacted query params). \
          A `[security] csp` you set also takes effect then, and can break \
          pages that use inline script."
     );
@@ -3176,6 +3184,19 @@ mod tests {
                 "security.csrf_trusted_origins",
             ]
         );
+
+        // Read by the always-mounted access log, but only from applied settings.
+        let mut s = Settings::default();
+        s.audit.redact_query_params = vec!["token".into()];
+        s.logging.access_log = Some(false);
+        assert_eq!(
+            inert_layer_settings(&s),
+            vec!["audit.redact_query_params", "logging.access_log"]
+        );
+        // `true` is the default: nothing is lost.
+        let mut s = Settings::default();
+        s.logging.access_log = Some(true);
+        assert!(inert_layer_settings(&s).is_empty());
     }
 
     /// #1856 — `Cli::tenant_header` reaches the builder's resolver chain.

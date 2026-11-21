@@ -40,11 +40,6 @@
 use crate::core::SqlValue;
 use crate::core::{Model, Op};
 use crate::query::QuerySet;
-// For the PG-only `get`.
-#[cfg(feature = "postgres")]
-use sqlx::postgres::PgRow;
-#[cfg(feature = "postgres")]
-use sqlx::FromRow;
 
 use super::ExecError;
 
@@ -345,24 +340,6 @@ fn shared_on_field(
     } else {
         None
     }
-}
-
-// ============================================================ PG-typed get / get_on
-
-#[cfg(feature = "postgres")]
-impl<T, K> ForeignKey<T, K>
-where
-    T: Model
-        + for<'r> FromRow<'r, PgRow>
-        + crate::sql::MaybeMyFromRow
-        + crate::sql::MaybeSqliteFromRow
-        + Send
-        + Unpin
-        + crate::sql::LoadRelated
-        + crate::sql::MaybeMyLoadRelated
-        + crate::sql::MaybeSqliteLoadRelated,
-    K: Clone + Into<SqlValue> + Send + Sync + 'static,
-{
 }
 
 impl<T, K> ForeignKey<T, K>
