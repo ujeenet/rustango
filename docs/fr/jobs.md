@@ -486,6 +486,9 @@ changement. Surchargez-le pour lire :
 - `ctx.attempt()` — 1 à la première exécution, 2 à la première nouvelle tentative.
 - `ctx.stopping()` / `ctx.is_stopping()` — la file s'arrête ; terminez dans le
   délai `shutdown_grace`, sinon l'exécution est interrompue et remise en file.
+  Sur la file en base, ils se déclenchent aussi quand l'exécution a perdu son bail
+  (`ctx.lease_lost()`) : un autre worker a pris la ligne, arrêtez-vous tôt, car
+  le résultat de cette exécution est ignoré.
 
 Utilisez `idempotency_key` comme clé vue par un système externe, pour qu'un débit
 relancé ne soit pas débité deux fois. L'id de la file en base est l'id de la ligne
@@ -600,7 +603,18 @@ le builder balaie le pool de la file au `start`, puis toutes les
 trois heartbeats.
 
 Une tâche en cours rafraîchit son verrou toutes les `heartbeat_interval` (10 s
-par défaut) : gardez donc le seuil bien au-dessus. Chaque prise en charge
+par défaut) : gardez donc le seuil bien au-dessus. Les heures de verrou viennent
+de l'horloge de la base, donc des hôtes aux horloges décalées s'accordent.
+`reclaim_stuck_jobs_pool` ne connaît pas le heartbeat et ne relève donc pas son
+seuil ; `Duration::ZERO` libère tous les verrous.
+
+**Une tâche vivante récupérée peut tourner sur deux workers à la fois.** Si un
+heartbeat se bloque (pool épuisé, long verrou d'écriture SQLite), un balayage
+libère une tâche encore en cours, et un autre worker la démarre. Les écritures
+de la première exécution sur la ligne sont ignorées, mais pas ses effets
+externes. Passez `ctx.idempotency_key(..)` aux systèmes externes et utilisez
+`(ctx.id(), ctx.attempt())` comme jeton de fencing : la tentative augmente à
+chaque prise en charge. Chaque prise en charge
 consomme une tentative, donc une tâche qui fait planter son worker passe en
 dead-letter une fois ses `MAX_ATTEMPTS` exécutions épuisées. Une tâche qui
 panique est un échec `Retryable` ; le worker continue de tourner.

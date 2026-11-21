@@ -70,8 +70,16 @@
 //! crashed worker get picked up again, or let the queue do it with
 //! [`PgJobQueue::reclaim_stuck_after`]. A running job refreshes its lock
 //! every [`PgJobQueue::heartbeat_interval`], so keep the threshold well
-//! above that. `attempt` counts at pickup: a job that crashes its
-//! process still spends an attempt.
+//! above that. Lock times are the database's clock, not the hosts'.
+//! `attempt` counts at pickup: a job that crashes its process still
+//! spends an attempt.
+//!
+//! A reclaimed job that was still alive runs on two workers at once; its
+//! first run sees [`JobCtx::stopping`] fire at its next heartbeat. The
+//! queue's own writes (heartbeat, finish, retry) match `(id, locked_by)`,
+//! so that run writes nothing to the row. The job's own writes are not
+//! fenced: a later run has a higher [`JobCtx::attempt`], so key them on
+//! `(id, attempt)` if a stale run must not land.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -85,7 +93,7 @@ use tokio::sync::{Mutex, Notify};
 
 use super::{
     DeadLetterFn, Dispatch, Enqueued, HandlerRegistry, Job, JobCtx, JobDeadLetter, JobError, JobId,
-    JobQueue, Next, Registered, Running, StopSignal, UniqueKey, DEFAULT_SHUTDOWN_GRACE,
+    JobQueue, LeaseLoss, Next, Registered, Running, StopSignal, UniqueKey, DEFAULT_SHUTDOWN_GRACE,
 };
 use crate::sql::{DialectKind, Pool};
 
@@ -165,6 +173,15 @@ const NO_UNIQUE_COLUMN: &str = "rustango_jobs has no `unique_key` column, so a u
 /// `at` cut to whole microseconds, the precision every backend stores.
 fn whole_micros(at: DateTime<Utc>) -> DateTime<Utc> {
     DateTime::from_timestamp_micros(at.timestamp_micros()).unwrap_or(at)
+}
+
+/// This process's clock. Lease times (`locked_at`) use the database's
+/// instead, so hosts whose clocks disagree still agree on a lease.
+fn local_now() -> DateTime<Utc> {
+    let now = Utc::now();
+    #[cfg(test)]
+    let now = now + tests::SKEW.with(std::cell::Cell::get);
+    now
 }
 
 const NO_QUEUE_COLUMN: &str = "rustango_jobs has no `queue_name` column, so a named queue \
@@ -589,9 +606,13 @@ impl PgJobQueue {
         Self::reclaim_stuck_jobs_pool(&Pool::Postgres(pool.clone()), older_than).await
     }
 
-    /// Clear `locked_at` on any row locked longer than `older_than`,
-    /// so jobs left reserved by a crashed worker run again. Call it on
-    /// a schedule, for example once a minute.
+    /// Clear `locked_at` on any row locked at least `older_than` ago, by the
+    /// database's clock, so jobs left reserved by a crashed worker run
+    /// again. Call it on a schedule, for example once a minute.
+    ///
+    /// Keep `older_than` above three of the workers' heartbeats, or a live
+    /// job may run twice. It is not raised here, as this call does not know
+    /// the workers' heartbeat, and `Duration::ZERO` frees every lock on purpose.
     ///
     /// Returns the number of rows reclaimed.
     ///
@@ -602,19 +623,30 @@ impl PgJobQueue {
         older_than: Duration,
     ) -> Result<u64, sqlx::Error> {
         use crate::core::SqlValue;
-        let cutoff: DateTime<Utc> = Utc::now()
-            - chrono::Duration::from_std(older_than).unwrap_or(chrono::Duration::seconds(0));
         let to_sqlx = |e| match e {
             crate::sql::ExecError::Driver(err) => err,
             other => sqlx::Error::Protocol(format!("{other}")),
         };
         let d = pool.dialect();
-        // The cutoff is computed in Rust and bound, so no backend
-        // needs its own `NOW() - INTERVAL` SQL. `SqlValue::DateTime`
-        // encodes as TIMESTAMPTZ on PG, DATETIME(6) on MySQL and
-        // RFC3339 TEXT on SQLite.
+        // Workers stamp `locked_at` with the database's clock, so the
+        // cutoff is taken from it too, then bound: no backend needs its
+        // own `NOW() - INTERVAL` SQL.
+        let now = format!("SELECT {} AS now", d.utc_now_sql());
+        let now: Vec<(DateTime<Utc>,)> = crate::sql::raw_query_pool(&now, vec![], pool)
+            .await
+            .map_err(to_sqlx)?;
+        let (now,) = now.into_iter().next().ok_or(sqlx::Error::RowNotFound)?;
+        // Older than any time stored: nothing to reclaim.
+        let Some(cutoff) = chrono::Duration::from_std(older_than)
+            .ok()
+            .and_then(|age| now.checked_sub_signed(age))
+        else {
+            return Ok(0);
+        };
+        // `<=`: SQLite's clock has whole ms, so ZERO still frees a lock
+        // taken in this tick.
         let stale = format!(
-            "SELECT id FROM rustango_jobs WHERE locked_at IS NOT NULL AND locked_at < {}",
+            "SELECT id FROM rustango_jobs WHERE locked_at IS NOT NULL AND locked_at <= {}",
             d.placeholder(1)
         );
         let ids: Vec<(i64,)> =
@@ -626,7 +658,7 @@ impl PgJobQueue {
         // deadlocks the two (1213). The cutoff is checked again per row.
         let sql = format!(
             "UPDATE rustango_jobs SET locked_at = NULL, locked_by = NULL \
-              WHERE id = {} AND locked_at IS NOT NULL AND locked_at < {}",
+              WHERE id = {} AND locked_at IS NOT NULL AND locked_at <= {}",
             d.placeholder(1),
             d.placeholder(2),
         );
@@ -681,7 +713,7 @@ impl JobQueue for PgJobQueue {
         let dialect = self.pool.dialect();
         // Whole µs, as every backend stores it, so the id returned here is
         // the one the run sees.
-        let now = whole_micros(Utc::now());
+        let now = whole_micros(local_now());
         // Bind `run_at` / `created_at` instead of letting the column
         // default fill them. An older table may still default to
         // `CURRENT_TIMESTAMP`, and SQLite cannot ALTER a default. Such
@@ -946,7 +978,10 @@ async fn pick_one(
     queue: QueueFilter<'_>,
 ) -> Result<Option<PickedJob>, sqlx::Error> {
     use crate::task_context::TaskContext;
-    let now: DateTime<Utc> = Utc::now();
+    let now: DateTime<Utc> = local_now();
+    // The lease starts on the database's clock, as the heartbeat and the
+    // reclaim read it.
+    let db_now = pool.dialect().utc_now_sql();
     let cols = if with_context {
         "id, name, payload, attempt, max_attempts, created_at, context"
     } else {
@@ -965,12 +1000,12 @@ async fn pick_one(
                       LIMIT 1
                  )
                  UPDATE rustango_jobs
-                    SET locked_at = $3, locked_by = $1, attempt = attempt + 1
+                    SET locked_at = {db_now}, locked_by = $1, attempt = attempt + 1
                   WHERE id IN (SELECT id FROM next)
                  RETURNING {cols}",
-                q = queue.and("$4"),
+                q = queue.and("$3"),
             );
-            let mut pick = sqlx::query(&sql).bind(worker_id).bind(now).bind(now);
+            let mut pick = sqlx::query(&sql).bind(worker_id).bind(now);
             if let Some(name) = queue.name() {
                 pick = pick.bind(name);
             }
@@ -1018,15 +1053,15 @@ async fn pick_one(
                 tx.commit().await?;
                 return Ok(None);
             };
-            sqlx::query(
+            let claim = format!(
                 "UPDATE `rustango_jobs` \
-                    SET locked_at = ?, locked_by = ?, attempt = attempt + 1 WHERE id = ?",
-            )
-            .bind(now)
-            .bind(worker_id)
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
+                    SET locked_at = {db_now}, locked_by = ?, attempt = attempt + 1 WHERE id = ?"
+            );
+            sqlx::query(&claim)
+                .bind(worker_id)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
             let sql = format!("SELECT {cols} FROM `rustango_jobs` WHERE id = ?");
             let row = sqlx::query(&sql).bind(id).fetch_one(&mut *tx).await?;
             tx.commit().await?;
@@ -1062,7 +1097,7 @@ async fn pick_one(
             let now_str = crate::sql::encode_datetime(now);
             let sql = format!(
                 "UPDATE rustango_jobs
-                    SET locked_at = ?, locked_by = ?, attempt = attempt + 1
+                    SET locked_at = {db_now}, locked_by = ?, attempt = attempt + 1
                   WHERE id = (
                       SELECT id FROM rustango_jobs
                        WHERE locked_at IS NULL AND run_at <= ?{q}
@@ -1072,10 +1107,7 @@ async fn pick_one(
                   RETURNING {cols}",
                 q = queue.and("?"),
             );
-            let mut pick = sqlx::query(&sql)
-                .bind(&now_str)
-                .bind(worker_id)
-                .bind(&now_str);
+            let mut pick = sqlx::query(&sql).bind(worker_id).bind(&now_str);
             if let Some(name) = queue.name() {
                 pick = pick.bind(name);
             }
@@ -1148,12 +1180,14 @@ async fn run_one(
 
     // The enqueuer's context, as `InMemoryJobQueue` does (#1229).
     // `attempt` already counts this run; the row outlives its retries.
-    let ctx = JobCtx::new(JobId::of_row(job.id, job.created_at), runs, stop.clone());
+    let (loss, lease) = LeaseLoss::new();
+    let ctx =
+        JobCtx::new(JobId::of_row(job.id, job.created_at), runs, stop.clone()).with_lease(lease);
     let run = job
         .context
         .clone()
         .install((entry.handler)(job.payload.clone(), ctx));
-    let (outcome, held) = run_with_heartbeat(pool, worker, job.id, run).await;
+    let (outcome, held) = run_with_heartbeat(pool, worker, job.id, loss, run).await;
     if !held {
         // Another worker may own the row now; its outcome is not ours to write.
         tracing::warn!(id = job.id, worker = %worker.id, "job lease lost; result dropped");
@@ -1164,7 +1198,7 @@ async fn run_one(
         Next::Done => finish_job(pool, worker, job.id).await,
         Next::Retry { wait, error } => {
             let backoff = chrono::Duration::from_std(wait).unwrap_or_default();
-            let next_run: DateTime<Utc> = Utc::now() + backoff;
+            let next_run: DateTime<Utc> = local_now() + backoff;
             schedule_retry(pool, worker, job.id, next_run, &error).await;
         }
         Next::DeadLetter(msg) => {
@@ -1174,9 +1208,15 @@ async fn run_one(
 }
 
 /// Drive `run`, refreshing the row's `locked_at` every heartbeat so a
-/// reclaim sweep does not hand a live job to a second worker. The flag
-/// is `false` once a heartbeat found the lease gone.
-async fn run_with_heartbeat<F>(pool: &Pool, worker: &Worker, id: i64, run: F) -> (F::Output, bool)
+/// reclaim sweep does not hand a live job to a second worker. Once a
+/// heartbeat finds the lease gone it fires `loss`, and the flag is `false`.
+async fn run_with_heartbeat<F>(
+    pool: &Pool,
+    worker: &Worker,
+    id: i64,
+    loss: LeaseLoss,
+    run: F,
+) -> (F::Output, bool)
 where
     F: std::future::Future,
 {
@@ -1192,6 +1232,8 @@ where
         loop {
             beat.tick().await;
             if !heartbeat(&pool, &worker_id, id).await {
+                // Tell the job, which may stop early (`JobCtx::stopping`).
+                loss.fire();
                 return;
             }
         }
@@ -1218,17 +1260,14 @@ impl Drop for AbortOnDrop {
 async fn heartbeat(pool: &Pool, worker_id: &str, id: i64) -> bool {
     use crate::core::SqlValue;
     let d = pool.dialect();
+    // The database's clock: a reclaim on another host compares against it.
     let sql = format!(
         "UPDATE rustango_jobs SET locked_at = {} WHERE id = {} AND locked_by = {}",
+        d.utc_now_sql(),
         d.placeholder(1),
         d.placeholder(2),
-        d.placeholder(3),
     );
-    let binds = vec![
-        SqlValue::DateTime(Utc::now()),
-        SqlValue::I64(id),
-        SqlValue::String(worker_id.to_owned()),
-    ];
+    let binds = vec![SqlValue::I64(id), SqlValue::String(worker_id.to_owned())];
     match crate::sql::raw_execute_pool(pool, &sql, binds).await {
         Ok(0) => {
             tracing::warn!(id, worker = worker_id, "job lease lost while running");
@@ -1398,6 +1437,25 @@ mod tests {
 
     use super::*;
 
+    thread_local! {
+        /// How far this thread's [`local_now`] runs ahead (or behind).
+        pub(super) static SKEW: std::cell::Cell<chrono::TimeDelta> =
+            const { std::cell::Cell::new(chrono::TimeDelta::zero()) };
+    }
+
+    /// Run this thread's process clock `by` off until the guard drops.
+    #[cfg(feature = "sqlite")]
+    fn skew_clock(by: chrono::TimeDelta) -> impl Drop {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                SKEW.with(|s| s.set(chrono::TimeDelta::zero()));
+            }
+        }
+        SKEW.with(|s| s.set(by));
+        Reset
+    }
+
     fn dummy_pool() -> Pool {
         // Never connects. Only lets us build a `PgJobQueue` for
         // assertions that do no I/O.
@@ -1516,13 +1574,103 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(200)).await;
         };
         let started = std::time::Instant::now();
-        let ((), held) = run_with_heartbeat(&pool, &worker, 1, job).await;
+        let ((), held) = run_with_heartbeat(&pool, &worker, 1, LeaseLoss::new().0, job).await;
         assert!(held);
         assert!(
             started.elapsed() < Duration::from_secs(2),
             "stalled for {:?}",
             started.elapsed()
         );
+    }
+
+    /// A worker host an hour slow, or a sweeper an hour fast, must not see a
+    /// live lease as stale: every lease time is the database's.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn skewed_host_clocks_do_not_reclaim_a_live_lease() {
+        let sqlite = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("pool");
+        let pool = Pool::Sqlite(sqlite);
+        PgJobQueue::ensure_table_pool(&pool).await.expect("table");
+        let due = Utc::now() - chrono::TimeDelta::hours(2);
+        crate::sql::raw_execute_pool(
+            &pool,
+            "INSERT INTO rustango_jobs (name, payload, max_attempts, run_at) VALUES ('j', '{}', 3, ?)",
+            vec![crate::core::SqlValue::DateTime(due)],
+        )
+        .await
+        .expect("insert");
+        let hour = chrono::TimeDelta::hours(1);
+        let reclaim = || PgJobQueue::reclaim_stuck_jobs_pool(&pool, Duration::from_secs(3));
+        {
+            let _slow = skew_clock(-hour);
+            let job = pick_one(&pool, "w", false, QueueFilter::All)
+                .await
+                .expect("pick");
+            assert!(job.is_some(), "picked");
+        }
+        assert_eq!(reclaim().await.expect("reclaim"), 0, "slow worker's pickup");
+        {
+            let _slow = skew_clock(-hour);
+            assert!(heartbeat(&pool, "w", 1).await, "still held");
+        }
+        assert_eq!(
+            reclaim().await.expect("reclaim"),
+            0,
+            "slow worker's heartbeat"
+        );
+        {
+            let _fast = skew_clock(hour);
+            assert_eq!(reclaim().await.expect("reclaim"), 0, "fast sweeper");
+        }
+    }
+
+    /// `Duration::ZERO` frees a lease taken in the same clock tick: SQLite's
+    /// clock has whole milliseconds.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_zero_reclaim_frees_a_lease_taken_in_the_same_tick() {
+        let sqlite = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("pool");
+        let pool = Pool::Sqlite(sqlite);
+        PgJobQueue::ensure_table_pool(&pool).await.expect("table");
+        let due = Utc::now() - chrono::TimeDelta::hours(1);
+        crate::sql::raw_execute_pool(
+            &pool,
+            "INSERT INTO rustango_jobs (name, payload, max_attempts, run_at) VALUES ('j', '{}', 3, ?)",
+            vec![crate::core::SqlValue::DateTime(due)],
+        )
+        .await
+        .expect("insert");
+        for round in 0..20 {
+            let job = pick_one(&pool, "w", false, QueueFilter::All)
+                .await
+                .expect("pick");
+            assert!(job.is_some(), "round {round}: picked");
+            let freed = PgJobQueue::reclaim_stuck_jobs_pool(&pool, Duration::ZERO)
+                .await
+                .expect("reclaim");
+            assert_eq!(freed, 1, "round {round}");
+        }
+    }
+
+    /// Lease times come from the database's clock; the host's is read only
+    /// through `local_now`, which the skew test can move.
+    #[test]
+    fn the_host_clock_is_read_only_through_local_now() {
+        let src = include_str!("pg.rs");
+        let body = &src[..src.find("\nmod tests").expect("the test module")];
+        let reads = body.matches("Utc::now()").count();
+        assert_eq!(reads, 1, "read the host clock through `local_now`");
+        let at = body.find("Utc::now()").expect("one read");
+        let local_now = body.find("fn local_now()").expect("local_now");
+        assert!(at > local_now && at - local_now < 80, "outside `local_now`");
     }
 
     /// Every backend stores whole µs; the id `enqueue` returns must match.

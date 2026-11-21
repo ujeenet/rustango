@@ -721,7 +721,7 @@ Order::objects()
 
 | Builder | PG | MySQL | SQLite |
 |---|---|---|---|
-| `now()` | `NOW()` | `NOW()` | `CURRENT_TIMESTAMP` |
+| `now()` | `NOW()` | `UTC_TIMESTAMP(6)` | `strftime('%Y-%m-%dT%H:%M:%f000+00:00','now')` |
 | `extract_year(x)` | `CAST(EXTRACT(YEAR FROM x) AS INTEGER)` | `YEAR(x)` | `CAST(strftime('%Y', x) AS INTEGER)` |
 | `extract_week(x)` | `EXTRACT(WEEK FROM x)` — ISO 8601, plage 1–53 | `WEEK(x, 3)` — ISO 8601 | ISO 8601, à partir du jeudi de la semaine |
 | `extract_weekday(x)` | `CAST(EXTRACT(DOW FROM x) AS INTEGER)` | `(DAYOFWEEK(x) - 1)` | `CAST(strftime('%w', x) AS INTEGER)` |
@@ -1643,7 +1643,7 @@ manage audit-cleanup --days 90
 manage audit-cleanup --keep-last 50 --tenant acme
 ```
 
-Les utilitaires `_pool` prennent un `&Pool` et fonctionnent sur les trois backends. Le verbe `audit-cleanup` nécessite la feature `tenancy`. Il élague le journal du registre et celui de chaque tenant actif ; `--tenant <slug>` ou `--registry` le restreint, et un `N` de 0 ou moins exige `--yes`.
+Les utilitaires `_pool` prennent un `&Pool` et fonctionnent sur les trois backends. Le verbe `audit-cleanup` élague le journal d'audit de l'application. Avec la tenancy, il élague le journal du registre et celui de chaque tenant actif ; `--tenant <slug>` ou `--registry` (qui exigent la feature `tenancy`) le restreint, et un `N` de 0 ou moins exige `--yes`.
 
 ---
 

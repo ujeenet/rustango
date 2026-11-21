@@ -356,6 +356,13 @@ pub trait Dialect: Send + Sync + sealed::Sealed {
         self.translate_default_expr("now()", "datetime", None)
     }
 
+    /// The database's current time in UTC, comparable with a bound
+    /// `DateTime<Utc>`, whatever the session time zone. `F::Now` emits it;
+    /// a lease uses it too, as its writers' clocks may disagree.
+    fn utc_now_sql(&self) -> String {
+        self.current_timestamp_default()
+    }
+
     /// The full column clause for such a timestamp:
     /// `<type> NOT NULL DEFAULT <now>`.
     fn timestamp_now_column(&self) -> String {
@@ -1572,5 +1579,29 @@ mod bind_params_check_tests {
         for ok in [vec![], vec![SqlValue::I32(1)], vec![SqlValue::Bool(true)]] {
             assert_eq!(refused(&Postgres, SqlValue::Array(ok)), None);
         }
+    }
+
+    /// A typed PG array binds one element type: a mixed one used to lose the rest.
+    #[test]
+    fn a_postgres_array_of_mixed_elements_is_refused() {
+        let (i, s, null) = (
+            SqlValue::I64(1),
+            SqlValue::String("a".into()),
+            SqlValue::Null,
+        );
+        let mixed = SqlValue::Array(vec![i.clone(), s.clone()]);
+        assert_eq!(refused(&Postgres, mixed), Some("mixed array"));
+        let behind_null = SqlValue::Array(vec![null.clone(), s, i.clone()]);
+        assert_eq!(refused(&Postgres, behind_null), Some("mixed array"));
+        let i32_then_i64 = SqlValue::Array(vec![SqlValue::I32(1), i.clone()]);
+        assert_eq!(refused(&Postgres, i32_then_i64), Some("mixed array"));
+        assert_eq!(
+            refused(&Postgres, SqlValue::Array(vec![i.clone(), null.clone(), i])),
+            None
+        );
+        assert_eq!(refused(&Postgres, SqlValue::Array(Vec::new())), None);
+        // No element names the type; PG would get an int4[] for any column.
+        let all_null = SqlValue::Array(vec![null.clone(), null]);
+        assert_eq!(refused(&Postgres, all_null), Some("all-NULL array"));
     }
 }

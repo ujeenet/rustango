@@ -10,7 +10,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use rustango::core::{Filter, Op, SqlValue};
+use rustango::core::{Filter, Model as _, Op, SqlValue};
 use rustango::sql::{Auto, CounterPool as _, FetcherPool as _, Pool};
 use rustango::{tri_dialect_test, Model};
 use tower::ServiceExt as _;
@@ -233,10 +233,27 @@ pub struct Bulk {
 }
 rustango::register_object_permission!("rowscope_bulk", "view", not_hide_title);
 
+/// Writes whose row changes between the admin's first read and its write:
+/// the hooks must judge the row the write locks.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "rowscope_race", admin(actions = "delete_selected"))]
+#[allow(dead_code)]
+pub struct Race {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 64)]
+    pub title: String,
+    pub owner_id: i64,
+}
+rustango::register_queryset_scope!("rowscope_race", owner_one);
+rustango::register_object_permission!("rowscope_race", "change", not_locked_title);
+rustango::register_object_permission!("rowscope_race", "delete", not_locked_title);
+
 async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
     fresh_table::<Doc>(pool).await;
     fresh_table::<Bulk>(pool).await;
+    fresh_table::<Race>(pool).await;
     drop_table(pool, "rowscope_note").await;
     fresh_table::<Item>(pool).await;
     fresh_table::<Note>(pool).await;
@@ -936,9 +953,196 @@ async fn bulk_actions_skip_hidden_rows(pool: &Pool) {
     assert_eq!(left, ["hide-bulk"], "the hidden row was acted on");
 }
 
+async fn bulk_titles(pool: &Pool) -> Vec<String> {
+    let mut left: Vec<String> = Bulk::objects()
+        .fetch(pool)
+        .await
+        .expect("fetch")
+        .into_iter()
+        .map(|b| b.title)
+        .collect();
+    left.sort();
+    left
+}
+
+/// A create or edit whose row the `view` hook would hide from its author is
+/// refused and leaves nothing written.
+async fn write_the_view_hook_hides_is_refused(pool: &Pool) {
+    let (status, body) = post(pool, "/rowscope_bulk", "title=hide-new").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "create: {body}");
+    assert!(bulk_titles(pool).await.is_empty(), "a refused create wrote");
+    let (status, body) = post(pool, "/rowscope_bulk", "title=ok-new").await;
+    assert!(status.is_redirection(), "{status}: {body}");
+    let id = *Bulk::objects().fetch(pool).await.expect("fetch")[0]
+        .id
+        .get()
+        .expect("pk");
+    let uri = format!("/rowscope_bulk/{id}");
+    let (status, body) = post(pool, &uri, "title=hide-now").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "edit: {body}");
+    assert_eq!(bulk_titles(pool).await, ["ok-new"], "a refused edit wrote");
+}
+
+async fn seed_race(pool: &Pool, title: &str) -> i64 {
+    let mut r = Race {
+        id: Auto::default(),
+        title: title.into(),
+        owner_id: 1,
+    };
+    r.insert(pool).await.expect("insert");
+    *r.id.get().expect("pk")
+}
+
+async fn races(pool: &Pool) -> Vec<(String, i64)> {
+    let mut rows = Race::objects().fetch(pool).await.expect("fetch");
+    rows.sort_by_key(|r| *r.id.get().expect("pk"));
+    rows.into_iter().map(|r| (r.title, r.owner_id)).collect()
+}
+
+/// Sets `column = value` on a `rowscope_race` row titled `flip-…` (this
+/// backend's only) when an admin pre-save or pre-delete signal names it:
+/// the change lands after the admin's first read, before its write.
+struct Flip(
+    rustango::signals::admin::ReceiverId,
+    rustango::signals::admin::ReceiverId,
+);
+
+impl Flip {
+    fn on(pool: &Pool, column: &'static str, value: SqlValue) -> Self {
+        use rustango::signals::admin::{connect_admin_pre_delete, connect_admin_pre_save};
+        let flip = {
+            let pool = pool.clone();
+            move |table: &'static str, pk: String| {
+                let (pool, value) = (pool.clone(), value.clone());
+                async move {
+                    let Ok(pk) = pk.parse::<i64>() else { return };
+                    if table != "rowscope_race" {
+                        return;
+                    }
+                    let q = rustango::core::UpdateQuery::new(
+                        Race::SCHEMA,
+                        vec![rustango::core::Assignment::new(column, value)],
+                        rustango::core::WhereExpr::and_predicates(vec![
+                            Filter::new("id", Op::Eq, SqlValue::I64(pk)),
+                            Filter::new("title", Op::Like, SqlValue::from("flip%")),
+                        ]),
+                    );
+                    rustango::sql::update_pool(&pool, &q).await.expect("flip");
+                }
+            }
+        };
+        let on_delete = flip.clone();
+        Self(
+            connect_admin_pre_save(move |ctx| flip(ctx.table, ctx.pk)),
+            connect_admin_pre_delete(move |ctx| on_delete(ctx.table, ctx.pk)),
+        )
+    }
+}
+
+impl Drop for Flip {
+    fn drop(&mut self) {
+        rustango::signals::admin::disconnect_admin_pre_save(self.0);
+        rustango::signals::admin::disconnect_admin_pre_delete(self.1);
+    }
+}
+
+/// A row the `delete` or `change` hook would refuse by the time the admin
+/// writes it is refused: the hooks judge the row locked in the write's tx.
+async fn admin_writes_judge_the_locked_row(pool: &Pool) {
+    let _flip = Flip::on(pool, "title", SqlValue::from("locked"));
+    let one = seed_race(pool, "flip-one").await;
+    let (status, body) = post(pool, &format!("/rowscope_race/{one}/delete"), "").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "delete: {body}");
+    let two = seed_race(pool, "flip-two").await;
+    let three = seed_race(pool, "open-three").await;
+    let form = format!("action=delete_selected&_selected={two}&_selected={three}");
+    let (status, body) = post(pool, "/rowscope_race/__action", &form).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "delete_selected: {body}");
+    let four = seed_race(pool, "flip-four").await;
+    let uri = format!("/rowscope_race/{four}");
+    let (status, body) = post(pool, &uri, "title=edited&owner_id=1").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "edit: {body}");
+    let locked = || ("locked".to_owned(), 1);
+    assert_eq!(
+        races(pool).await,
+        [locked(), locked(), ("open-three".to_owned(), 1), locked()],
+        "a refused write wrote"
+    );
+}
+
+/// A row moved out of the queryset scope before the admin writes it is left alone.
+async fn admin_writes_stay_in_the_scope(pool: &Pool) {
+    let _flip = Flip::on(pool, "owner_id", SqlValue::I64(2));
+    let one = seed_race(pool, "flip-one").await;
+    let (status, body) = post(pool, &format!("/rowscope_race/{one}/delete"), "").await;
+    assert!(status.is_redirection(), "delete: {status}: {body}");
+    let two = seed_race(pool, "flip-two").await;
+    let three = seed_race(pool, "open-three").await;
+    let form = format!("action=delete_selected&_selected={two}&_selected={three}");
+    let (status, body) = post(pool, "/rowscope_race/__action", &form).await;
+    assert!(status.is_redirection(), "delete_selected: {status}: {body}");
+    assert_eq!(
+        races(pool).await,
+        [("flip-one".to_owned(), 2), ("flip-two".to_owned(), 2)],
+        "a row outside the scope was deleted"
+    );
+}
+
+/// A concurrent change the admin's write waits on is judged once it lands.
+/// SQLite serializes writers.
+async fn admin_writes_judge_a_concurrent_change(pool: &Pool) {
+    use rustango::core::{Assignment, UpdateQuery, WhereExpr};
+    if pool.dialect().kind() == rustango::sql::DialectKind::Sqlite {
+        return;
+    }
+    let ids = [
+        seed_race(pool, "open-1").await,
+        seed_race(pool, "open-2").await,
+        seed_race(pool, "open-3").await,
+    ];
+    let bulk = format!("action=delete_selected&_selected={}", ids[1]);
+    for (id, uri, form) in [
+        (
+            ids[0],
+            format!("/rowscope_race/{}/delete", ids[0]),
+            String::new(),
+        ),
+        (ids[1], "/rowscope_race/__action".to_owned(), bulk),
+        (
+            ids[2],
+            format!("/rowscope_race/{}", ids[2]),
+            "title=edited&owner_id=1".to_owned(),
+        ),
+    ] {
+        let mut tx = rustango::sql::write_transaction(pool).await.expect("tx");
+        let edit = UpdateQuery::new(
+            Race::SCHEMA,
+            vec![Assignment::new("title", SqlValue::from("locked"))],
+            WhereExpr::Predicate(Filter::new("id", Op::Eq, SqlValue::I64(id))),
+        );
+        rustango::sql::update_tx(&mut tx, &edit)
+            .await
+            .expect("edit");
+        let call = tokio::spawn({
+            let (pool, uri) = (pool.clone(), uri.clone());
+            async move { post(&pool, &uri, &form).await.0 }
+        });
+        // Long enough for the request to block on the row lock.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        tx.commit().await.expect("commit");
+        assert_eq!(call.await.unwrap(), StatusCode::FORBIDDEN, "{uri}");
+    }
+    let locked = || ("locked".to_owned(), 1);
+    assert_eq!(races(pool).await, [locked(), locked(), locked()]);
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        admin_writes_judge_the_locked_row,
+        admin_writes_stay_in_the_scope,
+        admin_writes_judge_a_concurrent_change,
+        write_the_view_hook_hides_is_refused,
         bulk_actions_skip_hidden_rows,
         nullable_bool_round_trips_in_admin_form,
         nullable_bool_round_trips_in_inline,

@@ -142,32 +142,100 @@ impl_visible!(
     crate::core::DeleteQuery
 );
 
-/// The hooks on the row `q` selects, read only when one is registered:
-/// missing or hidden by "view" is a 404, refused by `action`'s hook a 403.
-async fn gate_row(
+/// Open the write's transaction and judge the row `q` selects, locked in it,
+/// when a hook is registered: the write then changes the row the hooks saw.
+/// Missing or hidden by "view" is a 404, refused by `action`'s hook a 403.
+async fn lock_row(
     pool: &Pool,
     parts: &Parts,
-    q: &SelectQuery,
+    q: SelectQuery,
     action: Option<&'static str>,
-) -> Result<(), Response> {
+) -> Result<crate::sql::WriteTx, Response> {
+    let tx = crate::sql::write_tx(pool)
+        .await
+        .map_err(|e| template_error(&format!("begin write: {e}")))?;
+    #[cfg(feature = "admin")]
+    let mut tx = tx;
     #[cfg(feature = "admin")]
     {
         use crate::object_permissions::Hooks;
-        let table = q.model.table;
-        if !Hooks::All.judges(table, action) {
-            return Ok(());
+        if Hooks::All.judges(q.model.table, action) {
+            let judged = match Hooks::All.judge_locked(&mut tx, parts, q, action).await {
+                Ok(v) => verdict(v),
+                Err(e) => Err(template_error(&format!("query row: {e}"))),
+            };
+            if let Err(resp) = judged {
+                let _ = tx.rollback().await;
+                return Err(resp);
+            }
         }
-        let fields: Vec<_> = q.model.scalar_fields().collect();
-        let row = select_one_row_as_json(pool, q, &fields)
-            .await
-            .map_err(|e| template_error(&format!("query row: {e}")))?;
-        verdict(row.map(|row| Hooks::All.judge(table, parts, &row, action)))
     }
     #[cfg(not(feature = "admin"))]
-    {
-        let _ = (pool, parts, q, action);
-        Ok(())
+    let _ = (parts, q, action);
+    Ok(tx)
+}
+
+/// The re-check of the row a write made or changed, in its transaction: in
+/// the queryset scopes, admitted by the "view" hook and `action`'s, as a
+/// ViewSet checks it.
+struct WrittenCheck {
+    scope: Vec<WhereExpr>,
+    action: Option<&'static str>,
+}
+
+impl WrittenCheck {
+    /// For a create: the "add" hook judges the request first, a 403.
+    /// `None` when there is nothing to check.
+    fn created(model: &'static ModelSchema, parts: &Parts) -> Result<Option<Self>, Response> {
+        #[cfg(feature = "admin")]
+        if !crate::object_permissions::Hooks::All.allows(model.table, "add", parts, None) {
+            return Err(refused());
+        }
+        Ok(Self::of(model, parts, Some("add")))
     }
+
+    /// `None` when there is nothing to check; "change" judged an edit before it.
+    fn of(
+        model: &'static ModelSchema,
+        parts: &Parts,
+        action: Option<&'static str>,
+    ) -> Option<Self> {
+        #[cfg(feature = "admin")]
+        {
+            use crate::object_permissions::Hooks;
+            let scope = Hooks::All.scope_where(model.table, parts);
+            Hooks::All
+                .checks_written(model.table, &scope, action)
+                .then_some(Self { scope, action })
+        }
+        #[cfg(not(feature = "admin"))]
+        {
+            let _ = (model, parts, action);
+            None
+        }
+    }
+
+    /// Whether the row `pk` as written in `tx` passes this check.
+    async fn admits(
+        &self,
+        tx: &mut crate::sql::PoolTx<'_>,
+        parts: &Parts,
+        row: (&'static ModelSchema, &'static FieldSchema, SqlValue),
+    ) -> Result<bool, crate::sql::ExecError> {
+        #[cfg(feature = "admin")]
+        return crate::object_permissions::Hooks::All
+            .admits_written(tx, parts, row, &self.scope, self.action)
+            .await;
+        #[cfg(not(feature = "admin"))]
+        {
+            let _ = (&self.scope, self.action, tx, parts, row);
+            Ok(true)
+        }
+    }
+}
+
+fn refused() -> Response {
+    (StatusCode::FORBIDDEN, "permission denied").into_response()
 }
 
 /// Missing or hidden is a 404, refused a 403.
@@ -176,13 +244,13 @@ fn verdict(v: Option<crate::object_permissions::Verdict>) -> Result<(), Response
     use crate::object_permissions::Verdict;
     match v {
         None | Some(Verdict::Hidden) => Err((StatusCode::NOT_FOUND, "not found").into_response()),
-        Some(Verdict::Refused) => Err((StatusCode::FORBIDDEN, "permission denied").into_response()),
+        Some(Verdict::Refused) => Err(refused()),
         Some(Verdict::Allowed) => Ok(()),
     }
 }
 
 /// The row an item view shows, `fields` of it: inside [`row_scope`] and
-/// judged as [`gate_row`] does, `action` beside "view". One read: when hooked,
+/// judged by the "view" hook, and `action`'s. One read: when hooked,
 /// the whole row is judged and the same row rendered.
 async fn item_object(
     pool: &Pool,
@@ -260,27 +328,6 @@ async fn hide_from_list(
         let _ = (pool, parts, model, cap, where_clause);
         Ok(())
     }
-}
-
-/// Run `query`; a soft-delete model stamps its column instead, as the admin does (#2082).
-async fn delete_rows(
-    pool: &Pool,
-    parts: &Parts,
-    query: crate::core::DeleteQuery,
-) -> Result<u64, crate::sql::ExecError> {
-    let query = query.visible(parts);
-    let Some(col) = query.model.soft_delete_column else {
-        return crate::audit::delete(pool, &query).await;
-    };
-    let stamp = crate::core::UpdateQuery::new(
-        query.model,
-        vec![crate::core::Assignment {
-            column: col,
-            value: SqlValue::from(chrono::Utc::now()).into(),
-        }],
-        query.where_clause,
-    );
-    crate::audit::update_as(pool, &stamp, crate::audit::AuditOp::SoftDelete).await
 }
 
 // ============================================================== ListView
@@ -1755,13 +1802,28 @@ async fn delete_submit(vs: &DeleteView, pool: &Pool, parts: &Parts, pk: &str) ->
             vs.schema.table
         ));
     };
-    let key = pk_or_404!(pool, vs.schema, pk_field, pk);
-    let row = SelectQuery::by_pk(vs.schema, pk_field.column, key.clone()).visible(parts);
-    if let Err(resp) = gate_row(pool, parts, &row, Some("delete")).await {
-        return resp;
-    }
-    let delete_q = crate::core::DeleteQuery::by_pk(vs.schema, pk_field.column, key);
-    match delete_rows(pool, parts, delete_q).await {
+    let (schema, key) = (vs.schema, pk_or_404!(pool, vs.schema, pk_field, pk));
+    let by_pk = WhereExpr::Predicate(Filter::new(pk_field.column, Op::Eq, key.clone()));
+    let row = SelectQuery::by_pk(schema, pk_field.column, key.clone()).visible(parts);
+    let row_where = row.where_clause.clone();
+    let mut tx = match lock_row(pool, parts, row, Some("delete")).await {
+        Ok(tx) => tx,
+        Err(resp) => return resp,
+    };
+    // A soft-delete model stamps its column instead, as the admin does.
+    let stamp = schema.soft_delete_column.map(|col| {
+        let now = Some(chrono::Utc::now());
+        crate::soft_delete::__mark_query(schema, col, pk_field.column, key, now).visible(parts)
+    });
+    let deleted = crate::audit::remove_rows_tx(&mut tx, schema, (row_where, by_pk), stamp.as_ref());
+    let deleted = match deleted.await {
+        Ok(n) if n > 0 => tx.commit().await.map(|()| n),
+        other => {
+            let _ = tx.rollback().await;
+            other
+        }
+    };
+    match deleted {
         Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Ok(_) => {
             // Note: typically `{pk}` in a delete success_url
@@ -2520,7 +2582,8 @@ async fn create_insert(
     columns: Vec<&'static str>,
     values: Vec<SqlValue>,
 ) -> Result<String, WriteFailed> {
-    hidden_fk((pool, parts), schema, (&columns, &values), None).await?;
+    let check = WrittenCheck::created(schema, parts).map_err(WriteFailed::Error)?;
+    hidden_fk((pool, None, parts), schema, (&columns, &values), None).await?;
     // Placeholders are checked now; their values are read after the write.
     let fields = success_url_fields(success_url, schema)
         .map_err(|e| WriteFailed::Error(template_error(&e)))?;
@@ -2530,7 +2593,7 @@ async fn create_insert(
         .filter(|_| crate::audit::audits_creates(schema));
     let returning: Vec<&'static str> = schema
         .primary_key()
-        .filter(|_| !fields.is_empty() || audited_pk.is_some())
+        .filter(|_| !fields.is_empty() || audited_pk.is_some() || check.is_some())
         .map(|pk| vec![pk.column])
         .unwrap_or_default();
     let insert_q = crate::core::InsertQuery {
@@ -2541,7 +2604,17 @@ async fn create_insert(
         on_conflict: None,
         generated: Vec::new(),
     };
-    let result = if let Some(pk) = audited_pk {
+    let result = if let Some(check) = &check {
+        let Some(pk) = schema.primary_key() else {
+            let msg = format!("model `{}` has no primary key to check", schema.table);
+            return Err(WriteFailed::Error(template_error(&msg)));
+        };
+        match insert_checked((pool, parts), &insert_q, pk, check).await {
+            Ok(Some(row)) => Ok(Some(row)),
+            Ok(None) => return Err(WriteFailed::Error(refused())),
+            Err(e) => Err(e),
+        }
+    } else if let Some(pk) = audited_pk {
         crate::audit::insert_returning(pool, &insert_q, pk)
             .await
             .map(|(_, row)| Some(row))
@@ -2587,11 +2660,36 @@ async fn create_insert(
     }
 }
 
+/// One INSERT in its own transaction, committed only when `check` admits the
+/// written row: `Ok(None)` when it does not.
+async fn insert_checked(
+    (pool, parts): (&Pool, &Parts),
+    query: &crate::core::InsertQuery,
+    pk_field: &'static FieldSchema,
+    check: &WrittenCheck,
+) -> Result<Option<crate::sql::InsertReturningPool>, crate::sql::ExecError> {
+    let mut tx = crate::sql::write_tx(pool).await?;
+    let written = match crate::audit::insert_returning_tx(&mut tx, query, pk_field).await {
+        Ok((pk, row)) => check
+            .admits(&mut tx, parts, (query.model, pk_field, pk))
+            .await
+            .map(|admitted| admitted.then_some(row)),
+        Err(e) => Err(e),
+    };
+    match written {
+        Ok(Some(row)) => tx.commit().await.map(|()| Some(row)),
+        other => {
+            let _ = tx.rollback().await;
+            other
+        }
+    }
+}
+
 /// A form error for the first written FK naming a target row this request
 /// cannot see (its scopes or "view" hook), as a ViewSet refuses it. On
 /// update, `stored` is the row's pk: a value it already holds is kept.
 async fn hidden_fk(
-    (pool, parts): (&Pool, &Parts),
+    (pool, tx, parts): (&Pool, Option<&mut crate::sql::PoolTx<'_>>, &Parts),
     schema: &'static ModelSchema,
     (columns, values): (&[&'static str], &[SqlValue]),
     stored: Option<(&'static FieldSchema, &SqlValue)>,
@@ -2619,7 +2717,7 @@ async fn hidden_fk(
             values: &pairs,
             stored,
         }];
-        match first_hidden_in(pool, None, owner, &targets, &writes, admits).await {
+        match first_hidden_in(pool, tx, owner, &targets, &writes, admits).await {
             Ok(None) => Ok(()),
             Ok(Some((_, field))) => Err(WriteFailed::Refused(HashMap::from([(
                 field.name.to_owned(),
@@ -2632,13 +2730,14 @@ async fn hidden_fk(
     }
     #[cfg(not(feature = "admin"))]
     {
-        let _ = (pool, parts, schema, columns, values, stored);
+        let _ = (pool, tx, parts, schema, columns, values, stored);
         Ok(())
     }
 }
 
-/// The UpdateView UPDATE shared by the static and tenant routers, after the
-/// row's hooks; returns the rows changed, `0` when no visible row has the PK.
+/// The UpdateView UPDATE shared by the static and tenant routers, judged and
+/// written in one transaction; returns the rows changed, `0` when no visible
+/// row has the PK.
 async fn update_row(
     (pool, parts): (&Pool, &Parts),
     schema: &'static ModelSchema,
@@ -2646,13 +2745,13 @@ async fn update_row(
     values: Vec<SqlValue>,
     (pk_field, key): (&'static FieldSchema, SqlValue),
 ) -> Result<u64, WriteFailed> {
-    let row = SelectQuery::by_pk(schema, pk_field.column, key.clone()).visible(parts);
-    gate_row(pool, parts, &row, Some("change"))
-        .await
-        .map_err(WriteFailed::Error)?;
-    let stored = Some((pk_field, &key));
-    hidden_fk((pool, parts), schema, (&columns, &values), stored).await?;
-    let this_row = WhereExpr::Predicate(Filter::new(pk_field.column, Op::Eq, key));
+    #[cfg(feature = "admin")]
+    let rechecks = crate::object_permissions::Hooks::All.update_rechecks(schema.table);
+    #[cfg(not(feature = "admin"))]
+    let rechecks = false;
+    let update = crate::audit::TxUpdate::for_model(schema, rechecks)
+        .map_err(|e| WriteFailed::Error(template_error(&format!("update row: {e}"))))?;
+    let this_row = WhereExpr::Predicate(Filter::new(pk_field.column, Op::Eq, key.clone()));
     let mut stamped: Vec<(&'static str, SqlValue)> = columns
         .iter()
         .copied()
@@ -2667,15 +2766,62 @@ async fn update_row(
         .map(|(column, value)| crate::core::Assignment::new(column, value))
         .collect();
     let update_q = crate::core::UpdateQuery::new(schema, set, this_row.clone()).visible(parts);
-    match crate::audit::update(pool, &update_q).await {
-        Ok(n) => Ok(n),
+    let stored = Some((pk_field, &key));
+    // Audited only on a pool, with nothing to re-check: one unlocked write.
+    let Some(update) = update else {
+        hidden_fk((pool, None, parts), schema, (&columns, &values), stored).await?;
+        let written = crate::audit::update(pool, &update_q).await.map(Some);
+        return update_outcome(written, (pool, schema), (columns, &values), &this_row).await;
+    };
+    let row = SelectQuery::by_pk(schema, pk_field.column, key.clone()).visible(parts);
+    let mut tx = lock_row(pool, parts, row, Some("change"))
+        .await
+        .map_err(WriteFailed::Error)?;
+    let at = (pool, Some(&mut *tx), parts);
+    if let Err(e) = hidden_fk(at, schema, (&columns, &values), stored).await {
+        let _ = tx.rollback().await;
+        return Err(e);
+    }
+    let check = WrittenCheck::of(schema, parts, None);
+    let written = match update.run(&mut tx, &update_q, key.clone()).await {
+        // A write may not move the row out of the scopes or the "view" hook.
+        Ok(n) if n > 0 => match &check {
+            Some(c) => c
+                .admits(&mut tx, parts, (schema, pk_field, key))
+                .await
+                .map(|admitted| admitted.then_some(n)),
+            None => Ok(Some(n)),
+        },
+        other => other.map(Some),
+    };
+    let written = match written {
+        Ok(Some(n)) => tx.commit().await.map(|()| Some(n)),
+        other => {
+            let _ = tx.rollback().await;
+            other
+        }
+    };
+    update_outcome(written, (pool, schema), (columns, &values), &this_row).await
+}
+
+/// An UpdateView write's result as the view answers it: `Ok(None)` is a row
+/// the re-check refused.
+async fn update_outcome(
+    written: Result<Option<u64>, crate::sql::ExecError>,
+    (pool, schema): (&Pool, &'static ModelSchema),
+    (columns, values): (Vec<&'static str>, &[SqlValue]),
+    this_row: &WhereExpr,
+) -> Result<u64, WriteFailed> {
+    match written {
+        Ok(Some(n)) => Ok(n),
+        Ok(None) => Err(WriteFailed::Error(refused())),
         // A taken unique value is a form error, as on create (#2073).
         Err(e) if e.is_unique_violation() => Err(WriteFailed::Refused(
             duplicate_errors(
                 pool,
                 schema,
-                columns.into_iter().zip(&values),
-                Some(&this_row),
+                columns.into_iter().zip(values),
+                Some(this_row),
             )
             .await,
         )),
@@ -3799,31 +3945,17 @@ async fn visible_pks_pool(
     let q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec()).visible(parts);
     #[cfg(feature = "admin")]
     {
-        use crate::object_permissions::{Hooks, Verdict};
+        use crate::object_permissions::Hooks;
         if Hooks::All.judges(schema.table, action) {
             let fields: Vec<_> = schema.scalar_fields().collect();
             let rows = select_rows_as_json(pool, &q, &fields)
                 .await
                 .map_err(failed)?;
-            let mut admitted = Vec::new();
-            for row in &rows {
-                match Hooks::All.judge(schema.table, parts, row, action) {
-                    Verdict::Hidden => {}
-                    Verdict::Refused => {
-                        return Err((StatusCode::FORBIDDEN, "permission denied").into_response())
-                    }
-                    Verdict::Allowed => admitted.extend(row.get(pk_field.name).and_then(parsed)),
-                }
-            }
-            // Parsed on both sides: a key stored as other text (case, BLOB) still matches.
-            return Ok(pks
-                .iter()
-                .filter(|p| {
-                    parsed(&Value::String(p.to_display_string()))
-                        .is_some_and(|k| admitted.contains(&k))
-                })
-                .cloned()
-                .collect());
+            let judged = rows.into_iter().map(|row| {
+                let v = Hooks::All.judge(schema.table, parts, &row, action);
+                (row, v)
+            });
+            return admitted_pks(pk_field, pks, judged);
         }
     }
     #[cfg(not(feature = "admin"))]
@@ -3852,25 +3984,102 @@ async fn visible_pks_pool(
         .collect())
 }
 
-/// Run the built-in `delete_selected` action through [`delete_rows`] on
-/// the rows the "delete" hook admits: `DELETE … WHERE <pk> IN (...)`, or a
-/// `deleted_at` stamp on a soft-delete model.
+/// `pks`, in submitted order, kept where their row is judged allowed. A
+/// hidden row drops out; a refused one refuses the whole action, a 403.
+#[cfg(feature = "admin")]
+fn admitted_pks(
+    pk_field: &'static crate::core::FieldSchema,
+    pks: &[SqlValue],
+    judged: impl IntoIterator<Item = (Value, crate::object_permissions::Verdict)>,
+) -> Result<Vec<SqlValue>, Response> {
+    use crate::object_permissions::Verdict;
+    let parsed = |v: &Value| {
+        let raw = v.as_str().map_or_else(|| v.to_string(), str::to_owned);
+        crate::forms::parse_pk_string(pk_field, &raw).ok()
+    };
+    let mut admitted = Vec::new();
+    for (row, verdict) in judged {
+        match verdict {
+            Verdict::Hidden => {}
+            Verdict::Refused => return Err(refused()),
+            Verdict::Allowed => admitted.extend(row.get(pk_field.name).and_then(parsed)),
+        }
+    }
+    // Parsed on both sides: a key stored as other text (case, BLOB) still matches.
+    Ok(pks
+        .iter()
+        .filter(|p| {
+            parsed(&Value::String(p.to_display_string())).is_some_and(|k| admitted.contains(&k))
+        })
+        .cloned()
+        .collect())
+}
+
+/// The built-in `delete_selected`, in one transaction: lock the selected
+/// rows in one read, judge each, then delete (or soft delete) the admitted
+/// ones. A refused row deletes nothing. The selection is capped at
+/// `MAX_IN_VALUES`, far under every bind limit.
 async fn run_delete_selected_pool(
     schema: &'static ModelSchema,
     pk_field: &'static crate::core::FieldSchema,
     (pool, parts): (&Pool, &Parts),
     pks: &[SqlValue],
 ) -> Result<(), Response> {
-    let pks = visible_pks_pool(schema, pk_field, (pool, parts), pks, Some("delete")).await?;
     if pks.is_empty() {
         return Ok(());
     }
-    // #810 — `DeleteQuery::by_pk_in` for the DELETE … WHERE pk IN (...) shape.
-    let q = crate::core::DeleteQuery::by_pk_in(schema, pk_field.column, pks);
-    delete_rows(pool, parts, q)
+    let mut tx = crate::sql::write_tx(pool)
         .await
-        .map(|_| ())
-        .map_err(|e| delete_failed(&e))
+        .map_err(|e| template_error(&format!("begin write: {e}")))?;
+    let pks = match locked_delete_pks(&mut tx, schema, pk_field, parts, pks).await {
+        Ok(pks) if !pks.is_empty() => pks,
+        other => {
+            let _ = tx.rollback().await;
+            return other.map(drop);
+        }
+    };
+    let by_pk = crate::core::DeleteQuery::by_pk_in(schema, pk_field.column, pks).where_clause;
+    let rows = crate::core::DeleteQuery::new(schema, by_pk.clone()).visible(parts);
+    let stamp = schema.soft_delete_column.map(|col| {
+        let now = SqlValue::from(chrono::Utc::now());
+        let set = vec![crate::core::Assignment::new(col, now)];
+        crate::core::UpdateQuery::new(schema, set, rows.where_clause.clone())
+    });
+    let removed =
+        crate::audit::remove_rows_tx(&mut tx, schema, (rows.where_clause, by_pk), stamp.as_ref());
+    match removed.await {
+        Ok(_) => tx.commit().await.map_err(|e| delete_failed(&e)),
+        Err(e) => {
+            let _ = tx.rollback().await;
+            Err(delete_failed(&e))
+        }
+    }
+}
+
+/// The selected keys `delete_selected` may delete, judged on the rows locked
+/// in `tx` when a hook is registered; the DELETE's own scope narrows the rest.
+async fn locked_delete_pks(
+    tx: &mut crate::sql::PoolTx<'_>,
+    schema: &'static ModelSchema,
+    pk_field: &'static crate::core::FieldSchema,
+    parts: &Parts,
+    pks: &[SqlValue],
+) -> Result<Vec<SqlValue>, Response> {
+    #[cfg(feature = "admin")]
+    {
+        use crate::object_permissions::Hooks;
+        if Hooks::All.judges(schema.table, Some("delete")) {
+            let q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec()).visible(parts);
+            let judged = Hooks::All
+                .judge_locked_rows(tx, parts, q, Some("delete"))
+                .await
+                .map_err(|e| template_error(&format!("scope selected rows: {e}")))?;
+            return admitted_pks(pk_field, pks, judged);
+        }
+    }
+    #[cfg(not(feature = "admin"))]
+    let _ = (tx, schema, pk_field, parts);
+    Ok(pks.to_vec())
 }
 
 // v0.38 — `run_delete_selected_conn` removed; tenant handlers now

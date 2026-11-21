@@ -409,7 +409,7 @@ pub struct JobsSettings {
     /// anything but `"memory"` only earns a warning. Wire another
     /// backend yourself; see [`crate::jobs`].
     pub backend: Option<String>,
-    /// How many jobs run at once. `None` means one at a time.
+    /// How many jobs run at once. `None` means 4.
     pub concurrency: Option<u32>,
 }
 

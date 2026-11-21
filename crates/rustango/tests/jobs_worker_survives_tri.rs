@@ -702,7 +702,8 @@ async fn a_heartbeat_keeps_a_long_job_leased(pool: &Pool) {
 /// A reclaim sweep beside busy heartbeats never fails on a lock cycle.
 async fn a_reclaim_beside_heartbeats_does_not_fail(pool: &Pool) {
     let tok = token(pool, "reclaim_storm");
-    let q = queue(pool, 3, Duration::from_millis(2)).await;
+    // Beats far shorter than the threshold, as the reclaim floor demands.
+    let q = queue(pool, 3, Duration::from_millis(50)).await;
     for _ in 0..3 {
         q.dispatch(&Slow {
             token: tok.clone(),
@@ -716,10 +717,11 @@ async fn a_reclaim_beside_heartbeats_does_not_fail(pool: &Pool) {
     wait_for("the runs to start", || counts(&tok).0 == 3).await;
     let mut sweeps = 0;
     while counts(&tok).1 < 3 {
-        PgJobQueue::reclaim_stuck_jobs_pool(pool, Duration::from_millis(500))
+        PgJobQueue::reclaim_stuck_jobs_pool(pool, Duration::from_secs(3))
             .await
             .unwrap_or_else(|e| panic!("sweep {sweeps} failed: {e}"));
         sweeps += 1;
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
     q.shutdown().await;
     assert_eq!(counts(&tok).0, 3, "each ran once");
@@ -1093,6 +1095,88 @@ impl Job for UntilStop {
         }
         Ok(())
     }
+}
+
+/// A named rendezvous between a job and its test.
+fn barrier(token: &str, name: &str) -> Arc<tokio::sync::Barrier> {
+    static B: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Barrier>>>> = OnceLock::new();
+    let mut b = B.get_or_init(Mutex::default).lock().unwrap();
+    b.entry(format!("{token}:{name}"))
+        .or_insert_with(|| Arc::new(tokio::sync::Barrier::new(2)))
+        .clone()
+}
+
+/// `(is_stopping, lease_lost)` once `stopping()` resolved, per token.
+fn lease_seen() -> &'static Mutex<HashMap<String, (bool, bool)>> {
+    static S: OnceLock<Mutex<HashMap<String, (bool, bool)>>> = OnceLock::new();
+    S.get_or_init(Mutex::default)
+}
+
+/// On its first run, waits for `stopping()` (or ten seconds) and records why.
+#[derive(Serialize, Deserialize)]
+struct UntilLeaseLost {
+    token: String,
+}
+
+#[async_trait::async_trait]
+impl Job for UntilLeaseLost {
+    const NAME: &'static str = "tri:until_lease_lost";
+    async fn run(&self) -> Result<(), JobError> {
+        Err(JobError::Fatal("the queue calls run_with".into()))
+    }
+    async fn run_with(&self, ctx: &JobCtx) -> Result<(), JobError> {
+        if start(&self.token) > 1 {
+            return Ok(());
+        }
+        barrier(&self.token, "started").wait().await;
+        let _ = tokio::time::timeout(Duration::from_secs(10), ctx.stopping()).await;
+        let seen = (ctx.is_stopping(), ctx.lease_lost());
+        lease_seen()
+            .lock()
+            .unwrap()
+            .insert(self.token.clone(), seen);
+        barrier(&self.token, "done").wait().await;
+        Ok(())
+    }
+}
+
+/// A run whose row another worker took is told through `stopping()`.
+async fn a_lost_lease_fires_the_stop_signal(pool: &Pool) {
+    let tok = token(pool, "lease_stop");
+    let q = queue(pool, 1, Duration::from_millis(20)).await;
+    q.register::<UntilLeaseLost>().await;
+    q.dispatch(&UntilLeaseLost { token: tok.clone() })
+        .await
+        .unwrap();
+    q.start().await;
+    let wait = |name: &'static str| {
+        let b = barrier(&tok, name);
+        async move { tokio::time::timeout(Duration::from_secs(15), b.wait()).await }
+    };
+    let started = wait("started").await;
+    // Handed to another worker, as a sweep then a pickup would: the beats
+    // cannot refresh it back, whatever the clocks say.
+    let taken = match started {
+        Ok(_) => {
+            let d = pool.dialect();
+            let sql = format!(
+                "UPDATE rustango_jobs SET locked_by = 'another-worker' WHERE locked_by IS NOT NULL \
+                 AND name = {}",
+                d.placeholder(1)
+            );
+            let name = SqlValue::String(UntilLeaseLost::NAME.to_owned());
+            rustango::sql::raw_execute_pool(pool, &sql, vec![name]).await
+        }
+        Err(_) => Ok(0),
+    };
+    // Asserted only once the job is released, so a failure never hangs.
+    let done = wait("done").await;
+    q.shutdown().await;
+    assert!(started.is_ok(), "the job never started");
+    assert_eq!(taken.expect("take the lease"), 1, "rows taken");
+    assert!(done.is_ok(), "the job never saw the lease go");
+    let seen = lease_seen().lock().unwrap()[&tok];
+    assert_eq!(seen, (true, true), "(is_stopping, lease_lost)");
 }
 
 /// `shutdown` reaches a running job, which then finishes within the grace.
@@ -1682,6 +1766,7 @@ tri_dialect_test! {
         an_older_table_gets_the_queue_index,
         a_retry_keeps_the_job_id_and_counts_the_attempt,
         shutdown_fires_a_running_jobs_stop_signal,
+        a_lost_lease_fires_the_stop_signal,
         two_tenants_first_jobs_get_different_keys,
         a_scheduled_job_waits_and_can_be_cancelled,
         a_delayed_job_runs_under_the_returned_id,

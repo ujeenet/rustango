@@ -323,8 +323,8 @@ pub enum ScalarFn {
     NullIf,
 
     // --- Date / time ---
-    /// The server's wall-clock timestamp. 0-arg. `NOW()` on PG, `NOW(6)` on
-    /// MySQL; on SQLite an RFC3339 `strftime(…, 'now')`, so the text
+    /// The server's wall-clock timestamp. 0-arg. `NOW()` on PG, `UTC_TIMESTAMP(6)`
+    /// on MySQL; on SQLite an RFC3339 `strftime(…, 'now')`, so the text
     /// matches what every other write path stores.
     Now,
     /// `EXTRACT(YEAR FROM x)` family. SQLite wraps in

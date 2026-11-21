@@ -254,6 +254,11 @@ impl Dialect for Sqlite {
         false
     }
 
+    /// UTC, in the shape every write path stores, so text compares sort.
+    fn utc_now_sql(&self) -> String {
+        format!("strftime('{SQLITE_DATETIME_FORMAT}','now')")
+    }
+
     /// Translate a Postgres `DEFAULT` expression into SQLite's
     /// spelling.
     ///

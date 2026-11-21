@@ -479,7 +479,10 @@ Sobrescríbelo para leer:
 - `ctx.idempotency_key(scope)` — el id bajo tu ámbito, para un sistema externo.
 - `ctx.attempt()` — 1 en la primera ejecución, 2 en el primer reintento.
 - `ctx.stopping()` / `ctx.is_stopping()` — la cola se está deteniendo; termina
-  dentro de `shutdown_grace` o la ejecución se aborta y vuelve a la cola.
+  dentro de `shutdown_grace` o la ejecución se aborta y vuelve a la cola. En la
+  cola de base de datos también se disparan cuando la ejecución perdió su lease
+  (`ctx.lease_lost()`): otro worker tomó la fila, así que para pronto, porque el
+  resultado de esta ejecución se descarta.
 
 Usa `idempotency_key` como la clave que ve un sistema externo, para que un cobro
 reintentado no se cobre dos veces. El id de la cola en BD es el id de la fila más
@@ -592,7 +595,18 @@ builder barre el pool de la cola al hacer `start` y luego cada
 heartbeats.
 
 Un trabajo en curso renueva su bloqueo cada `heartbeat_interval` (10 s por
-defecto), así que mantén el umbral muy por encima. Cada recogida gasta un intento,
+defecto), así que mantén el umbral muy por encima. Las horas de bloqueo salen
+del reloj de la base de datos, así que hosts con relojes desfasados coinciden.
+`reclaim_stuck_jobs_pool` no conoce el heartbeat, así que no sube su umbral;
+`Duration::ZERO` libera todos los bloqueos.
+
+**Un trabajo vivo recuperado puede ejecutarse en dos workers a la vez.** Si un
+heartbeat se atasca (pool agotado, un bloqueo de escritura largo en SQLite), un
+barrido libera un trabajo que sigue en marcha y otro worker lo arranca. Las
+escrituras de la primera ejecución en la fila se descartan, pero sus efectos
+externos no. Pasa `ctx.idempotency_key(..)` a los sistemas externos y usa
+`(ctx.id(), ctx.attempt())` como token de fencing: el intento crece en cada
+recogida. Cada recogida gasta un intento,
 así que un trabajo que tumba a su worker va a dead-letter cuando se agotan las
 `MAX_ATTEMPTS` ejecuciones. Un trabajo que hace panic es un fallo `Retryable`; el
 worker sigue funcionando.

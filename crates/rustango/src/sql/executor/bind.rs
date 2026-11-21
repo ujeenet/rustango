@@ -75,9 +75,10 @@ pub(crate) fn bind_pg<'q, Q: Bind<'q, sqlx::Postgres>>(
 
 #[cfg(feature = "postgres")]
 fn bind_one_pg<'q, Q: Bind<'q, sqlx::Postgres>>(q: Q, value: SqlValue) -> Result<Q, SqlError> {
-    /// The elements of one variant, as a typed PG array.
-    fn elems<T>(v: Vec<SqlValue>, f: fn(SqlValue) -> Option<T>) -> Vec<T> {
-        v.into_iter().filter_map(f).collect()
+    /// The elements as one typed PG array, a NULL kept as a NULL element.
+    /// `BindParams::check` refused a mixed array, so `f` maps every other one.
+    fn elems<T>(v: Vec<SqlValue>, f: fn(SqlValue) -> Option<T>) -> Vec<Option<T>> {
+        v.into_iter().map(f).collect()
     }
     Ok(match value {
         SqlValue::Null => q.push(UntypedNull),
@@ -106,7 +107,8 @@ fn bind_one_pg<'q, Q: Bind<'q, sqlx::Postgres>>(q: Q, value: SqlValue) -> Result
         // PostGIS: EWKB binary via the `Point` newtype.
         SqlValue::Geometry { x, y, srid } => q.push(crate::sql::Point { x, y, srid }),
         // PG arrays are typed, so elements must be homogeneous.
-        SqlValue::Array(v) => match v.first() {
+        SqlValue::Array(v) => match v.iter().find(|e| !matches!(e, SqlValue::Null)) {
+            // Empty: `BindParams::check` refused an all-NULL one.
             None => q.push(Vec::<i32>::new()),
             Some(SqlValue::I16(_)) => q.push(elems(v, |e| match e {
                 SqlValue::I16(n) => Some(n),

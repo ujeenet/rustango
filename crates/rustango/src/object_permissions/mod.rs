@@ -142,6 +142,15 @@ impl Hooks {
         }
     }
 
+    /// [`Self::scope_filters`] as `WHERE` terms.
+    pub(crate) fn scope_where(self, table: &str, parts: &Parts) -> Vec<crate::core::WhereExpr> {
+        let filters = self.scope_filters(table, parts);
+        filters
+            .into_iter()
+            .map(crate::core::WhereExpr::Predicate)
+            .collect()
+    }
+
     /// The rows of `model` this request reaches: its global scopes, live
     /// rows, and the queryset scopes, ANDed by the caller.
     pub(crate) fn row_scope(
@@ -177,6 +186,84 @@ impl Hooks {
         } else {
             Verdict::Allowed
         }
+    }
+
+    /// The row `q` selects, locked in `tx`, then [`Self::judge`]d: `None` when
+    /// none matches. A write in `tx` then changes the row the hooks saw.
+    pub(crate) async fn judge_locked(
+        self,
+        tx: &mut crate::sql::PoolTx<'_>,
+        parts: &Parts,
+        q: crate::core::SelectQuery,
+        action: Option<&str>,
+    ) -> Result<Option<Verdict>, crate::sql::ExecError> {
+        let rows = self.judge_locked_rows(tx, parts, q, action).await?;
+        Ok(rows.into_iter().next().map(|(_, v)| v))
+    }
+
+    /// Every row `q` selects, locked in `tx` by one read, each [`Self::judge`]d.
+    pub(crate) async fn judge_locked_rows(
+        self,
+        tx: &mut crate::sql::PoolTx<'_>,
+        parts: &Parts,
+        mut q: crate::core::SelectQuery,
+        action: Option<&str>,
+    ) -> Result<Vec<(Value, Verdict)>, crate::sql::ExecError> {
+        q.lock_mode = Some(crate::core::LockMode {
+            silent_on_sqlite: true,
+            ..crate::core::LockMode::default()
+        });
+        let fields: Vec<_> = q.model.scalar_fields().collect();
+        let rows = crate::sql::select_rows_as_json_tx(tx, &q, &fields).await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let v = self.judge(q.model.table, parts, &row, action);
+                (row, v)
+            })
+            .collect())
+    }
+
+    /// Whether an update of `table` has a row to judge or re-check (a queryset
+    /// scope, the "view" or "change" hook), so it must run locked in a transaction.
+    pub(crate) fn update_rechecks(self, table: &str) -> bool {
+        !self.scope_filters_empty(table) || self.judges(table, Some("change"))
+    }
+
+    /// Whether [`Self::admits_written`] has anything to check.
+    pub(crate) fn checks_written(
+        self,
+        table: &str,
+        scope: &[crate::core::WhereExpr],
+        action: Option<&str>,
+    ) -> bool {
+        !scope.is_empty() || self.judges(table, action)
+    }
+
+    /// Whether the row `pk`, as just written in `tx`, is inside `scope` and
+    /// [`Self::judge`] allows it: a write may not put a row out of sight.
+    pub(crate) async fn admits_written(
+        self,
+        tx: &mut crate::sql::PoolTx<'_>,
+        parts: &Parts,
+        (model, pk_field, pk): (
+            &'static crate::core::ModelSchema,
+            &'static crate::core::FieldSchema,
+            crate::core::SqlValue,
+        ),
+        scope: &[crate::core::WhereExpr],
+        action: Option<&str>,
+    ) -> Result<bool, crate::sql::ExecError> {
+        if !self.checks_written(model.table, scope, action) {
+            return Ok(true);
+        }
+        let mut q = crate::core::SelectQuery::by_pk(model, pk_field.column, pk);
+        for s in scope {
+            q.where_clause.push_and(s.clone());
+        }
+        let fields: Vec<_> = model.scalar_fields().collect();
+        let row = crate::sql::select_one_row_as_json_tx(tx, &q, &fields).await?;
+        Ok(row.is_some_and(|row| self.judge(model.table, parts, &row, action) == Verdict::Allowed))
     }
 }
 
