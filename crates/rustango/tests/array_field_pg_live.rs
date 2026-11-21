@@ -110,6 +110,36 @@ async fn empty_array_round_trips() {
     assert!(row.scores.is_empty());
 }
 
+/// A mixed array is refused before the bind, which kept only the first
+/// element's type; NULL elements are bound, not dropped.
+#[tokio::test]
+async fn a_mixed_array_is_refused_and_nulls_are_kept() {
+    use rustango::core::SqlValue;
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    fresh(&pool).await;
+    let id = insert(&pool, "mixed", &[], &[5]).await;
+    let set = r#"UPDATE "arr_post" SET "scores" = $1 WHERE "id" = $2"#;
+    let mixed = SqlValue::Array(vec![SqlValue::I32(1), SqlValue::String("2".into())]);
+    let err = rustango::sql::raw_execute_pool(&pool, set, vec![mixed, SqlValue::I64(id)])
+        .await
+        .expect_err("a mixed array bound");
+    assert!(err.to_string().contains("mixed array"), "{err}");
+    let with_null = SqlValue::Array(vec![SqlValue::I32(1), SqlValue::Null, SqlValue::I32(2)]);
+    rustango::sql::raw_execute_pool(&pool, set, vec![with_null, SqlValue::I64(id)])
+        .await
+        .expect("an array with a NULL");
+    let (scores,): (String,) =
+        sqlx::query_as(r#"SELECT "scores"::text FROM "arr_post" WHERE "id" = $1"#)
+            .bind(id)
+            .fetch_one(pool.as_postgres().unwrap())
+            .await
+            .unwrap();
+    assert_eq!(scores, "{1,NULL,2}");
+}
+
 #[tokio::test]
 async fn array_contains_operator_filters() {
     let _g = live_lock().lock().await;

@@ -4,6 +4,16 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** a ViewSet PUT or PATCH whose row would leave a queryset scope or be hidden by the "view" hook is refused with 403 and rolled back; it used to answer 204.
+- **Breaking:** `CreateView` runs the "add" hook, on the request and on the written row, and refuses a row outside the queryset scopes or the "view" hook with 403 and no row. `UpdateView` refuses an edit that would leave them the same way.
+- `UpdateView` and `DeleteView` judge the row locked in the write's transaction, as ViewSets do, so a concurrent change between the check and the write is seen.
+
+### Fixed
+
+- A Postgres array bind with mixed element types returns `ValueNotSupportedInDialect` instead of dropping the elements that differ from the first; NULL elements are bound, not dropped.
+
 ## [0.68.0] — 2026-11-20
 
 ### Added

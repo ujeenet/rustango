@@ -104,18 +104,25 @@ pub(crate) fn unbindable(v: &SqlValue, pg: bool) -> Option<&'static str> {
     }
     match v {
         SqlValue::List(_) => Some("list"),
-        SqlValue::Array(elems) => match elems.first() {
-            None
-            | Some(
+        SqlValue::Array(elems) => {
+            // One element type per typed array; NULLs bind as NULL elements.
+            let mut typed = elems.iter().filter(|e| !matches!(e, SqlValue::Null));
+            let Some(first) = typed.next() else {
+                return None;
+            };
+            if !typed.all(|e| std::mem::discriminant(e) == std::mem::discriminant(first)) {
+                return Some("mixed array");
+            }
+            match first {
                 SqlValue::I16(_)
                 | SqlValue::I32(_)
                 | SqlValue::I64(_)
                 | SqlValue::String(_)
                 | SqlValue::Bool(_)
-                | SqlValue::Uuid(_),
-            ) => None,
-            Some(_) => Some("array element"),
-        },
+                | SqlValue::Uuid(_) => None,
+                _ => Some("array element"),
+            }
+        }
         _ => None,
     }
 }

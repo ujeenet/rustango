@@ -1573,4 +1573,23 @@ mod bind_params_check_tests {
             assert_eq!(refused(&Postgres, SqlValue::Array(ok)), None);
         }
     }
+
+    /// A typed PG array binds one element type: a mixed one used to lose the rest.
+    #[test]
+    fn a_postgres_array_of_mixed_elements_is_refused() {
+        let (i, s, null) = (
+            SqlValue::I64(1),
+            SqlValue::String("a".into()),
+            SqlValue::Null,
+        );
+        let mixed = SqlValue::Array(vec![i.clone(), s.clone()]);
+        assert_eq!(refused(&Postgres, mixed), Some("mixed array"));
+        let behind_null = SqlValue::Array(vec![null.clone(), s, i.clone()]);
+        assert_eq!(refused(&Postgres, behind_null), Some("mixed array"));
+        let i32_then_i64 = SqlValue::Array(vec![SqlValue::I32(1), i.clone()]);
+        assert_eq!(refused(&Postgres, i32_then_i64), Some("mixed array"));
+        for ok in [vec![i.clone(), null.clone(), i], vec![null.clone(), null]] {
+            assert_eq!(refused(&Postgres, SqlValue::Array(ok)), None);
+        }
+    }
 }
