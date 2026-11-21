@@ -127,6 +127,12 @@ async fn a_mixed_array_is_refused_and_nulls_are_kept() {
         .await
         .expect_err("a mixed array bound");
     assert!(err.to_string().contains("mixed array"), "{err}");
+    // No element names the type; PG would get an int4[] for any column.
+    let all_null = SqlValue::Array(vec![SqlValue::Null, SqlValue::Null]);
+    let err = rustango::sql::raw_execute_pool(&pool, set, vec![all_null, SqlValue::I64(id)])
+        .await
+        .expect_err("an all-NULL array bound");
+    assert!(err.to_string().contains("all-NULL array"), "{err}");
     let with_null = SqlValue::Array(vec![SqlValue::I32(1), SqlValue::Null, SqlValue::I32(2)]);
     rustango::sql::raw_execute_pool(&pool, set, vec![with_null, SqlValue::I64(id)])
         .await

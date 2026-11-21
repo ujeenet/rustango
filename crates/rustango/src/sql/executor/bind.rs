@@ -108,7 +108,8 @@ fn bind_one_pg<'q, Q: Bind<'q, sqlx::Postgres>>(q: Q, value: SqlValue) -> Result
         SqlValue::Geometry { x, y, srid } => q.push(crate::sql::Point { x, y, srid }),
         // PG arrays are typed, so elements must be homogeneous.
         SqlValue::Array(v) => match v.iter().find(|e| !matches!(e, SqlValue::Null)) {
-            None => q.push(vec![None::<i32>; v.len()]),
+            // Empty: `BindParams::check` refused an all-NULL one.
+            None => q.push(Vec::<i32>::new()),
             Some(SqlValue::I16(_)) => q.push(elems(v, |e| match e {
                 SqlValue::I16(n) => Some(n),
                 _ => None,

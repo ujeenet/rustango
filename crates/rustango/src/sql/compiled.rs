@@ -106,9 +106,10 @@ pub(crate) fn unbindable(v: &SqlValue, pg: bool) -> Option<&'static str> {
         SqlValue::List(_) => Some("list"),
         SqlValue::Array(elems) => {
             // One element type per typed array; NULLs bind as NULL elements.
+            // With none typed, no element names the PG type to bind.
             let mut typed = elems.iter().filter(|e| !matches!(e, SqlValue::Null));
             let Some(first) = typed.next() else {
-                return None;
+                return (!elems.is_empty()).then_some("all-NULL array");
             };
             if !typed.all(|e| std::mem::discriminant(e) == std::mem::discriminant(first)) {
                 return Some("mixed array");

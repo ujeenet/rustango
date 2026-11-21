@@ -1595,8 +1595,13 @@ mod bind_params_check_tests {
         assert_eq!(refused(&Postgres, behind_null), Some("mixed array"));
         let i32_then_i64 = SqlValue::Array(vec![SqlValue::I32(1), i.clone()]);
         assert_eq!(refused(&Postgres, i32_then_i64), Some("mixed array"));
-        for ok in [vec![i.clone(), null.clone(), i], vec![null.clone(), null]] {
-            assert_eq!(refused(&Postgres, SqlValue::Array(ok)), None);
-        }
+        assert_eq!(
+            refused(&Postgres, SqlValue::Array(vec![i.clone(), null.clone(), i])),
+            None
+        );
+        assert_eq!(refused(&Postgres, SqlValue::Array(Vec::new())), None);
+        // No element names the type; PG would get an int4[] for any column.
+        let all_null = SqlValue::Array(vec![null.clone(), null]);
+        assert_eq!(refused(&Postgres, all_null), Some("all-NULL array"));
     }
 }
