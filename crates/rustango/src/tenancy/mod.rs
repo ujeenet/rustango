@@ -225,6 +225,8 @@ pub(crate) use pools::boot_checks;
 pub(crate) use pools::build_database_pool;
 #[cfg(all(test, feature = "postgres"))]
 pub(crate) use pools::scoped_pool_options;
+#[cfg(all(feature = "migrate-v2-spike", feature = "postgres"))]
+pub use pools::spike_v2;
 #[cfg(any(feature = "postgres", feature = "manage"))]
 pub(crate) use pools::RegistryConnect;
 pub use pools::{

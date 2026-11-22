@@ -237,7 +237,7 @@ const MIGRATE_LOCK_KEY: i64 = 0x5255_5354_4d49_4754;
 /// schema-mode tenant folds in the schema its sessions create in: one key
 /// for every schema made a tenant's run wait on all the others.
 #[cfg(feature = "postgres")]
-async fn pg_migrate_lock_key(pool: &PgPool) -> Result<i64, sqlx::Error> {
+pub(crate) async fn pg_migrate_lock_key(pool: &PgPool) -> Result<i64, sqlx::Error> {
     let schema: Option<String> = sqlx::query_scalar("SELECT current_schema()::text")
         .fetch_one(pool)
         .await?;
@@ -247,7 +247,7 @@ async fn pg_migrate_lock_key(pool: &PgPool) -> Result<i64, sqlx::Error> {
 /// [`MIGRATE_LOCK_KEY`] for `public` (and no schema), as before; another
 /// schema's mixes in its FNV-1a hash, stable across processes and builds.
 #[cfg(feature = "postgres")]
-fn lock_key_for_schema(schema: Option<&str>) -> i64 {
+pub(crate) fn lock_key_for_schema(schema: Option<&str>) -> i64 {
     let Some(schema) = schema.filter(|s| *s != "public") else {
         return MIGRATE_LOCK_KEY;
     };
@@ -2388,7 +2388,7 @@ where
 /// beside it, which every process on the file sees and a crash releases.
 /// `None` in memory, which one process owns.
 #[cfg(feature = "sqlite")]
-async fn sqlite_lock_options(
+pub(crate) async fn sqlite_lock_options(
     sq: &sqlx::SqlitePool,
 ) -> Result<Option<sqlx::sqlite::SqliteConnectOptions>, MigrateError> {
     let file: String =

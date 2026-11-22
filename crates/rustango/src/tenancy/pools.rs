@@ -2020,7 +2020,8 @@ impl TenantPools<sqlx::Postgres> {
         let Some(role) = self.tenant_role(schema).await? else {
             return Ok(None);
         };
-        let unchecked = TenantSearchPath::resolve(&self.registry, schema).await?;
+        let unchecked =
+            TenantSearchPath::resolve(&self.registry, schema, PublicRule::Admit).await?;
         let extensions = &unchecked.path.schemas[1..];
         super::schema_role::ensure(&self.registry, &role, schema, extensions).await?;
         Ok(Some(role.name))
@@ -2080,9 +2081,10 @@ impl TenantSearchPath {
         check: FallThrough,
         timeout: std::time::Duration,
     ) -> Result<Self, TenancyError> {
-        let unchecked = tokio::time::timeout(timeout, Self::resolve(registry, schema))
-            .await
-            .map_err(|_| sqlx::Error::PoolTimedOut)??;
+        let unchecked =
+            tokio::time::timeout(timeout, Self::resolve(registry, schema, PublicRule::Admit))
+                .await
+                .map_err(|_| sqlx::Error::PoolTimedOut)??;
         match check {
             FallThrough::Refuse => unchecked.strict(),
             FallThrough::OpenPool => unchecked.warn_skipped().strict(),
@@ -2097,7 +2099,11 @@ impl TenantSearchPath {
     /// Read the extension schemas and what they would serve the tenant. Only
     /// `public` and schemas holding nothing but extension-owned objects qualify,
     /// and never one an org names, so another tenant's schema never joins the path.
-    async fn resolve(registry: &PgPool, schema: &str) -> Result<UncheckedPath, TenancyError> {
+    async fn resolve(
+        registry: &PgPool,
+        schema: &str,
+        public: PublicRule,
+    ) -> Result<UncheckedPath, TenancyError> {
         use crate::core::Model as _;
         use crate::sql::Dialect as _;
         let orgs = crate::sql::Postgres.quote_ident(Org::SCHEMA.table);
@@ -2106,10 +2112,10 @@ impl TenantSearchPath {
             "AND n.nspname NOT IN (SELECT slug FROM {orgs} \
              UNION ALL SELECT schema_name FROM {orgs} WHERE schema_name IS NOT NULL)"
         );
-        match Self::resolve_with(registry, schema, &named_by_org).await {
+        match Self::resolve_with(registry, schema, &named_by_org, public).await {
             // No orgs table (orgs came from elsewhere): the objects check alone guards the path.
             Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("42P01") => {
-                Ok(Self::resolve_with(registry, schema, "").await?)
+                Ok(Self::resolve_with(registry, schema, "", public).await?)
             }
             other => Ok(other?),
         }
@@ -2119,11 +2125,16 @@ impl TenantSearchPath {
         registry: &PgPool,
         schema: &str,
         org_filter: &str,
+        public: PublicRule,
     ) -> Result<UncheckedPath, sqlx::Error> {
+        let admit_public = match public {
+            PublicRule::Admit => "n.nspname = 'public' OR",
+            PublicRule::LikeAnyOther => "",
+        };
         // A class row is the extension's when it or its row type is a member.
         let sql = format!(
             "WITH ext AS (SELECT DISTINCT n.oid, n.nspname::text AS name, \
-                   (n.nspname = 'public' OR (TRUE {org_filter} \
+                   ({admit_public} (TRUE {org_filter} \
                    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c \
                      WHERE c.relnamespace = n.oid \
                      AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S', 'c') \
@@ -2268,6 +2279,80 @@ impl UncheckedPath {
              move them with `ALTER EXTENSION <name> SET SCHEMA public`",
         );
         self
+    }
+}
+
+/// Whether `public` joins a path while it holds objects of its own.
+#[cfg(feature = "postgres")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublicRule {
+    /// v1: registry FK targets and citext live there.
+    Admit,
+    /// SPIKE S4 (v2): only when it holds nothing but extension objects.
+    #[cfg_attr(not(feature = "migrate-v2-spike"), allow(dead_code))]
+    LikeAnyOther,
+}
+
+/// SPIKE S4: the v2 tenant migrate path, `open(FallThrough::Refuse)` without `public`.
+#[cfg(all(feature = "migrate-v2-spike", feature = "postgres"))]
+pub mod spike_v2 {
+    use super::{PgPool, PublicRule, TenancyError, TenantSearchPath};
+
+    /// A v2 tenant path: the schemas in order, and extensions left off it.
+    #[derive(Debug, Clone)]
+    pub struct V2Path {
+        pub schemas: Vec<String>,
+        pub skipped: Vec<String>,
+        pub set_sql: String,
+    }
+
+    /// Resolve `schema`'s v2 path through `registry`, with every `Refuse` check.
+    ///
+    /// # Errors
+    /// The `strict` refusals: role-named, missing schema, shadowed tenant tables.
+    pub async fn open_refuse(registry: &PgPool, schema: &str) -> Result<V2Path, TenancyError> {
+        let unchecked =
+            TenantSearchPath::resolve(registry, schema, PublicRule::LikeAnyOther).await?;
+        let skipped = unchecked.skipped.clone();
+        let path = unchecked.strict()?;
+        Ok(V2Path {
+            set_sql: path.set_sql(),
+            schemas: path.schemas,
+            skipped,
+        })
+    }
+
+    /// v1's migrate path (`CheckAfterMigrate`), for the comparison tests.
+    ///
+    /// # Errors
+    /// As [`TenantSearchPath::open`].
+    pub async fn open_v1_migrate(
+        registry: &PgPool,
+        schema: &str,
+    ) -> Result<Vec<String>, TenancyError> {
+        let p = TenantSearchPath::open(
+            registry,
+            schema,
+            super::FallThrough::CheckAfterMigrate,
+            std::time::Duration::from_secs(10),
+        )
+        .await?;
+        Ok(p.schemas)
+    }
+
+    /// v1's schema-mode migrate pool, as `migrate_tenants` builds it.
+    ///
+    /// # Errors
+    /// As [`super::connect_schema_scoped`].
+    pub async fn v1_migrate_pool(registry_url: &str, schema: &str) -> Result<PgPool, TenancyError> {
+        super::connect_schema_scoped(
+            registry_url,
+            schema,
+            2,
+            super::FallThrough::CheckAfterMigrate,
+            std::time::Duration::from_secs(10),
+        )
+        .await
     }
 }
 

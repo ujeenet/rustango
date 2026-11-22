@@ -1648,6 +1648,7 @@ jobs:
           binary(=orm_relations_tri) |
           binary(=migrate_v2_catalog_spike_tri) |
           binary(=migrate_v2_render_spike_tri) |
+          binary(=migrate_v2_tenancy_spike_tri) |
           binary(=prefetch_related_tri) |
           binary(=orm_relation_edges_tri) |
           binary(=orm_query_edges_tri) |
