@@ -165,7 +165,7 @@ async fn migrate_embedded_propagates_parse_errors() {
     let err = migrate::migrate_embedded_pool(&pool.clone().into(), embedded)
         .await
         .unwrap_err();
-    matches!(err, MigrateError::Json(_));
+    assert!(matches!(err, MigrateError::Json(_)), "{err:?}");
 }
 
 #[tokio::test]
@@ -187,7 +187,7 @@ async fn migrate_embedded_validates_inconsistent_data_op() {
     let err = migrate::migrate_embedded_pool(&pool.clone().into(), embedded)
         .await
         .unwrap_err();
-    matches!(err, MigrateError::Validation(_));
+    assert!(matches!(err, MigrateError::Validation(_)), "{err:?}");
 }
 
 #[tokio::test]
