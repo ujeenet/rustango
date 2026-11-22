@@ -5,6 +5,7 @@
 //! its own statements, in place; defaults go out exactly as written.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use super::ops::{CheckDecl, ColumnDecl, FkDecl, IndexDecl, TableDecl};
 use crate::migrate::diff::{self, DefaultText, SchemaChange};
@@ -37,7 +38,8 @@ pub struct ExternTable {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct State {
-    pub tables: BTreeMap<String, TableState>,
+    /// `Arc` per table: a state clone is pointer copies, an op copies one table.
+    pub tables: BTreeMap<String, Arc<TableState>>,
     pub externs: BTreeMap<String, ExternTable>,
     pub extensions: BTreeSet<String>,
 }
@@ -214,14 +216,17 @@ pub const E_UNSUPPORTED: &str = "MV2-E014";
 // ------------------------------------------------------------------ apply
 
 fn table_mut<'s>(s: &'s mut State, t: &str) -> Result<&'s mut TableState, RenderError> {
-    s.tables.get_mut(t).ok_or_else(|| RenderError {
-        code: E_STATE,
-        msg: format!("table `{t}` is not in state"),
-    })
+    s.tables
+        .get_mut(t)
+        .map(Arc::make_mut)
+        .ok_or_else(|| RenderError {
+            code: E_STATE,
+            msg: format!("table `{t}` is not in state"),
+        })
 }
 
 fn table<'s>(s: &'s State, t: &str) -> Result<&'s TableState, RenderError> {
-    s.tables.get(t).ok_or_else(|| RenderError {
+    s.tables.get(t).map(|a| &**a).ok_or_else(|| RenderError {
         code: E_STATE,
         msg: format!("table `{t}` is not in state"),
     })
@@ -229,21 +234,21 @@ fn table<'s>(s: &'s State, t: &str) -> Result<&'s TableState, RenderError> {
 
 /// Index, check and FK names: unique per target (MySQL wants FK and check
 /// names unique per database, PG index names per schema).
-fn names(s: &State) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    for t in s.tables.values() {
-        out.extend(t.indexes.iter().map(|i| i.decl.name.clone()));
-        out.extend(t.decl.checks.iter().map(|c| c.name.clone()));
-        out.extend(t.decl.fks.iter().map(|f| f.name.clone()));
-    }
-    out
+fn name_taken(s: &State, name: &str) -> bool {
+    // A scan with no allocation: the old `BTreeSet<String>` of every name
+    // cost one clone per name per claim and dominated replay.
+    s.tables.values().any(|t| {
+        t.indexes.iter().any(|i| i.decl.name == name)
+            || t.decl.checks.iter().any(|c| c.name == name)
+            || t.decl.fks.iter().any(|f| f.name == name)
+    })
 }
 
 fn claim(s: &State, name: &str) -> Result<(), RenderError> {
     if name.len() > 63 {
         return err(E_STATE, format!("`{name}` is longer than 63 bytes"));
     }
-    if names(s).contains(name) {
+    if name_taken(s, name) {
         return err(E_STATE, format!("the name `{name}` is taken in state"));
     }
     Ok(())
@@ -416,7 +421,7 @@ fn add_table(s: &mut State, table: &TableDecl, indexes: &[IndexState]) -> Result
         indexes: Vec::new(),
     };
     fresh.decl.fks.clear();
-    s.tables.insert(table.name.clone(), fresh);
+    s.tables.insert(table.name.clone(), Arc::new(fresh));
     for ix in indexes {
         add_index(s, ix)?;
     }
@@ -493,15 +498,19 @@ pub fn apply(s: &mut State, op: &Op) -> Result<(), RenderError> {
                 code: E_STATE,
                 msg: format!("table `{from}` is not in state"),
             })?;
-            t.decl.name.clone_from(to);
-            for i in &mut t.indexes {
+            let tm = Arc::make_mut(&mut t);
+            tm.decl.name.clone_from(to);
+            for i in &mut tm.indexes {
                 i.decl.table.clone_from(to);
             }
             s.tables.insert(to.clone(), t);
+            // Copy only the tables that point at the renamed one.
             for ts in s.tables.values_mut() {
-                for f in &mut ts.decl.fks {
-                    if &f.ref_table == from {
-                        f.ref_table.clone_from(to);
+                if ts.decl.fks.iter().any(|f| &f.ref_table == from) {
+                    for f in &mut Arc::make_mut(ts).decl.fks {
+                        if &f.ref_table == from {
+                            f.ref_table.clone_from(to);
+                        }
                     }
                 }
             }
@@ -588,7 +597,11 @@ pub fn apply(s: &mut State, op: &Op) -> Result<(), RenderError> {
                 }
             }
             for other in s.tables.values_mut() {
-                for f in &mut other.decl.fks {
+                let hit = |f: &FkDecl| &f.ref_table == t && f.ref_columns.iter().any(|c| c == from);
+                if !other.decl.fks.iter().any(hit) {
+                    continue;
+                }
+                for f in &mut Arc::make_mut(other).decl.fks {
                     if &f.ref_table == t {
                         for c in &mut f.ref_columns {
                             if c == from {

@@ -9,5 +9,6 @@ pub mod defaults;
 pub mod exec;
 pub mod norm;
 pub mod ops;
+pub mod perf;
 pub mod probe;
 pub mod render;
