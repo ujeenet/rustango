@@ -79,6 +79,13 @@ impl CellDecode {
         json: json_as_is,
         on_bad: OnBadCell::Null,
     };
+
+    /// A bad cell is an error; JSON cells untouched.
+    #[cfg(feature = "migrate-v2-spike")]
+    pub(crate) const STRICT: Self = Self {
+        json: json_as_is,
+        on_bad: OnBadCell::Fail,
+    };
 }
 
 /// A [`OnBadCell::Null`] decode, which has no error to return.

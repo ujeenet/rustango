@@ -89,6 +89,9 @@ test_utils = []
 # pulls in nothing and costs a normal build nothing.
 testkit = []
 
+# SPIKE S1 (migrations engine v2, historical ORM). Throwaway; never ship.
+migrate-v2-spike = ["testkit", "dep:sha2"]
+
 # MySQL 8.0+ backend. Fully tri-dialect since v0.38: every framework
 # surface (ORM, migrations, admin, tenancy database-mode, jobs queue,
 # audit, media, contenttypes, permissions, inspectdb, ViewSet,
