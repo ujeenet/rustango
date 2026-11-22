@@ -757,6 +757,20 @@ async fn a_console_post_needs_csrf(pool: &Pool) {
     assert!(db_server::get(&env.registry, "nocsrf").await.is_err());
 }
 
+/// A NUL byte in a console form is a 400 and writes nothing.
+async fn a_nul_byte_in_a_console_form_is_400(pool: &Pool) {
+    let _g = env_lock().lock().await;
+    with_key();
+    let env = Env::new(pool).await;
+    seed_operator(&env).await;
+    let c = Console::boot(&env, true).await;
+    let resp = c
+        .post("/db-servers", "name=nul%00x&sqlite_dir=/tmp&active=on")
+        .await;
+    assert_eq!(resp.status().as_u16(), 400, "{}", body(resp).await);
+    assert!(db_server::get(&env.registry, "nul\0x").await.is_err());
+}
+
 /// Without tenant pools the console cannot tell who uses a server, so it
 /// does not delete it.
 async fn a_console_without_pools_does_not_delete(pool: &Pool) {
@@ -1117,6 +1131,7 @@ tri_dialect_test! {
         reseal_covers_server_passwords,
         reseal_covers_operator_totp,
         a_console_post_needs_csrf,
+        a_nul_byte_in_a_console_form_is_400,
         a_console_without_pools_does_not_delete,
         the_console_never_shows_the_password,
         the_password_is_sealed_and_never_shown,

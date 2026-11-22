@@ -5,25 +5,11 @@
 //! check, like `one_redirect_sanitizer`: the property is "nobody wrote
 //! the escaper again", which is a property of the source.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for e in entries.flatten() {
-        let p = e.path();
-        // Build output, and integration tests (they assert on escaped text).
-        if p.ends_with("target") || p.ends_with("tests") {
-            continue;
-        }
-        if p.is_dir() {
-            rs_files(&p, out);
-        } else if p.extension().is_some_and(|x| x == "rs") {
-            out.push(p);
-        }
-    }
-}
+#[path = "support/rust_files.rs"]
+mod rust_files;
+use rust_files::rust_files;
 
 /// Lines of non-test code that spell out the `<` entity. Any escaper
 /// has to, whatever its shape (match arm, `.replace` chain, table);
@@ -41,8 +27,13 @@ fn entity_lines(src: &str) -> Vec<(usize, &str)> {
 fn only_text_rs_escapes_html() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
-    rs_files(&root.join("src"), &mut files);
-    rs_files(&root.join("examples"), &mut files);
+    rust_files(&root.join("src"), &mut files);
+    rust_files(&root.join("examples"), &mut files);
+    // Integration tests assert on escaped text.
+    files.retain(|p| {
+        !p.strip_prefix(root)
+            .is_ok_and(|r| r.components().any(|c| c.as_os_str() == "tests"))
+    });
     assert!(files.len() > 100, "found only {} sources", files.len());
 
     let mut copies = Vec::new();

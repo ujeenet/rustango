@@ -2170,7 +2170,7 @@ async fn org_edit_submit(
     State(state): State<ConsoleState>,
     axum::extract::Path(slug): axum::extract::Path<String>,
     Extension(op): Extension<auth::Operator>,
-    Form(mut form): Form<std::collections::HashMap<String, String>>,
+    crate::forms::NulFreeForm(mut form): crate::forms::NulFreeForm,
 ) -> Response<Body> {
     use crate::core::Model as _;
 

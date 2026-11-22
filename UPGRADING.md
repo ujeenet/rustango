@@ -148,6 +148,12 @@ untouched.
 
 ---
 
+## 0.70.0
+
+- A write body or form value holding a NUL byte now answers 400 on every backend (admin, ViewSet, `CreateView`, `UpdateView`, `FormView`, `ListView` bulk actions, operator console forms, media JSON bodies, string keys in the URL); MySQL and SQLite used to store it. A JSON, array or hstore value with a `\u0000` escape is refused as a field error. The filter 400 message now reads "a value must not contain a NUL byte".
+- An admin inline row edit or delete refused by its hook on the locked row now answers 403 and rolls the parent edit back.
+- On MySQL, new `now()` column defaults (and new migration ledger and i18n tables) are `(UTC_TIMESTAMP(6))`. An existing column keeps `CURRENT_TIMESTAMP(6)`; alter it if rows rely on the default under a non-UTC session.
+
 ## 0.69.0
 
 - A ViewSet update that moves its row out of a queryset scope or the "view" hook now answers 403 and writes nothing, where it answered 204. Template `CreateView` and `UpdateView` do the same, and `CreateView` runs your "add" hook.

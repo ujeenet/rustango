@@ -1484,6 +1484,7 @@ async fn read_repeating_form(
         .map_err(|e| e.to_string())?;
     let pairs: Vec<(String, String)> =
         serde_urlencoded::from_bytes(&bytes).map_err(|e| e.to_string())?;
+    crate::list_params::reject_nul_in(pairs.iter().map(|(_, v)| v)).map_err(|e| e.to_string())?;
     let mut out: HashMap<String, Vec<String>> = HashMap::new();
     for (k, v) in pairs {
         out.entry(k).or_default().push(v);
@@ -2470,9 +2471,13 @@ fn success_url_fields<'t>(
 /// A URL-path PK (or lookup) value bound as the field's type, or `None`
 /// when it does not parse, so the caller 404s instead of a PG cast 500 (#1950).
 fn coerce_pk(field: &crate::core::FieldSchema, raw: &str) -> Option<SqlValue> {
-    crate::forms::parse_pk_string(field, raw)
-        .or_else(|_| crate::forms::parse_form_value(field, Some(raw)))
-        .ok()
+    match crate::forms::parse_pk_string(field, raw) {
+        // Only a type no key can have falls back; a refused key stays refused.
+        Err(crate::forms::FormError::UnsupportedPk { .. }) => {
+            crate::forms::parse_form_value(field, Some(raw)).ok()
+        }
+        parsed => parsed.ok(),
+    }
 }
 
 /// [`coerce_pk`] bound as the row stores it (a SQLite UUID key may be TEXT).
@@ -2505,7 +2510,7 @@ async fn handle_create_get(
 async fn handle_create_post(
     State(state): State<Arc<FormViewState>>,
     parts: Parts,
-    axum::Form(form): axum::Form<HashMap<String, String>>,
+    crate::forms::NulFreeForm(form): crate::forms::NulFreeForm,
 ) -> Response {
     let (mut columns, mut values, mut errors) = parse_form(
         state.schema,
@@ -2890,7 +2895,7 @@ async fn handle_update_post(
     State(state): State<Arc<FormViewState>>,
     Path(pk): Path<String>,
     parts: Parts,
-    axum::Form(form): axum::Form<HashMap<String, String>>,
+    crate::forms::NulFreeForm(form): crate::forms::NulFreeForm,
 ) -> Response {
     let Some(pk_field) = state.schema.primary_key() else {
         return template_error(&format!(
@@ -4473,7 +4478,7 @@ where
 async fn handle_form_view_post<F>(
     State(state): State<Arc<StandaloneFormViewState<F>>>,
     parts: Parts,
-    axum::extract::Form(payload): axum::extract::Form<HashMap<String, String>>,
+    crate::forms::NulFreeForm(payload): crate::forms::NulFreeForm,
 ) -> Response
 where
     F: crate::forms::Form,
@@ -4860,7 +4865,7 @@ mod tenant {
         State(state): State<Arc<TenantFormViewState>>,
         parts: Parts,
         t: TenantScope,
-        axum::Form(form): axum::Form<HashMap<String, String>>,
+        crate::forms::NulFreeForm(form): crate::forms::NulFreeForm,
     ) -> Response {
         let (mut columns, mut values, mut errors) = parse_form(
             state.schema,
@@ -4918,7 +4923,7 @@ mod tenant {
         Path(pk): Path<String>,
         parts: Parts,
         t: TenantScope,
-        axum::Form(form): axum::Form<HashMap<String, String>>,
+        crate::forms::NulFreeForm(form): crate::forms::NulFreeForm,
     ) -> Response {
         let Some(pk_field) = state.schema.primary_key() else {
             return template_error(&format!(
@@ -6212,6 +6217,7 @@ mod tests {
             SqlValue::String(s) => assert_eq!(s, "hello-world"),
             other => panic!("expected String, got {other:?}"),
         }
+        assert!(coerce_pk(pk, "a\0b").is_none(), "a NUL key reached a query");
     }
 
     /// `parse_form` collects required-missing errors for non-nullable

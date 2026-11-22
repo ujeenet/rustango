@@ -207,6 +207,52 @@ impl From<FormError> for FormErrors {
     }
 }
 
+/// A form body for a model write: `axum::Form`, with a NUL byte in any
+/// value refused as a 400 before it reaches a query (Postgres would 500).
+#[cfg(any(feature = "admin", feature = "template_views"))]
+pub(crate) struct NulFreeForm(pub HashMap<String, String>);
+
+#[cfg(any(feature = "admin", feature = "template_views"))]
+impl<S: Send + Sync> axum::extract::FromRequest<S> for NulFreeForm {
+    type Rejection = axum::response::Response;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        use axum::response::IntoResponse as _;
+        let axum::Form(form) = axum::Form::<HashMap<String, String>>::from_request(req, state)
+            .await
+            .map_err(axum::response::IntoResponse::into_response)?;
+        crate::list_params::reject_nul_in(form.values())
+            .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e.to_string()).into_response())?;
+        Ok(Self(form))
+    }
+}
+
+/// A JSON body for a write: `axum::Json`, with a NUL byte in any key or
+/// string refused as a 400 before it reaches a query (Postgres would 500).
+#[cfg(all(feature = "admin", feature = "media"))]
+pub(crate) struct NulFreeJson<T>(pub T);
+
+#[cfg(all(feature = "admin", feature = "media"))]
+impl<T: serde::de::DeserializeOwned, S: Send + Sync> axum::extract::FromRequest<S>
+    for NulFreeJson<T>
+{
+    type Rejection = axum::response::Response;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse as _;
+        let axum::Json(value) = axum::Json::<serde_json::Value>::from_request(req, state)
+            .await
+            .map_err(axum::response::IntoResponse::into_response)?;
+        crate::list_params::reject_nul_json(&value)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()).into_response())?;
+        // A body of the wrong shape is a 422, as `axum::Json` answers it.
+        serde_json::from_value(value)
+            .map(Self)
+            .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response())
+    }
+}
+
 // ------------------------------------------------------------------ low-level parsers (admin + ModelForm)
 
 /// Parse a single PK fragment from a URL path segment into an `SqlValue`.
@@ -234,7 +280,10 @@ pub fn parse_pk_string(field: &FieldSchema, raw: &str) -> Result<SqlValue, FormE
             .parse::<i64>()
             .map(SqlValue::I64)
             .map_err(|e| make_parse_err("i64", &e)),
-        FieldType::String => Ok(SqlValue::String(raw.to_owned())),
+        // Postgres refuses NUL in text: no key may carry one to a query.
+        FieldType::String => crate::list_params::reject_nul(raw)
+            .map(|k| SqlValue::String(k.to_owned()))
+            .map_err(|e| make_parse_err("String", &e)),
         FieldType::Uuid => uuid::Uuid::parse_str(raw)
             .map(SqlValue::Uuid)
             .map_err(|e| make_parse_err("Uuid", &e)),
@@ -411,14 +460,10 @@ pub(crate) fn parse_body_value(
             if raw.is_empty() {
                 Ok(SqlValue::Json(serde_json::json!({})))
             } else {
-                serde_json::from_str::<serde_json::Value>(raw)
+                json_text(raw)
+                    .map_err(|e| make_parse_err("Json", &e))?
                     .map(SqlValue::Json)
-                    .map_err(|e| FormError::Parse {
-                        field: field.name.to_owned(),
-                        ty: "Json",
-                        value: raw.to_owned(),
-                        detail: e.to_string(),
-                    })
+                    .map_err(|e| make_parse_err("Json", &e))
             }
         }
         // `123.45` / `-0.001`, or `1e3` as a JSON number may spell it;
@@ -464,18 +509,18 @@ pub(crate) fn parse_body_value(
         // input (`a, b, c`). Empty / whitespace-only input → empty array.
         // A JSON array (a REST body) is read as one, so items keep commas.
         FieldType::Array(elem) => {
-            let parts: Vec<String> =
-                match serde_json::from_str::<Vec<serde_json::Value>>(raw.trim()) {
-                    Ok(items) => items
-                        .into_iter()
-                        .map(|v| match v {
-                            serde_json::Value::String(s) => s,
-                            other => other.to_string(),
-                        })
-                        .collect(),
-                    Err(_) if raw.trim().is_empty() => Vec::new(),
-                    Err(_) => raw.split(',').map(|p| p.trim().to_owned()).collect(),
-                };
+            let json = json_text(raw.trim()).map_err(|e| make_parse_err("array", &e))?;
+            let parts: Vec<String> = match json {
+                Ok(serde_json::Value::Array(items)) => items
+                    .into_iter()
+                    .map(|v| match v {
+                        serde_json::Value::String(s) => s,
+                        other => other.to_string(),
+                    })
+                    .collect(),
+                _ if raw.trim().is_empty() => Vec::new(),
+                _ => raw.split(',').map(|p| p.trim().to_owned()).collect(),
+            };
             match elem {
                 crate::core::ArrayElem::Text => Ok(SqlValue::Array(
                     parts.into_iter().map(SqlValue::String).collect(),
@@ -500,7 +545,9 @@ pub(crate) fn parse_body_value(
         // #342 — PG hstore column from a form field: a JSON object
         // (`{"k":"v"}`, null values allowed) parsed into key→value pairs.
         FieldType::HStore => {
-            let map: std::collections::BTreeMap<String, Option<String>> = serde_json::from_str(raw)
+            let map: std::collections::BTreeMap<String, Option<String>> = json_text(raw)
+                .map_err(|e| make_parse_err("hstore (JSON object)", &e))?
+                .and_then(serde_json::from_value)
                 .map_err(|e| make_parse_err("hstore (JSON object)", &e))?;
             Ok(SqlValue::HStore(map.into_iter().collect()))
         }
@@ -518,6 +565,17 @@ pub(crate) fn parse_body_value(
                 .map_err(|e| make_parse_err("geometry (JSON {x, y, srid?})", &e))?;
             Ok(p.into())
         }
+    }
+}
+
+/// `raw` as JSON: the outer error is a NUL in any key or string, which no
+/// caller may store (Postgres refuses it); the inner one is text that is not JSON.
+fn json_text(
+    raw: &str,
+) -> Result<Result<serde_json::Value, serde_json::Error>, crate::list_params::NulInValue> {
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(v) => crate::list_params::reject_nul_json(&v).map(|()| Ok(v)),
+        Err(e) => Ok(Err(e)),
     }
 }
 
@@ -2162,6 +2220,36 @@ mod model_form_tests {
         }
         let err = ModelFormFor::<Priced>::from_json_slice(b"[1]").expect_err("array root");
         assert!(!err.non_field().is_empty());
+    }
+
+    /// A string key with a NUL byte never parses: Postgres would 500 on it.
+    #[test]
+    fn a_nul_in_a_string_key_is_refused() {
+        let f = crate::core::FieldSchema::new("code", "code", FieldType::String);
+        let err = parse_pk_string(&f, "a\0b").expect_err("nul").to_string();
+        assert!(err.contains("NUL"), "{err}");
+        assert!(parse_pk_string(&f, "ab").is_ok());
+    }
+
+    /// A `\u0000` escape in a value read as JSON text is refused: Postgres
+    /// text, jsonb and hstore cannot store it. Plain text still parses.
+    #[test]
+    fn a_nul_escape_in_json_text_is_refused() {
+        use crate::core::{ArrayElem, FieldSchema};
+        let fields = [
+            FieldSchema::new("meta", "meta", FieldType::Json),
+            FieldSchema::new("tags", "tags", FieldType::Array(ArrayElem::Text)),
+            FieldSchema::new("attrs", "attrs", FieldType::HStore),
+        ];
+        for (f, bad, ok) in [
+            (&fields[0], r#"{"k":"a\u0000b"}"#, r#"{"k":"ab"}"#),
+            (&fields[1], r#"["a","b\u0000c"]"#, r#"["a","bc"]"#),
+            (&fields[2], r#"{"k\u0000":"v"}"#, r#"{"k":"v"}"#),
+        ] {
+            let err = parse_form_value(f, Some(bad)).expect_err(bad).to_string();
+            assert!(err.contains("NUL"), "{bad}: {err}");
+            assert!(parse_form_value(f, Some(ok)).is_ok(), "{ok}");
+        }
     }
 
     /// NaN and inf pass every bound; no backend stores them as sent.

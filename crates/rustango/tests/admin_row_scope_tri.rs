@@ -249,11 +249,32 @@ rustango::register_queryset_scope!("rowscope_race", owner_one);
 rustango::register_object_permission!("rowscope_race", "change", not_locked_title);
 rustango::register_object_permission!("rowscope_race", "delete", not_locked_title);
 
+/// An inline row of `rowscope_race` under the same hooks.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "rowscope_racechild")]
+#[allow(dead_code)]
+pub struct RaceChild {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub race_id: i64,
+    #[rustango(max_length = 64)]
+    pub title: String,
+}
+rustango::register_admin_inline!(
+    parent = "rowscope_race",
+    child = "rowscope_racechild",
+    fk = "race_id",
+    fields = &["title"],
+);
+rustango::register_object_permission!("rowscope_racechild", "change", not_locked_title);
+rustango::register_object_permission!("rowscope_racechild", "delete", not_locked_title);
+
 async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
     fresh_table::<Doc>(pool).await;
     fresh_table::<Bulk>(pool).await;
     fresh_table::<Race>(pool).await;
+    fresh_table::<RaceChild>(pool).await;
     drop_table(pool, "rowscope_note").await;
     fresh_table::<Item>(pool).await;
     fresh_table::<Note>(pool).await;
@@ -999,8 +1020,8 @@ async fn races(pool: &Pool) -> Vec<(String, i64)> {
     rows.into_iter().map(|r| (r.title, r.owner_id)).collect()
 }
 
-/// Sets `column = value` on a `rowscope_race` row titled `flip-…` (this
-/// backend's only) when an admin pre-save or pre-delete signal names it:
+/// Sets `column = value` on a `rowscope_race` (or inline child) row titled `flip-…`
+/// (this backend's only) when an admin pre-save or pre-delete signal names it:
 /// the change lands after the admin's first read, before its write.
 struct Flip(
     rustango::signals::admin::ReceiverId,
@@ -1016,11 +1037,13 @@ impl Flip {
                 let (pool, value) = (pool.clone(), value.clone());
                 async move {
                     let Ok(pk) = pk.parse::<i64>() else { return };
-                    if table != "rowscope_race" {
-                        return;
-                    }
+                    let schema = match table {
+                        "rowscope_race" => Race::SCHEMA,
+                        "rowscope_racechild" => RaceChild::SCHEMA,
+                        _ => return,
+                    };
                     let q = rustango::core::UpdateQuery::new(
-                        Race::SCHEMA,
+                        schema,
                         vec![rustango::core::Assignment::new(column, value)],
                         rustango::core::WhereExpr::and_predicates(vec![
                             Filter::new("id", Op::Eq, SqlValue::I64(pk)),
@@ -1067,6 +1090,92 @@ async fn admin_writes_judge_the_locked_row(pool: &Pool) {
         races(pool).await,
         [locked(), locked(), ("open-three".to_owned(), 1), locked()],
         "a refused write wrote"
+    );
+}
+
+async fn race_children(pool: &Pool) -> Vec<String> {
+    let mut rows = RaceChild::objects().fetch(pool).await.expect("fetch");
+    rows.sort_by_key(|r| *r.id.get().expect("pk"));
+    rows.into_iter().map(|r| r.title).collect()
+}
+
+/// An inline row edit or delete the hooks would refuse by the time it is
+/// written is a 403, and the parent edit rolls back with it.
+async fn inline_writes_judge_the_locked_row(pool: &Pool) {
+    let _flip = Flip::on(pool, "title", SqlValue::from("locked"));
+    let parent = seed_race(pool, "open-p").await;
+    let mut ids = Vec::new();
+    for title in ["flip-edit", "flip-delete"] {
+        let mut c = RaceChild {
+            id: Auto::default(),
+            race_id: parent,
+            title: title.into(),
+        };
+        c.insert(pool).await.expect("insert child");
+        ids.push(*c.id.get().expect("pk"));
+    }
+    let uri = format!("/rowscope_race/{parent}");
+    let head = "title=open-renamed&owner_id=1\
+        &rowscope_racechild-TOTAL_FORMS=1&rowscope_racechild-INITIAL_FORMS=1";
+    for (what, row) in [
+        ("edit", format!("rowscope_racechild-0-id={}&rowscope_racechild-0-title=edited", ids[0])),
+        ("delete", format!("rowscope_racechild-0-id={}&rowscope_racechild-0-title=flip-delete&rowscope_racechild-0-DELETE=on", ids[1])),
+    ] {
+        let (status, body) = post(pool, &uri, &format!("{head}&{row}")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{what}: {body}");
+    }
+    assert_eq!(
+        race_children(pool).await,
+        ["locked", "locked"],
+        "a refused inline write wrote"
+    );
+    assert_eq!(
+        races(pool).await,
+        [("open-p".to_owned(), 1)],
+        "the parent edit was kept"
+    );
+}
+
+/// Postgres refuses a NUL byte in text: an admin create, edit or inline row
+/// holding one is a 400 on every backend, and nothing is written.
+async fn admin_form_nul_bytes_are_400(pool: &Pool) {
+    let (status, body) = post(pool, "/rowscope_item", "title=a%00b&owner_id=1").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "create: {body}");
+    assert!(body.contains("NUL"), "create: {body}");
+    assert!(items(pool).await.is_empty(), "create wrote");
+    let mine = seed(pool, "mine", 1).await;
+    let uri = format!("/rowscope_item/{mine}");
+    let (status, body) = post(pool, &uri, "title=a%00b&owner_id=1").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "edit: {body}");
+    let p = seed_parent(pool).await;
+    seed_child(pool, "a", p, "one", false).await;
+    let form = "name=renamed&rowscope_child-TOTAL_FORMS=1&rowscope_child-INITIAL_FORMS=1\
+        &rowscope_child-0-code=a&rowscope_child-0-label=a%00b";
+    let (status, body) = post(pool, &format!("/rowscope_parent/{p}"), form).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "inline: {body}");
+    assert_eq!(items(pool).await, [("mine".to_owned(), 1)], "edit wrote");
+    assert_eq!(
+        child(pool, "a").await.expect("a").label,
+        "one",
+        "inline wrote"
+    );
+    assert_eq!(parent_names(pool).await, ["p"], "parent edit kept");
+}
+
+/// A NUL byte in a string key, in the path or a bulk selection, is a 400.
+async fn admin_nul_keys_are_400(pool: &Pool) {
+    let p = seed_parent(pool).await;
+    seed_child(pool, "a", p, "one", false).await;
+    let (status, body) = get(pool, "/rowscope_child/a%00b").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "path: {body}");
+    let id = seed_race(pool, "open-1").await;
+    let form = format!("action=delete_selected&_selected={id}&_selected=a%00b");
+    let (status, body) = post(pool, "/rowscope_race/__action", &form).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "bulk: {body}");
+    assert_eq!(
+        races(pool).await,
+        [("open-1".to_owned(), 1)],
+        "bulk deleted"
     );
 }
 
@@ -1140,6 +1249,9 @@ tri_dialect_test! {
     setup: setup,
     scenarios: [
         admin_writes_judge_the_locked_row,
+        inline_writes_judge_the_locked_row,
+        admin_form_nul_bytes_are_400,
+        admin_nul_keys_are_400,
         admin_writes_stay_in_the_scope,
         admin_writes_judge_a_concurrent_change,
         write_the_view_hook_hides_is_refused,

@@ -152,3 +152,34 @@ async fn form_view_shows_form_wide_errors() {
     let body = std::str::from_utf8(&body_bytes).unwrap();
     assert_eq!(body, "start must be at most end");
 }
+
+#[derive(rustango::Form, Default, Debug)]
+pub struct NoteForm {
+    pub note: String,
+}
+
+/// A NUL byte in a `FormView` POST is a 400; the handler never runs.
+#[tokio::test]
+async fn form_view_refuses_a_nul_byte() {
+    const CSRF: &str = "tv-form-token-tv-form-token-tv-form-token-x";
+    let mut tera = Tera::default();
+    tera.add_raw_template("tv_note.html", "note").unwrap();
+    let app = rustango::template_views::FormView::<NoteForm>::for_form(|_f| async {
+        panic!("the handler ran")
+    })
+    .template("tv_note.html")
+    .router("/note", Arc::new(tera));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/note")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("cookie", format!("rustango_csrf={CSRF}"))
+                .body(Body::from(format!("_csrf={CSRF}&note=a%00b")))
+                .unwrap(),
+        )
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}

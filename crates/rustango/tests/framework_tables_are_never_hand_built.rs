@@ -55,16 +55,9 @@ fn crate_dir() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn rust_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
-    for entry in std::fs::read_dir(dir).expect("read dir").flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            rust_files(&path, out);
-        } else if path.extension().is_some_and(|e| e == "rs") {
-            out.push(path);
-        }
-    }
-}
+#[path = "support/rust_files.rs"]
+mod rust_files;
+use rust_files::rust_files;
 
 /// Every `table = "rustango_*"` the framework's own models declare.
 fn framework_tables() -> BTreeSet<String> {
