@@ -394,7 +394,7 @@ async fn run_unknown_subcommand_is_validation_error() {
     let err = manage::run(&pool, &dir, args(&["frobnicate"]))
         .await
         .unwrap_err();
-    matches!(err, MigrateError::Validation(_));
+    assert!(matches!(err, MigrateError::Validation(_)), "{err:?}");
     assert!(format!("{err}").contains("frobnicate"));
 }
 

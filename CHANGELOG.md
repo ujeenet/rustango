@@ -13,6 +13,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Fixed
 
 - Admin inline row edits and deletes judge the row locked in the save's transaction, as the parent's edit does, so a change between the check and the write is seen.
+- `FileCache` on Windows retries a read that races a `set` replacing the same file, instead of failing with "Access is denied".
 
 ## [0.69.0] — 2026-11-21
 

@@ -1532,13 +1532,23 @@ impl FileCache {
     }
 
     fn read_entry(path: &std::path::Path) -> Result<Entry, CacheError> {
-        match std::fs::read(path) {
-            Ok(b) => Ok(match Self::decode(&b) {
-                Some((_, v, false, at)) => Entry::Live(v, at),
-                _ => Entry::Dead,
-            }),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Entry::Missing),
-            Err(e) => Err(CacheError::Connection(format!("read: {e}"))),
+        let mut retries = 0;
+        loop {
+            match std::fs::read(path) {
+                Ok(b) => {
+                    return Ok(match Self::decode(&b) {
+                        Some((_, v, false, at)) => Entry::Live(v, at),
+                        _ => Entry::Dead,
+                    })
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Entry::Missing),
+                // Runs on the blocking pool, so a short sleep parks no async worker.
+                Err(e) if retries < 4 && is_replace_race(&e) => {
+                    retries += 1;
+                    std::thread::sleep(Duration::from_millis(1 << retries));
+                }
+                Err(e) => return Err(CacheError::Connection(format!("read: {e}"))),
+            }
         }
     }
 
@@ -1721,6 +1731,17 @@ enum Entry {
     Missing,
     Dead,
     Live(Vec<u8>, i64),
+}
+
+/// Windows refuses to open a file while a rename replaces it: access
+/// denied (5) for the pending-delete old file, or a sharing violation (32).
+fn is_replace_race(e: &std::io::Error) -> bool {
+    cfg!(windows) && is_windows_replace_race_code(e.raw_os_error())
+}
+
+/// Split out so the codes are tested on every platform; on Unix 5 is EIO.
+fn is_windows_replace_race_code(code: Option<i32>) -> bool {
+    matches!(code, Some(5 | 32))
 }
 
 /// Held stripe lock, released on drop. `None` where the filesystem has no locks.
@@ -2202,6 +2223,19 @@ mod file_cache_tests {
         let got = block_on_no_runtime(cache.get("k")).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(got.as_deref(), Some("v"));
+    }
+
+    /// Only the Windows mid-replace codes retry, and only on Windows.
+    #[test]
+    fn a_read_retries_only_a_windows_replace_race() {
+        assert!(is_windows_replace_race_code(Some(5)));
+        assert!(is_windows_replace_race_code(Some(32)));
+        assert!(!is_windows_replace_race_code(Some(2)));
+        assert!(!is_windows_replace_race_code(None));
+        let denied = std::io::Error::from_raw_os_error(5);
+        assert_eq!(is_replace_race(&denied), cfg!(windows));
+        let not_found = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert!(!is_replace_race(&not_found));
     }
 
     /// Racing writers and readers on one key never see it missing.

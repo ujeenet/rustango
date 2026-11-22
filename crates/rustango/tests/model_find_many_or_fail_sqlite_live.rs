@@ -60,7 +60,10 @@ async fn find_many_or_fail_errors_when_any_pk_missing() {
     let mut request = ids;
     request.push(999_999);
     let err = Post::find_many_or_fail(request, &pool).await.unwrap_err();
-    matches!(err, ExecError::Driver(sqlx::Error::RowNotFound));
+    assert!(
+        matches!(err, ExecError::Driver(sqlx::Error::RowNotFound)),
+        "{err:?}"
+    );
 }
 
 #[tokio::test]

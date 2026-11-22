@@ -22,21 +22,11 @@
 //! of the drain, even one with its own `with_graceful_shutdown` (#1948).
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-fn rust_files(root: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            rust_files(&path, out);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-            out.push(path);
-        }
-    }
-}
+#[path = "support/rust_files.rs"]
+mod rust_files;
+use rust_files::rust_files;
 
 #[test]
 fn no_bare_axum_serve_in_the_crate() {

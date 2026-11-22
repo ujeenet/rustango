@@ -276,7 +276,7 @@ fn load_missing_file_is_io_error() {
     let path = tmp_path("definitely_does_not_exist_aaaa");
     let _ = std::fs::remove_file(&path);
     let err = file::load(&path).unwrap_err();
-    matches!(err, MigrateError::Io(_));
+    assert!(matches!(err, MigrateError::Io(_)), "{err:?}");
 }
 
 // ---------- ordering ----------
@@ -382,7 +382,7 @@ fn list_dir_propagates_malformed_file_as_json_error() {
     std::fs::write(dir.join("0001_bad.json"), "{not valid json").unwrap();
     let err = file::list_dir(&dir).unwrap_err();
     let _ = std::fs::remove_dir_all(&dir);
-    matches!(err, MigrateError::Json(_));
+    assert!(matches!(err, MigrateError::Json(_)), "{err:?}");
 }
 
 #[test]
