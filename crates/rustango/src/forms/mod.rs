@@ -431,19 +431,10 @@ pub(crate) fn parse_body_value(
             if raw.is_empty() {
                 Ok(SqlValue::Json(serde_json::json!({})))
             } else {
-                // A `\u0000` escape is valid JSON that Postgres jsonb refuses.
-                serde_json::from_str::<serde_json::Value>(raw)
-                    .map_err(|e| e.to_string())
-                    .and_then(|v| {
-                        crate::list_params::reject_nul_json(&v).map_err(|e| e.to_string())?;
-                        Ok(SqlValue::Json(v))
-                    })
-                    .map_err(|detail| FormError::Parse {
-                        field: field.name.to_owned(),
-                        ty: "Json",
-                        value: raw.to_owned(),
-                        detail,
-                    })
+                json_text(raw)
+                    .map_err(|e| make_parse_err("Json", &e))?
+                    .map(SqlValue::Json)
+                    .map_err(|e| make_parse_err("Json", &e))
             }
         }
         // `123.45` / `-0.001`, or `1e3` as a JSON number may spell it;
@@ -489,18 +480,18 @@ pub(crate) fn parse_body_value(
         // input (`a, b, c`). Empty / whitespace-only input → empty array.
         // A JSON array (a REST body) is read as one, so items keep commas.
         FieldType::Array(elem) => {
-            let parts: Vec<String> =
-                match serde_json::from_str::<Vec<serde_json::Value>>(raw.trim()) {
-                    Ok(items) => items
-                        .into_iter()
-                        .map(|v| match v {
-                            serde_json::Value::String(s) => s,
-                            other => other.to_string(),
-                        })
-                        .collect(),
-                    Err(_) if raw.trim().is_empty() => Vec::new(),
-                    Err(_) => raw.split(',').map(|p| p.trim().to_owned()).collect(),
-                };
+            let json = json_text(raw.trim()).map_err(|e| make_parse_err("array", &e))?;
+            let parts: Vec<String> = match json {
+                Ok(serde_json::Value::Array(items)) => items
+                    .into_iter()
+                    .map(|v| match v {
+                        serde_json::Value::String(s) => s,
+                        other => other.to_string(),
+                    })
+                    .collect(),
+                _ if raw.trim().is_empty() => Vec::new(),
+                _ => raw.split(',').map(|p| p.trim().to_owned()).collect(),
+            };
             match elem {
                 crate::core::ArrayElem::Text => Ok(SqlValue::Array(
                     parts.into_iter().map(SqlValue::String).collect(),
@@ -525,7 +516,9 @@ pub(crate) fn parse_body_value(
         // #342 — PG hstore column from a form field: a JSON object
         // (`{"k":"v"}`, null values allowed) parsed into key→value pairs.
         FieldType::HStore => {
-            let map: std::collections::BTreeMap<String, Option<String>> = serde_json::from_str(raw)
+            let map: std::collections::BTreeMap<String, Option<String>> = json_text(raw)
+                .map_err(|e| make_parse_err("hstore (JSON object)", &e))?
+                .and_then(serde_json::from_value)
                 .map_err(|e| make_parse_err("hstore (JSON object)", &e))?;
             Ok(SqlValue::HStore(map.into_iter().collect()))
         }
@@ -543,6 +536,17 @@ pub(crate) fn parse_body_value(
                 .map_err(|e| make_parse_err("geometry (JSON {x, y, srid?})", &e))?;
             Ok(p.into())
         }
+    }
+}
+
+/// `raw` as JSON: the outer error is a NUL in any key or string, which no
+/// caller may store (Postgres refuses it); the inner one is text that is not JSON.
+fn json_text(
+    raw: &str,
+) -> Result<Result<serde_json::Value, serde_json::Error>, crate::list_params::NulInValue> {
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(v) => crate::list_params::reject_nul_json(&v).map(|()| Ok(v)),
+        Err(e) => Ok(Err(e)),
     }
 }
 
@@ -2187,6 +2191,27 @@ mod model_form_tests {
         }
         let err = ModelFormFor::<Priced>::from_json_slice(b"[1]").expect_err("array root");
         assert!(!err.non_field().is_empty());
+    }
+
+    /// A `\u0000` escape in a value read as JSON text is refused: Postgres
+    /// text, jsonb and hstore cannot store it. Plain text still parses.
+    #[test]
+    fn a_nul_escape_in_json_text_is_refused() {
+        use crate::core::{ArrayElem, FieldSchema};
+        let fields = [
+            FieldSchema::new("meta", "meta", FieldType::Json),
+            FieldSchema::new("tags", "tags", FieldType::Array(ArrayElem::Text)),
+            FieldSchema::new("attrs", "attrs", FieldType::HStore),
+        ];
+        for (f, bad, ok) in [
+            (&fields[0], r#"{"k":"a\u0000b"}"#, r#"{"k":"ab"}"#),
+            (&fields[1], r#"["a","b\u0000c"]"#, r#"["a","bc"]"#),
+            (&fields[2], r#"{"k\u0000":"v"}"#, r#"{"k":"v"}"#),
+        ] {
+            let err = parse_form_value(f, Some(bad)).expect_err(bad).to_string();
+            assert!(err.contains("NUL"), "{bad}: {err}");
+            assert!(parse_form_value(f, Some(ok)).is_ok(), "{ok}");
+        }
     }
 
     /// NaN and inf pass every bound; no backend stores them as sent.
