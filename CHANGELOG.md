@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.70.0] — 2026-11-22
+
 ### Changed
 
 - **Breaking:** a NUL byte in an admin form or bulk action (inline rows too), a ViewSet create or update body, a `CreateView` / `UpdateView` / `FormView` form, a `ListView` bulk action, an operator console org or database server form, a media JSON body, or a string key in the URL is a 400 on every backend (a template view key answers 404, as any key that does not parse). Postgres failed with a 500; MySQL and SQLite stored it. The NUL refusal, for filters too, reads "a value must not contain a NUL byte".

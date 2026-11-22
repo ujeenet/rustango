@@ -148,7 +148,7 @@ untouched.
 
 ---
 
-## Unreleased
+## 0.70.0
 
 - A write body or form value holding a NUL byte now answers 400 on every backend (admin, ViewSet, `CreateView`, `UpdateView`, `FormView`, `ListView` bulk actions, operator console forms, media JSON bodies, string keys in the URL); MySQL and SQLite used to store it. A JSON, array or hstore value with a `\u0000` escape is refused as a field error. The filter 400 message now reads "a value must not contain a NUL byte".
 - An admin inline row edit or delete refused by its hook on the locked row now answers 403 and rolls the parent edit back.
