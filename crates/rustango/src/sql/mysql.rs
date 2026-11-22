@@ -574,10 +574,8 @@ impl Dialect for MySql {
     /// Translate Postgres-native `DEFAULT` expressions to MySQL
     /// spelling.
     ///
-    /// - `now()` becomes `CURRENT_TIMESTAMP(6)`. MySQL wants the
-    ///   default's precision to match the column, and a `DateTime`
-    ///   column is `DATETIME(6)`; without the `(6)` it rejects the
-    ///   default outright.
+    /// - `now()` becomes `(UTC_TIMESTAMP(6))`, the 8.0.13+ expression form:
+    ///   `CURRENT_TIMESTAMP` follows the session time zone on `DATETIME`.
     /// - `gen_random_uuid()` becomes the 8.0.13+ expression `(UUID())`.
     /// - `'<lit>'::<type>` becomes `'<lit>'`.
     /// - A JSON, TEXT or BLOB column takes no literal default, only
@@ -590,7 +588,7 @@ impl Dialect for MySql {
         let mut out = expr.trim().to_owned();
         match out.as_str() {
             "now()" | "NOW()" | "current_timestamp" | "CURRENT_TIMESTAMP" => {
-                out = "CURRENT_TIMESTAMP(6)".to_owned();
+                return format!("({})", self.utc_now_sql());
             }
             e if super::dialect::is_uuid_expr(e) => return "(UUID())".to_owned(),
             _ => {
@@ -1580,10 +1578,14 @@ mod tests {
         );
         // Non-LOB scalars are never wrapped.
         assert_eq!(MySql.translate_default_expr("0", "i64", None), "0");
-        // now() still becomes the (6)-precision form.
+        // now() is UTC whatever the session zone, in the expression form.
         assert_eq!(
             MySql.translate_default_expr("now()", "datetime", None),
-            "CURRENT_TIMESTAMP(6)"
+            "(UTC_TIMESTAMP(6))"
+        );
+        assert_eq!(
+            MySql.timestamp_now_column(),
+            "DATETIME(6) NOT NULL DEFAULT (UTC_TIMESTAMP(6))"
         );
     }
 
