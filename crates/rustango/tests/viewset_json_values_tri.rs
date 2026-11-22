@@ -233,6 +233,51 @@ async fn non_finite_float_is_refused(pool: &Pool) {
     assert!(rows(pool).await.is_empty());
 }
 
+/// A NUL byte in a create, bulk create, PUT, PATCH or urlencoded body is a
+/// 400 on every backend, and nothing is written.
+async fn a_nul_byte_in_a_body_is_400(pool: &Pool) {
+    let (status, body) = send(pool, Method::POST, "/items", r#"{"nickname":"n"}"#).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = rows(pool).await[0].id.get().copied().unwrap();
+    let item = format!("/items/{id}");
+    for (method, uri, body) in [
+        (Method::POST, "/items", r#"{"nickname":"a\u0000b"}"#),
+        (
+            Method::POST,
+            "/items",
+            r#"[{"nickname":"ok"},{"nickname":"a\u0000b"}]"#,
+        ),
+        (
+            Method::PUT,
+            item.as_str(),
+            r#"{"nickname":"a\u0000b","qty":0,"label":"x"}"#,
+        ),
+        (Method::PATCH, item.as_str(), r#"{"label":"a\u0000b"}"#),
+    ] {
+        let (status, resp) = send(pool, method.clone(), uri, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{method} {body}: {resp}");
+        assert!(resp.contains("NUL"), "{method} {body}: {resp}");
+    }
+    let app = ViewSet::for_model(Item::SCHEMA, &["id", "nickname", "qty", "label"])
+        .allow_anonymous()
+        .router("/items", pool.clone());
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/items")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from("nickname=a%00b"))
+        .unwrap();
+    let status = app.oneshot(req).await.unwrap().status();
+    assert_eq!(status, StatusCode::BAD_REQUEST, "urlencoded");
+    let got = rows(pool).await;
+    assert_eq!(got.len(), 1, "a refused create wrote");
+    assert_eq!(
+        (got[0].nickname.as_deref(), got[0].label.as_str()),
+        (Some("n"), "x")
+    );
+    clear(pool).await;
+}
+
 /// `null` on a NOT NULL field is a 400 on PUT and PATCH, never a skip,
 /// a NULL or a `""`.
 async fn null_on_a_not_null_field_is_refused(pool: &Pool) {
@@ -256,6 +301,7 @@ tri_dialect_test! {
     setup: setup,
     scenarios: [
         writes_roll_back_with_the_callers_block,
+        a_nul_byte_in_a_body_is_400,
         null_on_a_not_null_field_is_refused,
         empty_string_is_not_null,
         decimal_number_keeps_its_digits,

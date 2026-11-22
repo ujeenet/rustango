@@ -450,6 +450,26 @@ async fn a_nul_byte_in_a_list_filter_or_search_is_400(pool: &Pool) {
     }
 }
 
+/// A create or update form value with a NUL byte is a 400 on every backend; nothing is written.
+async fn a_nul_byte_in_a_form_is_400(pool: &Pool) {
+    let bad = format!("{}&note=a%00b", form("2026-09-29", 7, true));
+    let (status, body) = send(pool, Method::POST, "/events/new", &bad).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "create: {body}");
+    assert!(events(pool).await.is_empty(), "create wrote");
+    let ok = format!("{}&note=n", form("2026-09-29", 7, true));
+    let (status, body) = send(pool, Method::POST, "/events/new", &ok).await;
+    assert!(status.is_redirection(), "{status} {body}");
+    let pk = *events(pool).await[0].id.get().expect("pk");
+    let uri = format!("/events/{pk}/edit");
+    let (status, body) = send(pool, Method::POST, &uri, &bad).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "update: {body}");
+    assert_eq!(
+        events(pool).await[0].note.as_deref(),
+        Some("n"),
+        "update wrote"
+    );
+}
+
 /// A string PK that looks like a UUID must bind as text, not uuid.
 async fn fk_display_binds_the_target_pk_type(pool: &Pool) {
     let tag = Tag {
@@ -1047,6 +1067,7 @@ tri_dialect_test! {
         create_and_update_bind_typed_values,
         list_filters_bind_typed_values,
         a_nul_byte_in_a_list_filter_or_search_is_400,
+        a_nul_byte_in_a_form_is_400,
         fk_display_binds_the_target_pk_type,
         garbage_url_pk_is_a_404,
         huge_page_is_an_empty_page,

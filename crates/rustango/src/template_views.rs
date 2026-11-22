@@ -2505,7 +2505,7 @@ async fn handle_create_get(
 async fn handle_create_post(
     State(state): State<Arc<FormViewState>>,
     parts: Parts,
-    axum::Form(form): axum::Form<HashMap<String, String>>,
+    crate::forms::NulFreeForm(form): crate::forms::NulFreeForm,
 ) -> Response {
     let (mut columns, mut values, mut errors) = parse_form(
         state.schema,
@@ -2890,7 +2890,7 @@ async fn handle_update_post(
     State(state): State<Arc<FormViewState>>,
     Path(pk): Path<String>,
     parts: Parts,
-    axum::Form(form): axum::Form<HashMap<String, String>>,
+    crate::forms::NulFreeForm(form): crate::forms::NulFreeForm,
 ) -> Response {
     let Some(pk_field) = state.schema.primary_key() else {
         return template_error(&format!(
@@ -4860,7 +4860,7 @@ mod tenant {
         State(state): State<Arc<TenantFormViewState>>,
         parts: Parts,
         t: TenantScope,
-        axum::Form(form): axum::Form<HashMap<String, String>>,
+        crate::forms::NulFreeForm(form): crate::forms::NulFreeForm,
     ) -> Response {
         let (mut columns, mut values, mut errors) = parse_form(
             state.schema,
@@ -4918,7 +4918,7 @@ mod tenant {
         Path(pk): Path<String>,
         parts: Parts,
         t: TenantScope,
-        axum::Form(form): axum::Form<HashMap<String, String>>,
+        crate::forms::NulFreeForm(form): crate::forms::NulFreeForm,
     ) -> Response {
         let Some(pk_field) = state.schema.primary_key() else {
             return template_error(&format!(

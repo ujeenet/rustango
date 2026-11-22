@@ -207,6 +207,26 @@ impl From<FormError> for FormErrors {
     }
 }
 
+/// A form body for a model write: `axum::Form`, with a NUL byte in any
+/// value refused as a 400 before it reaches a query (Postgres would 500).
+#[cfg(any(feature = "admin", feature = "template_views"))]
+pub(crate) struct NulFreeForm(pub HashMap<String, String>);
+
+#[cfg(any(feature = "admin", feature = "template_views"))]
+impl<S: Send + Sync> axum::extract::FromRequest<S> for NulFreeForm {
+    type Rejection = axum::response::Response;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        use axum::response::IntoResponse as _;
+        let axum::Form(form) = axum::Form::<HashMap<String, String>>::from_request(req, state)
+            .await
+            .map_err(axum::response::IntoResponse::into_response)?;
+        crate::list_params::reject_nul_in(form.values())
+            .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e.to_string()).into_response())?;
+        Ok(Self(form))
+    }
+}
+
 // ------------------------------------------------------------------ low-level parsers (admin + ModelForm)
 
 /// Parse a single PK fragment from a URL path segment into an `SqlValue`.
