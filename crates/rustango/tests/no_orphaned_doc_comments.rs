@@ -31,7 +31,7 @@
 //! from a struct's own documentation by reading alone, so this does
 //! not try.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Section headings that only a function or method can honour.
 const FUNCTION_ONLY: &[&str] = &["# Errors", "# Panics", "# Safety"];
@@ -41,19 +41,9 @@ const NON_CALLABLE: &[&str] = &[
     "struct ", "enum ", "const ", "static ", "type ", "union ", "trait ",
 ];
 
-fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for e in entries.flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            rs_files(&p, out);
-        } else if p.extension().is_some_and(|x| x == "rs") {
-            out.push(p);
-        }
-    }
-}
+#[path = "support/rust_files.rs"]
+mod rust_files;
+use rust_files::rust_files;
 
 /// Strip `pub`, `pub(crate)`, `async`, `unsafe` and attributes so the
 /// item keyword is first.
@@ -79,7 +69,7 @@ fn item_keyword(line: &str) -> String {
 fn a_function_contract_never_documents_a_struct() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
-    rs_files(&root, &mut files);
+    rust_files(&root, &mut files);
     assert!(
         files.len() > 50,
         "expected the whole src tree, saw {} files — the walk is broken \
