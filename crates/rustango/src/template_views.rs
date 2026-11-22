@@ -2471,9 +2471,13 @@ fn success_url_fields<'t>(
 /// A URL-path PK (or lookup) value bound as the field's type, or `None`
 /// when it does not parse, so the caller 404s instead of a PG cast 500 (#1950).
 fn coerce_pk(field: &crate::core::FieldSchema, raw: &str) -> Option<SqlValue> {
-    crate::forms::parse_pk_string(field, raw)
-        .or_else(|_| crate::forms::parse_form_value(field, Some(raw)))
-        .ok()
+    match crate::forms::parse_pk_string(field, raw) {
+        // Only a type no key can have falls back; a refused key stays refused.
+        Err(crate::forms::FormError::UnsupportedPk { .. }) => {
+            crate::forms::parse_form_value(field, Some(raw)).ok()
+        }
+        parsed => parsed.ok(),
+    }
 }
 
 /// [`coerce_pk`] bound as the row stores it (a SQLite UUID key may be TEXT).
@@ -6213,6 +6217,7 @@ mod tests {
             SqlValue::String(s) => assert_eq!(s, "hello-world"),
             other => panic!("expected String, got {other:?}"),
         }
+        assert!(coerce_pk(pk, "a\0b").is_none(), "a NUL key reached a query");
     }
 
     /// `parse_form` collects required-missing errors for non-nullable

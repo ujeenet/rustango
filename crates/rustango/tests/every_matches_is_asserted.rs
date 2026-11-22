@@ -12,18 +12,8 @@ use rust_files::rust_files;
 /// Line numbers of every `matches!(..)` at statement position whose
 /// value is dropped by a trailing `;`.
 fn bare_matches(src: &str) -> Vec<usize> {
-    // Whole-line comments out, so a commented `;` is not a statement end.
-    let code: String = src
-        .lines()
-        .map(|l| {
-            if l.trim_start().starts_with("//") {
-                ""
-            } else {
-                l
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    // Comments blanked, so neither a commented `;` nor a commented `matches!` counts.
+    let code = strip_comments(src);
     let bytes = code.as_bytes();
     let mut out = Vec::new();
     for (at, _) in code.match_indices("matches!(") {
@@ -31,8 +21,13 @@ fn bare_matches(src: &str) -> Vec<usize> {
         if at > 0 && (bytes[at - 1].is_ascii_alphanumeric() || b"_:".contains(&bytes[at - 1])) {
             continue;
         }
-        let prev = code[..at].trim_end().bytes().last();
-        if !matches!(prev, None | Some(b';' | b'{' | b'}')) {
+        let before = code[..at].trim_end();
+        let starts_statement = match before.bytes().last() {
+            None | Some(b';' | b'{' | b'}') => true,
+            Some(b']') => ends_with_attribute(before),
+            _ => false,
+        };
+        if !starts_statement {
             continue;
         }
         let Some(close) = closing_paren(&code, at + "matches!".len()) else {
@@ -43,6 +38,75 @@ fn bare_matches(src: &str) -> Vec<usize> {
         }
     }
     out
+}
+
+/// `src` with every `//` and `/* */` comment blanked to spaces (newlines
+/// kept, so line numbers hold), skipping string and char literals.
+fn strip_comments(src: &str) -> String {
+    let b = src.as_bytes();
+    let mut out = b.to_vec();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                while i < b.len() && b[i] != b'\n' {
+                    out[i] = b' ';
+                    i += 1;
+                }
+                continue;
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                let end = src[i + 2..].find("*/").map_or(b.len(), |e| i + 2 + e + 2);
+                for c in &mut out[i..end] {
+                    if *c != b'\n' {
+                        *c = b' ';
+                    }
+                }
+                i = end;
+                continue;
+            }
+            b'"' => {
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            // `'"'` and `'\''` are chars; a lifetime has no closing quote.
+            b'\'' if b.get(i + 1) == Some(&b'\\') => {
+                i = src
+                    .get(i + 3..)
+                    .and_then(|r| r.find('\''))
+                    .map_or(i, |q| i + 3 + q);
+            }
+            b'\'' => {
+                let len = src[i + 1..].chars().next().map_or(1, char::len_utf8);
+                if b.get(i + 1 + len) == Some(&b'\'') {
+                    i += 1 + len;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    String::from_utf8(out).expect("only ASCII bytes were replaced")
+}
+
+/// Whether `code` ends with an attribute such as `#[allow(x)]`.
+fn ends_with_attribute(code: &str) -> bool {
+    let mut depth = 0usize;
+    for (i, c) in code.bytes().enumerate().rev() {
+        match c {
+            b']' => depth += 1,
+            b'[' => {
+                depth -= 1;
+                if depth == 0 {
+                    return code[..i].trim_end_matches('!').ends_with('#');
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Index of the `)` closing the `(` at `open`, skipping string and
@@ -93,10 +157,18 @@ fn closing_paren(code: &str, open: usize) -> Option<usize> {
 
 #[test]
 fn no_matches_statement_is_discarded() {
-    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut files = Vec::new();
-    rust_files(&crates, &mut files);
-    assert!(files.len() > 500, "walked only {} files", files.len());
+    rust_files(&root.join("crates"), &mut files);
+    let in_crates = files.len();
+    rust_files(&root.join("examples"), &mut files);
+    assert!(in_crates > 500, "walked only {in_crates} files");
+    assert!(
+        files
+            .iter()
+            .any(|p| p.starts_with(root.join("examples/showcase"))),
+        "examples/showcase not walked"
+    );
 
     let mut offenders = Vec::new();
     for path in &files {
@@ -108,7 +180,7 @@ fn no_matches_statement_is_discarded() {
             continue;
         }
         for line in bare_matches(&src) {
-            let rel = path.strip_prefix(&crates).unwrap_or(path);
+            let rel = path.strip_prefix(&root).unwrap_or(path);
             offenders.push(format!("{}:{line}", rel.display()));
         }
     }
@@ -139,4 +211,21 @@ fn the_scanner_flags_only_discarded_statements() {
         0
     );
     assert_eq!(bare_matches("fn t() {\n    matches!(c, ')');\n}"), [2]);
+    // After a trailing or block comment, or an attribute.
+    assert_eq!(
+        flagged("fn t() { x(); // note\n    matches!(e, E::A); }"),
+        1
+    );
+    assert_eq!(flagged("fn t() { x(); /* a; b */ matches!(e, E::A); }"), 1);
+    assert_eq!(
+        flagged("fn t() {\n    #[allow(unused)]\n    matches!(e, E::A);\n}"),
+        1
+    );
+    assert_eq!(
+        flagged("fn t() { let s = \"a//b\"; matches!(e, E::A); }"),
+        1
+    );
+    assert_eq!(flagged("fn t() { x(); // matches!(e, E::A);\n}"), 0);
+    assert_eq!(flagged("fn t() { x(); /* matches!(e, E::A); */ }"), 0);
+    assert_eq!(flagged("let v = a[0]; let ok = matches!(e, E::A);"), 0);
 }

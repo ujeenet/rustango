@@ -1162,6 +1162,23 @@ async fn admin_form_nul_bytes_are_400(pool: &Pool) {
     assert_eq!(parent_names(pool).await, ["p"], "parent edit kept");
 }
 
+/// A NUL byte in a string key, in the path or a bulk selection, is a 400.
+async fn admin_nul_keys_are_400(pool: &Pool) {
+    let p = seed_parent(pool).await;
+    seed_child(pool, "a", p, "one", false).await;
+    let (status, body) = get(pool, "/rowscope_child/a%00b").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "path: {body}");
+    let id = seed_race(pool, "open-1").await;
+    let form = format!("action=delete_selected&_selected={id}&_selected=a%00b");
+    let (status, body) = post(pool, "/rowscope_race/__action", &form).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "bulk: {body}");
+    assert_eq!(
+        races(pool).await,
+        [("open-1".to_owned(), 1)],
+        "bulk deleted"
+    );
+}
+
 /// A row moved out of the queryset scope before the admin writes it is left alone.
 async fn admin_writes_stay_in_the_scope(pool: &Pool) {
     let _flip = Flip::on(pool, "owner_id", SqlValue::I64(2));
@@ -1234,6 +1251,7 @@ tri_dialect_test! {
         admin_writes_judge_the_locked_row,
         inline_writes_judge_the_locked_row,
         admin_form_nul_bytes_are_400,
+        admin_nul_keys_are_400,
         admin_writes_stay_in_the_scope,
         admin_writes_judge_a_concurrent_change,
         write_the_view_hook_hides_is_refused,

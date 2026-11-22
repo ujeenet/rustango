@@ -263,7 +263,8 @@ pub fn reject_nul(value: &str) -> Result<&str, NulInValue> {
 }
 
 /// [`reject_nul`] on every value of a decoded form body.
-#[cfg(any(feature = "admin", feature = "tenancy", feature = "template_views"))]
+// `tenancy` implies `admin`; a `forms`-only build has no form extractor.
+#[cfg(any(feature = "admin", feature = "template_views"))]
 pub(crate) fn reject_nul_in<'a>(
     values: impl IntoIterator<Item = &'a String>,
 ) -> Result<(), NulInValue> {
@@ -271,7 +272,7 @@ pub(crate) fn reject_nul_in<'a>(
 }
 
 /// [`reject_nul`] on every key and string of a JSON body, nested ones too.
-#[cfg(any(feature = "forms", feature = "tenancy"))]
+#[cfg(feature = "forms")]
 pub(crate) fn reject_nul_json(value: &serde_json::Value) -> Result<(), NulInValue> {
     use serde_json::Value;
     match value {

@@ -227,6 +227,32 @@ impl<S: Send + Sync> axum::extract::FromRequest<S> for NulFreeForm {
     }
 }
 
+/// A JSON body for a write: `axum::Json`, with a NUL byte in any key or
+/// string refused as a 400 before it reaches a query (Postgres would 500).
+#[cfg(all(feature = "admin", feature = "media"))]
+pub(crate) struct NulFreeJson<T>(pub T);
+
+#[cfg(all(feature = "admin", feature = "media"))]
+impl<T: serde::de::DeserializeOwned, S: Send + Sync> axum::extract::FromRequest<S>
+    for NulFreeJson<T>
+{
+    type Rejection = axum::response::Response;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse as _;
+        let axum::Json(value) = axum::Json::<serde_json::Value>::from_request(req, state)
+            .await
+            .map_err(axum::response::IntoResponse::into_response)?;
+        crate::list_params::reject_nul_json(&value)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()).into_response())?;
+        // A body of the wrong shape is a 422, as `axum::Json` answers it.
+        serde_json::from_value(value)
+            .map(Self)
+            .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response())
+    }
+}
+
 // ------------------------------------------------------------------ low-level parsers (admin + ModelForm)
 
 /// Parse a single PK fragment from a URL path segment into an `SqlValue`.
@@ -254,7 +280,10 @@ pub fn parse_pk_string(field: &FieldSchema, raw: &str) -> Result<SqlValue, FormE
             .parse::<i64>()
             .map(SqlValue::I64)
             .map_err(|e| make_parse_err("i64", &e)),
-        FieldType::String => Ok(SqlValue::String(raw.to_owned())),
+        // Postgres refuses NUL in text: no key may carry one to a query.
+        FieldType::String => crate::list_params::reject_nul(raw)
+            .map(|k| SqlValue::String(k.to_owned()))
+            .map_err(|e| make_parse_err("String", &e)),
         FieldType::Uuid => uuid::Uuid::parse_str(raw)
             .map(SqlValue::Uuid)
             .map_err(|e| make_parse_err("Uuid", &e)),
@@ -2191,6 +2220,15 @@ mod model_form_tests {
         }
         let err = ModelFormFor::<Priced>::from_json_slice(b"[1]").expect_err("array root");
         assert!(!err.non_field().is_empty());
+    }
+
+    /// A string key with a NUL byte never parses: Postgres would 500 on it.
+    #[test]
+    fn a_nul_in_a_string_key_is_refused() {
+        let f = crate::core::FieldSchema::new("code", "code", FieldType::String);
+        let err = parse_pk_string(&f, "a\0b").expect_err("nul").to_string();
+        assert!(err.contains("NUL"), "{err}");
+        assert!(parse_pk_string(&f, "ab").is_ok());
     }
 
     /// A `\u0000` escape in a value read as JSON text is refused: Postgres

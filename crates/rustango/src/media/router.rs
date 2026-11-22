@@ -1332,7 +1332,7 @@ fn upload_owner(requested: Option<i64>, extensions: &axum::http::Extensions) -> 
 async fn begin_upload_handler(
     State(manager): State<Arc<MediaManager>>,
     parts: axum::http::request::Parts,
-    Json(body): Json<BeginUploadBody>,
+    crate::forms::NulFreeJson(body): crate::forms::NulFreeJson<BeginUploadBody>,
 ) -> Result<Json<UploadTicketBody>, MediaError> {
     let uploaded_by_id = upload_owner(body.uploaded_by_id, &parts.extensions);
     let ticket = manager
@@ -1404,7 +1404,7 @@ async fn set_tags_handler(
     State(manager): State<Arc<MediaManager>>,
     Path(id): Path<i64>,
     permit: Option<axum::Extension<TagCreatePermit>>,
-    Json(body): Json<SetTagsBody>,
+    crate::forms::NulFreeJson(body): crate::forms::NulFreeJson<SetTagsBody>,
 ) -> Result<StatusCode, Response> {
     let slugs: Vec<&str> = body.slugs.iter().map(String::as_str).collect();
     // A new slug creates a tag, which needs `Add(NewTag)` as well.
@@ -1434,7 +1434,7 @@ async fn untag_handler(
 
 async fn create_collection_handler(
     State(manager): State<Arc<MediaManager>>,
-    Json(body): Json<CreateCollectionBody>,
+    crate::forms::NulFreeJson(body): crate::forms::NulFreeJson<CreateCollectionBody>,
 ) -> Result<(StatusCode, Json<CollectionResponse>), MediaError> {
     let c = manager
         .create_collection(body.name, body.slug, body.parent_id, body.description)
@@ -1502,7 +1502,7 @@ async fn collection_contents_handler(
 
 async fn create_tag_handler(
     State(manager): State<Arc<MediaManager>>,
-    Json(body): Json<CreateTagBody>,
+    crate::forms::NulFreeJson(body): crate::forms::NulFreeJson<CreateTagBody>,
 ) -> Result<(StatusCode, Json<TagResponse>), MediaError> {
     let t = manager.ensure_tag(&body.slug).await?;
     Ok((StatusCode::CREATED, Json(t.into())))
