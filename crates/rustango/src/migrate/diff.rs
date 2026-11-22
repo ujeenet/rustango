@@ -2845,7 +2845,10 @@ fn sql_type(f: &FieldSnapshot) -> String {
 /// `dialect.column_type()`. SQLite's `Auto<i64>` PK becomes
 /// `INTEGER PRIMARY KEY AUTOINCREMENT`; MySQL's becomes `BIGINT NOT NULL
 /// AUTO_INCREMENT`; PG's stays `BIGSERIAL`.
-fn sql_type_with_dialect(f: &FieldSnapshot, dialect: &dyn crate::sql::Dialect) -> String {
+pub(crate) fn sql_type_with_dialect(
+    f: &FieldSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+) -> String {
     use crate::core::FieldType;
     let ty = super::snapshot::field_type_from_name(&f.ty);
     // v0.13.2: `auto = true` historically meant "PK SERIAL/BIGSERIAL"

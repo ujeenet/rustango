@@ -36,6 +36,10 @@ pub mod snapshot;
 /// compares correctly against a Rust-bound timestamp.
 #[cfg(feature = "sqlite")]
 pub mod sqlite_datetime;
+/// SPIKE S6: catalog reader, normalisers, probes and default checks. Throwaway.
+#[cfg(feature = "migrate-v2-spike")]
+#[doc(hidden)]
+pub mod v2_spike;
 
 pub use diff::{
     detect_changes, detect_unsupported_field_changes, render_changes,

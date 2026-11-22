@@ -1646,6 +1646,7 @@ jobs:
           binary(=admin_audit_writes_tri) |
           binary(=orm_bounded_dml_tri) |
           binary(=orm_relations_tri) |
+          binary(=migrate_v2_catalog_spike_tri) |
           binary(=prefetch_related_tri) |
           binary(=orm_relation_edges_tri) |
           binary(=orm_query_edges_tri) |
