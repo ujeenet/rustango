@@ -1484,6 +1484,7 @@ async fn read_repeating_form(
         .map_err(|e| e.to_string())?;
     let pairs: Vec<(String, String)> =
         serde_urlencoded::from_bytes(&bytes).map_err(|e| e.to_string())?;
+    crate::list_params::reject_nul_in(pairs.iter().map(|(_, v)| v)).map_err(|e| e.to_string())?;
     let mut out: HashMap<String, Vec<String>> = HashMap::new();
     for (k, v) in pairs {
         out.entry(k).or_default().push(v);
@@ -4473,7 +4474,7 @@ where
 async fn handle_form_view_post<F>(
     State(state): State<Arc<StandaloneFormViewState<F>>>,
     parts: Parts,
-    axum::extract::Form(payload): axum::extract::Form<HashMap<String, String>>,
+    crate::forms::NulFreeForm(payload): crate::forms::NulFreeForm,
 ) -> Response
 where
     F: crate::forms::Form,

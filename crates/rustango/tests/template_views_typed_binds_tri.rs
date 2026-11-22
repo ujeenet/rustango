@@ -313,6 +313,13 @@ fn app(pool: &Pool) -> axum::Router {
                 .router("/ptags", t.clone(), pool.clone()),
         )
         .merge(
+            ListView::for_model(Tag::SCHEMA)
+                .allow_anonymous()
+                .template("list.html")
+                .bulk_actions(true)
+                .router("/btags", t.clone(), pool.clone()),
+        )
+        .merge(
             ListView::for_model(Pin::SCHEMA)
                 .allow_anonymous()
                 .template("pins.html")
@@ -468,6 +475,32 @@ async fn a_nul_byte_in_a_form_is_400(pool: &Pool) {
         Some("n"),
         "update wrote"
     );
+}
+
+/// A NUL byte in a `delete_selected` string PK is a 400; nothing is deleted.
+async fn a_nul_byte_in_a_bulk_action_is_400(pool: &Pool) {
+    let tag = Tag {
+        code: "go".into(),
+        name: "Go".into(),
+    };
+    tag.insert(pool).await.expect("tag");
+    let form = "action=delete_selected&_selected_action=go&_selected_action=go%00x";
+    let (status, body) = send(pool, Method::POST, "/btags", form).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(Tag::objects().fetch(pool).await.expect("tags").len(), 1);
+}
+
+/// A JSON field value holding the escape `\u0000` is refused (Postgres jsonb
+/// cannot store it); nothing is written.
+async fn a_nul_escape_in_a_json_field_is_refused(pool: &Pool) {
+    let bad = form("2026-09-29", 7, true).replace(
+        "meta=%7B%22k%22%3A1%7D",
+        "meta=%7B%22k%22%3A%22a%5Cu0000b%22%7D",
+    );
+    let (status, body) = send(pool, Method::POST, "/events/new", &bad).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(body.contains("NUL"), "{body}");
+    assert!(events(pool).await.is_empty(), "create wrote");
 }
 
 /// A string PK that looks like a UUID must bind as text, not uuid.
@@ -1068,6 +1101,8 @@ tri_dialect_test! {
         list_filters_bind_typed_values,
         a_nul_byte_in_a_list_filter_or_search_is_400,
         a_nul_byte_in_a_form_is_400,
+        a_nul_byte_in_a_bulk_action_is_400,
+        a_nul_escape_in_a_json_field_is_refused,
         fk_display_binds_the_target_pk_type,
         garbage_url_pk_is_a_404,
         huge_page_is_an_empty_page,

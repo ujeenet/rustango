@@ -431,13 +431,18 @@ pub(crate) fn parse_body_value(
             if raw.is_empty() {
                 Ok(SqlValue::Json(serde_json::json!({})))
             } else {
+                // A `\u0000` escape is valid JSON that Postgres jsonb refuses.
                 serde_json::from_str::<serde_json::Value>(raw)
-                    .map(SqlValue::Json)
-                    .map_err(|e| FormError::Parse {
+                    .map_err(|e| e.to_string())
+                    .and_then(|v| {
+                        crate::list_params::reject_nul_json(&v).map_err(|e| e.to_string())?;
+                        Ok(SqlValue::Json(v))
+                    })
+                    .map_err(|detail| FormError::Parse {
                         field: field.name.to_owned(),
                         ty: "Json",
                         value: raw.to_owned(),
-                        detail: e.to_string(),
+                        detail,
                     })
             }
         }

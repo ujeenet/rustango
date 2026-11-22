@@ -271,7 +271,7 @@ pub(crate) fn reject_nul_in<'a>(
 }
 
 /// [`reject_nul`] on every key and string of a JSON body, nested ones too.
-#[cfg(any(feature = "admin", feature = "tenancy"))]
+#[cfg(any(feature = "forms", feature = "tenancy"))]
 pub(crate) fn reject_nul_json(value: &serde_json::Value) -> Result<(), NulInValue> {
     use serde_json::Value;
     match value {
