@@ -985,11 +985,13 @@ fn not_null_check(s: &State, t: &str, c: &str) -> Result<String, RenderError> {
     Ok(name)
 }
 
-fn expand_templates(
+/// `{{t:..}}`, `{{c:..}}`, and `{{batch_range}}` when `batch` is given (data ops).
+pub fn expand_templates(
     s: &State,
     after: &State,
     d: &dyn Dialect,
     sql: &str,
+    batch: Option<&str>,
 ) -> Result<String, RenderError> {
     let mut out = String::new();
     let mut rest = sql;
@@ -1008,6 +1010,9 @@ fn expand_templates(
                 out.push_str(&q(d, name));
             }
             Some(("c", name)) => out.push_str(&q(d, name)),
+            None if tag == "batch_range" && batch.is_some() => {
+                out.push_str(batch.unwrap_or_default());
+            }
             _ => return err(E_STATE, format!("unknown template `{tag}`")),
         }
         rest = &rest[end + 2..];
@@ -1378,7 +1383,7 @@ pub fn render_op(
             };
             let mut sql = Vec::new();
             for s in stmts {
-                let s = expand_templates(before, after, d, s)?;
+                let s = expand_templates(before, after, d, s, None)?;
                 let head = s.trim_start().to_ascii_uppercase();
                 if !autocommit && SESSION_STMTS.iter().any(|p| head.starts_with(p)) {
                     return err(

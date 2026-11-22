@@ -4,6 +4,7 @@
 //! defaults of design 2.6 valid where we say they are?
 //! SPIKE S3 adds `render` (pure per-op units) and `exec` (runs them live).
 //! SPIKE S4 adds `lock` (`LockScope`), `tenant_sql` (load scan) and `tenancy`.
+//! SPIKE S5 adds `resume` (frozen plan, autocommit probes, resume after a kill).
 
 pub mod catalog;
 pub mod defaults;
@@ -14,5 +15,6 @@ pub mod ops;
 pub mod perf;
 pub mod probe;
 pub mod render;
+pub mod resume;
 pub mod tenancy;
 pub mod tenant_sql;

@@ -46,7 +46,9 @@ async fn run_unit(pool: &Pool, u: &Unit) -> Result<(), String> {
 /// `foreign_key_check` inside it before commit.
 #[cfg(feature = "sqlite")]
 async fn run_rebuild(pool: &Pool, u: &Unit) -> Result<(), String> {
-    let Pool::Sqlite(sq) = pool else {
+    #[allow(irrefutable_let_patterns)]
+    let Pool::Sqlite(sq) = pool
+    else {
         return Err("a rebuild unit is SQLite only".into());
     };
     let mut conn = crate::migrate::rebuild::RebuildConn::acquire(sq, true)

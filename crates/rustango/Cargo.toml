@@ -90,7 +90,7 @@ test_utils = []
 testkit = []
 
 # SPIKE S6 (migrations engine v2, catalog reader and defaults). Throwaway; never ship.
-migrate-v2-spike = ["testkit"]
+migrate-v2-spike = ["testkit", "dep:sha2"]
 
 # MySQL 8.0+ backend. Fully tri-dialect since v0.38: every framework
 # surface (ORM, migrations, admin, tenancy database-mode, jobs queue,

@@ -5,7 +5,7 @@
 use crate::migrate::snapshot::FieldSnapshot;
 use crate::sql::{Dialect, DialectKind};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ColumnDecl {
     pub name: String,
     /// v1/v2 type token: `i64`, `string`, `datetime`, `json`, ...
@@ -69,7 +69,7 @@ impl ColumnDecl {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IndexDecl {
     pub name: String,
     pub table: String,
@@ -80,13 +80,13 @@ pub struct IndexDecl {
     pub include: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CheckDecl {
     pub name: String,
     pub expr: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FkDecl {
     pub name: String,
     pub columns: Vec<String>,
@@ -96,7 +96,7 @@ pub struct FkDecl {
     pub on_delete: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TableDecl {
     pub name: String,
     pub columns: Vec<ColumnDecl>,
@@ -106,7 +106,7 @@ pub struct TableDecl {
 }
 
 /// The ops S6 gives probe specs for. A unique is a unique `AddIndex` (3.3).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum SpikeOp {
     CreateTable(TableDecl),
