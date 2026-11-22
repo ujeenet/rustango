@@ -791,7 +791,7 @@ fn same_on_delete(p: &RelationSnapshot, c: &RelationSnapshot) -> bool {
     effective(p).eq_ignore_ascii_case(effective(c))
 }
 
-fn push_alter_changes(
+pub(crate) fn push_alter_changes(
     table: &str,
     pf: &FieldSnapshot,
     cf: &FieldSnapshot,
@@ -1193,7 +1193,7 @@ fn alter_column_elsewhere(
             out.immediate.push(format!(
                 "ALTER TABLE {} MODIFY COLUMN {}",
                 dialect.quote_ident(table),
-                column_definition(f, dialect)
+                column_definition(f, dialect, DefaultText::Translate)
             ));
         }
     }
@@ -1220,9 +1220,22 @@ pub(crate) fn declared_indexes(current: &SchemaSnapshot, table: &str) -> Vec<Str
         .collect()
 }
 
+/// How a `DEFAULT` reaches DDL: v1 snapshots hold PG spelling; v2 files
+/// hold the backend's own text, which is never translated (SPIKE S3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DefaultText {
+    Translate,
+    #[cfg_attr(not(feature = "migrate-v2-spike"), allow(dead_code))]
+    AsWritten,
+}
+
 /// `<column> <type> [DEFAULT …] [NOT NULL] [COMMENT …]`, as CREATE TABLE
 /// writes it, for MySQL's `MODIFY COLUMN`; PK and CHECK stay where they are.
-fn column_definition(f: &FieldSnapshot, dialect: &dyn crate::sql::Dialect) -> String {
+pub(crate) fn column_definition(
+    f: &FieldSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+    defaults: DefaultText,
+) -> String {
     let mut sql = format!(
         "{} {}",
         dialect.quote_ident(&f.column),
@@ -1232,7 +1245,10 @@ fn column_definition(f: &FieldSnapshot, dialect: &dyn crate::sql::Dialect) -> St
         dialect.write_generated_column(&mut sql, expr, f.nullable);
     } else {
         if let Some(expr) = &f.default {
-            let rendered = render_column_default(expr, &f.ty, f.max_length, dialect);
+            let rendered = match defaults {
+                DefaultText::Translate => render_column_default(expr, &f.ty, f.max_length, dialect),
+                DefaultText::AsWritten => expr.clone(),
+            };
             let _ = write!(sql, " DEFAULT {rendered}");
         }
         if !f.nullable {

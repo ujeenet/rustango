@@ -37,7 +37,7 @@ impl ColumnDecl {
         }
     }
 
-    fn snapshot(&self) -> FieldSnapshot {
+    pub(crate) fn snapshot(&self) -> FieldSnapshot {
         FieldSnapshot {
             name: self.name.clone(),
             column: self.name.clone(),
