@@ -236,7 +236,16 @@ async fn the_request_span_carries_the_tenant() {
         .expect("response");
     assert_eq!(res.status(), 200);
 
-    let out = buf.contents();
+    // sqlx's SQLite worker thread holds a clone of the request span and
+    // drops it after replying, so the span can close after the response.
+    let mut out = buf.contents();
+    for _ in 0..500 {
+        if out.contains("http.request{") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        out = buf.contents();
+    }
     assert!(
         out.contains("http.request{"),
         "expected the request span in the output, got:\n{out}"

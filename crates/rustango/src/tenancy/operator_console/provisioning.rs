@@ -35,7 +35,6 @@ use axum::extract::{Extension, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Redirect, Response};
-use axum::Form;
 use tera::Context;
 
 use super::{inject_op_brand, withheld, withheld_in, ConsoleState};
@@ -288,7 +287,7 @@ pub(super) async fn org_new_submit(
     State(state): State<ConsoleState>,
     Extension(op): Extension<auth::Operator>,
     headers: HeaderMap,
-    Form(form): Form<HashMap<String, String>>,
+    crate::forms::NulFreeForm(form): crate::forms::NulFreeForm,
 ) -> Response<Body> {
     let provisioner = state
         .provisioner
@@ -462,7 +461,7 @@ pub(super) async fn provision_resume(
     Extension(op): Extension<auth::Operator>,
     Path(run_id): Path<i64>,
     headers: HeaderMap,
-    Form(form): Form<HashMap<String, String>>,
+    crate::forms::NulFreeForm(form): crate::forms::NulFreeForm,
 ) -> Response<Body> {
     use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
@@ -575,7 +574,7 @@ pub(super) async fn provision_resume(
 pub(super) async fn test_connection(
     State(state): State<ConsoleState>,
     Extension(op): Extension<auth::Operator>,
-    Form(form): Form<HashMap<String, String>>,
+    crate::forms::NulFreeForm(form): crate::forms::NulFreeForm,
 ) -> Response<Body> {
     let field = |k: &str| form.get(k).map(|s| s.trim()).filter(|s| !s.is_empty());
 

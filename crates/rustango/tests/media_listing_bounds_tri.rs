@@ -439,10 +439,44 @@ async fn recursive_listing_without_the_parent_index(pool: &Pool) {
     assert_eq!(ids(&rows), vec![media]);
 }
 
+/// A NUL byte in a media JSON body is a 400; nothing is created.
+async fn a_nul_byte_in_a_media_body_is_400(pool: &Pool) {
+    let mgr = manager(pool);
+    for (uri, body) in [
+        ("/collections", r#"{"name":"a\u0000b","slug":"ab"}"#),
+        (
+            "/collections",
+            r#"{"name":"ab","slug":"ab","description":"a\u0000b"}"#,
+        ),
+        ("/tags", r#"{"slug":"a\u0000b"}"#),
+        (
+            "/uploads/begin",
+            r#"{"disk":"default","mime":"text/plain","original_filename":"a\u0000b","size_bytes":1}"#,
+        ),
+    ] {
+        let app = media_router_with(mgr.clone(), AllowAll);
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.oneshot(req).await.expect("router answers");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri} {body}");
+    }
+    assert_eq!(
+        get_rows(&mgr, "/collections").await.0.len(),
+        0,
+        "a collection was made"
+    );
+    assert_eq!(get_rows(&mgr, "/tags").await.0.len(), 0, "a tag was made");
+}
+
 tri_dialect_test!(
     setup: setup,
     scenarios: [
         collections_are_paged,
+        a_nul_byte_in_a_media_body_is_400,
         tags_are_paged,
         tagging_is_batched,
         case_variants_resolve,

@@ -7,7 +7,7 @@
 //! `_for::<DB>` variants name their backend. A real exception goes in
 //! `ALLOWED` with its reason.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// `(file, line text, why)` allowed to name the default backend.
 const ALLOWED: &[(&str, &str, &str)] = &[];
@@ -21,16 +21,9 @@ const PINNED: &[&str] = &[
     "TenantContext<DefaultTenantDb>",
 ];
 
-fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    for entry in std::fs::read_dir(dir).expect("read dir").flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            rust_files(&path, out);
-        } else if path.extension().is_some_and(|e| e == "rs") {
-            out.push(path);
-        }
-    }
-}
+#[path = "support/rust_files.rs"]
+mod rust_files;
+use rust_files::rust_files;
 
 #[test]
 fn no_framework_router_is_pinned_to_the_default_backend() {

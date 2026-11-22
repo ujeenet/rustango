@@ -1,25 +1,18 @@
 //! Every public `*Error` enum is `#[non_exhaustive]`, so adding a variant
 //! later is not a breaking change.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    for entry in std::fs::read_dir(dir).expect("read src dir") {
-        let path = entry.expect("dir entry").path();
-        if path.is_dir() {
-            rs_files(&path, out);
-        } else if path.extension().is_some_and(|e| e == "rs") {
-            out.push(path);
-        }
-    }
-}
+#[path = "support/rust_files.rs"]
+mod rust_files;
+use rust_files::rust_files;
 
 /// `file:EnumName` for every `pub enum *Error` whose attributes lack
 /// `#[non_exhaustive]`.
 fn exhaustive_public_errors() -> Vec<String> {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
-    rs_files(&src, &mut files);
+    rust_files(&src, &mut files);
     let mut found = Vec::new();
     for file in files {
         let text = std::fs::read_to_string(&file).expect("read source");

@@ -4,6 +4,20 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.70.0] — 2026-11-22
+
+### Changed
+
+- **Breaking:** a NUL byte in an admin form or bulk action (inline rows too), a ViewSet create or update body, a `CreateView` / `UpdateView` / `FormView` form, a `ListView` bulk action, an operator console org or database server form, a media JSON body, or a string key in the URL is a 400 on every backend (a template view key answers 404, as any key that does not parse). Postgres failed with a 500; MySQL and SQLite stored it. The NUL refusal, for filters too, reads "a value must not contain a NUL byte".
+- A JSON, array or hstore form value holding the escape `\u0000` is a field error: Postgres cannot store it.
+- **Breaking:** an admin inline row edit or delete that the "change" or "delete" hook refuses on the locked row is a 403, and the parent edit rolls back.
+
+### Fixed
+
+- Admin inline row edits and deletes judge the row locked in the save's transaction, as the parent's edit does, so a change between the check and the write is seen.
+- A `now()` column default on MySQL is `(UTC_TIMESTAMP(6))`: `CURRENT_TIMESTAMP(6)` stored the session's local time on `DATETIME` columns. Tables created before keep their old default until altered.
+- `FileCache` on Windows retries a read that races a `set` replacing the same file, instead of failing with "Access is denied".
+
 ## [0.69.0] — 2026-11-21
 
 ### Changed

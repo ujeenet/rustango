@@ -68,6 +68,18 @@ pub struct Meas {
     pub taken_on: chrono::NaiveDate,
 }
 
+/// A `now()` column default.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "orm_dialect_tri_stamp")]
+#[rustango(app = "orm_dialect_tri")]
+pub struct Stamp {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub n: i64,
+    #[rustango(default = "now()")]
+    pub at: chrono::DateTime<chrono::Utc>,
+}
+
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "orm_dialect_tri_reading")]
 #[rustango(app = "orm_dialect_tri")]
@@ -670,6 +682,7 @@ async fn setup(pool: &Pool) {
     fresh_table::<Blob>(pool).await;
     rustango::testkit::matrix::drop_table(pool, Reading::SCHEMA.table).await;
     fresh_table::<Meas>(pool).await;
+    fresh_table::<Stamp>(pool).await;
     fresh_table::<Reading>(pool).await;
     fresh_table::<Noted>(pool).await;
     fresh_table::<Account>(pool).await;
@@ -1510,6 +1523,35 @@ async fn now_is_utc_in_a_non_utc_session(pool: &Pool) {
     assert_eq!(n.expect("count"), 1, "an hour ago is before now()");
 }
 
+/// A `now()` column default stores UTC in a session whose time zone is not
+/// UTC: MySQL's `CURRENT_TIMESTAMP` gave the session's local time.
+async fn now_default_is_utc_in_a_non_utc_session(pool: &Pool) {
+    use rustango::sql::{raw_execute_tx, DialectKind};
+    let zone = match pool.dialect().kind() {
+        DialectKind::Mysql => Some(("SET time_zone = '+05:00'", Some("SET time_zone = '+00:00'"))),
+        DialectKind::Postgres => Some(("SET LOCAL TIME ZONE '+05:00'", None)),
+        _ => None,
+    };
+    let before = chrono::Utc::now();
+    let mut tx = rustango::sql::write_transaction(pool).await.expect("begin");
+    if let Some((set, _)) = zone {
+        raw_execute_tx(&mut tx, set, Vec::new())
+            .await
+            .expect("set zone");
+    }
+    let q = InsertQuery::new(Stamp::SCHEMA, vec!["n"], vec![SqlValue::I64(1)]);
+    rustango::sql::insert_tx(&mut tx, &q).await.expect("insert");
+    if let Some((_, Some(reset))) = zone {
+        raw_execute_tx(&mut tx, reset, Vec::new())
+            .await
+            .expect("reset zone");
+    }
+    tx.commit().await.expect("commit");
+    let at = Stamp::objects().fetch(pool).await.expect("fetch")[0].at;
+    let drift = (at - before).num_seconds().abs();
+    assert!(drift < 60, "default {at} is {drift}s from UTC now {before}");
+}
+
 /// SQLite bound a Decimal as text, which no number ever exceeds.
 async fn decimal_compares_with_expressions(pool: &Pool) {
     use rust_decimal::Decimal;
@@ -1547,6 +1589,7 @@ tri_dialect_test! {
         string_agg_passes_one_mebibyte,
         now_and_casts_keep_fractional_seconds,
         now_is_utc_in_a_non_utc_session,
+        now_default_is_utc_in_a_non_utc_session,
         decimal_compares_with_expressions,
         insert_or_ignore_on_a_natural_pk,
         insert_or_ignore_reports_a_skip_on_an_auto_pk,

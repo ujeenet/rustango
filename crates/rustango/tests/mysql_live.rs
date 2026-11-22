@@ -284,7 +284,7 @@ async fn migrate_pool_ledger_round_trips() {
 
     // ensure_ledger_pool is idempotent + creates the
     // __rustango_migrations__ table with the right column types
-    // (DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) on MySQL).
+    // (DATETIME(6) NOT NULL DEFAULT (UTC_TIMESTAMP(6)) on MySQL).
     rustango::migrate::ensure_ledger_pool(&pool)
         .await
         .expect("ensure_ledger_pool");

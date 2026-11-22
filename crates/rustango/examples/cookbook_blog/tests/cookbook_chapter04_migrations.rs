@@ -66,7 +66,11 @@ fn migration_serde_round_trips_schema_and_data_ops() {
     let back: Migration = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(back.name, "9999_demo");
     assert_eq!(back.forward.len(), 2);
-    matches!(back.forward[0], Operation::Schema(SchemaChange::CreateTable(_)));
+    assert!(
+        matches!(back.forward[0], Operation::Schema(SchemaChange::CreateTable(_))),
+        "{:?}",
+        back.forward[0]
+    );
     if let Operation::Data(d) = &back.forward[1] {
         assert!(d.reversible);
         assert_eq!(d.reverse_sql.as_deref(), Some("DELETE FROM cookbook_demo WHERE id = 1"));

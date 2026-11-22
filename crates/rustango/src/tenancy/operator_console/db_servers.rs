@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::extract::{Form, Path, Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::Response;
 use axum::response::IntoResponse;
 use axum::Extension;
@@ -225,7 +225,7 @@ async fn audit(state: &ConsoleState, op: &auth::Operator, name: &str, verb: &str
 pub(super) async fn create(
     State(state): State<ConsoleState>,
     Extension(op): Extension<auth::Operator>,
-    Form(form): Form<HashMap<String, String>>,
+    crate::forms::NulFreeForm(form): crate::forms::NulFreeForm,
 ) -> Response<Body> {
     let name = form
         .get("name")
@@ -316,7 +316,7 @@ pub(super) async fn edit_submit(
     State(state): State<ConsoleState>,
     Extension(op): Extension<auth::Operator>,
     Path(name): Path<String>,
-    Form(form): Form<HashMap<String, String>>,
+    crate::forms::NulFreeForm(form): crate::forms::NulFreeForm,
 ) -> Response<Body> {
     let row = match db_server::get(&state.registry, &name).await {
         Ok(r) => r,

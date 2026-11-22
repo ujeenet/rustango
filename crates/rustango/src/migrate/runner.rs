@@ -960,7 +960,7 @@ pub fn render_changes_between(
 ///
 /// Backend-specific ledger DDL (the `applied_at` column type differs):
 /// - Postgres: `applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`
-/// - MySQL: `applied_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)`
+/// - MySQL: `applied_at DATETIME(6) NOT NULL DEFAULT (UTC_TIMESTAMP(6))`
 ///
 /// # Errors
 /// Returns [`MigrateError::Exec`] for any executor / driver failure.
