@@ -4,6 +4,16 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** a NUL byte in an admin form (inline rows too), a ViewSet create or update body, a `CreateView` / `UpdateView` / `FormView` form or a `ListView` bulk action is a 400 on every backend. Postgres failed with a 500; MySQL and SQLite stored it.
+- A JSON, array or hstore form value holding the escape `\u0000` is a field error: Postgres cannot store it.
+- **Breaking:** an admin inline row edit or delete that the "change" or "delete" hook refuses on the locked row is a 403, and the parent edit rolls back.
+
+### Fixed
+
+- Admin inline row edits and deletes judge the row locked in the save's transaction, as the parent's edit does, so a change between the check and the write is seen.
+
 ## [0.69.0] — 2026-11-21
 
 ### Changed

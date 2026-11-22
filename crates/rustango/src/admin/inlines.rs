@@ -2043,7 +2043,7 @@ pub(crate) enum InlineApplyError {
     },
     /// A delete the inserts needed to stay within `max_num` removed nothing.
     MaxNum { child: &'static ModelSchema },
-    /// A written row left the child's scope or failed its `add` hook.
+    /// A hook refused the locked row, or a written row left the child's scope or failed `add`.
     Forbidden {
         child: &'static ModelSchema,
         action: &'static str,
@@ -2111,6 +2111,14 @@ pub(crate) async fn apply_plan_tx(
                     #[cfg(feature = "tenancy")]
                     claims,
                 } => {
+                    // `change` judged again on the row locked here, as the parent's edit.
+                    if crate::object_permissions::Hooks::All.judges(table, Some("change"))
+                        && lock_judged_row(tx, parts, locked(&query.where_clause), "change")
+                            .await?
+                            .is_none()
+                    {
+                        continue;
+                    }
                     let written = crate::audit::update_one_with_row_diff_tx(
                         tx,
                         &query,
@@ -2136,24 +2144,22 @@ pub(crate) async fn apply_plan_tx(
                         });
                     }
                 }
-                // 0 rows: deleted or moved since the plan was checked.
+                // Gone or hidden: deleted or moved since the plan was checked.
                 InlineWrite::Delete { query, pk } => {
                     let select = locked(query.where_clause());
-                    let before = crate::sql::select_one_row_as_json_tx(tx, &select, &fields)
-                        .await
-                        .map_err(refused)?;
+                    let Some(row) = lock_judged_row(tx, parts, select, "delete").await? else {
+                        continue;
+                    };
                     if query.run(tx).await.map_err(refused)? == 0 {
                         continue;
                     }
-                    if let Some(row) = before {
-                        entries.push(super::audit::admin_row_snapshot_entry(
-                            child,
-                            pk.clone(),
-                            query.op(),
-                            &row,
-                            None,
-                        ));
-                    }
+                    entries.push(super::audit::admin_row_snapshot_entry(
+                        child,
+                        pk.clone(),
+                        query.op(),
+                        &row,
+                        None,
+                    ));
                     written_rows.push(ChildSignal::Delete { table, pk });
                 }
             }
@@ -2244,6 +2250,25 @@ async fn claim_written(
         .after_write(tx, pk)
         .await
         .map_err(|error| InlineApplyError::Claim { child, error })
+}
+
+/// The row `select` reads, locked in `tx` and judged for `action` by the
+/// parent's rule: `None` when gone or hidden, a 403 when refused.
+async fn lock_judged_row(
+    tx: &mut crate::sql::PoolTx<'_>,
+    parts: &Parts,
+    select: SelectQuery,
+    action: &'static str,
+) -> Result<Option<serde_json::Value>, InlineApplyError> {
+    let child = select.model;
+    let judged = crate::object_permissions::Hooks::All
+        .judge_locked_rows(tx, parts, select, Some(action))
+        .await
+        .map_err(|error| InlineApplyError::Write { child, error })?;
+    // Its only error is the 403.
+    let rows = super::views::admitted_rows(parts, child, judged, (action, None))
+        .map_err(|_| InlineApplyError::Forbidden { child, action })?;
+    Ok(rows.into_iter().next())
 }
 
 /// The plan only saw the row before the write; re-check what was written.

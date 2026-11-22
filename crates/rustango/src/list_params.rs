@@ -15,7 +15,7 @@
 //!   [`check_offset`] refuses one past [`DEFAULT_MAX_OFFSET`] or the list's own cap.
 //! * [`split_in_list`] — a `__in` value, capped at [`MAX_IN_VALUES`];
 //!   [`in_values_budget`] caps all lists of a request together.
-//! * [`reject_nul`] — refuses a filter or search value holding `\0`.
+//! * [`reject_nul`] — refuses a filter, search or write-body value holding `\0`.
 //!
 //! Each layer still builds its own WHERE clause, because viewset
 //! supports a richer filter syntax than the CBV.
@@ -236,14 +236,14 @@ pub fn check_offset(offset: i64, max: usize) -> Result<i64, OffsetTooDeep> {
     }
 }
 
-/// A filter or search value holding a NUL byte.
+/// A filter, search or write-body value holding a NUL byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct NulInValue;
 
 impl std::fmt::Display for NulInValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("a query value must not contain a NUL byte")
+        f.write_str("a value must not contain a NUL byte")
     }
 }
 
@@ -259,6 +259,29 @@ pub fn reject_nul(value: &str) -> Result<&str, NulInValue> {
         Err(NulInValue)
     } else {
         Ok(value)
+    }
+}
+
+/// [`reject_nul`] on every value of a decoded form body.
+#[cfg(any(feature = "admin", feature = "tenancy", feature = "template_views"))]
+pub(crate) fn reject_nul_in<'a>(
+    values: impl IntoIterator<Item = &'a String>,
+) -> Result<(), NulInValue> {
+    values.into_iter().try_for_each(|v| reject_nul(v).map(drop))
+}
+
+/// [`reject_nul`] on every key and string of a JSON body, nested ones too.
+#[cfg(any(feature = "forms", feature = "tenancy"))]
+pub(crate) fn reject_nul_json(value: &serde_json::Value) -> Result<(), NulInValue> {
+    use serde_json::Value;
+    match value {
+        Value::String(s) => reject_nul(s).map(drop),
+        Value::Array(items) => items.iter().try_for_each(reject_nul_json),
+        Value::Object(map) => map.iter().try_for_each(|(k, v)| {
+            reject_nul(k)?;
+            reject_nul_json(v)
+        }),
+        Value::Null | Value::Bool(_) | Value::Number(_) => Ok(()),
     }
 }
 

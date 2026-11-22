@@ -10,7 +10,7 @@ use crate::core::{
     Assignment, CountQuery, DeleteQuery, FieldSchema, Filter, InsertQuery, ModelEntry, Op,
     SearchClause, SelectQuery, SqlValue, UpdateQuery, WhereExpr,
 };
-use axum::extract::{Form, Path, Query};
+use axum::extract::{Path, Query};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 
 use super::errors::AdminError;
@@ -2119,7 +2119,7 @@ pub(crate) async fn create_submit(
     parts: axum::http::request::Parts,
     Path(table): Path<String>,
     state: AppState,
-    Form(form): Form<HashMap<String, String>>,
+    crate::forms::NulFreeForm(form): crate::forms::NulFreeForm,
 ) -> Result<Response, AdminError> {
     let model = resolve_model(&state, &table)?;
     if !state.can_add(model.table) {
@@ -2602,7 +2602,7 @@ pub(crate) async fn update_submit(
     parts: axum::http::request::Parts,
     Path((table, pk_raw)): Path<(String, String)>,
     state: AppState,
-    Form(form): Form<HashMap<String, String>>,
+    crate::forms::NulFreeForm(form): crate::forms::NulFreeForm,
 ) -> Result<Response, AdminError> {
     let model = resolve_model(&state, &table)?;
     if state.is_read_only(model.table) {
@@ -3549,7 +3549,7 @@ async fn lock_judged(
 
 /// The judged rows a write may change: hidden ones drop out, and one that
 /// `perm`'s hook or the action's own (`named`) refuses refuses all, a 403.
-fn admitted_rows(
+pub(super) fn admitted_rows(
     parts: &axum::http::request::Parts,
     model: &'static crate::core::ModelSchema,
     judged: impl IntoIterator<Item = (serde_json::Value, crate::object_permissions::Verdict)>,

@@ -5058,6 +5058,8 @@ pub(crate) async fn extract_create_body(
 
     if content_type.contains("application/json") {
         let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        // Postgres refuses NUL in text: a 400 on every backend, not its 500.
+        crate::list_params::reject_nul_json(&value).map_err(|e| e.to_string())?;
         // A Decimal number is read from its text; the Value holds an f64.
         let decimals =
             typed.is_some_and(|t| t.schema.scalar_fields().any(|f| f.ty == FieldType::Decimal));
@@ -5101,6 +5103,7 @@ pub(crate) async fn extract_create_body(
         // form-urlencoded (default) — single only, no typed JSON value.
         let form = serde_urlencoded::from_bytes::<HashMap<String, String>>(&bytes)
             .map_err(|e| e.to_string())?;
+        crate::list_params::reject_nul_in(form.values()).map_err(|e| e.to_string())?;
         Ok(CreateBody::Single(form, None))
     }
 }
