@@ -37,6 +37,7 @@ once against the trait; switch from local disk to S3 with a one-line change.
 - [Large files: stream them](#large-files-stream-them)
 - [Several disks from config](#several-disks-from-config)
 - [The media library](#the-media-library)
+- [Static assets: hashed names, SRI and one-file images](#static-assets-hashed-names-sri-and-one-file-images)
 - [Reference](#reference)
 - [See also](#see-also)
 

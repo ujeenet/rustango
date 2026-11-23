@@ -11,6 +11,7 @@ Ce guide couvre chaque fonctionnalité de sécurité fournie par **Rustango** et
 - [Autoriser les requêtes cross-origin (CORS)](#autoriser-les-requêtes-cross-origin-cors)
 - [Limiter le débit des requêtes](#limiter-le-débit-des-requêtes)
 - [Autoriser ou bloquer des IP](#autoriser-ou-bloquer-des-ip)
+- [Lire l'IP du client](#lire-lip-du-client)
 - [Se protéger contre le CSRF](#se-protéger-contre-le-csrf)
 - [Prévenir le XSS](#prévenir-le-xss)
 - [Prévenir l'injection SQL](#prévenir-linjection-sql)
@@ -21,6 +22,7 @@ Ce guide couvre chaque fonctionnalité de sécurité fournie par **Rustango** et
 - [Ajouter l'authentification à deux facteurs (TOTP)](#ajouter-lauthentification-à-deux-facteurs-totp)
 - [Envoyer des URL signées (liens magiques)](#envoyer-des-url-signées-liens-magiques)
 - [Vérifier les webhooks entrants](#vérifier-les-webhooks-entrants)
+- [Récupérer des URL fournies par l'utilisateur](#récupérer-des-url-fournies-par-lutilisateur)
 - [Garder les secrets hors de vos journaux](#garder-les-secrets-hors-de-vos-journaux)
 - [Tracer les requêtes entre services](#tracer-les-requêtes-entre-services)
 - [Gérer les secrets](#gérer-les-secrets)
@@ -255,6 +257,25 @@ axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).a
 ```
 
 Une requête sans `ConnectInfo` est refusée par `allow_only` et acceptée par `block` ; changez cela avec `.allow_no_ip(bool)`. Derrière un reverse proxy, le pair est le proxy. Appelez `.behind_trusted_proxy()` pour vérifier plutôt l'IP client qu'un `RealIpLayer` avec `trust_proxies` a résolue. Le filtre doit se trouver à l'intérieur de ce `RealIpLayer` (ajoutez `.real_ip(...)` après `.ip_filter(...)`), sinon il vérifie l'adresse du proxy et une liste de blocage laisse passer tout le monde. `ip_filter` ne lit jamais lui-même un en-tête de transfert.
+
+---
+
+## Lire l'IP du client
+
+Pour les journaux d'audit, vos propres limites par IP, ou les e-mails « nouvelle
+connexion depuis », utilisez l'extracteur `ClientAddr` (ou appelez
+`real_ip::client_ip(&parts.extensions, &parts.headers)`). C'est l'adresse
+qu'utilisent le limiteur de débit et le filtre d'IP : le `TrustedRealIp` lorsqu'un
+proxy nommé dans `RealIpLayer::trust_proxies` a transmis la requête, sinon le
+socket de connexion. Un en-tête de transfert venant de n'importe qui d'autre est
+ignoré.
+
+```rust
+use rustango::real_ip::ClientAddr;
+
+async fn sign_in(ClientAddr(ip): ClientAddr) { /* … */ }        // 500 without ConnectInfo
+async fn audit(ip: Option<ClientAddr>) { /* … */ }             // None without ConnectInfo
+```
 
 ---
 
@@ -686,6 +707,31 @@ La comparaison de signature est à temps constant, ce qui signifie qu'elle prend
 Les appels sortants vers des URL que la configuration peut définir (livraison de webhooks, `webhook_callback` de Slack, découverte OAuth2/OIDC, token et userinfo) refusent les adresses de loopback, privées, link-local et de métadonnées, et ne suivent jamais les redirections. Pour joindre un IdP ou un hook Slack sur votre propre réseau, listez-le dans `RUSTANGO_OUTBOUND_ALLOW` (hôtes et CIDR séparés par des virgules, p. ex. `10.0.5.0/24,idp.internal`) ; tout le reste reste refusé. Une entrée d'hôte fait confiance à tout ce vers quoi ce nom résout : ne listez que des noms que vous contrôlez. La liste ne s'applique jamais à la livraison de webhooks : un abonnement s'y inscrit avec `allow_private_targets(true)`. Elle ne s'applique pas non plus aux fournisseurs SSO propres à un tenant, qu'un admin du tenant définit : ceux-ci lisent `RUSTANGO_TENANT_OUTBOUND_ALLOW` (vide par défaut, donc adresses publiques seulement).
 
 Ces appels ignorent `HTTPS_PROXY`/`NO_PROXY`. Pour les faire passer par un proxy de sortie, définissez `RUSTANGO_OUTBOUND_PROXY` (p. ex. `http://proxy.internal:3128`) ; le proxy lui-même peut être privé. L'application résout et vérifie quand même chaque cible d'abord : elle a donc besoin d'un DNS local pour elles ; un échec de résolution refuse l'appel. Le proxy résout le nom à nouveau, il doit donc lui aussi refuser les destinations privées et de métadonnées : 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16 (dont 169.254.169.254, 169.254.170.2, 169.254.170.23), 100.64.0.0/10 (dont 100.100.100.200), ::1, fc00::/7 (dont fd00:ec2::254, fd00:ec2::23) et fe80::/10. Sans proxy, les adresses sont vérifiées à nouveau au moment de la connexion.
+
+---
+
+## Récupérer des URL fournies par l'utilisateur
+
+Une URL qu'un utilisateur ou un tenant vous donne (aperçu de lien, cible de
+webhook, URL d'avatar) ne doit pas atteindre votre réseau privé ni le point de
+terminaison de métadonnées du cloud. Envoyez-la via `outbound::Egress` (la
+fonctionnalité `http-client`) :
+
+```rust
+use rustango::outbound::Egress;
+
+let target = Egress::public()?.check(&user_url).await?; // TargetError::Blocked if private
+let resp = target.request(reqwest::Method::GET).send().await?;
+```
+
+`Egress::public()` refuse les adresses de loopback, privées, link-local, CGNAT et
+de métadonnées, ne suit jamais les redirections, et contrôle de nouveau chaque
+adresse à la connexion ; un nom qui change sa réponse après le contrôle
+(DNS rebinding) n'aboutit donc nulle part. `Egress::public_or_allowed()` laisse
+aussi passer les hôtes et CIDR de `RUSTANGO_OUTBOUND_ALLOW`. Pour un socket
+brut, `outbound::resolve_public(host, port)` résout une seule fois et ne renvoie
+que des adresses publiques : connectez-vous à celles-ci, jamais de nouveau au
+nom.
 
 ---
 

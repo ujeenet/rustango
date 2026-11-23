@@ -36,6 +36,7 @@ petición.
 
 ## Tabla de contenidos
 - [Inicio rápido](#inicio-rápido) · [Sesiones vs. JWT](#sesiones-vs-jwt)
+- [La capa de sesión](#la-capa-de-sesión) · [Listar y revocar las sesiones de un usuario](#listar-y-revocar-las-sesiones-de-un-usuario)
 - [La bolsa de sesión](#la-bolsa-de-sesión) · [La cookie](#la-cookie)
 - [Elegir un backend](#elegir-un-backend) · [Caducidad y renovación deslizante](#caducidad-y-renovación-deslizante)
 - [Actualizar in situ](#actualizar-una-sesión-in-situ) · [Notas y límites](#notas-y-límites)
@@ -73,6 +74,79 @@ inadivinable.
 Con tenancy, acota el store por petición con
 `store.for_tenant(&TenantSlug::of(&t.org)?)`: el id no lleva tenant, y con
 enrutado por apex y prefijo de ruta una cookie `Path=/` llega a todos los tenants.
+
+---
+
+## La capa de sesión
+
+`SessionLayer` hace el trabajo de la cookie por ti: carga la sesión que nombra
+la cookie, se la entrega a los handlers como `CurrentSession` y la guarda cuando
+el handler termina. La cookie es siempre `HttpOnly`, y por defecto `Secure` +
+`SameSite=Lax`; vive tanto como el TTL del store.
+
+```rust
+use rustango::sessions::{CurrentSession, SessionLayer, SessionStore};
+
+let app = Router::new()
+    .route("/login", post(login))
+    .route("/me", get(me))
+    .layer(SessionLayer::new(SessionStore::new(cache)));
+
+async fn login(session: CurrentSession /* , form … */) -> Result<&'static str, ApiError> {
+    // After the password check: a new id, bound to the user.
+    session.login(&user.id.to_string()).await.map_err(ApiError::internal)?;
+    session.set("theme", "dark");
+    Ok("ok")
+}
+
+async fn me(session: CurrentSession) -> String {
+    session.user().unwrap_or_default()
+}
+```
+
+- `login(user)` mueve la sesión a un **id nuevo**, así que un id plantado antes
+  del login no sirve de nada. `cycle_id()` hace lo mismo tras un cambio de
+  permisos.
+- `logout()` borra la sesión y expira la cookie.
+- Opciones: `cookie_name`, `cookie_path`, `cookie_domain`, `same_site`,
+  `allow_insecure_for_dev()` (solo desarrollo con HTTP plano) y `rolling()`
+  (renueva el TTL y la cookie en cada petición).
+- Con tenancy, la capa acota el store al tenant de la petición. Una petición
+  sin contexto de tenant recibe un 503; `allow_global()` la sirve desde el
+  espacio global de la plataforma.
+- Una petición nunca vuelve a escribir una sesión que terminó mientras se
+  ejecutaba (revocada, o cerrada en otro sitio): en su lugar se elimina la
+  cookie.
+- Para un token CSRF guardado en la sesión, usa `SessionLayer::with_csrf` —
+  consulta [CSRF](security.md#protección-contra-csrf).
+
+---
+
+## Listar y revocar las sesiones de un usuario
+
+Las sesiones creadas con `login` quedan ligadas al usuario, así que puedes
+mostrar «dónde has iniciado sesión» y terminarlas:
+
+```rust
+let store = session.store(); // the request's store, scoped to its tenant
+for s in store.sessions_of(&user_id).await? {
+    println!("{} since {}", s.key, s.created_at);
+}
+store.revoke(&user_id, &key).await?;                 // one device
+store.revoke_all(&user_id, session.id().as_deref()).await?; // all but this one
+```
+
+`key` nombra una sesión en los listados; no es el id de sesión, así que un
+listado nunca filtra una cookie utilizable. `revoke_all` también termina las
+sesiones que el listado pasó por alto (dos logins del mismo usuario en el mismo
+instante pueden perder una entrada), porque incrementa la generación de
+revocación del usuario y las sesiones anteriores dejan de cargarse. La sesión
+que se conserva sigue siendo válida durante el guardado propio de la petición,
+incluido `cycle_id()`.
+
+Un usuario conserva como máximo `MAX_SESSIONS_PER_USER` (100) sesiones; un
+login que lo supere termina la más antigua.
+
 
 ---
 
