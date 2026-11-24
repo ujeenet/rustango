@@ -78,10 +78,6 @@ pub(crate) struct ColumnDef {
     pub(crate) comment: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub(crate) case_insensitive: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) min: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) max: Option<i64>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub(crate) sealed: bool,
 }
@@ -516,8 +512,6 @@ mod tests {
             generated_as: None,
             comment: None,
             case_insensitive: false,
-            min: None,
-            max: None,
             sealed: false,
         }];
         let st = State {

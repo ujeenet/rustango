@@ -606,8 +606,6 @@ fn alter_column(
     change!(max_length);
     change!(comment);
     change!(case_insensitive);
-    change!(min);
-    change!(max);
     change!(sealed);
     if ch.ty.is_some() || ch.max_length.is_some() {
         if let Some(f) = fks_using(s, table, column) {

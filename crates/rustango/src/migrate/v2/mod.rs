@@ -6,11 +6,14 @@
 // Wired to the runner and CLI in later phase 1 branches.
 #![cfg_attr(not(test), allow(dead_code))]
 
+pub(crate) mod catalog;
 pub(crate) mod checksum;
 pub(crate) mod format;
 pub(crate) mod graph;
 pub(crate) mod json;
 pub(crate) mod load;
+pub(crate) mod norm;
+pub(crate) mod probe;
 pub(crate) mod render;
 pub(crate) mod replay;
 pub(crate) mod state;

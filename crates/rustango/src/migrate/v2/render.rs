@@ -17,7 +17,8 @@ use crate::migrate::snapshot::{FieldSnapshot, IndexSnapshot, SchemaSnapshot, Tab
 use crate::sql::{Dialect, TableTarget};
 
 /// How a unit runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum UnitKind {
     /// One transaction, with the ledger update.
     Tx,
@@ -28,13 +29,20 @@ pub(crate) enum UnitKind {
 }
 
 /// What a probe checks after an autocommit unit: the state just after it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "expect", rename_all = "snake_case")]
 pub(crate) enum Expect {
-    Table(Arc<TableState>),
-    NoTable(String),
+    Table {
+        table: Box<TableState>,
+    },
+    NoTable {
+        table: String,
+    },
+    /// `column` as it is after the unit; `before` as it was, when it existed.
     Column {
         table: String,
         column: ColumnDef,
+        before: Option<ColumnDef>,
     },
     NoColumn {
         table: String,
@@ -64,15 +72,17 @@ pub(crate) enum Expect {
         table: String,
         name: String,
     },
-    /// The file's own probe SQL.
-    Sql(String),
+    /// The file's own probe SQL: a row back means done.
+    Sql {
+        sql: String,
+    },
     /// The statement is safe to run again.
     Idempotent,
 }
 
 /// One unit: its op index, how it runs, its SQL and, for autocommit units,
 /// the probe of the state after it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Unit {
     pub(crate) op: usize,
     pub(crate) kind: UnitKind,
@@ -239,7 +249,7 @@ fn auto(sql: String, probe: Vec<Expect>) -> Unit {
     }
 }
 
-fn snapshot(c: &ColumnDef) -> FieldSnapshot {
+pub(crate) fn snapshot(c: &ColumnDef) -> FieldSnapshot {
     FieldSnapshot {
         name: c.column.clone(),
         column: c.column.clone(),
@@ -470,6 +480,12 @@ impl Render<'_> {
     }
 
     fn column_expect(&self, table: &str, column: &str) -> Vec<Expect> {
+        let before = self
+            .before
+            .tables
+            .get(table)
+            .and_then(|t| t.column(column))
+            .cloned();
         self.after
             .tables
             .get(table)
@@ -478,6 +494,7 @@ impl Render<'_> {
                 vec![Expect::Column {
                     table: table.to_owned(),
                     column: c.clone(),
+                    before,
                 }]
             })
             .unwrap_or_default()
@@ -502,7 +519,9 @@ impl Render<'_> {
                         ts.indexes.iter().filter(|i| !skipped(i, self.b)).collect();
                     vec![auto(
                         create_table_sql(d, &ts, &ts.name, &inline),
-                        vec![Expect::Table(Arc::clone(&ts))],
+                        vec![Expect::Table {
+                            table: Box::new((*ts).clone()),
+                        }],
                     )]
                 } else {
                     let mut sql = vec![create_table_sql(d, &ts, &ts.name, &[])];
@@ -523,7 +542,9 @@ impl Render<'_> {
             // PG without CASCADE: a missed FK fails loudly.
             Op::DropTable { table, .. } => self.ddl(
                 vec![format!("DROP TABLE {}", q(d, table))],
-                vec![Expect::NoTable(table.clone())],
+                vec![Expect::NoTable {
+                    table: table.clone(),
+                }],
             ),
             Op::RenameTable { from, to } => {
                 let mut sql = vec![format!("ALTER TABLE {} RENAME TO {}", q(d, from), q(d, to))];
@@ -538,8 +559,12 @@ impl Render<'_> {
                     }
                 }
                 let probe = vec![
-                    Expect::Table(self.table(self.after, to)?),
-                    Expect::NoTable(from.clone()),
+                    Expect::Table {
+                        table: Box::new((*self.table(self.after, to)?).clone()),
+                    },
+                    Expect::NoTable {
+                        table: from.clone(),
+                    },
                 ];
                 self.ddl(sql, probe)
             }
@@ -547,7 +572,9 @@ impl Render<'_> {
                 d.alter_table_comment_statement(tgt(table), to.as_deref().unwrap_or(""))
                     .into_iter()
                     .collect(),
-                vec![Expect::Table(self.table(self.after, table)?)],
+                vec![Expect::Table {
+                    table: Box::new((*self.table(self.after, table)?).clone()),
+                }],
             ),
             Op::AddColumn {
                 table,
@@ -874,7 +901,7 @@ impl Render<'_> {
                 .sql
                 .as_ref()
                 .and_then(|p| p.get(self.b))
-                .map(|s| vec![Expect::Sql(s.0.clone())]),
+                .map(|s| vec![Expect::Sql { sql: s.0.clone() }]),
         })
     }
 
@@ -895,9 +922,13 @@ impl Render<'_> {
                     name: name.clone(),
                 }),
                 Op::CreateTable { table, .. } => {
-                    out.push(Expect::Table(self.table(self.after, &table.name)?));
+                    out.push(Expect::Table {
+                        table: Box::new((*self.table(self.after, &table.name)?).clone()),
+                    });
                 }
-                Op::DropTable { table, .. } => out.push(Expect::NoTable(table.clone())),
+                Op::DropTable { table, .. } => out.push(Expect::NoTable {
+                    table: table.clone(),
+                }),
                 Op::AddColumn { table, column, .. } => {
                     out.extend(self.column_expect(table, &column.column.column));
                 }
@@ -927,7 +958,9 @@ impl Render<'_> {
                 other => {
                     // Anything else: the whole table it names, from the after-state.
                     if let Some(t) = touched_table(other).and_then(|t| self.after.tables.get(t)) {
-                        out.push(Expect::Table(Arc::clone(t)));
+                        out.push(Expect::Table {
+                            table: Box::new((**t).clone()),
+                        });
                     }
                 }
             }
@@ -973,12 +1006,6 @@ impl Render<'_> {
         fill: Option<&str>,
     ) -> Result<Vec<Unit>, LoadError> {
         let d = self.d;
-        if column.min.is_some() || column.max.is_some() {
-            return Err(self.err(
-                Code::Unsupported,
-                "`min`/`max` are checks: write an add_check op instead",
-            ));
-        }
         let not_null_no_default =
             !column.nullable && column.default.is_none() && column.generated_as.is_none();
         if fill.is_some() && !not_null_no_default {
@@ -1029,7 +1056,8 @@ impl Render<'_> {
                         format!("ALTER TABLE {t} ADD COLUMN {}", col_def(d, &nullable)),
                         vec![Expect::Column {
                             table: table.to_owned(),
-                            column: nullable,
+                            column: nullable.clone(),
+                            before: None,
                         }],
                     ),
                     Unit {
@@ -1040,7 +1068,11 @@ impl Render<'_> {
                     },
                     auto(
                         format!("ALTER TABLE {t} MODIFY COLUMN {}", col_def(d, column)),
-                        probe,
+                        vec![Expect::Column {
+                            table: table.to_owned(),
+                            column: column.clone(),
+                            before: Some(nullable),
+                        }],
                     ),
                 ])
             }
@@ -1074,12 +1106,6 @@ impl Render<'_> {
         let (Some(from), Some(to)) = (from.column(column), after_t.column(column)) else {
             return Err(self.err(Code::State, format!("column `{table}.{column}` missing")));
         };
-        if to.min.is_some() || to.max.is_some() {
-            return Err(self.err(
-                Code::Unsupported,
-                "`min`/`max` are checks: write add_check/drop_check ops instead",
-            ));
-        }
         let mut changes = Vec::new();
         diff::push_alter_changes(table, &snapshot(from), &snapshot(to), &mut changes);
         if changes.is_empty() {
@@ -1095,6 +1121,7 @@ impl Render<'_> {
                 vec![Expect::Column {
                     table: table.to_owned(),
                     column: to.clone(),
+                    before: Some(from.clone()),
                 }],
             )]),
             Backend::Postgres => {

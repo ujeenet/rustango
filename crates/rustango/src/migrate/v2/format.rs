@@ -271,8 +271,6 @@ pub(crate) struct ColumnChanges {
     pub(crate) case_insensitive: Option<Change<bool>>,
     pub(crate) primary_key: Option<Change<bool>>,
     pub(crate) auto: Option<Change<bool>>,
-    pub(crate) min: Option<Change<Option<i64>>>,
-    pub(crate) max: Option<Change<Option<i64>>>,
     pub(crate) generated_as: Option<Change<Option<String>>>,
     pub(crate) sealed: Option<Change<bool>>,
 }
@@ -617,7 +615,13 @@ fn decode_op(v: &Value, at: &str) -> Result<OpEnvelope, LoadError> {
     for k in ENVELOPE {
         payload.remove(k);
     }
-    let bad = |e: serde_json::Error| LoadError::new(Code::File, at, format!("`{kind}`: {e}"));
+    let bad = |e: serde_json::Error| {
+        let mut msg = format!("`{kind}`: {e}");
+        if msg.contains("unknown field `min`") || msg.contains("unknown field `max`") {
+            msg.push_str("; `min`/`max` are checks: write an add_check op");
+        }
+        LoadError::new(Code::File, at, msg)
+    };
     let op = if kind == "add_index" {
         payload.remove("op");
         let table = payload.remove("table");
@@ -919,6 +923,21 @@ mod tests {
         );
         raw.as_object_mut().unwrap().remove("state");
         assert_eq!(code(&file(json!([raw]))), Code::File, "state is required");
+    }
+
+    /// `min`/`max` are not column keys: makemigrations writes checks.
+    #[test]
+    fn min_and_max_are_refused_at_load() {
+        let v = file(json!([{"op": "add_column", "v": 1, "table": "t",
+            "column": {"column": "n", "ty": "i64", "nullable": true, "min": 0}}]));
+        let e = decode(&v, "f.json").unwrap_err();
+        assert_eq!(e.code, Code::File);
+        assert!(e.msg.contains("add_check"), "{e}");
+        let v = file(
+            json!([{"op": "alter_column", "v": 1, "table": "t", "column": "n",
+            "changes": {"max": {"from": null, "to": 9}}}]),
+        );
+        assert_eq!(code(&v), Code::File);
     }
 
     #[test]
