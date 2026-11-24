@@ -274,6 +274,7 @@ pub(super) fn write_scaffold(
     scope: crate::migrate::MigrationScope,
     forward: Vec<Operation>,
 ) -> Result<Migration, MigrateError> {
+    crate::migrate::require_v1_project(dir)?;
     let prior = file::list_dir(dir)?;
     let chain: Vec<&Migration> = prior.iter().filter(|m| m.scope == scope).collect();
     let head = chain.last().copied();
@@ -373,8 +374,7 @@ pub fn append_data_op(
     sql: &str,
     reverse_sql: Option<&str>,
 ) -> Result<(), MigrateError> {
-    // It edits one file; the folder must still be engine v1.
-    file::v1_folder(dir)?;
+    crate::migrate::require_v1_project(dir)?;
     let path = file_path(dir, migration_name);
     let mut mig = file::load(&path).map_err(|e| match e {
         MigrateError::Io(io) if io.kind() == std::io::ErrorKind::NotFound => {

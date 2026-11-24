@@ -135,6 +135,8 @@ pub fn make_migrations_for_app_with(
     name_override: Option<&str>,
     drops: DropAndAdd,
 ) -> Result<Option<Migration>, MigrateError> {
+    // Project-level: the new app folder must not join an engine v2 project.
+    super::require_v1_project(project_root)?;
     let app_dir = project_root.join(app).join("migrations");
     if !app_dir.exists() {
         std::fs::create_dir_all(&app_dir)?;
@@ -181,6 +183,7 @@ pub fn make_migrations_scoped_with(
     name_override: Option<&str>,
     drops: DropAndAdd,
 ) -> Result<Option<Migration>, MigrateError> {
+    super::require_v1_project(dir)?;
     let prior = file::list_dir(dir)?;
     let Some(mig) = plan_scoped(
         &prior,
@@ -510,6 +513,8 @@ pub fn make_migrations_system(
     scope: crate::core::ModelScope,
     name_override: Option<&str>,
 ) -> Result<Option<Migration>, MigrateError> {
+    // It writes into the project, so the whole project must be engine v1.
+    super::require_v1_project(project_root)?;
     let dir = project_root.join("system").join("migrations");
     let prior = if dir.exists() {
         file::list_dir(&dir)?
@@ -725,6 +730,7 @@ pub fn make_migrations_from_with(
     name_override: Option<&str>,
     drops: DropAndAdd,
 ) -> Result<Option<Migration>, MigrateError> {
+    super::require_v1_project(dir)?;
     let prior = file::list_dir(dir)?;
     let Some(mig) = plan_from(&prior, current, name_override, drops)? else {
         return Ok(None);
@@ -1264,6 +1270,7 @@ fn auto_name(changes: &[SchemaChange], is_first: bool) -> String {
 /// merged, or [`MigrateError::Io`] / [`MigrateError::Json`] on file
 /// problems.
 pub fn make_merge_migration(dir: &Path) -> Result<Option<Migration>, MigrateError> {
+    super::require_v1_project(dir)?;
     let prior = file::list_dir(dir)?;
     if prior.is_empty() {
         return Err(MigrateError::Validation(

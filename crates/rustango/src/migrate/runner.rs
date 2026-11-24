@@ -584,6 +584,7 @@ pub fn sqlmigrate_one(
     name: &str,
     dialect: &dyn crate::sql::Dialect,
 ) -> Result<MigrationPreview, MigrateError> {
+    super::require_v1_project(dir)?;
     let all = file::list_dir(dir)?;
     let mig = all.iter().find(|m| m.name == name).ok_or_else(|| {
         MigrateError::Validation(format!("migration `{name}` not found in {}", dir.display()))

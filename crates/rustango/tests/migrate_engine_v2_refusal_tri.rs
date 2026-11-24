@@ -211,11 +211,16 @@ async fn refuses(backend: Backend, shapes: &[Shape], entries: Vec<(&str, Call)>)
                     || err.contains("mixes engine v1 and engine v2"),
                 "{label} on {shape:?}: {err}"
             );
+            let after = snapshot(&root);
+            let names = |s: &[(PathBuf, Vec<u8>)]| -> Vec<PathBuf> {
+                s.iter().map(|(p, _)| p.clone()).collect()
+            };
             assert_eq!(
-                snapshot(&root),
-                before,
-                "{label} on {shape:?}: files changed"
+                names(&after),
+                names(&before),
+                "{label} on {shape:?}: files written"
             );
+            assert!(after == before, "{label} on {shape:?}: a file changed");
             assert_eq!(
                 tables(&pool).await,
                 Vec::<String>::new(),
@@ -359,10 +364,16 @@ async fn v1_refuses_v2_cli_add_data_op(backend: Backend) {
     refuses(
         backend,
         PROJECT,
-        vec![(
-            "add-data-op",
-            cli(&["add-data-op", "0001_initial", "--sql", "SELECT 1"]),
-        )],
+        vec![
+            (
+                "add-data-op to",
+                cli(&["add-data-op", "--to", "0001_initial", "--sql", "SELECT 1"]),
+            ),
+            (
+                "add-data-op name",
+                cli(&["add-data-op", "--name", "seed", "--sql", "SELECT 1"]),
+            ),
+        ],
     )
     .await;
 }
@@ -533,6 +544,36 @@ async fn v1_refuses_v2_make_apis(backend: Backend) {
                     Box::pin(
                         async move { err_string(rustango::migrate::make_migrations(&c.dir, None)) },
                     )
+                }),
+            ),
+            (
+                "make_migrations_for_scope",
+                call(|c| {
+                    Box::pin(async move {
+                        err_string(rustango::migrate::make::make_migrations_for_scope(
+                            &c.dir,
+                            rustango::core::ModelScope::Tenant,
+                            None,
+                        ))
+                    })
+                }),
+            ),
+            (
+                "make_migrations_for_app",
+                call(|c| {
+                    Box::pin(async move {
+                        err_string(rustango::migrate::make_migrations_for_app(
+                            &c.root, "shop", None,
+                        ))
+                    })
+                }),
+            ),
+            (
+                "make_merge_migration",
+                call(|c| {
+                    Box::pin(async move {
+                        err_string(rustango::migrate::make::make_merge_migration(&c.dir))
+                    })
                 }),
             ),
             (
