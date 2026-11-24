@@ -181,6 +181,9 @@ pub(crate) async fn run_with_writer_for<W: Write + Send>(
 ) -> Result<(), MigrateError> {
     let args: Vec<String> = args.into_iter().collect();
     let cmd = args.first().map_or("", String::as_str);
+    if crate::cli_verbs::ENGINE_V1_VERBS.contains(&cmd) {
+        crate::migrate::require_v1_project(dir)?;
+    }
 
     match cmd {
         "" | "--help" | "-h" | "help" => {

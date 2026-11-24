@@ -148,6 +148,12 @@ untouched.
 
 ---
 
+## Unreleased
+
+- Every migrate verb, `Builder::migrate`, boot and the tenancy runners refuse a project with an engine v2 migration file (top-level `engine` or `format` key) with `MigrateError::EngineV2`, or `MigrateError::MixedEngine` when v1 and v2 files sit together; `file::list_dir`, `file::load` and `file::parse` refuse the file itself. `embed_migrations!` fails to compile on such a folder.
+- A v1 migrate on a database holding the engine v2 ledger (`__rustango_migrations_v2`, or `<ledger>_v2`) is refused with `MigrateError::SwitchedToV2`; `runserver` and `Builder::migrate` log a warning and serve without migrating.
+- `migrate_embedded_pool` parses every entry before it takes the lock, so a bad entry no longer creates the ledger.
+
 ## 0.70.0
 
 - A write body or form value holding a NUL byte now answers 400 on every backend (admin, ViewSet, `CreateView`, `UpdateView`, `FormView`, `ListView` bulk actions, operator console forms, media JSON bodies, string keys in the URL); MySQL and SQLite used to store it. A JSON, array or hstore value with a `\u0000` escape is refused as a field error. The filter 400 message now reads "a value must not contain a NUL byte".

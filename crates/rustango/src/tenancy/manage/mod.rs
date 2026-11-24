@@ -268,6 +268,9 @@ where
     #[cfg(feature = "postgres")]
     crate::tenancy::boot_checks(pools).await?;
     let cmd = args.first().map_or("", String::as_str);
+    if crate::cli_verbs::TENANCY_ENGINE_V1_VERBS.contains(&cmd) {
+        crate::migrate::require_v1_project(dir)?;
+    }
 
     match cmd {
         "" | "help" | "--help" | "-h" => {

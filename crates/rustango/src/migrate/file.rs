@@ -161,16 +161,31 @@ fn default_reversible() -> bool {
 /// an atomic migration (#1626).
 pub fn load(path: &Path) -> Result<Migration, MigrateError> {
     let raw = crate::text_file::read(path)?;
-    parse(&raw)
+    parse_from(&raw, &path.display().to_string())
 }
 
 /// Parse and validate a migration from a JSON string. Used by
 /// [`load`], and by `migrate_embedded` for `include_str!` bytes.
 ///
 /// # Errors
-/// Returns [`MigrateError::Json`] on parse failure or
+/// Returns [`MigrateError::Json`] on parse failure,
+/// [`MigrateError::EngineV2`] for an engine v2 file, or
 /// [`MigrateError::Validation`] on internal-consistency failures.
 pub fn parse(raw: &str) -> Result<Migration, MigrateError> {
+    parse_from(raw, "this migration")
+}
+
+/// [`parse`], naming `origin` when the text is an engine v2 file.
+pub(crate) fn parse_from(raw: &str, origin: &str) -> Result<Migration, MigrateError> {
+    if super::engine::FileEngine::of(raw) == super::engine::FileEngine::V2 {
+        return Err(MigrateError::EngineV2 {
+            origin: origin.to_owned(),
+        });
+    }
+    parse_v1(raw)
+}
+
+fn parse_v1(raw: &str) -> Result<Migration, MigrateError> {
     let mig: Migration = serde_json::from_str(raw)?;
     validate(&mig)?;
     Ok(mig)
@@ -207,26 +222,35 @@ pub(crate) fn private_tempdir(prefix: &str) -> std::io::Result<tempfile::TempDir
 /// there fails here with a clear error instead of deep inside
 /// `unapply` or `migrate_to`.
 ///
+/// A folder holding an engine v2 file is refused whole, before any file
+/// is parsed: every v1 reader ends here or in [`parse`].
+///
 /// # Errors
 /// Returns [`MigrateError::Io`] on read failure, [`MigrateError::Json`]
-/// on parse failure, or [`MigrateError::Validation`] if any file is
-/// internally inconsistent or the chain is broken.
+/// on parse failure, [`MigrateError::EngineV2`] or
+/// [`MigrateError::MixedEngine`] for a folder holding engine v2 files,
+/// or [`MigrateError::Validation`] if any file is internally
+/// inconsistent or the chain is broken.
 pub fn list_dir(dir: &Path) -> Result<Vec<Migration>, MigrateError> {
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)?
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
-        .collect();
-    paths.sort();
-    let mut out = Vec::with_capacity(paths.len());
-    for p in paths {
-        out.push(load(&p)?);
+    let files = v1_folder(dir)?;
+    let mut out = Vec::with_capacity(files.len());
+    for f in files {
+        out.push(parse_v1(&f.text)?);
     }
     validate_chain(&out, &dir.display().to_string())?;
     Ok(out)
+}
+
+/// `dir`'s `*.json` files, refused when any is an engine v2 file: the
+/// per-folder guard.
+///
+/// # Errors
+/// [`MigrateError::Io`], [`MigrateError::EngineV2`] or
+/// [`MigrateError::MixedEngine`].
+pub(crate) fn v1_folder(dir: &Path) -> Result<Vec<super::engine::RawFile>, MigrateError> {
+    let files = super::engine::read_folder(dir)?;
+    super::engine::ProjectEngine::of_files(&files).require_v1()?;
+    Ok(files)
 }
 
 /// [`list_dir`] over several directories. Loads each one, then sorts

@@ -724,6 +724,14 @@ fn expand_q(input: TokenStream2) -> syn::Result<TokenStream2> {
     Ok(expanded)
 }
 
+/// An engine v2 file: a non-null top-level `engine` or `format`. Kept in
+/// step with `rustango::migrate::engine` by `engine_marker_cases.json`.
+fn is_engine_v2_file(json: &serde_json::Value) -> bool {
+    ["engine", "format"]
+        .iter()
+        .any(|k| json.get(*k).is_some_and(|v| !v.is_null()))
+}
+
 fn expand_embed_migrations(input: TokenStream2) -> syn::Result<TokenStream2> {
     // Default to "./migrations" if invoked without args.
     let path_str = if input.is_empty() {
@@ -780,6 +788,7 @@ fn expand_embed_migrations(input: TokenStream2) -> syn::Result<TokenStream2> {
     let mut chain_names: Vec<String> = Vec::with_capacity(entries.len());
     let mut prev_refs: Vec<(String, Option<String>)> = Vec::with_capacity(entries.len());
     let mut texts: Vec<String> = Vec::with_capacity(entries.len());
+    let mut v2_files: Vec<String> = Vec::new();
     for (stem, path) in &entries {
         let raw = std::fs::read(path)
             .map_err(|e| e.to_string())
@@ -802,6 +811,10 @@ fn expand_embed_migrations(input: TokenStream2) -> syn::Result<TokenStream2> {
                 ),
             )
         })?;
+        if is_engine_v2_file(&json) {
+            v2_files.push(path.display().to_string());
+            continue;
+        }
         let name = json
             .get("name")
             .and_then(|v| v.as_str())
@@ -828,6 +841,27 @@ fn expand_embed_migrations(input: TokenStream2) -> syn::Result<TokenStream2> {
         chain_names.push(name.clone());
         prev_refs.push((name, prev));
         texts.push(raw);
+    }
+
+    if !v2_files.is_empty() {
+        // The macro crate shares rustango's version.
+        let what = if chain_names.is_empty() {
+            format!(
+                "holds engine v2 migrations, and rustango {} runs engine v1 only; \
+                 it needs a newer rustango with migrations engine v2",
+                env!("CARGO_PKG_VERSION")
+            )
+        } else {
+            "mixes engine v1 and engine v2 migration files; a project runs one engine".to_owned()
+        };
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!(
+                "embed_migrations!: {} {what} (v2: {})",
+                abs.display(),
+                v2_files.join(", ")
+            ),
+        ));
     }
 
     let name_set: std::collections::HashSet<&str> =
@@ -14846,6 +14880,59 @@ mod embed_migrations_tests {
     fn existing_dir_does_not_warn() {
         let out = expand("./src");
         assert!(!out.contains("deprecated"), "{out}");
+    }
+
+    /// The cases `rustango::migrate::engine` is tested on too.
+    #[test]
+    fn engine_marker_matches_the_shared_cases() {
+        let cases: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("engine_marker_cases.json")).unwrap();
+        for case in cases {
+            let want = case["v2"].as_bool().unwrap();
+            assert_eq!(is_engine_v2_file(&case["file"]), want, "{}", case["case"]);
+        }
+    }
+
+    /// A temp folder holding `files`, for `expand_err`.
+    fn folder(tag: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("rustango_embed_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, body) in files {
+            std::fs::write(dir.join(name), body).unwrap();
+        }
+        dir
+    }
+
+    const V1: &str =
+        r#"{"name": "0001_initial", "created_at": "", "snapshot": {"tables": []}, "forward": []}"#;
+    const V2: &str = r#"{"engine": 2, "format": 1, "id": "0002_add_bio", "operations": []}"#;
+
+    fn expand_err(dir: &std::path::Path) -> String {
+        let path = dir.display().to_string();
+        let err = expand_embed_migrations(quote! { #path })
+            .expect_err("must not compile")
+            .to_string();
+        let _ = std::fs::remove_dir_all(dir);
+        err
+    }
+
+    #[test]
+    fn embed_migrations_refuses_v2_file() {
+        let dir = folder("v2", &[("0002_add_bio.json", V2)]);
+        let err = expand_err(&dir);
+        assert!(err.contains("engine v2"), "{err}");
+        assert!(err.contains("0002_add_bio.json"), "{err}");
+    }
+
+    #[test]
+    fn embed_migrations_refuses_mixed_dir() {
+        let dir = folder(
+            "mixed",
+            &[("0001_initial.json", V1), ("0002_add_bio.json", V2)],
+        );
+        let err = expand_err(&dir);
+        assert!(err.contains("mixes engine v1 and engine v2"), "{err}");
     }
 }
 

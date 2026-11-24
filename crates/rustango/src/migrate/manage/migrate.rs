@@ -291,6 +291,9 @@ where
     F: FnOnce(crate::migrate::LockHeld) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<Migration>, MigrateError>>,
 {
+    // Shared by the CLI and boot: refuse an engine v2 project before the
+    // system chain is generated.
+    crate::migrate::require_v1_project(dir)?;
     let chain = system_chain(dir)?;
     let applied = crate::migrate::chains::migrate_chains(
         pool,
@@ -396,6 +399,8 @@ pub(super) async fn migrate_squash<W: Write>(
     dir: &Path,
     w: &mut W,
 ) -> Result<(), MigrateError> {
+    // The renames below bypass the loader, so the project is checked first.
+    crate::migrate::require_v1_project(dir)?;
     SetAside::refuse_leftovers(dir)?;
     runner::ensure_ledger_pool(pool).await?;
     let all = file::list_dir(dir)?;
@@ -839,6 +844,38 @@ mod squash_aside_tests {
         let err = aside.restore().expect_err("0002_b's backup is gone");
         assert!(err.to_string().contains("0002_b"), "{err}");
         assert_eq!(names(&dir), ["0001_a.json", "0003_c.json"]);
+    }
+
+    /// Squash renames files outside the loader: an engine v2 file in the
+    /// project refuses it before the first rename.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn squash_refuses_v2_before_touching_files() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut prev = String::new();
+        for n in ["0001_a", "0002_b", "0003_c"] {
+            let prev_key = if prev.is_empty() {
+                String::new()
+            } else {
+                format!(r#""prev": "{prev}","#)
+            };
+            let body = format!(
+                r#"{{"name": "{n}", {prev_key} "created_at": "", "snapshot": {{"tables": []}}, "forward": []}}"#
+            );
+            std::fs::write(file_path(&dir, n), body).unwrap();
+            prev = n.to_owned();
+        }
+        let sys = root.path().join("system").join("migrations");
+        std::fs::create_dir_all(&sys).unwrap();
+        std::fs::write(file_path(&sys, "0001_s"), r#"{"engine": 2, "format": 1}"#).unwrap();
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let err = migrate_squash(&pool, &dir, &mut Vec::new())
+            .await
+            .expect_err("mixed project");
+        assert!(matches!(err, MigrateError::MixedEngine { .. }), "{err}");
+        assert_eq!(names(&dir), ORIGINAL);
     }
 
     /// A backup left by an interrupted squash refuses the next one.

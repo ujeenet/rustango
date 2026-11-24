@@ -4,6 +4,15 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added
+
+- Migration files written for engine v2 are recognised: every v1 verb, boot path, runner and `embed_migrations!` refuses them with a clear error instead of a parse failure, and a v1 migrate refuses a database switched to engine v2 (boot warns and serves).
+
+### Fixed
+
+- `runserver` on Postgres migrates through the same boot route as the other backends.
+- A tenant schema holding only an engine v2 ledger is not taken for a foreign schema.
+
 ## [0.70.0] — 2026-11-22
 
 ### Changed

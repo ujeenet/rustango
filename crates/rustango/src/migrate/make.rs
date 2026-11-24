@@ -654,7 +654,8 @@ impl SystemChain {
             .get_or_init(Default::default)
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let shipped = file::list_dir(&dir).is_ok_and(|m| !m.is_empty());
+        // A refusal (an engine v2 file) must not read as "nothing shipped".
+        let shipped = !file::list_dir(&dir)?.is_empty();
         let generated = scopes
             .iter()
             .try_for_each(|&scope| make_migrations_system(project_root, scope, None).map(drop));
@@ -1344,6 +1345,33 @@ pub fn make_merge_migration(dir: &Path) -> Result<Option<Migration>, MigrateErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A refused system dir must not be taken for an empty one: that marked
+    /// it regenerated for the rest of the process.
+    #[test]
+    fn prepare_does_not_treat_v2_as_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sys = tmp.path().join("system").join("migrations");
+        std::fs::create_dir_all(&sys).unwrap();
+        let v2 = sys.join("0001_x.json");
+        std::fs::write(&v2, r#"{"engine": 2, "format": 1}"#).unwrap();
+        let scopes = [crate::core::ModelScope::Tenant];
+        let err = SystemChain::prepare(tmp.path(), &scopes).unwrap_err();
+        assert!(matches!(err, MigrateError::EngineV2 { .. }), "{err}");
+        assert_eq!(
+            std::fs::read_dir(&sys).unwrap().count(),
+            1,
+            "nothing written"
+        );
+        std::fs::remove_file(&v2).unwrap();
+        std::fs::write(
+            sys.join("0001_x.json"),
+            r#"{"name": "0001_x", "created_at": "", "snapshot": {"tables": []}, "forward": []}"#,
+        )
+        .unwrap();
+        let chain = SystemChain::prepare(tmp.path(), &scopes).unwrap();
+        assert_eq!(chain.origin(), super::super::runner::ChainOrigin::OnDisk);
+    }
 
     #[test]
     fn auto_name_initial_for_first_migration_with_create_tables() {

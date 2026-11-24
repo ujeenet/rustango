@@ -38,6 +38,66 @@ pub const LEDGER_TABLE: &str = "__rustango_migrations__";
 /// the project's never collide or renumber each other.
 pub const SYSTEM_LEDGER_TABLE: &str = "__rustango_system_migrations__";
 
+/// A ledger table a migrations engine owns, under its default name.
+#[cfg_attr(
+    not(any(feature = "sqlite", all(feature = "tenancy", feature = "postgres"))),
+    allow(dead_code)
+)]
+pub(crate) struct LedgerTable {
+    pub(crate) name: &'static str,
+    /// The datetime column old SQLite defaults wrote in a legacy shape;
+    /// `None` for v2 tables, which bind the canonical shape from day one.
+    #[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
+    pub(crate) legacy_datetime: Option<&'static str>,
+}
+
+/// Every ledger table: v1's two and engine v2's four (derived from
+/// [`LEDGER_TABLE`] by [`v2_ledger`]). The one list every reader uses.
+#[cfg_attr(
+    not(any(feature = "sqlite", all(feature = "tenancy", feature = "postgres"))),
+    allow(dead_code)
+)]
+pub(crate) const LEDGER_TABLES: &[LedgerTable] = &[
+    LedgerTable {
+        name: LEDGER_TABLE,
+        legacy_datetime: Some("applied_at"),
+    },
+    LedgerTable {
+        name: SYSTEM_LEDGER_TABLE,
+        legacy_datetime: Some("applied_at"),
+    },
+    LedgerTable {
+        name: "__rustango_migrations_v2",
+        legacy_datetime: None,
+    },
+    LedgerTable {
+        name: "__rustango_migrations_v2_progress",
+        legacy_datetime: None,
+    },
+    LedgerTable {
+        name: "__rustango_migrations_v2_undo",
+        legacy_datetime: None,
+    },
+    LedgerTable {
+        name: "__rustango_migrations_v2_events",
+        legacy_datetime: None,
+    },
+];
+
+/// The engine v2 ledger that goes with the v1 ledger `ledger`.
+pub(crate) fn v2_ledger(ledger: &str) -> String {
+    format!("{}_v2", ledger.trim_end_matches('_'))
+}
+
+/// Refuse a database switched to engine v2: it holds `ledger`'s v2 ledger.
+async fn refuse_switched_db(pool: &crate::sql::Pool, ledger: &str) -> Result<(), MigrateError> {
+    let table = v2_ledger(ledger);
+    if try_table_exists_here(pool, &table).await? {
+        return Err(MigrateError::SwitchedToV2 { table });
+    }
+    Ok(())
+}
+
 /// Per-app migration runner config. Lets two rustango apps live in
 /// the same Postgres database without colliding on the default
 /// `__rustango_migrations__` ledger table — each app picks its own
@@ -980,7 +1040,11 @@ pub async fn ensure_ledger_pool_with_ledger(
 
 /// The ledger `CREATE TABLE IF NOT EXISTS`. Only under the migrate lock:
 /// concurrent PG creators collide on `pg_type` (23505) (#1844).
+///
+/// Every v1 ledger write starts here, so a database switched to engine v2
+/// is refused here.
 async fn create_ledger_locked(pool: &crate::sql::Pool, ledger: &str) -> Result<(), MigrateError> {
+    refuse_switched_db(pool, ledger).await?;
     // Was a three-arm match on the dialect name with a hand-written
     // type + DEFAULT each, whose SQLite arm carried a copy of #1464's
     // canonical `strftime`. `Dialect` answers both halves now, so the
@@ -1217,6 +1281,8 @@ async fn migrate_pool_with_ledger_opts(
     origin: ChainOrigin,
     observer: Option<&dyn MigrationObserver>,
 ) -> Result<Vec<Migration>, MigrateError> {
+    // Before the lock: a refused folder must leave no ledger behind.
+    file::v1_folder(dir)?;
     with_migrate_lock_pool(
         pool,
         ledger,
@@ -4417,6 +4483,8 @@ pub async fn migrate_to_pool_with_ledger(
     target: &str,
     ledger: &str,
 ) -> Result<Vec<Migration>, MigrateError> {
+    // Before the lock: a refused folder must leave no ledger behind.
+    file::v1_folder(dir)?;
     let moved = with_migrate_lock_held(pool, |held| {
         migrate_to_locked(held, pool, dir, target, ledger)
     })
@@ -4511,6 +4579,8 @@ pub async fn downgrade_pool_with_ledger(
     steps: usize,
     ledger: &str,
 ) -> Result<Vec<Migration>, MigrateError> {
+    // Before the lock: a refused folder must leave no ledger behind.
+    file::v1_folder(dir)?;
     if steps == 0 {
         return Ok(Vec::new());
     }
@@ -4681,6 +4751,8 @@ pub async fn unapply_pool_with_ledger(
     name: &str,
     ledger: &str,
 ) -> Result<Migration, MigrateError> {
+    // Before the lock: a refused folder must leave no ledger behind.
+    file::v1_folder(dir)?;
     with_migrate_lock_pool(pool, ledger, async {
         check_is_head_pool(pool, dir, name, ledger).await?;
         unapply_locked_pool(pool, dir, name, ledger).await
@@ -4708,6 +4780,8 @@ async fn unapply_force_pool_with_ledger(
     name: &str,
     ledger: &str,
 ) -> Result<Migration, MigrateError> {
+    // Before the lock: a refused folder must leave no ledger behind.
+    file::v1_folder(dir)?;
     with_migrate_lock_pool(pool, ledger, unapply_locked_pool(pool, dir, name, ledger)).await
 }
 
@@ -5032,20 +5106,21 @@ async fn migrate_embedded_pool_with_ledger(
     embedded: &[(&str, &str)],
     ledger: &str,
 ) -> Result<Vec<Migration>, MigrateError> {
-    with_migrate_lock_pool(pool, ledger, async {
-        let mut all: Vec<Migration> = Vec::with_capacity(embedded.len());
-        for (name, json) in embedded {
-            let mig = file::parse(json)?;
-            if mig.name != *name {
-                return Err(MigrateError::Validation(format!(
-                    "embedded entry key `{name}` doesn't match migration `name` field `{}`",
-                    mig.name,
-                )));
-            }
-            all.push(mig);
+    // Parsed before the lock: an engine v2 entry creates no ledger.
+    let mut all: Vec<Migration> = Vec::with_capacity(embedded.len());
+    for (name, json) in embedded {
+        let mig = file::parse_from(json, &format!("embedded migration `{name}`"))?;
+        if mig.name != *name {
+            return Err(MigrateError::Validation(format!(
+                "embedded entry key `{name}` doesn't match migration `name` field `{}`",
+                mig.name,
+            )));
         }
-        all.sort_by(|a, b| a.name.cmp(&b.name));
-        file::validate_chain(&all, "embedded slice")?;
+        all.push(mig);
+    }
+    all.sort_by(|a, b| a.name.cmp(&b.name));
+    file::validate_chain(&all, "embedded slice")?;
+    with_migrate_lock_pool(pool, ledger, async {
         apply_chain(pool, all, ledger, false, ChainOrigin::OnDisk, None).await
     })
     .await
@@ -5106,6 +5181,23 @@ async fn unapply_nonatomic_pool(
 
 #[cfg(test)]
 mod tests {
+    /// The list names each engine v2 table under the name `v2_ledger` derives.
+    #[test]
+    fn ledger_tables_hold_the_v2_names() {
+        let names: Vec<&str> = super::LEDGER_TABLES.iter().map(|t| t.name).collect();
+        let v2 = super::v2_ledger(super::LEDGER_TABLE);
+        assert_eq!(v2, "__rustango_migrations_v2");
+        let mut want = vec![super::LEDGER_TABLE, super::SYSTEM_LEDGER_TABLE];
+        let derived: Vec<String> = ["", "_progress", "_undo", "_events"]
+            .iter()
+            .map(|s| format!("{v2}{s}"))
+            .collect();
+        want.extend(derived.iter().map(String::as_str));
+        assert_eq!(names, want);
+        assert!(names.iter().all(|n| n.len() <= 63), "{names:?}");
+        assert_eq!(super::v2_ledger("app_ledger"), "app_ledger_v2");
+    }
+
     /// GET_LOCK's NULL is a server error, not "held elsewhere": polling it would spin forever.
     #[test]
     fn mysql_get_lock_null_is_an_error() {

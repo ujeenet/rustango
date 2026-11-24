@@ -816,6 +816,8 @@ pub(super) fn init_tenancy_cmd_with<W: Write>(
     w: &mut W,
     init_fn: super::InitTenancyFn,
 ) -> Result<(), TenancyError> {
+    // It writes v1 bootstrap files; the wizard calls it too.
+    crate::migrate::require_v1_project(dir)?;
     let report = init_fn(dir)?;
     if report.written.is_empty() && report.skipped.is_empty() {
         // Should not happen — init_tenancy always processes both files.
@@ -953,7 +955,7 @@ impl FakeScope {
                 };
                 (
                     root.join("system").join("migrations"),
-                    crate::tenancy::migrate::SYSTEM_LEDGER,
+                    rustango::migrate::SYSTEM_LEDGER_TABLE,
                 )
             }
         }

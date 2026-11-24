@@ -761,6 +761,8 @@ impl<DB: Database> Builder<DB> {
         crate::tenancy::boot_checks(self.pools.as_ref()).await?;
         let root = project_root.as_ref();
         std::fs::create_dir_all(root)?;
+        // Before `init_tenancy_fn` writes anything.
+        crate::migrate::require_v1_project(root)?;
 
         // Detect which shape the user passed. If `<root>/migrations/`
         // exists OR `<root>/<app>/migrations/` exists, we're a project
@@ -770,10 +772,7 @@ impl<DB: Database> Builder<DB> {
         if dirs.is_empty() && root_has_json_files(root) {
             // v0.8.1 shape: user passed the flat migrations dir.
             (self.init_tenancy_fn)(root)?;
-            let _ = crate::tenancy::migrate_registry(self.pools.as_ref(), root).await?;
-            let _ =
-                crate::tenancy::migrate_tenants_dyn(self.pools.as_ref(), root, &self.registry_url)
-                    .await?;
+            self.migrate_registry_then_tenants(root).await?;
             return Ok(self);
         }
 
@@ -783,10 +782,30 @@ impl<DB: Database> Builder<DB> {
         (self.init_tenancy_fn)(&flat)?;
 
         // Each runner walks the flat dir and every app dir, with one system chain.
-        let _ = crate::tenancy::migrate_registry(self.pools.as_ref(), root).await?;
-        let _ = crate::tenancy::migrate_tenants_dyn(self.pools.as_ref(), root, &self.registry_url)
-            .await?;
+        self.migrate_registry_then_tenants(root).await?;
         Ok(self)
+    }
+
+    /// The registry, then every tenant. A registry switched to engine v2
+    /// is ahead of this binary: boot warns and serves without migrating.
+    async fn migrate_registry_then_tenants(
+        &self,
+        dir: &std::path::Path,
+    ) -> Result<(), crate::tenancy::TenancyError>
+    where
+        crate::sql::Pool: From<sqlx::Pool<DB>>,
+    {
+        match crate::tenancy::migrate_registry(self.pools.as_ref(), dir).await {
+            Err(crate::tenancy::TenancyError::Migrate(e))
+                if crate::migrate::boot_skips_switched_db(&e) =>
+            {
+                return Ok(());
+            }
+            registry => drop(registry?),
+        }
+        crate::tenancy::migrate_tenants_dyn(self.pools.as_ref(), dir, &self.registry_url)
+            .await
+            .map(drop)
     }
 
     /// Bind + serve. Owns the host dispatcher, operator console,

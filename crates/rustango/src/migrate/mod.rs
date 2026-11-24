@@ -13,6 +13,7 @@ pub mod callbacks;
 pub(crate) mod chains;
 pub mod ddl;
 pub mod diff;
+mod engine;
 pub(crate) mod ensure;
 mod error;
 pub mod file;
@@ -41,6 +42,10 @@ pub use diff::{
     detect_changes, detect_unsupported_field_changes, render_changes,
     render_changes_split_with_dialect, RenderedBatch, SchemaChange,
 };
+#[cfg(any(feature = "manage", feature = "tenancy"))]
+pub(crate) use engine::boot_skips_switched_db;
+pub(crate) use engine::require_v1_project;
+pub use engine::ProjectEngine;
 #[cfg(all(feature = "admin", feature = "totp"))]
 pub(crate) use ensure::add_columns_idempotent;
 pub(crate) use ensure::apply_idempotent;
@@ -74,6 +79,8 @@ pub(crate) use runner::try_table_exists_here;
 #[cfg(all(feature = "tenancy", feature = "media", feature = "postgres"))]
 pub(crate) use runner::try_table_exists_in_schema;
 pub use runner::unapply_pool_with_ledger;
+#[cfg(all(feature = "tenancy", feature = "postgres"))]
+pub(crate) use runner::LEDGER_TABLES;
 #[cfg(feature = "tenancy")]
 pub(crate) use runner::{applied_or_empty, SYSTEM_LEDGER_TABLE};
 pub use runner::{ensure_ledger_pool_with_ledger, render_changes_between};

@@ -64,18 +64,23 @@ fn is_help_verb(args: &[String]) -> bool {
 }
 
 /// `runserver`'s auto-migrate: the same chains and signals as `manage migrate`.
+/// The only boot route of the single-database `Cli`.
 async fn auto_migrate(
     pool: &crate::sql::Pool,
     dir: &std::path::Path,
 ) -> Result<(), crate::migrate::MigrateError> {
-    crate::migrate::manage::migrate_with_framework(
+    let migrated = crate::migrate::manage::migrate_with_framework(
         pool,
         dir,
         &mut std::io::stderr(),
         crate::migrate::Signals::Fire { tenant: None },
         |held| crate::migrate::migrate_pool_locked(held, pool, dir, None),
     )
-    .await
+    .await;
+    match migrated {
+        Err(e) if crate::migrate::boot_skips_switched_db(&e) => Ok(()),
+        other => other,
+    }
 }
 
 /// How long a booting single-database server waits for another run's migrate lock.
@@ -1798,16 +1803,9 @@ impl Cli {
                 return Ok(());
             }
             let pool = crate::sql::Pool::connect_postgres(&url).await?;
-            let dir = &self.migrations_dir;
             let enum_pool = crate::sql::Pool::from(pool.clone());
             self.boot_migrate()
-                .run(crate::migrate::manage::migrate_with_framework(
-                    &enum_pool,
-                    dir,
-                    &mut std::io::stderr(),
-                    crate::migrate::Signals::Fire { tenant: None },
-                    |held| crate::migrate::migrate_pool_locked(held, &enum_pool, dir, None),
-                ))
+                .run(auto_migrate(&enum_pool, &self.migrations_dir))
                 .await?;
             run_boot_hooks(self.seed.take(), self.before_serve.take(), &enum_pool)
                 .await
@@ -2664,6 +2662,72 @@ mod tests {
                 .await
                 .expect("system ledger");
         assert!(applied > 0, "no system migration applied");
+    }
+
+    /// Every `runserver` arm migrates through `auto_migrate`, so the engine
+    /// checks there cover boot on every backend.
+    #[test]
+    fn one_cli_boot_route() {
+        let src = include_str!("manage.rs");
+        let body = src.split("\n#[cfg(test)]\nmod tests").next().unwrap();
+        assert_eq!(body.matches("migrate_with_framework(").count(), 1);
+        assert_eq!(body.matches("migrate_pool_locked(").count(), 1);
+    }
+
+    /// Boot on a project holding engine v2 files refuses before it writes.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn v1_refuses_v2_boot_auto_migrate() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("0001_a.json"), r#"{"engine": 2, "format": 1}"#).unwrap();
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("app.db").display());
+        let pool = crate::sql::Pool::connect(&url).await.expect("connect");
+        let err = auto_migrate(&pool, &dir).await.expect_err("v2 project");
+        assert!(
+            matches!(err, crate::migrate::MigrateError::EngineV2 { .. }),
+            "{err}"
+        );
+        assert!(!tmp.path().join("system").exists(), "system chain written");
+        assert!(
+            !crate::migrate::try_table_exists_here(&pool, "__rustango_system_migrations__")
+                .await
+                .unwrap()
+        );
+    }
+
+    /// Boot on a database switched to engine v2 warns and serves; the CLI
+    /// verb refuses.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn v1_boot_serves_on_switched_db() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("app.db").display());
+        let pool = crate::sql::Pool::connect(&url).await.expect("connect");
+        crate::sql::raw_execute_pool(
+            &pool,
+            "CREATE TABLE __rustango_migrations_v2 (id TEXT)",
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        auto_migrate(&pool, &dir).await.expect("boot serves");
+        let mut out = Vec::new();
+        let err =
+            crate::migrate::manage::run_with_writer(&pool, &dir, ["migrate".into()], &mut out)
+                .await
+                .expect_err("CLI refuses");
+        assert!(
+            matches!(err, crate::migrate::MigrateError::SwitchedToV2 { .. }),
+            "{err}"
+        );
+        let v1 = crate::migrate::LEDGER_TABLE;
+        assert!(!crate::migrate::try_table_exists_here(&pool, v1)
+            .await
+            .unwrap());
     }
 
     /// The registry's backend comes from the URL's scheme alone, whatever

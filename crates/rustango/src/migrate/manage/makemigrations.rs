@@ -373,6 +373,8 @@ pub fn append_data_op(
     sql: &str,
     reverse_sql: Option<&str>,
 ) -> Result<(), MigrateError> {
+    // It edits one file; the folder must still be engine v1.
+    file::v1_folder(dir)?;
     let path = file_path(dir, migration_name);
     let mut mig = file::load(&path).map_err(|e| match e {
         MigrateError::Io(io) if io.kind() == std::io::ErrorKind::NotFound => {
