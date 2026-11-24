@@ -38,9 +38,21 @@ async fn fresh(backend: Backend, tmp: &Path) -> Option<(Pool, String, DbGuard)> 
             (format!("sqlite:{}?mode=rwc", db.display()), None)
         }
         #[cfg(feature = "postgres")]
-        Backend::Postgres => scratch(&std::env::var("DATABASE_URL").ok()?).await,
+        Backend::Postgres => {
+            scratch(&rustango::testkit::matrix::live_url(
+                "DATABASE_URL",
+                "postgres",
+            )?)
+            .await
+        }
         #[cfg(feature = "mysql")]
-        Backend::Mysql => scratch(&std::env::var("MYSQL_TEST_URL").ok()?).await,
+        Backend::Mysql => {
+            scratch(&rustango::testkit::matrix::live_url(
+                "MYSQL_TEST_URL",
+                "mysql",
+            )?)
+            .await
+        }
     };
     let _ = tmp;
     Some((Pool::connect(&url).await.expect("connect"), url, guard))
@@ -830,6 +842,11 @@ async fn v1_migrate_refuses_switched_db(backend: Backend) {
         !t.iter().any(|t| t == rustango::migrate::LEDGER_TABLE),
         "{t:?}"
     );
+    // Refused at the system chain, before anything ran.
+    assert!(
+        !t.iter().any(|t| t == "__rustango_system_migrations__"),
+        "{t:?}"
+    );
 
     // Every v1 ledger write starts at the same check, custom ledgers included.
     exec(&pool, "CREATE TABLE ev2_custom_v2 (id VARCHAR(64))").await;
@@ -845,6 +862,15 @@ async fn v1_migrate_refuses_switched_db(backend: Backend) {
         .await
         .expect_err("ensure_ledger_pool_with_ledger");
     assert!(matches!(err, MigrateError::SwitchedToV2 { .. }), "{err}");
+    // The system chain checks the project's v2 ledger (it has none of its own).
+    let err =
+        rustango::migrate::ensure_ledger_pool_with_ledger(&pool, "__rustango_system_migrations__")
+            .await
+            .expect_err("system ledger");
+    assert!(
+        err.to_string().contains("__rustango_migrations_v2"),
+        "{err}"
+    );
     // A ledger without a v2 twin still works.
     rustango::migrate::ensure_ledger_pool_with_ledger(&pool, "ev2_other")
         .await

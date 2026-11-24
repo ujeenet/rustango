@@ -7,7 +7,7 @@ pub(super) const CHECKSUM_GOLDENS: &[(&str, &str, &str)] = &[
     (
         "0002_create_invoice.json",
         include_str!("fixtures/0002_create_invoice.json"),
-        "8b7d1d469f8a9e20e98e53f4f59c5bf0ca81c109ade1aa258cbc98f3c91cfa60",
+        "19a833ec731b8c9d60cf16bfeb9a548605692cb685e741834dada4daed8eeb02",
     ),
     (
         "0003_pg_trgm_index.json",
@@ -17,7 +17,7 @@ pub(super) const CHECKSUM_GOLDENS: &[(&str, &str, &str)] = &[
     (
         "0004_escapes.json",
         include_str!("fixtures/0004_escapes.json"),
-        "957b934b7ede49688a36ef0b9c51aada9c4f5a0f36276bd1c3bade3f5941848f",
+        "3cc4be3a093f651369c6ec1676a12123a8b0f8eedaf8b90e32c9fc4d57d80f36",
     ),
     (
         "0012_add_locale_to_user.json",

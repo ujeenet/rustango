@@ -19,11 +19,13 @@ pub(crate) const V2_MARKER_KEYS: [&str; 2] = ["engine", "format"];
 pub(crate) enum FileEngine {
     V1,
     V2,
+    /// Not a JSON object: no engine can be told, so neither counts it.
+    /// Each loader reports the parse error itself.
+    Unparsable,
 }
 
 impl FileEngine {
-    /// Classify `raw` by its top-level keys. A text that is not a JSON
-    /// object counts as v1, so the v1 parser reports the real error.
+    /// Classify `raw` by its top-level keys.
     pub(crate) fn of(raw: &str) -> Self {
         // Top-level keys only: values are skipped, not built.
         type TopLevel = std::collections::BTreeMap<String, Option<serde::de::IgnoredAny>>;
@@ -35,7 +37,8 @@ impl FileEngine {
             {
                 Self::V2
             }
-            _ => Self::V1,
+            Ok(_) => Self::V1,
+            Err(_) => Self::Unparsable,
         }
     }
 }
@@ -110,8 +113,10 @@ impl ProjectEngine {
     }
 
     pub(crate) fn of_files<'a>(files: impl IntoIterator<Item = &'a RawFile>) -> Self {
-        let (v2, v1): (Vec<&RawFile>, Vec<&RawFile>) =
-            files.into_iter().partition(|f| f.engine == FileEngine::V2);
+        let (v2, v1): (Vec<&RawFile>, Vec<&RawFile>) = files
+            .into_iter()
+            .filter(|f| f.engine != FileEngine::Unparsable)
+            .partition(|f| f.engine == FileEngine::V2);
         let paths = |fs: Vec<&RawFile>| fs.into_iter().map(|f| f.path.clone()).collect();
         match (v1.is_empty(), v2.is_empty()) {
             (_, true) => Self::V1,
@@ -311,8 +316,16 @@ mod tests {
     }
 
     #[test]
-    fn invalid_json_counts_as_v1() {
-        assert_eq!(FileEngine::of("not json"), FileEngine::V1);
-        assert_eq!(FileEngine::of("[1, 2]"), FileEngine::V1);
+    fn invalid_json_is_unparsable() {
+        assert_eq!(FileEngine::of("not json"), FileEngine::Unparsable);
+        assert_eq!(FileEngine::of("[1, 2]"), FileEngine::Unparsable);
+        // It decides no engine: a v2 folder with a broken file is still V2.
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "0001_a.json", V2);
+        write(tmp.path(), "0002_b.json", "{\"engine\": 2,");
+        assert!(matches!(
+            ProjectEngine::detect([tmp.path()]).unwrap(),
+            ProjectEngine::V2 { .. }
+        ));
     }
 }

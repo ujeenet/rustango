@@ -105,6 +105,24 @@ pub(crate) struct IndexDef {
     pub(crate) skipped_on: Vec<Backend>,
 }
 
+impl IndexDef {
+    /// Equality and hashes compare this form: `skipped_on` sorted.
+    pub(crate) fn normalised(&self) -> Self {
+        let mut ix = self.clone();
+        ix.skipped_on.sort_unstable();
+        ix
+    }
+}
+
+/// `a` and `b` name the same columns, in any order.
+pub(crate) fn same_column_set<A: AsRef<str>, B: AsRef<str>>(a: &[A], b: &[B]) -> bool {
+    let mut a: Vec<&str> = a.iter().map(AsRef::as_ref).collect();
+    let mut b: Vec<&str> = b.iter().map(AsRef::as_ref).collect();
+    a.sort_unstable();
+    b.sort_unstable();
+    a == b
+}
+
 fn btree() -> String {
     "btree".to_owned()
 }
@@ -183,10 +201,8 @@ impl TableState {
     pub(crate) fn normalised(&self) -> Self {
         let mut t = self.clone();
         t.columns.sort_by(|a, b| a.column.cmp(&b.column));
+        t.indexes = t.indexes.iter().map(IndexDef::normalised).collect();
         t.indexes.sort_by(|a, b| a.name.cmp(&b.name));
-        for i in &mut t.indexes {
-            i.skipped_on.sort_unstable();
-        }
         t.checks.sort_by(|a, b| a.name.cmp(&b.name));
         t.fks.sort_by(|a, b| a.name.cmp(&b.name));
         t
@@ -235,6 +251,20 @@ pub(crate) struct ExternTable {
     pub(crate) owner: ExternOwner,
 }
 
+impl ExternTable {
+    /// Equality and hashes compare this form: columns, and each unique set,
+    /// sorted.
+    pub(crate) fn normalised(&self) -> Self {
+        let mut e = self.clone();
+        e.columns.sort_by(|a, b| a.name.cmp(&b.name));
+        for u in &mut e.unique_sets {
+            u.sort();
+        }
+        e.unique_sets.sort();
+        e
+    }
+}
+
 /// One target's schema.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct State {
@@ -267,7 +297,7 @@ impl State {
             externs: self
                 .externs
                 .iter()
-                .map(|(k, e)| (k.to_string(), (**e).clone()))
+                .map(|(k, e)| (k.to_string(), e.normalised()))
                 .collect(),
             extensions: self.extensions.clone(),
         }
@@ -302,7 +332,7 @@ impl State {
             h.update(b"e\0");
             h.update(name.as_bytes());
             h.update(b"\0");
-            h.update(digest(&**e));
+            h.update(digest(&e.normalised()));
         }
         for x in &self.extensions {
             h.update(b"x\0");
@@ -500,6 +530,35 @@ mod tests {
         let mut memo = HashMemo::default();
         assert_eq!(back.hash(&mut memo), st.hash(&mut memo));
         assert!(text.contains("\"restrict\""), "{text}");
+    }
+
+    /// Extern tables hash by their normal form too.
+    #[test]
+    fn extern_tables_are_normalised() {
+        let col = |n: &str| ExternColumn {
+            name: n.into(),
+            ty: "i64".into(),
+            unique: false,
+        };
+        let ext = |cols: Vec<ExternColumn>, sets: Vec<Vec<String>>| State {
+            externs: [(
+                Arc::from("e"),
+                Arc::new(ExternTable {
+                    table: "e".into(),
+                    columns: cols,
+                    unique_sets: sets,
+                    owner: ExternOwner::System,
+                }),
+            )]
+            .into(),
+            ..State::default()
+        };
+        let s = |v: &[&str]| v.iter().map(|x| (*x).to_owned()).collect::<Vec<_>>();
+        let a = ext(vec![col("a"), col("b")], vec![s(&["a", "b"]), s(&["b"])]);
+        let b = ext(vec![col("b"), col("a")], vec![s(&["b"]), s(&["b", "a"])]);
+        let mut memo = HashMemo::default();
+        assert_eq!(a.hash(&mut memo), b.hash(&mut memo));
+        assert_eq!(a.normalised(), b.normalised());
     }
 
     /// Order of columns, indexes and the rest does not change the hash.

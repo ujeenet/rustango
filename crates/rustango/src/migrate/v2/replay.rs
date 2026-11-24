@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use super::format::{ColumnChanges, Field, File, Kind, Op};
 use super::state::{
-    pg_object_name, CheckDef, ColumnDef, ExternTable, FkDef, IndexDef, State, TableState, Target,
+    pg_object_name, same_column_set, CheckDef, ColumnDef, ExternTable, FkDef, IndexDef, State,
+    TableState, Target,
 };
 use super::{Code, LoadError, MAX_IDENT};
 
@@ -102,6 +103,17 @@ pub(crate) fn apply(
             let mut columns = Vec::with_capacity(table.fields.len());
             for f in &table.fields {
                 ident(at, &f.column.column)?;
+                // Only an auto primary key owns a PG sequence state tracks.
+                if f.column.auto && !f.column.primary_key {
+                    return Err(coded(
+                        Code::Unsupported,
+                        at,
+                        format!(
+                            "`{}.{}` is `auto` but not the primary key",
+                            table.name, f.column.column
+                        ),
+                    ));
+                }
                 if columns
                     .iter()
                     .any(|c: &ColumnDef| c.column == f.column.column)
@@ -269,7 +281,7 @@ pub(crate) fn apply(
         } => {
             let t = get(s, at, table)?;
             let live = t.indexes.iter().find(|i| &i.name == name);
-            if was.name != *name || live.map(sorted_skips) != Some(sorted_skips(was)) {
+            if was.name != *name || live.map(IndexDef::normalised) != Some(was.normalised()) {
                 return Err(fail(at, format!("drop_index `{name}`: `was` differs")));
             }
             if let Some(f) = t
@@ -674,8 +686,13 @@ fn fks_using<'s>(s: &'s State, t: &str, col: &str) -> Option<&'s FkDef> {
 }
 
 /// `ix` leads with exactly `cols` (an FK's covering index), unconditionally.
+/// An index skipped on any backend covers nothing: the FK exists on all of
+/// them, and MySQL would add a hidden index state does not know (1553).
 fn covers(ix: &IndexDef, cols: &[String]) -> bool {
-    ix.predicate.is_none() && ix.columns.len() >= cols.len() && ix.columns[..cols.len()] == *cols
+    ix.predicate.is_none()
+        && ix.skipped_on.is_empty()
+        && ix.columns.len() >= cols.len()
+        && ix.columns[..cols.len()] == *cols
 }
 
 /// `cols` lead the primary key or an index of `t`, `except` the named one.
@@ -686,12 +703,6 @@ fn covered(t: &TableState, cols: &[String], except: Option<&str>) -> bool {
         || t.indexes
             .iter()
             .any(|i| Some(i.name.as_str()) != except && covers(i, cols))
-}
-
-fn sorted_skips(ix: &IndexDef) -> IndexDef {
-    let mut ix = ix.clone();
-    ix.skipped_on.sort_unstable();
-    ix
 }
 
 /// The FK target is in this target's state and a unique key, each column
@@ -732,26 +743,15 @@ fn add_fk(s: &mut State, at: &str, ctx: &Ctx<'_>, table: &str, fk: FkDef) -> Res
     }
     let unique = match (owned, ext) {
         (Some(t), _) => {
-            let mut pk: Vec<&str> = t.primary_key().collect();
-            let mut want: Vec<&str> = fk.on.iter().map(String::as_str).collect();
-            pk.sort_unstable();
-            want.sort_unstable();
-            pk == want
+            let pk: Vec<&str> = t.primary_key().collect();
+            same_column_set(&pk, &fk.on)
                 || t.indexes.iter().any(|i| {
-                    let mut c: Vec<&str> = i.columns.iter().map(String::as_str).collect();
-                    c.sort_unstable();
-                    i.unique && i.predicate.is_none() && c == want
+                    i.unique && i.predicate.is_none() && same_column_set(&i.columns, &fk.on)
                 })
         }
         (None, Some(e)) => {
             (fk.on.len() == 1 && e.columns.iter().any(|c| c.name == fk.on[0] && c.unique))
-                || e.unique_sets.iter().any(|u| {
-                    let mut a = u.clone();
-                    let mut b = fk.on.clone();
-                    a.sort();
-                    b.sort();
-                    a == b
-                })
+                || e.unique_sets.iter().any(|u| same_column_set(u, &fk.on))
         }
         (None, None) => unreachable!("checked above"),
     };
@@ -919,6 +919,26 @@ mod tests {
         let alter = json!([{"op": "alter_column", "v": 1, "table": "customer", "column": "id",
             "changes": {"ty": {"from": "i64", "to": "i32"}}}]);
         assert_eq!(err(&mut s, alter), Code::FkType);
+        // An index skipped on a backend does not cover, on add or on drop.
+        let mut s = State::default();
+        let mut inv = invoice();
+        inv["indexes"][0]["skipped_on"] = json!(["mysql"]);
+        assert_eq!(err(&mut s, json!([customer(), inv])), Code::FkIndex);
+        let mut s = base();
+        run(
+            &mut s,
+            json!([{"op": "add_index", "v": 1, "table": "invoice",
+            "name": "invoice_customer_skip", "columns": ["customer_id"], "skipped_on": ["mysql"]}]),
+        )
+        .unwrap();
+        let drop = json!([{"op": "drop_index", "v": 1, "table": "invoice",
+            "name": "invoice_customer_idx",
+            "was": {"name": "invoice_customer_idx", "columns": ["customer_id"]}}]);
+        assert_eq!(
+            err(&mut s, drop),
+            Code::FkIndex,
+            "the skipped one does not cover"
+        );
         // An FK in add_column is refused.
         let mut s = base();
         let add = json!([{"op": "add_column", "v": 1, "table": "invoice",
@@ -1042,6 +1062,14 @@ mod tests {
         assert_eq!(err(&mut s, add), Code::State, "name taken");
     }
 
+    #[test]
+    fn auto_needs_the_primary_key() {
+        let mut s = State::default();
+        let ops = json!([{"op": "create_table", "v": 1, "table": {"name": "t", "scope": "tenant",
+            "fields": [id(), {"column": "n", "ty": "i64", "auto": true, "nullable": false}]}}]);
+        assert_eq!(err(&mut s, ops), Code::Unsupported);
+    }
+
     /// raw_sql applies its declared state; copy-on-write leaves other tables shared.
     #[test]
     fn raw_sql_state_and_copy_on_write() {
@@ -1052,7 +1080,8 @@ mod tests {
             json!([{"op": "raw_sql", "v": 1, "id": "trgm",
             "up": {"postgres": "CREATE INDEX ..."}, "state": [
                 {"op": "add_index", "v": 1, "table": "customer", "name": "customer_x",
-                 "columns": ["id"], "method": "gin"}]}]),
+                 "columns": ["id"], "method": "gin",
+                 "skipped_on": ["mysql", "sqlite"]}]}]),
         )
         .unwrap();
         assert_eq!(s.tables["customer"].indexes.len(), 1);

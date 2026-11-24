@@ -64,6 +64,10 @@ pub(crate) fn load_project(dir: &Path) -> Result<Project, LoadError> {
         raw.push((f, files));
     }
     let all: Vec<&RawFile> = raw.iter().flat_map(|(_, fs)| fs).collect();
+    // A file that does not parse decides no engine: report it as it is.
+    if let Some(f) = all.iter().find(|f| f.engine == FileEngine::Unparsable) {
+        load_file(&f.path, &f.text)?;
+    }
     match ProjectEngine::of_files(all.iter().copied()) {
         ProjectEngine::V1 if all.is_empty() => {}
         ProjectEngine::V1 => {
@@ -382,6 +386,16 @@ mod tests {
             "{e}"
         );
         std::fs::remove_file(dir.join("0001_old.json")).unwrap();
+        // A v2 file with a typo is a parse error, not "delete it" or "adopt".
+        std::fs::write(dir.join("0003_typo.json"), r#"{"engine": 2, "format": 1,}"#).unwrap();
+        let e = load_project(&dir).unwrap_err();
+        assert_eq!(e.code, Code::File, "{e}");
+        assert!(e.at.ends_with("0003_typo.json"), "{e}");
+        // Alone it is still a parse error, not "this project is on engine v1".
+        std::fs::rename(dir.join("0002_a.json"), tmp.path().join("aside.json")).unwrap();
+        assert_eq!(load_project(&dir).unwrap_err().code, Code::File);
+        std::fs::rename(tmp.path().join("aside.json"), dir.join("0002_a.json")).unwrap();
+        std::fs::remove_file(dir.join("0003_typo.json")).unwrap();
         write(
             &tmp.path().join("system/migrations"),
             "0001_s",

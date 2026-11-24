@@ -107,7 +107,7 @@ impl Backend {
         match self {
             #[cfg(feature = "postgres")]
             Backend::Postgres => {
-                let url = std::env::var("DATABASE_URL").ok()?;
+                let url = live_url("DATABASE_URL", "postgres")?;
                 assert_scheme(
                     self,
                     "DATABASE_URL",
@@ -118,7 +118,7 @@ impl Backend {
             }
             #[cfg(feature = "mysql")]
             Backend::MySql => {
-                let url = std::env::var("MYSQL_TEST_URL").ok()?;
+                let url = live_url("MYSQL_TEST_URL", "mysql")?;
                 assert_scheme(self, "MYSQL_TEST_URL", &url, &["mysql://", "mariadb://"]);
                 Some(connect_isolated("MYSQL_TEST_URL", &url).await)
             }
@@ -172,6 +172,38 @@ impl Backend {
         };
         eprintln!("{var} not set — skipping the {name} arm of `{test}`");
     }
+}
+
+/// Names the backends a CI job must run (`postgres,mysql`): their arms
+/// panic instead of skipping when the URL is missing, since a skipped arm
+/// reports `ok`.
+pub const REQUIRE_LIVE_VAR: &str = "RUSTANGO_REQUIRE_LIVE";
+
+/// The URL in `var` for `backend`, or `None` to skip the arm.
+///
+/// # Panics
+/// When [`REQUIRE_LIVE_VAR`] names `backend` and `var` is unset.
+#[must_use]
+pub fn live_url(var: &str, backend: &str) -> Option<String> {
+    required_url(
+        std::env::var(var).ok(),
+        std::env::var(REQUIRE_LIVE_VAR).ok().as_deref(),
+        var,
+        backend,
+    )
+}
+
+fn required_url(
+    url: Option<String>,
+    require: Option<&str>,
+    var: &str,
+    backend: &str,
+) -> Option<String> {
+    let required = require.is_some_and(|r| r.split(',').any(|b| b.trim() == backend));
+    if url.is_none() && required {
+        panic!("{REQUIRE_LIVE_VAR} names {backend} but {var} is not set: the arm would skip");
+    }
+    url
 }
 
 /// nextest's global slot: unique among the tests running at one moment,
@@ -862,6 +894,24 @@ impl From<IntoPoolOption<Option<Pool>>> for Option<Pool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_required_backend_without_a_url_panics() {
+        assert_eq!(required_url(None, None, "DATABASE_URL", "postgres"), None);
+        assert_eq!(
+            required_url(None, Some("mysql"), "DATABASE_URL", "postgres"),
+            None
+        );
+        let url = Some("postgres://x/y".to_owned());
+        assert_eq!(
+            required_url(url.clone(), Some("postgres"), "DATABASE_URL", "postgres"),
+            url
+        );
+        let caught = std::panic::catch_unwind(|| {
+            required_url(None, Some("mysql, postgres"), "DATABASE_URL", "postgres")
+        });
+        assert!(caught.is_err());
+    }
 
     /// The env var each backend reads. `MYSQL_TEST_URL` is the one that
     /// matters: every CI job setting both points `DATABASE_URL` at

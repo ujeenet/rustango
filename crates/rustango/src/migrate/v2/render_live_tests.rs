@@ -64,6 +64,7 @@ async fn run_unit(pool: &Pool, u: &Unit) -> Result<(), String> {
 }
 
 #[cfg(feature = "sqlite")]
+#[allow(irrefutable_let_patterns)] // Pool has one variant in SQLite-only builds.
 async fn run_rebuild(pool: &Pool, u: &Unit) -> Result<(), String> {
     let Pool::Sqlite(sq) = pool else {
         return Err("a rebuild unit is SQLite only".into());

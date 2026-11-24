@@ -751,13 +751,10 @@ fn dialect_refusals() {
                             "skipped_on": ["mysql"]}]})
         )
     ]);
-    expect_err(
-        &State::default(),
-        &skipped_idx,
-        Backend::Mysql,
-        Code::FkIndex,
-    );
-    render(&State::default(), &skipped_idx, Backend::Postgres).unwrap();
+    // It is a state rule, so every backend refuses it.
+    for b in Backend::ALL {
+        expect_err(&State::default(), &skipped_idx, b, Code::FkIndex);
+    }
     // `using` is not enabled yet.
     let using = json!([{"op": "alter_column", "v": 1, "table": "s3_parent", "column": "name",
         "changes": {"ty": {"from": "string", "to": "text"}}, "using": {"any": "name"}}]);

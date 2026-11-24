@@ -90,8 +90,15 @@ pub(crate) fn v2_ledger(ledger: &str) -> String {
 }
 
 /// Refuse a database switched to engine v2: it holds `ledger`'s v2 ledger.
+/// The system chain has no v2 ledger of its own until it moves to v2, so it
+/// checks the project's.
 async fn refuse_switched_db(pool: &crate::sql::Pool, ledger: &str) -> Result<(), MigrateError> {
-    let table = v2_ledger(ledger);
+    let base = if ledger == SYSTEM_LEDGER_TABLE {
+        LEDGER_TABLE
+    } else {
+        ledger
+    };
+    let table = v2_ledger(base);
     if try_table_exists_here(pool, &table).await? {
         return Err(MigrateError::SwitchedToV2 { table });
     }

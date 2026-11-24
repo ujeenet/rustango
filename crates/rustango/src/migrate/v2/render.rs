@@ -436,33 +436,6 @@ impl Render<'_> {
         }
     }
 
-    /// On MySQL an index skipped there does not cover an FK: MySQL would add
-    /// a hidden one that state does not know (1553).
-    fn mysql_fk_covered(&self, t: &TableState, fk: &FkDef) -> Result<(), LoadError> {
-        if self.b != Backend::Mysql {
-            return Ok(());
-        }
-        let n = fk.columns.len();
-        let prefix = |cols: &[String]| cols.len() >= n && cols[..n] == fk.columns[..];
-        let pk: Vec<String> = t.primary_key().map(str::to_owned).collect();
-        let covered = prefix(&pk)
-            || t.indexes.iter().any(|i| {
-                !skipped(i, Backend::Mysql) && i.predicate.is_none() && prefix(&i.columns)
-            });
-        if covered {
-            return Ok(());
-        }
-        Err(self.err(
-            Code::FkIndex,
-            format!(
-                "FK `{}` on `{}`({}) has no index on MySQL; its index is `skipped_on` mysql",
-                fk.name,
-                t.name,
-                fk.columns.join(", ")
-            ),
-        ))
-    }
-
     /// The SQLite rebuild of `t`: new table, copy, swap, then its indexes.
     fn rebuild(&self, t: &TableState, copy: &[(String, String)]) -> Vec<Unit> {
         let d = self.d;
@@ -524,9 +497,6 @@ impl Render<'_> {
                     self.index_supported(ix)?;
                 }
                 let ts = self.table(self.after, &table.name)?;
-                for f in &ts.fks {
-                    self.mysql_fk_covered(&ts, f)?;
-                }
                 if my {
                     let inline: Vec<&IndexDef> =
                         ts.indexes.iter().filter(|i| !skipped(i, self.b)).collect();
@@ -673,10 +643,6 @@ impl Render<'_> {
                     name: name.clone(),
                 }];
                 if my {
-                    let t = self.table(self.after, table)?;
-                    for f in &t.fks {
-                        self.mysql_fk_covered(&t, f)?;
-                    }
                     return Ok(vec![auto(
                         format!("ALTER TABLE {} DROP INDEX {}", q(d, table), q(d, name)),
                         probe,
@@ -777,7 +743,6 @@ impl Render<'_> {
                     return Ok(self.rebuild(&t, &[]));
                 }
                 let state_fk = fk.state(column);
-                self.mysql_fk_covered(&t, &state_fk)?;
                 let add = format!(
                     "ALTER TABLE {} ADD {}",
                     q(d, table),

@@ -716,13 +716,9 @@ fn validate(
                 ));
             }
             let nested = env.op.nested(&op_at)?;
+            // Nothing runs on `b`: a `null`, a missing key, or `"any": null`.
             for b in Backend::ALL {
-                let null = match b {
-                    Backend::Postgres => &up.postgres,
-                    Backend::Mysql => &up.mysql,
-                    Backend::Sqlite => &up.sqlite,
-                };
-                if matches!(null, Some(None)) && !state.is_empty() {
+                if up.get(b).is_none() && !state.is_empty() {
                     if let Some(op) = nested.iter().find(|o| !skips(o, b)) {
                         return Err(LoadError::new(
                             Code::Dialect,
@@ -904,6 +900,23 @@ mod tests {
         assert_eq!(code(&file(json!([raw.clone()]))), Code::File, "no probe");
         raw["probe"] = json!("state");
         assert!(decode(&file(json!([raw.clone()])), "f.json").is_ok());
+        // A missing backend key and `"any": null` mean nothing runs there too.
+        let mut missing = raw.clone();
+        missing["up"] = json!({"postgres": "CREATE INDEX ..."});
+        missing["state"][0]["skipped_on"] = json!(["mysql"]);
+        assert_eq!(
+            code(&file(json!([missing]))),
+            Code::Dialect,
+            "sqlite key missing"
+        );
+        let mut any_null = raw.clone();
+        any_null["up"] = json!({"any": null, "postgres": "CREATE INDEX ..."});
+        any_null["state"][0]["skipped_on"] = json!(["sqlite"]);
+        assert_eq!(
+            code(&file(json!([any_null]))),
+            Code::Dialect,
+            "mysql via any: null"
+        );
         raw.as_object_mut().unwrap().remove("state");
         assert_eq!(code(&file(json!([raw]))), Code::File, "state is required");
     }
