@@ -150,7 +150,7 @@ untouched.
 
 ## Unreleased
 
-- Every migrate verb, `Builder::migrate`, boot and the tenancy runners refuse a project with an engine v2 migration file (top-level `engine` or `format` key) with `MigrateError::EngineV2`, or `MigrateError::MixedEngine` when v1 and v2 files sit together; `file::list_dir`, `file::load` and `file::parse` refuse the file itself. `embed_migrations!` fails to compile on such a folder.
+- Every migrate verb, `Builder::migrate`, boot and the tenancy runners refuse a project with an engine v2 migration file (top-level `engine` or `format` key) with `MigrateError::EngineV2`, or `MigrateError::MixedEngine` when v1 and v2 files sit together; `file::list_dir`, `file::load` and `file::parse` refuse the file itself. `embed_migrations!` fails to compile on such a folder. The `system` folder does not decide the engine; an engine v2 file there is refused with `MigrateError::SystemChainV2`.
 - A v1 migrate on a database holding the engine v2 ledger (`__rustango_migrations_v2`, or `<ledger>_v2`) is refused with `MigrateError::SwitchedToV2`; `runserver` and `Builder::migrate` log a warning and serve without migrating.
 - `migrate_embedded_pool` parses every entry before it takes the lock, so a bad entry no longer creates the ledger.
 

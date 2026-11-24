@@ -102,8 +102,8 @@ fn v1(name: &str) -> String {
 enum Shape {
     /// `migrations/` holds a v2 file.
     V2,
-    /// A v1 `system/` next to a v2 `migrations/`.
-    MixedSystem,
+    /// A v2 `migrations/` with the v1 `system/` chain: still a v2 project.
+    V1System,
     /// A v1 `migrations/` next to a v2 `blog/migrations/`.
     MixedApps,
     /// One folder with a v1 and a v2 file.
@@ -113,7 +113,7 @@ enum Shape {
 /// Every shape: what a project-level entry must refuse.
 const PROJECT: &[Shape] = &[
     Shape::V2,
-    Shape::MixedSystem,
+    Shape::V1System,
     Shape::MixedApps,
     Shape::MixedFolder,
 ];
@@ -130,7 +130,7 @@ fn lay_out(root: &Path, shape: Shape) -> PathBuf {
     let dir = root.join("migrations");
     match shape {
         Shape::V2 => put(&dir, "0001_initial", V2),
-        Shape::MixedSystem => {
+        Shape::V1System => {
             put(
                 &root.join("system/migrations"),
                 "0001_system",

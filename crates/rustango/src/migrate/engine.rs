@@ -92,8 +92,8 @@ pub enum ProjectEngine {
 }
 
 impl ProjectEngine {
-    /// Classify the files in `folders`. Pass every folder the project
-    /// loads, the `system` one included: discovery skips it.
+    /// Classify the files in `folders`: the project's app folders. The
+    /// `system` folder does not decide the engine (see [`Self::of_project`]).
     ///
     /// # Errors
     /// [`MigrateError::Io`] when a folder or file cannot be read.
@@ -109,9 +109,9 @@ impl ProjectEngine {
         Ok(Self::of_files(&files))
     }
 
-    pub(crate) fn of_files(files: &[RawFile]) -> Self {
+    pub(crate) fn of_files<'a>(files: impl IntoIterator<Item = &'a RawFile>) -> Self {
         let (v2, v1): (Vec<&RawFile>, Vec<&RawFile>) =
-            files.iter().partition(|f| f.engine == FileEngine::V2);
+            files.into_iter().partition(|f| f.engine == FileEngine::V2);
         let paths = |fs: Vec<&RawFile>| fs.into_iter().map(|f| f.path.clone()).collect();
         match (v1.is_empty(), v2.is_empty()) {
             (_, true) => Self::V1,
@@ -123,15 +123,15 @@ impl ProjectEngine {
         }
     }
 
-    /// The project around the migrations dir `dir`: its app folders and its
-    /// `system` folder.
+    /// The project around the migrations dir `dir`, by its app folders. The
+    /// `system` folder is the framework's chain: it stays engine v1 until it
+    /// moves to v2, so it never decides the engine and a v2 file there is refused.
     ///
     /// # Errors
-    /// As [`Self::detect`].
+    /// As [`Self::detect`], or [`MigrateError::SystemChainV2`].
     pub(crate) fn of_project(dir: &Path) -> Result<Self, MigrateError> {
-        let mut folders = super::file::project_migration_dirs(dir);
-        folders.push(super::make::SystemChain::dir_for(dir));
-        Self::detect(folders)
+        refuse_v2_in_system(dir)?;
+        Self::detect(super::file::project_migration_dirs(dir))
     }
 
     /// Refuse anything but [`Self::V1`]: this release runs engine v1 only.
@@ -146,6 +146,23 @@ impl ProjectEngine {
             }),
             Self::Mixed { v1, v2 } => Err(MigrateError::MixedEngine { v1, v2 }),
         }
+    }
+}
+
+/// Refuse an engine v2 file in the project's `system` folder.
+///
+/// # Errors
+/// [`MigrateError::SystemChainV2`], or [`MigrateError::Io`].
+pub(crate) fn refuse_v2_in_system(dir: &Path) -> Result<(), MigrateError> {
+    let v2: Vec<PathBuf> = read_folder(&super::make::SystemChain::dir_for(dir))?
+        .into_iter()
+        .filter(|f| f.engine == FileEngine::V2)
+        .map(|f| f.path)
+        .collect();
+    if v2.is_empty() {
+        Ok(())
+    } else {
+        Err(MigrateError::SystemChainV2 { files: v2 })
     }
 }
 
@@ -254,36 +271,33 @@ mod tests {
         assert_eq!(super::super::file::list_dir(&v1).unwrap().len(), 1);
     }
 
-    /// `detect` reads the `system` folder, which discovery skips.
+    /// A v2 file in `system` is refused: that chain stays engine v1.
     #[test]
-    fn detect_includes_system_dir() {
+    fn a_v2_file_in_system_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("migrations");
-        std::fs::create_dir_all(&dir).unwrap();
+        write(&dir, "0001_a.json", V1);
         write(&tmp.path().join("system/migrations"), "0001_s.json", V2);
-        assert!(matches!(
-            ProjectEngine::of_project(&dir).unwrap(),
-            ProjectEngine::V2 { .. }
-        ));
+        let err = ProjectEngine::of_project(&dir).unwrap_err();
+        assert!(matches!(err, MigrateError::SystemChainV2 { .. }), "{err}");
+        assert!(err.to_string().contains("0001_s.json"), "{err}");
     }
 
-    /// A v1 `system` folder next to v2 app folders is Mixed, not V2.
+    /// The `system` folder does not decide the engine: v1 there plus v2 apps is V2.
     #[test]
-    fn v1_system_folder_next_to_v2_app_folders_is_mixed() {
+    fn v1_system_folder_does_not_decide_the_engine() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("migrations");
         write(&dir, "0002_b.json", V2);
         write(&tmp.path().join("blog/migrations"), "0001_c.json", V2);
         write(&tmp.path().join("system/migrations"), "0001_a.json", V1);
-        let ProjectEngine::Mixed { v1, v2 } = ProjectEngine::of_project(&dir).unwrap() else {
-            panic!("not mixed");
+        let ProjectEngine::V2 { files } = ProjectEngine::of_project(&dir).unwrap() else {
+            panic!("not V2");
         };
-        assert_eq!(v1, [tmp.path().join("system/migrations/0001_a.json")]);
-        assert_eq!(v2.len(), 2, "{v2:?}");
+        assert_eq!(files.len(), 2, "{files:?}");
+        // This release still runs v1 projects only.
         let err = require_v1_project(&dir).unwrap_err();
-        assert!(matches!(err, MigrateError::MixedEngine { .. }), "{err}");
-        // The v1 folder alone passes the per-folder guard.
-        assert!(super::super::file::list_dir(&tmp.path().join("system/migrations")).is_ok());
+        assert!(matches!(err, MigrateError::EngineV2 { .. }), "{err}");
     }
 
     #[test]

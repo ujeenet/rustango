@@ -874,7 +874,7 @@ mod squash_aside_tests {
         let err = migrate_squash(&pool, &dir, &mut Vec::new())
             .await
             .expect_err("mixed project");
-        assert!(matches!(err, MigrateError::MixedEngine { .. }), "{err}");
+        assert!(matches!(err, MigrateError::SystemChainV2 { .. }), "{err}");
         assert_eq!(names(&dir), ORIGINAL);
     }
 

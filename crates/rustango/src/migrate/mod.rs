@@ -37,6 +37,8 @@ pub mod snapshot;
 /// compares correctly against a Rust-bound timestamp.
 #[cfg(feature = "sqlite")]
 pub mod sqlite_datetime;
+/// Engine v2: file format, loader, checksum and state by replay.
+pub(crate) mod v2;
 
 pub use diff::{
     detect_changes, detect_unsupported_field_changes, render_changes,

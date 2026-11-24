@@ -1,0 +1,8 @@
+{"engine": 2, "format": 1, "id": "0003_pg_trgm_index", "app": "accounts", "parents": ["0002_x"], "target": "tenant",
+ "operations": [{ "op": "raw_sql", "v": 1, "id": "pg_trgm_index",
+  "up":   { "postgres": ["CREATE INDEX CONCURRENTLY user_name_trgm", "  ON {{t:user}} USING gin ({{c:name}} gin_trgm_ops)"],
+            "mysql": null, "sqlite": null },
+  "down": { "postgres": "DROP INDEX CONCURRENTLY IF EXISTS user_name_trgm" },
+  "state": [ { "op": "add_index", "v": 1, "name": "user_name_trgm", "table": "user",
+               "columns": ["name"], "method": "gin", "skipped_on": ["mysql", "sqlite"] } ],
+  "probe": "state", "tx": "autocommit" }]}

@@ -105,6 +105,18 @@ pub enum MigrateError {
         v2: Vec<std::path::PathBuf>,
     },
 
+    /// An engine v2 file in the `system` folder, which stays engine v1.
+    #[error(
+        "the `system` folder is the framework's own chain and stays on engine v1; \
+         move these engine v2 files to an app folder: {}",
+        super::engine::path_list(.files)
+    )]
+    #[non_exhaustive]
+    SystemChainV2 {
+        /// The v2 files found there.
+        files: Vec<std::path::PathBuf>,
+    },
+
     /// The database was switched to engine v2: it holds the v2 ledger.
     #[error(
         "this database was switched to migrations engine v2 (table `{table}` exists), and \
