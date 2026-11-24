@@ -9,6 +9,7 @@ use serde_json::Value;
 use super::checksum::checksum;
 use super::format::{decode, File};
 use super::graph::{order, Node};
+use super::json::JsonError;
 use super::replay::{apply_file, Ctx};
 use super::state::{HashMemo, State, Target};
 use super::{Code, LoadError};
@@ -173,8 +174,14 @@ pub(crate) fn load_file(path: &Path, text: &str) -> Result<Loaded, LoadError> {
         .and_then(|s| s.to_str())
         .ok_or_else(|| LoadError::new(Code::Name, &at, "the file name is not UTF-8"))?;
     check_name(stem, &at)?;
-    let raw: Value =
-        serde_json::from_str(text).map_err(|e| LoadError::new(Code::File, &at, e.to_string()))?;
+    let raw: Value = super::json::parse(text).map_err(|e| match e {
+        JsonError::Syntax(msg) => LoadError::new(Code::File, &at, msg),
+        JsonError::Duplicate { pointer } => LoadError::new(
+            Code::File,
+            format!("{at}#{pointer}"),
+            "this key is written twice in one object",
+        ),
+    })?;
     let checksum = checksum(&raw).map_err(|e| {
         LoadError::new(
             Code::NotInteger,
@@ -408,6 +415,17 @@ mod tests {
         write(&dir, "0001_a", &file("project", "0001_a", &[], json!([])));
         write(&dir, "0002_b", &file("other", "0002_b", &[], json!([])));
         assert_eq!(load_project(&dir).unwrap_err().code, Code::AppLabel);
+    }
+
+    /// A key written twice is a load error, not "the last one wins".
+    #[test]
+    fn duplicate_keys_are_load_errors() {
+        let text = r#"{"engine": 2, "format": 1, "id": "0001_a", "app": "project",
+            "target": "tenant", "operations": [{"op": "add_check", "v": 1, "table": "t",
+            "name": "c", "expr": "x > 0", "expr": "x > 1"}]}"#;
+        let e = load_file(Path::new("0001_a.json"), text).unwrap_err();
+        assert_eq!(e.code, Code::File);
+        assert!(e.at.ends_with("0001_a.json#/operations/0/expr"), "{e}");
     }
 
     #[test]

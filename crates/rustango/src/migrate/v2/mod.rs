@@ -9,6 +9,7 @@
 pub(crate) mod checksum;
 pub(crate) mod format;
 pub(crate) mod graph;
+pub(crate) mod json;
 pub(crate) mod load;
 pub(crate) mod replay;
 pub(crate) mod state;
