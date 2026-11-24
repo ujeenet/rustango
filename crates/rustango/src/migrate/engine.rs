@@ -10,7 +10,7 @@ use super::error::MigrateError;
 
 /// The top-level keys only an engine v2 file has. `embed_migrations!`
 /// keeps its own copy (the macro crate cannot depend on this one); the
-/// shared cases in `rustango-macros/src/engine_marker_cases.json` keep
+/// shared cases in `rustango-macros/engine_marker_cases.json` keep
 /// the two in step.
 pub(crate) const V2_MARKER_KEYS: [&str; 2] = ["engine", "format"];
 
@@ -202,7 +202,7 @@ mod tests {
     use super::*;
 
     /// The cases `embed_migrations!` is tested on too.
-    const CASES: &str = include_str!("../../../rustango-macros/src/engine_marker_cases.json");
+    const CASES: &str = include_str!("../../../rustango-macros/engine_marker_cases.json");
 
     #[test]
     fn file_engine_matches_the_shared_marker_cases() {

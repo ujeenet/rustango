@@ -1690,6 +1690,7 @@ jobs:
           binary(=tenant_login_field_tri) |
           binary(=api_key_hmac_tri) |
           binary(=system_chain_order_tri) |
+          binary(=migrate_engine_v2_refusal_tri) |
           binary(=agent_grants_unique_tri) |
           binary(=admin_totp_replay_tri) |
           binary(=operator_console_totp_tri) |

@@ -14886,7 +14886,7 @@ mod embed_migrations_tests {
     #[test]
     fn engine_marker_matches_the_shared_cases() {
         let cases: Vec<serde_json::Value> =
-            serde_json::from_str(include_str!("engine_marker_cases.json")).unwrap();
+            serde_json::from_str(include_str!("../engine_marker_cases.json")).unwrap();
         for case in cases {
             let want = case["v2"].as_bool().unwrap();
             assert_eq!(is_engine_v2_file(&case["file"]), want, "{}", case["case"]);
