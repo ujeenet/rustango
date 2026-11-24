@@ -1,0 +1,12 @@
+-- postgres
+[op 0] tx
+  ALTER TABLE "s3_t" DROP CONSTRAINT "s3_t_a_pos";
+-- mysql
+[op 0] autocommit
+  ALTER TABLE `s3_t` DROP CHECK `s3_t_a_pos`;
+-- sqlite
+[op 0] rebuild
+  CREATE TABLE "_rustango_rebuild_s3_t" ("id" INTEGER NOT NULL, "a" INTEGER, PRIMARY KEY ("id"));
+  INSERT INTO "_rustango_rebuild_s3_t" ("id", "a") SELECT "id", "a" FROM "s3_t";
+  DROP TABLE "s3_t";
+  ALTER TABLE "_rustango_rebuild_s3_t" RENAME TO "s3_t";

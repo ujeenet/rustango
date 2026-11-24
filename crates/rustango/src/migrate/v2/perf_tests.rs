@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use super::load::{load_project, replay, replay_with};
-use super::state::{HashMemo, Target};
+use super::render::render_project;
+use super::state::{Backend, HashMemo, Target};
 
 const APPS: usize = 4;
 const FILES_PER_APP: usize = 500;
@@ -155,13 +156,32 @@ fn s2_budgets_on_2000_files() {
     );
     assert_eq!(tenant(&replayed).tables.len(), APPS * TABLES_PER_APP);
 
+    // A fresh plan plus render per backend: load from disk, render every file.
+    let mut renders = Vec::new();
+    for b in Backend::ALL {
+        let started = Instant::now();
+        let project = load_project(&dir).unwrap();
+        let units = render_project(&project, b).unwrap();
+        renders.push((b, started.elapsed()));
+        // The fixture's repeated widenings to 80 are no-op alters: they render nothing.
+        let n: usize = units.iter().map(|(_, u)| u.len()).sum();
+        assert!(n > 4 * project.files.len(), "{}: {n} units", b.as_str());
+    }
+
     eprintln!(
         "S2: {ops} ops; load + replay + hashes {plan:?}; replay {replay_time:?}; \
-         replay + hashes {hashed:?}"
+         replay + hashes {hashed:?}; load + render {renders:?}"
     );
     if cfg!(debug_assertions) {
         return;
     }
     assert!(replay_time < REPLAY_BUDGET, "replay took {replay_time:?}");
     assert!(plan < PLAN_BUDGET, "load + replay + hashes took {plan:?}");
+    for (b, took) in renders {
+        assert!(
+            took < PLAN_BUDGET,
+            "{}: load + render took {took:?}",
+            b.as_str()
+        );
+    }
 }

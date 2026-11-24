@@ -11,6 +11,7 @@ pub(crate) mod format;
 pub(crate) mod graph;
 pub(crate) mod json;
 pub(crate) mod load;
+pub(crate) mod render;
 pub(crate) mod replay;
 pub(crate) mod state;
 
@@ -18,6 +19,10 @@ pub(crate) mod state;
 mod fixtures;
 #[cfg(test)]
 mod perf_tests;
+#[cfg(test)]
+mod render_live_tests;
+#[cfg(test)]
+mod render_tests;
 
 /// Why a v2 file or project does not load. Each code is stable: docs and
 /// `allow` entries name it.
@@ -62,6 +67,11 @@ pub(crate) enum Code {
     AppLabel,
     /// The project is not engine v2, or the `system` folder holds a v2 file.
     Engine,
+    /// A raw_sql statement refused in its unit (session statement, `PRAGMA`,
+    /// MySQL DDL outside an autocommit op).
+    Raw,
+    /// A unit that commits on its own has no probe for the state after it.
+    Probe,
     /// A folder or file could not be read.
     Io,
 }
@@ -86,6 +96,8 @@ impl Code {
             Self::AppLabel => "MV2-E016",
             Self::Engine => "MV2-E017",
             Self::Io => "MV2-E018",
+            Self::Raw => "MV2-E013",
+            Self::Probe => "MV2-E019",
             Self::CrossTarget => "MV2-E030",
             Self::FkType => "MV2-E3780",
             Self::CheckColumn => "MV2-E3959",

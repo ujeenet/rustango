@@ -93,6 +93,28 @@ impl TableRebuild {
     pub(crate) fn statements(&self, dialect: &dyn Dialect) -> Vec<String> {
         let old = &self.target.name;
         let new = format!("_rustango_rebuild_{old}");
+        let mut create = super::diff::create_table_sql_as(&self.target, &new, dialect);
+        if !self.checks.is_empty() {
+            create.pop();
+            for c in &self.checks {
+                create.push_str(&format!(
+                    ", CONSTRAINT {} CHECK ({})",
+                    dialect.quote_ident(&c.name),
+                    c.expr
+                ));
+            }
+            create.push(')');
+        }
+        let mut out = vec![create];
+        out.extend(self.copy_and_swap(dialect, &new));
+        out
+    }
+
+    /// Steps 5 to 7 after `new` exists: copy the rows, keep the
+    /// AUTOINCREMENT mark, drop the old table, rename `new` into its place.
+    #[must_use]
+    pub(crate) fn copy_and_swap(&self, dialect: &dyn Dialect, new: &str) -> Vec<String> {
+        let old = &self.target.name;
         let stored = || {
             self.target
                 .fields
@@ -112,26 +134,11 @@ impl TableRebuild {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        let mut create = super::diff::create_table_sql_as(&self.target, &new, dialect);
-        if !self.checks.is_empty() {
-            create.pop();
-            for c in &self.checks {
-                create.push_str(&format!(
-                    ", CONSTRAINT {} CHECK ({})",
-                    dialect.quote_ident(&c.name),
-                    c.expr
-                ));
-            }
-            create.push(')');
-        }
-        let mut out = vec![
-            create,
-            format!(
-                "INSERT INTO {} ({cols}) SELECT {exprs} FROM {}",
-                dialect.quote_ident(&new),
-                dialect.quote_ident(old)
-            ),
-        ];
+        let mut out = vec![format!(
+            "INSERT INTO {} ({cols}) SELECT {exprs} FROM {}",
+            dialect.quote_ident(new),
+            dialect.quote_ident(old)
+        )];
         let autoincrement = dialect.serial_type_includes_primary_key()
             && self
                 .target
@@ -143,19 +150,19 @@ impl TableRebuild {
             let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
             out.push(format!(
                 "DELETE FROM sqlite_sequence WHERE name = {}",
-                lit(&new)
+                lit(new)
             ));
             out.push(format!(
                 "INSERT INTO sqlite_sequence (name, seq) \
                  SELECT {}, seq FROM sqlite_sequence WHERE name = {}",
-                lit(&new),
+                lit(new),
                 lit(old)
             ));
         }
         out.push(format!("DROP TABLE {}", dialect.quote_ident(old)));
         out.push(format!(
             "ALTER TABLE {} RENAME TO {}",
-            dialect.quote_ident(&new),
+            dialect.quote_ident(new),
             dialect.quote_ident(old)
         ));
         out

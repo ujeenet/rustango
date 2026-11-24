@@ -385,7 +385,7 @@ fn ident(at: &str, name: &str) -> Result<(), LoadError> {
 
 /// A table, index, check, FK, pkey or sequence uses `name`. One namespace
 /// per target; a scan, so a claim allocates nothing.
-fn taken(s: &State, name: &str) -> bool {
+pub(crate) fn taken(s: &State, name: &str) -> bool {
     s.externs.contains_key(name)
         || s.tables.iter().any(|(k, t)| {
             &**k == name
