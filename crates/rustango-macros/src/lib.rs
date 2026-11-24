@@ -848,7 +848,7 @@ fn expand_embed_migrations(input: TokenStream2) -> syn::Result<TokenStream2> {
         let what = if chain_names.is_empty() {
             format!(
                 "holds engine v2 migrations, and rustango {} runs engine v1 only; \
-                 it needs a newer rustango with migrations engine v2",
+                 it needs a newer rustango with migrations engine v2: use `manage dbmigrate` there",
                 env!("CARGO_PKG_VERSION")
             )
         } else {
@@ -14923,6 +14923,7 @@ mod embed_migrations_tests {
         let err = expand_err(&dir);
         assert!(err.contains("engine v2"), "{err}");
         assert!(err.contains("0002_add_bio.json"), "{err}");
+        assert!(err.contains("use `manage dbmigrate`"), "{err}");
     }
 
     #[test]

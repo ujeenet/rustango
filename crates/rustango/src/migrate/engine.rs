@@ -258,6 +258,7 @@ mod tests {
         assert!(err.to_string().contains("0002_b.json"), "{err}");
         let err = super::super::file::parse(V2).unwrap_err();
         assert!(matches!(err, MigrateError::EngineV2 { .. }), "{err}");
+        assert!(err.to_string().contains("use `manage dbmigrate`"), "{err}");
 
         let mixed = tmp.path().join("mixed");
         write(&mixed, "0001_a.json", V1);

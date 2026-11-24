@@ -69,7 +69,7 @@ pub(crate) fn load_project(dir: &Path) -> Result<Project, LoadError> {
             return Err(LoadError::new(
                 Code::Engine,
                 dir.display().to_string(),
-                "this project is on engine v1: run `manage migrations adopt` to switch it to \
+                "this project is on engine v1: run `manage dbmigrate adopt` to switch it to \
                  engine v2",
             ))
         }

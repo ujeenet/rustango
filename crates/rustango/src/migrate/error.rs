@@ -81,7 +81,7 @@ pub enum MigrateError {
     /// Migration files written for engine v2, which this release cannot run.
     #[error(
         "{origin} holds engine v2 migrations, and rustango {version} runs engine v1 only. \
-         It needs a newer rustango with migrations engine v2; use that release's v2 commands.",
+         It needs a newer rustango with migrations engine v2: use `manage dbmigrate` there.",
         version = env!("CARGO_PKG_VERSION")
     )]
     #[non_exhaustive]
