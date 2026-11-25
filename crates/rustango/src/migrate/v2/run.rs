@@ -66,6 +66,8 @@ pub(crate) enum Crash {
     MidBatch(usize),
     /// The batch committed and its answer was lost (counted in batches).
     LostAck(usize),
+    /// An unbatched transactional unit committed and its answer was lost.
+    LostUnitAck(usize),
     /// After a data unit's statement, before its commit.
     AfterData(usize),
     /// After an autocommit unit's started mark, before its statement.
@@ -93,11 +95,14 @@ pub(crate) enum RunError {
     Load(#[from] LoadError),
     #[error(transparent)]
     Db(#[from] MigrateError),
-    /// A clean stop between batches (`--max-duration`, a batch budget): the
-    /// row stays `running` and the next run resumes it.
-    #[error("{0}")]
+    /// A planned stop (SIGTERM, `--max-duration`, a batch cap): the row is
+    /// failed with class `stopped` and the next run resumes it.
+    #[error("{}: {}", STOPPED, .0)]
     Stopped(String),
 }
+
+/// How status, boot and the CLI name a planned stop.
+pub(crate) const STOPPED: &str = "stopped, resumes on the next run";
 
 impl From<crate::sql::ExecError> for RunError {
     fn from(e: crate::sql::ExecError) -> Self {
@@ -122,7 +127,7 @@ impl From<RunError> for MigrateError {
         match e {
             RunError::Load(e) => Self::Validation(e.to_string()),
             RunError::Db(e) => e,
-            RunError::Stopped(why) => Self::Validation(why),
+            RunError::Stopped(why) => Self::Validation(format!("{STOPPED}: {why}")),
         }
     }
 }
@@ -843,7 +848,14 @@ impl Runner<'_> {
     async fn finish(&mut self, f: &Loaded, units: &[Unit], from: usize) -> Result<(), RunError> {
         let k = key(&f.file);
         if let Err(e) = self.run_units(k, units, from).await {
-            if matches!(e, RunError::Stopped(_)) {
+            if let RunError::Stopped(why) = &e {
+                // A planned stop: failed with class `stopped`, the event says why.
+                self.ledger
+                    .set_state(self.pool, k, self.run_id, RowState::Failed, Some("stopped"))
+                    .await?;
+                self.ledger
+                    .event(self.pool, "stopped", k, None, self.run_id, Some(why))
+                    .await?;
                 return Err(e);
             }
             // Best effort: the row stays resumable; the class only, never driver text.
@@ -951,11 +963,10 @@ impl Runner<'_> {
     ) -> Result<(), RunError> {
         for (n, u) in units.iter().enumerate().skip(from) {
             if self.units_run > 0 && self.stopping() {
-                return Err(MigrateError::Validation(format!(
-                    "stopped by a shutdown signal after {} unit(s); the next start resumes",
+                return Err(RunError::Stopped(format!(
+                    "a shutdown signal after {} unit(s)",
                     self.units_run
-                ))
-                .into());
+                )));
             }
             #[cfg(test)]
             if self.opts.crash == Some(Crash::BeforeUnit(self.units_run)) {
@@ -1001,17 +1012,14 @@ impl Runner<'_> {
             if let Some(bp) = &u.batch {
                 if batches_here > 0 || self.batches_run > 0 {
                     if self.stopping() {
-                        return Err(MigrateError::Validation(format!(
-                            "stopped by a shutdown signal between batches of `{}:{}`; the next \
-                             start resumes",
+                        return Err(RunError::Stopped(format!(
+                            "a shutdown signal between batches of `{}:{}`",
                             k.0, k.1
-                        ))
-                        .into());
+                        )));
                     }
                     if self.out_of_time() {
                         return Err(RunError::Stopped(format!(
-                            "--max-duration reached between batches of `{}:{}`; the next run \
-                             resumes",
+                            "--max-duration reached between batches of `{}:{}`",
                             k.0, k.1
                         )));
                     }
@@ -1019,8 +1027,7 @@ impl Runner<'_> {
                         && bp.max_batches_per_run.is_some_and(|m| batches_here >= m)
                     {
                         return Err(RunError::Stopped(format!(
-                            "`{}:{}` ran its {batches_here} batches for this run; the next run \
-                             resumes",
+                            "`{}:{}` ran its {batches_here} batches for this run",
                             k.0, k.1
                         )));
                     }
@@ -1293,31 +1300,22 @@ impl Runner<'_> {
                     .into(),
             ));
         }
-        let committed = tx.commit().await;
-        #[cfg(test)]
-        let committed = match committed {
-            Ok(())
-                if u.batch.is_some()
-                    && self.opts.crash == Some(Crash::LostAck(self.batches_run)) =>
-            {
-                Err(sqlx::Error::Protocol(
-                    "test: the commit's answer was lost".into(),
-                ))
-            }
-            other => other,
-        };
+        let committed = self.lose_ack(u.batch.is_some(), tx.commit().await);
         if let Err(e) = committed {
             // An unknown outcome (6.3): read what the database holds.
-            if u.batch.is_some() && self.batch_committed(k, ui, batches).await? {
-                tracing::warn!(
-                    target: "rustango::migrate",
-                    "`{}:{}` batch {batches}: the commit's answer was lost ({e}); it committed",
-                    k.0,
-                    k.1
-                );
-            } else {
+            let landed = match u.batch {
+                Some(_) => self.batch_committed(k, ui, batches).await?,
+                None => self.unit_committed(k, n).await.map_err(fatal)?,
+            };
+            if !landed {
                 return Err(Attempt::Retry(format!("commit failed: {e}")));
             }
+            tracing::warn!(
+                target: "rustango::migrate",
+                "`{}:{}` unit {n}: the commit's answer was lost ({e}); it committed",
+                k.0,
+                k.1
+            );
         }
         if let Some((id, hash)) = hash {
             let detail = format!("{id} {hash}");
@@ -1327,6 +1325,58 @@ impl Runner<'_> {
                 .map_err(|e| fatal(e.into()))?;
         }
         Ok(done)
+    }
+
+    /// Test failpoint: report a commit that went through as lost.
+    fn lose_ack(&self, batched: bool, r: Result<(), sqlx::Error>) -> Result<(), sqlx::Error> {
+        #[cfg(test)]
+        if r.is_ok()
+            && self.opts.crash
+                == Some(if batched {
+                    Crash::LostAck(self.batches_run)
+                } else {
+                    Crash::LostUnitAck(self.units_run)
+                })
+        {
+            return Err(sqlx::Error::Protocol(
+                "test: the commit's answer was lost".into(),
+            ));
+        }
+        let _ = batched;
+        r
+    }
+
+    /// After a lost commit answer on unit `n`: its commit carries the
+    /// ledger advance, so a row at `n` or past it means it committed.
+    async fn unit_committed(&self, k: (&str, &str), n: i64) -> Result<bool, RunError> {
+        let rows = self.ledger.rows(self.pool).await?;
+        Ok(rows
+            .iter()
+            .any(|r| r.app == k.0 && r.id == k.1 && r.run_id == self.run_id && r.pos >= n))
+    }
+
+    /// The outcome of a transactional unit's commit: a lost answer whose
+    /// ledger advance landed is done, never an error.
+    async fn commit_outcome(
+        &self,
+        k: (&str, &str),
+        n: i64,
+        r: Result<(), MigrateError>,
+    ) -> Result<(), RunError> {
+        let r = r.and_then(|()| self.lose_ack(false, Ok(())).map_err(MigrateError::Driver));
+        let Err(e) = r else {
+            return Ok(());
+        };
+        if self.unit_committed(k, n).await? {
+            tracing::warn!(
+                target: "rustango::migrate",
+                "`{}:{}` unit {n}: the commit's answer was lost ({e}); it committed",
+                k.0,
+                k.1
+            );
+            return Ok(());
+        }
+        Err(e.into())
     }
 
     /// After a lost commit answer: did batch `batches` of unit `ui` commit?
@@ -1366,8 +1416,8 @@ impl Runner<'_> {
                 .expect_err("not one row")
                 .into());
         }
-        tx.commit().await?;
-        Ok(())
+        let r = tx.commit().await.map_err(MigrateError::Driver);
+        self.commit_outcome(k, n, r).await
     }
 
     /// A SQLite rebuild: FK enforcement off outside, the ledger update inside
@@ -1395,8 +1445,8 @@ impl Runner<'_> {
             }
             let moved = q.execute(&mut *tx).await?.rows_affected();
             super::ledger::fenced(moved)?;
-            tx.commit().await?;
-            Ok(())
+            let r = tx.commit().await;
+            self.commit_outcome(k, n, r).await
         }
         .await;
         let finished = conn.finish().await;

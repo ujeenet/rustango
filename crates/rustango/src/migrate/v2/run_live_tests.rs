@@ -713,9 +713,28 @@ async fn stop_mid_run_then_resume(b: B) {
         ))),
         ..Options::default()
     };
-    let e = migrate(pool, &dir, &stopping).await.expect_err("stopped");
-    assert!(e.to_string().contains("shutdown signal"), "{e}");
+    let rep = migrate(pool, &dir, &stopping).await.unwrap();
+    assert!(
+        rep.stopped.as_deref().unwrap().contains("shutdown signal"),
+        "{rep:?}"
+    );
     assert_eq!(columns(pool, "rv_author").await, ["id", "name"]);
+    // A planned stop: failed with class `stopped`, and the event says why.
+    let row = Ledger::default_names()
+        .rows(pool)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(
+        (row.state, row.error_class.as_deref()),
+        (RowState::Failed, Some("stopped"))
+    );
+    let kinds = Ledger::default_names()
+        .event_kinds(pool, ("project", "0002_bio"))
+        .await
+        .unwrap();
+    assert!(kinds.iter().any(|k| k == "stopped"), "{kinds:?}");
     let rep = migrate(pool, &dir, &opts()).await.unwrap();
     assert_eq!(rep.applied, ["0002_bio"]);
     assert_eq!(columns(pool, "rv_author").await, ["id", "name", "bio"]);
@@ -2312,7 +2331,7 @@ async fn max_duration_stops_between_batches(b: B) {
         count(pool, "SELECT COUNT(*) FROM ed_user WHERE street = 'moved'").await,
         10
     );
-    assert_eq!(rows(pool).await.last().unwrap().1, RowState::Running);
+    assert_eq!(rows(pool).await.last().unwrap().1, RowState::Failed);
     assert_eq!(
         migrate(pool, &dir, &opts()).await.unwrap().applied,
         ["0002_mark"]
@@ -2357,6 +2376,40 @@ async fn max_batches_per_run_binds_the_cli_only(b: B) {
     );
 }
 
+/// A lost commit answer on an unbatched unit (schema or data) whose ledger
+/// advance landed is done: the run goes on, never an error, never a redo.
+async fn a_lost_unit_ack_counts_as_done(b: B) {
+    for unit in 0..2 {
+        let Some(db) = fresh(b).await else { return };
+        let pool = &db.pool;
+        let (_root, dir) = ed_project(pool, &[1, 2, 3]).await;
+        let other = json!({"op": "create_table", "v": 1, "table": {"name": "ed_other",
+            "scope": "tenant", "fields": [
+            {"column": "id", "ty": "i64", "primary_key": true, "nullable": false}]}});
+        let mark = json!({"op": "data_sql", "v": 1, "id": "mark_v1",
+            "tables": {"read": ["ed_user"], "write": ["ed_user.street"]},
+            "up": {"any": "UPDATE {{t:ed_user}} SET {{c:street}} = {{?}}"},
+            "binds": [{"ty": "string", "value": "moved"}],
+            "down": {"noop": "test"}, "allow": [{"code": "MV2-E028", "reason": "test"}]});
+        put(
+            &dir,
+            "0002_mark",
+            &vs("0002_mark", &["0001_user"], json!([other, mark])),
+        );
+        let lost = Options {
+            crash: Some(Crash::LostUnitAck(unit)),
+            ..Options::default()
+        };
+        let rep = migrate(pool, &dir, &lost).await;
+        assert_eq!(rep.unwrap().applied, ["0002_mark"], "{b:?} unit {unit}");
+        assert_eq!(
+            count(pool, "SELECT COUNT(*) FROM ed_user WHERE street = 'moved'").await,
+            3
+        );
+        assert_eq!(rows(pool).await.last().unwrap().1, RowState::Applied);
+    }
+}
+
 /// A shutdown signal stops between batches; the next start resumes at the
 /// stored cursor and moves every row once.
 async fn a_shutdown_stops_between_batches(b: B) {
@@ -2375,8 +2428,11 @@ async fn a_shutdown_stops_between_batches(b: B) {
         ))),
         ..Options::default()
     };
-    let e = migrate(pool, &dir, &stopping).await.expect_err("stopped");
-    assert!(e.to_string().contains("between batches"), "{e}");
+    let rep = migrate(pool, &dir, &stopping).await.unwrap();
+    assert!(
+        rep.stopped.as_deref().unwrap().contains("between batches"),
+        "{rep:?}"
+    );
     assert_eq!(
         count(pool, "SELECT COUNT(*) FROM ed_user WHERE street = 'moved'").await,
         10
@@ -2524,6 +2580,7 @@ per_backend!(
     a_batch_must_advance,
     max_duration_stops_between_batches,
     a_shutdown_stops_between_batches,
+    a_lost_unit_ack_counts_as_done,
     max_batches_per_run_binds_the_cli_only,
     a_held_lock_is_retried,
     a_waiter_finishes_a_killed_move,

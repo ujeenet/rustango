@@ -99,7 +99,14 @@ async fn boot_migrate_v2(
     for id in &report.applied {
         tracing::info!(target: "rustango::migrate", migration = %id, "applied");
     }
-    Ok(())
+    // A stopped run never opens the gate; the process exits non-zero.
+    match report.stopped {
+        Some(why) => Err(crate::migrate::MigrateError::Validation(format!(
+            "{}: {why}",
+            crate::migrate::v2::run::STOPPED
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// How long a booting single-database server waits for another run's migrate lock.
@@ -2856,12 +2863,210 @@ mod tests {
         };
         let res = Cli::new()
             .migrations_dir(std::path::PathBuf::from(dir))
+            .with_health()
             .run_with_args(vec!["runserver".into()])
             .await;
         if let Err(e) = res {
             eprintln!("{e}");
             std::process::exit(3);
         }
+    }
+
+    /// A boot stopped by a shutdown signal is an error that says it resumes.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn v2_boot_stop_says_it_resumes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (id, parents, name) in [
+            ("0001_a", vec![], "bs_a"),
+            ("0002_b", vec!["0001_a"], "bs_b"),
+        ] {
+            let file = serde_json::json!({"engine": 2, "format": 1, "id": id, "app": "project",
+                "parents": parents, "target": "tenant", "operations": [{"op": "create_table",
+                "v": 1, "table": {"name": name, "scope": "tenant", "fields": [
+                    {"column": "id", "ty": "i64", "primary_key": true, "nullable": false}]}}]});
+            std::fs::write(dir.join(format!("{id}.json")), file.to_string()).unwrap();
+        }
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("app.db").display());
+        let pool = crate::sql::Pool::connect(&url).await.expect("connect");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let e = boot_migrate_v2(&pool, &dir, stop)
+            .await
+            .expect_err("a stopped boot never serves");
+        assert!(
+            e.to_string().starts_with(crate::migrate::v2::run::STOPPED),
+            "{e}"
+        );
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        boot_migrate_v2(&pool, &dir, stop)
+            .await
+            .expect("the next start resumes");
+    }
+
+    /// One plain HTTP/1.0 GET: the status code, or `None` when nothing listens.
+    #[cfg(feature = "sqlite")]
+    async fn http_status(port: u16, path: &str) -> Option<u16> {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .ok()?;
+        s.write_all(format!("GET {path} HTTP/1.0\r\nHost: localhost\r\n\r\n").as_bytes())
+            .await
+            .ok()?;
+        let mut buf = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(5), s.read_to_end(&mut buf))
+            .await
+            .ok()?
+            .ok()?;
+        String::from_utf8_lossy(&buf)
+            .split(' ')
+            .nth(1)?
+            .parse()
+            .ok()
+    }
+
+    /// A booting `runserver` child on `port`, killed when dropped.
+    #[cfg(feature = "sqlite")]
+    struct Replica(std::process::Child);
+
+    #[cfg(feature = "sqlite")]
+    impl Replica {
+        fn start(dir: &std::path::Path, url: &str, port: u16) -> Self {
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--ignored", "--exact", "manage::tests::v2_boot_child"])
+                .env(BOOT_CHILD, dir)
+                .env("DATABASE_URL", url)
+                .env("RUSTANGO_BIND", format!("127.0.0.1:{port}"))
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            Self(child)
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    impl Drop for Replica {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    /// A batched move at boot keeps `/ready` and every route at 503; the
+    /// migrating replica is killed mid-batch and a waiting one finishes the
+    /// move, every row once, then opens its gate (6.11).
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn v2_boot_gate_holds_a_batched_move_and_a_waiter_finishes_it() {
+        const ROWS: i64 = 30;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let create = serde_json::json!({"engine": 2, "format": 1, "id": "0001_t",
+            "app": "project", "parents": [], "target": "tenant", "operations": [
+            {"op": "create_table", "v": 1, "table": {"name": "bg_t", "scope": "tenant",
+             "fields": [{"column": "id", "ty": "i64", "primary_key": true, "nullable": false},
+                        {"column": "street", "ty": "string", "max_length": 40,
+                         "nullable": true}]}}]});
+        std::fs::write(dir.join("0001_t.json"), create.to_string()).unwrap();
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("app.db").display());
+        let pool = crate::sql::Pool::connect(&url).await.expect("connect");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        boot_migrate_v2(&pool, &dir, stop).await.expect("0001");
+        let values: Vec<String> = (1..=ROWS).map(|i| format!("({i}, 's')")).collect();
+        crate::sql::raw_execute_pool(
+            &pool,
+            &format!("INSERT INTO bg_t (id, street) VALUES {}", values.join(", ")),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let mov = serde_json::json!({"engine": 2, "format": 1, "id": "0002_move",
+            "app": "project", "parents": ["0001_t"], "target": "tenant", "operations": [
+            {"op": "data_sql", "v": 1, "id": "move_v1",
+             "tables": {"read": ["bg_t"], "write": ["bg_t.street"]},
+             "up": {"any": "UPDATE {{t:bg_t}} SET {{c:street}} = {{?}} WHERE {{batch_range}}"},
+             "binds": [{"ty": "string", "value": "moved"}],
+             "batch": {"table": "bg_t", "key": "id", "size": 1, "sleep_ms": 150},
+             "down": {"noop": "test"}, "allow": [{"code": "MV2-E028", "reason": "test"},
+                                                {"code": "MV2-W010", "reason": "test"}]}]});
+        std::fs::write(dir.join("0002_move.json"), mov.to_string()).unwrap();
+        let ledger = crate::migrate::v2::ledger::Ledger::default_names();
+        let batches = || async {
+            crate::migrate::v2::ledger::Ledger::default_names()
+                .event_kinds(&pool, ("project", "0002_move"))
+                .await
+                .unwrap()
+                .iter()
+                .filter(|k| *k == "batch")
+                .count()
+        };
+        let moved = || async {
+            let n: Vec<(i64,)> = crate::sql::raw_query_pool(
+                "SELECT COUNT(*) FROM bg_t WHERE street = 'moved'",
+                Vec::new(),
+                &pool,
+            )
+            .await
+            .unwrap();
+            n[0].0
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let (pa, pb) = (free_port(), free_port());
+        let a = Replica::start(&dir, &url, pa);
+        // A binds at once and keeps the gate shut while it moves rows.
+        while batches().await < 3 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "A never moved 3 batches"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(http_status(pa, "/health").await, Some(200));
+        assert_eq!(http_status(pa, "/ready").await, Some(503));
+        assert_eq!(http_status(pa, "/anything").await, Some(503));
+        let b = Replica::start(&dir, &url, pb);
+        while http_status(pb, "/health").await != Some(200) {
+            assert!(std::time::Instant::now() < deadline, "B never bound");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(http_status(pb, "/ready").await, Some(503));
+        // Kill -9 the migrating replica mid-move.
+        drop(a);
+        let at_kill = moved().await;
+        assert!(at_kill < ROWS, "the move ended before the kill");
+        loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "B never opened its gate"
+            );
+            match http_status(pb, "/ready").await {
+                Some(200) => break,
+                Some(503) => assert_eq!(http_status(pb, "/anything").await, Some(503)),
+                other => panic!("/ready on B: {other:?}"),
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(moved().await, ROWS);
+        // One committed batch per row: none ran twice.
+        assert_eq!(batches().await, usize::try_from(ROWS).unwrap());
+        let rows = ledger.rows(&pool).await.unwrap();
+        assert!(rows
+            .iter()
+            .all(|r| r.state == crate::migrate::v2::ledger::RowState::Applied));
+        drop(b);
     }
 
     /// A data step with nothing to run here stops boot before any statement.

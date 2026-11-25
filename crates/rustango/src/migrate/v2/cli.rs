@@ -242,7 +242,7 @@ async fn apply<W: Write>(
         writeln!(w, "Applied {id}").map_err(io)?;
     }
     if let Some(why) = &report.stopped {
-        writeln!(w, "Stopped: {why}").map_err(io)?;
+        writeln!(w, "{}: {why}", super::run::STOPPED).map_err(io)?;
     } else if !opts.dry_run && report.applied.is_empty() {
         writeln!(w, "Nothing to apply.").map_err(io)?;
     }
@@ -293,15 +293,20 @@ async fn status<W: Write>(pool: &Pool, dir: &Path, w: &mut W) -> Result<(), Migr
         .await?;
     for &i in project.order.get(&Target::Tenant).into_iter().flatten() {
         let f = &project.files[i].file;
-        let mark = match rows.iter().find(|r| r.app == f.app && r.id == f.id) {
+        let row = rows.iter().find(|r| r.app == f.app && r.id == f.id);
+        let mark = match row.map(|r| &r.state) {
             None => " ",
-            Some(r) => match r.state {
-                RowState::Applied => "X",
-                RowState::Running | RowState::RollingBack => "~",
-                RowState::Failed => "!",
-            },
+            Some(RowState::Applied) => "X",
+            Some(RowState::Running | RowState::RollingBack) => "~",
+            Some(RowState::Failed) => "!",
         };
-        writeln!(w, "[{mark}] {}:{}", f.app, f.id).map_err(io)?;
+        let note = match row {
+            Some(r) if r.error_class.as_deref() == Some("stopped") => {
+                format!(" ({})", super::run::STOPPED)
+            }
+            _ => String::new(),
+        };
+        writeln!(w, "[{mark}] {}:{}{note}", f.app, f.id).map_err(io)?;
     }
     Ok(())
 }

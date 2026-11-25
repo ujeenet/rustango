@@ -54,6 +54,8 @@ pub(crate) struct Row {
     pub(crate) pos: i64,
     pub(crate) started_unit: Option<i64>,
     pub(crate) run_id: String,
+    /// Why the row failed (class only); `stopped` for a planned stop.
+    pub(crate) error_class: Option<String>,
 }
 
 /// The ledger's table names, from the configured base.
@@ -258,16 +260,28 @@ impl Ledger {
             i64,
             Option<i64>,
             String,
+            Option<String>,
         );
         let sql = format!(
-            "SELECT app, id, checksum, applied_body, state, unit_plan, pos, started_unit, run_id \
-             FROM {} ORDER BY seq",
+            "SELECT app, id, checksum, applied_body, state, unit_plan, pos, started_unit, run_id, \
+             error_class FROM {} ORDER BY seq",
             self.qt(pool)
         );
         let raw: Vec<Raw> = raw_query_pool(&sql, Vec::new(), pool).await?;
         raw.into_iter()
             .map(
-                |(app, id, checksum, applied_body, state, plan, pos, started_unit, run_id)| {
+                |(
+                    app,
+                    id,
+                    checksum,
+                    applied_body,
+                    state,
+                    plan,
+                    pos,
+                    started_unit,
+                    run_id,
+                    error_class,
+                )| {
                     Ok(Row {
                         unit_plan: serde_json::from_str(&plan)?,
                         state: RowState::parse(&state)?,
@@ -278,6 +292,7 @@ impl Ledger {
                         pos,
                         started_unit,
                         run_id,
+                        error_class,
                     })
                 },
             )

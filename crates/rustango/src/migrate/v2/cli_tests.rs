@@ -94,3 +94,29 @@ async fn the_verbs_run_a_v2_project() {
     let e = cli(&pool, &dir, &["migrate"]).await.unwrap_err();
     assert!(e.to_string().contains("manage dbmigrate"), "{e}");
 }
+
+/// A planned stop shows in status as stopped, resuming on the next run.
+#[tokio::test]
+async fn status_names_a_planned_stop() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("migrations");
+    v2_project(&dir);
+    let pool = sqlite(tmp.path()).await;
+    let stopping = crate::migrate::v2::run::Options {
+        stop: Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            true,
+        ))),
+        ..crate::migrate::v2::run::Options::default()
+    };
+    let rep = crate::migrate::v2::run::migrate(&pool, &dir, &stopping)
+        .await
+        .unwrap();
+    assert!(rep.stopped.is_some(), "{rep:?}");
+    let out = cli(&pool, &dir, &["dbmigrate", "status"]).await.unwrap();
+    assert_eq!(
+        out,
+        "[X] project:0001_t\n[!] project:0002_n (stopped, resumes on the next run)\n"
+    );
+    let out = cli(&pool, &dir, &["dbmigrate", "apply"]).await.unwrap();
+    assert!(out.contains("Applied 0002_n"), "{out}");
+}
