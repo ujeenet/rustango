@@ -1656,7 +1656,7 @@ use super::super::step::{Batch, StepCtx, StepError, StepResult};
 
 /// `st_user` (id, name, greeting) gets "hi" where the greeting is unset;
 /// down unsets it again.
-#[crate::data_step(app = "project", id = "greet_v1")]
+#[crate::data_step(app = "steps", id = "greet_v1")]
 impl GreetV1 {
     async fn up(ctx: &mut StepCtx<'_>, batch: Batch) -> StepResult {
         let t = ctx.table("st_user")?;
@@ -1678,7 +1678,7 @@ impl GreetV1 {
 }
 
 /// Writes, then swallows a failed statement: the unit must roll back.
-#[crate::data_step(app = "project", id = "swallow_v1")]
+#[crate::data_step(app = "steps", id = "swallow_v1")]
 impl SwallowV1 {
     async fn up(ctx: &mut StepCtx<'_>, batch: Batch) -> StepResult {
         let t = ctx.table("st_user")?;
@@ -1695,7 +1695,7 @@ impl SwallowV1 {
 }
 
 /// Reaches for the app's default pool inside the step.
-#[crate::data_step(app = "project", id = "escape_v1")]
+#[crate::data_step(app = "steps", id = "escape_v1")]
 impl EscapeV1 {
     async fn up(_ctx: &mut StepCtx<'_>, batch: Batch) -> StepResult {
         match crate::databases::default() {
@@ -1710,7 +1710,7 @@ impl EscapeV1 {
 static PANICKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Panics on its first run in this process, then succeeds.
-#[crate::data_step(app = "project", id = "panic_once_v1")]
+#[crate::data_step(app = "steps", id = "panic_once_v1")]
 impl PanicOnceV1 {
     async fn up(ctx: &mut StepCtx<'_>, batch: Batch) -> StepResult {
         let t = ctx.table("st_user")?;
@@ -1724,12 +1724,19 @@ impl PanicOnceV1 {
 }
 
 /// Touches a table outside its op's footprint.
-#[crate::data_step(app = "project", id = "outside_v1")]
+#[crate::data_step(app = "steps", id = "outside_v1")]
 impl OutsideV1 {
     async fn up(ctx: &mut StepCtx<'_>, batch: Batch) -> StepResult {
         ctx.table("st_other")?;
         Ok(batch.done())
     }
+}
+
+/// [`v2`] for the app the test steps are registered under.
+fn vs(id: &str, parents: &[&str], ops: Value) -> Value {
+    let mut f = v2(id, parents, ops);
+    f["app"] = json!("steps");
+    f
 }
 
 fn st_users() -> Value {
@@ -1752,7 +1759,7 @@ async fn st_project(pool: &Pool, ops: Value) -> (tempfile::TempDir, PathBuf) {
     put(
         &dir,
         "0001_users",
-        &v2("0001_users", &[], json!([st_users()])),
+        &vs("0001_users", &[], json!([st_users()])),
     );
     migrate(pool, &dir, &opts()).await.unwrap();
     for n in ["a", "b"] {
@@ -1764,7 +1771,7 @@ async fn st_project(pool: &Pool, ops: Value) -> (tempfile::TempDir, PathBuf) {
         .await
         .unwrap();
     }
-    put(&dir, "0002_step", &v2("0002_step", &["0001_users"], ops));
+    put(&dir, "0002_step", &vs("0002_step", &["0001_users"], ops));
     (root, dir)
 }
 
@@ -1783,9 +1790,9 @@ async fn a_rust_step_runs_both_ways(b: B) {
         2
     );
     let hashes = Ledger::default_names().step_hashes(pool).await.unwrap();
-    let want = super::super::step::registered("project", "greet_v1")[0].code_hash();
+    let want = super::super::step::registered("steps", "greet_v1")[0].code_hash();
     assert_eq!(
-        hashes.get(&("project".into(), "greet_v1".into())),
+        hashes.get(&("steps".into(), "greet_v1".into())),
         Some(&want)
     );
     downgrade(pool, &dir, 1, &opts()).await.unwrap();
@@ -1860,7 +1867,7 @@ async fn a_missing_rust_step_runs_nothing(b: B) {
     put(
         &dir,
         "0001_users",
-        &v2(
+        &vs(
             "0001_users",
             &[],
             json!([st_users(), rust_op("greet_v2", json!("rust"))]),
@@ -1869,7 +1876,7 @@ async fn a_missing_rust_step_runs_nothing(b: B) {
     let e = migrate(pool, &dir, &opts()).await.expect_err("refused");
     assert_eq!(e.code(), Some(Code::Unresolved), "{e}");
     let msg = e.to_string();
-    assert!(msg.contains("near: project:greet_v1"), "{msg}");
+    assert!(msg.contains("near: steps:greet_v1"), "{msg}");
     let bin = std::env::current_exe().unwrap();
     assert!(
         msg.contains(&*bin.file_name().unwrap().to_string_lossy()),
@@ -1887,7 +1894,7 @@ async fn a_changed_step_is_warned_or_refused(b: B) {
     let (_root, dir) = st_project(pool, json!([rust_op("greet_v1", json!("rust"))])).await;
     migrate(pool, &dir, &opts()).await.unwrap();
     let ledger = Ledger::default_names();
-    let k = ("project", "0002_step");
+    let k = ("steps", "0002_step");
     ledger
         .event(pool, STEP_HASH, k, None, "test", Some("greet_v1 0000"))
         .await
@@ -1942,18 +1949,18 @@ async fn the_testing_helper_runs_a_step(b: B) {
     put(
         &dir,
         "0001_users",
-        &v2("0001_users", &[], json!([st_users()])),
+        &vs("0001_users", &[], json!([st_users()])),
     );
     put(
         &dir,
         "0002_step",
-        &v2(
+        &vs(
             "0002_step",
             &["0001_users"],
             json!([rust_op("greet_v1", json!("rust"))]),
         ),
     );
-    let t = super::super::testing::at(&db.pool, &dir, "project", "greet_v1")
+    let t = super::super::testing::at(&db.pool, &dir, "steps", "greet_v1")
         .await
         .unwrap();
     raw_execute_pool(

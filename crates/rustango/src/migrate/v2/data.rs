@@ -300,13 +300,13 @@ fn not_registered(at: &str, app: &str, id: &str, down: bool) -> String {
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "this binary".into());
     let near = super::step::near(app, id);
-    let what = if down { "with a `down`" } else { "" };
+    let what = if down { " with a `down`" } else { "" };
     let hint = if near.is_empty() {
         String::new()
     } else {
         format!(" (near: {})", near.join(", "))
     };
-    format!("{at}: no `#[data_step(app = \"{app}\", id = \"{id}\")]` {what} is registered in `{bin}`{hint}")
+    format!("{at}: no `#[data_step(app = \"{app}\", id = \"{id}\")]`{what} is registered in `{bin}`{hint}")
 }
 
 /// One error listing every miss, or `Ok` when there is none.
