@@ -6,16 +6,20 @@
 // Wired to the runner and CLI in later phase 1 branches.
 #![cfg_attr(not(test), allow(dead_code))]
 
+pub(crate) mod adopt;
 pub(crate) mod catalog;
 pub(crate) mod checksum;
 pub(crate) mod format;
 pub(crate) mod graph;
+pub(crate) mod invert;
 pub(crate) mod json;
+pub(crate) mod ledger;
 pub(crate) mod load;
 pub(crate) mod norm;
 pub(crate) mod probe;
 pub(crate) mod render;
 pub(crate) mod replay;
+pub(crate) mod run;
 pub(crate) mod state;
 
 #[cfg(test)]
@@ -75,6 +79,18 @@ pub(crate) enum Code {
     Raw,
     /// A unit that commits on its own has no probe for the state after it.
     Probe,
+    /// A rollback blocker: dropped data, a missing `down`, an extension.
+    Blocked,
+    /// An applied migration's file changed since it ran.
+    Edited,
+    /// Below the switch point (the adopt checkpoint): v2 never rolls back into v1.
+    Floor,
+    /// The database differs from the adopt checkpoint.
+    Drift,
+    /// The database's v1 ledger is behind the adopt checkpoint.
+    Behind,
+    /// Tables exist but no ledger says how they got there.
+    Unowned,
     /// A folder or file could not be read.
     Io,
 }
@@ -101,6 +117,12 @@ impl Code {
             Self::Io => "MV2-E018",
             Self::Raw => "MV2-E013",
             Self::Probe => "MV2-E019",
+            Self::Blocked => "MV2-E020",
+            Self::Edited => "MV2-E021",
+            Self::Floor => "MV2-E022",
+            Self::Drift => "MV2-E023",
+            Self::Behind => "MV2-E024",
+            Self::Unowned => "MV2-E025",
             Self::CrossTarget => "MV2-E030",
             Self::FkType => "MV2-E3780",
             Self::CheckColumn => "MV2-E3959",

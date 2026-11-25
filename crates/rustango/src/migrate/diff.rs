@@ -2693,7 +2693,7 @@ fn field_fk_sql(
 /// expression form `DEFAULT ('')` it requires — MySQL rejects a *literal*
 /// default on those types (error 1101), only the 8.0.13+ expression form is
 /// legal. PG/SQLite leave `''` untouched (#1174).
-fn render_column_default(
+pub(crate) fn render_column_default(
     expr: &str,
     ty: &str,
     max_length: Option<u32>,

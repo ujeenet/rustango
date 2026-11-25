@@ -26,6 +26,8 @@ pub(crate) struct Loaded {
     pub(crate) at: String,
     /// Checksum alg 1 of the raw file.
     pub(crate) checksum: String,
+    /// The raw file in canonical form: what the ledger stores as `applied_body`.
+    pub(crate) body: String,
     pub(crate) file: File,
 }
 
@@ -211,10 +213,12 @@ pub(crate) fn load_file(path: &Path, text: &str) -> Result<Loaded, LoadError> {
             ));
         }
     }
+    let body = super::checksum::canonical(&raw).expect("checked for integers above");
     Ok(Loaded {
         path: path.to_path_buf(),
         at,
         checksum,
+        body,
         file,
     })
 }

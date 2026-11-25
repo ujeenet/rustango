@@ -86,6 +86,7 @@ pub(crate) use runner::LEDGER_TABLES;
 #[cfg(feature = "tenancy")]
 pub(crate) use runner::{applied_or_empty, SYSTEM_LEDGER_TABLE};
 pub use runner::{ensure_ledger_pool_with_ledger, render_changes_between};
+pub(crate) use runner::{v2_ledger, with_migrate_lock_held_v2};
 pub(crate) use runner::{LockHeld, Signals};
 // Always on: entry points that work on PG, MySQL and SQLite through the
 // `Pool` enum, plus the inventory and builder surface.

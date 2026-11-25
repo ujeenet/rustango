@@ -386,6 +386,59 @@ fn create_table_sql(d: &dyn Dialect, t: &TableState, name: &str, inline: &[&Inde
     s
 }
 
+/// The units that create `tables` (in that order) exactly as state holds
+/// them, for a fresh install of an adopt checkpoint. No replay rules: the
+/// checkpoint is the state engine v1 left, which may predate them.
+///
+/// # Errors
+/// What the backend cannot build (an index it does not support).
+pub(crate) fn render_install(
+    externs: &State,
+    tables: &[&TableState],
+    at: &str,
+    b: Backend,
+) -> Result<Vec<Unit>, LoadError> {
+    let mut before = externs.clone();
+    let mut units = Vec::new();
+    for (i, t) in tables.iter().enumerate() {
+        let mut after = before.clone();
+        after
+            .tables
+            .insert(Arc::from(t.name.as_str()), Arc::new((*t).clone()));
+        let created = BTreeSet::new();
+        let r = Render {
+            before: &before,
+            after: &after,
+            d: dialect(b),
+            b,
+            created: &created,
+            at,
+        };
+        let op = Op::CreateTable {
+            table: super::format::TableDef {
+                name: t.name.clone(),
+                scope: t.scope,
+                fields: Vec::new(),
+                comment: t.comment.clone(),
+            },
+            indexes: t.indexes.clone(),
+            checks: Vec::new(),
+        };
+        for mut u in r.op(&op, None)? {
+            u.op = i;
+            units.push(u);
+        }
+        before = after;
+    }
+    Ok(units)
+}
+
+/// `CREATE TABLE` for `t` alone (no MySQL inline indexes): the v2 ledger
+/// tables are built with it.
+pub(crate) fn create_table_sql_for(d: &dyn Dialect, t: &TableState) -> String {
+    create_table_sql(d, t, &t.name, &[])
+}
+
 impl Render<'_> {
     fn err(&self, code: Code, msg: impl Into<String>) -> LoadError {
         LoadError::new(code, self.at, msg)

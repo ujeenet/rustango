@@ -1051,8 +1051,16 @@ pub async fn ensure_ledger_pool_with_ledger(
 ///
 /// Every v1 ledger write starts here, so a database switched to engine v2
 /// is refused here.
-async fn create_ledger_locked(pool: &crate::sql::Pool, ledger: &str) -> Result<(), MigrateError> {
-    refuse_switched_db(pool, ledger).await?;
+async fn create_ledger_locked(
+    pool: &crate::sql::Pool,
+    ledger: &str,
+    gate: Gate,
+) -> Result<(), MigrateError> {
+    // Engine v2 owns a switched database; it reaches the v1 system chain
+    // only through `Gate::V2`, which only it can mint.
+    if gate == Gate::V1 {
+        refuse_switched_db(pool, ledger).await?;
+    }
     // Was a three-arm match on the dialect name with a hand-written
     // type + DEFAULT each, whose SQLite arm carried a copy of #1464's
     // canonical `strftime`. `Dialect` answers both halves now, so the
@@ -1070,11 +1078,11 @@ async fn create_ledger_locked(pool: &crate::sql::Pool, ledger: &str) -> Result<(
 /// `ledger`'s names, creating it first: on PG a read before a tenant schema
 /// has its ledger finds `public`'s, and the cached plan keeps it (#2143).
 pub(crate) async fn ledger_names(
-    _: LockHeld,
+    held: LockHeld,
     pool: &crate::sql::Pool,
     ledger: &str,
 ) -> Result<HashSet<String>, MigrateError> {
-    create_ledger_locked(pool, ledger).await?;
+    create_ledger_locked(pool, ledger, held.0).await?;
     applied_set_pool_with_ledger(pool, ledger).await
 }
 
@@ -1251,25 +1259,25 @@ pub(crate) enum ChainOrigin {
 /// As [`migrate_pool_with_ledger_fake_initial`], plus catalog reads and
 /// what a [`ChainOrigin::Regenerated`] chain could not converge.
 pub(crate) async fn migrate_system_chain(
-    _: LockHeld,
+    held: LockHeld,
     pool: &crate::sql::Pool,
     chain: &super::make::SystemChain,
     run_dir: &Path,
     observer: Option<&dyn MigrationObserver>,
 ) -> Result<Vec<Migration>, MigrateError> {
     let origin = chain.origin();
-    create_ledger_locked(pool, SYSTEM_LEDGER_TABLE).await?;
+    create_ledger_locked(pool, SYSTEM_LEDGER_TABLE, held.0).await?;
     migrate_pool_body(pool, run_dir, SYSTEM_LEDGER_TABLE, true, origin, observer).await
 }
 
 /// [`migrate_pool_with_progress`] for a caller that holds the migrate lock.
 pub(crate) async fn migrate_pool_locked(
-    _: LockHeld,
+    held: LockHeld,
     pool: &crate::sql::Pool,
     dir: &Path,
     observer: Option<&dyn MigrationObserver>,
 ) -> Result<Vec<Migration>, MigrateError> {
-    create_ledger_locked(pool, LEDGER_TABLE).await?;
+    create_ledger_locked(pool, LEDGER_TABLE, held.0).await?;
     migrate_pool_body(
         pool,
         dir,
@@ -2290,7 +2298,7 @@ where
     hold_migrate_lock(
         pool,
         Box::pin(async {
-            create_ledger_locked(pool, ledger).await?;
+            create_ledger_locked(pool, ledger, Gate::V1).await?;
             body.await
         }),
     )
@@ -2298,9 +2306,20 @@ where
 }
 
 /// Proof the caller holds the migrate lock; only [`with_migrate_lock_held`]
-/// mints one, so the `*_locked` runners can't run unlocked.
+/// and [`with_migrate_lock_held_v2`] mint one, so the `*_locked` runners
+/// can't run unlocked. It carries which engine took the lock.
 #[derive(Clone, Copy)]
-pub(crate) struct LockHeld(());
+pub(crate) struct LockHeld(Gate);
+
+/// Which engine holds the lock. `V2` needs a [`V2Token`], which only the v2
+/// runner can build, so no v1 caller can skip the switched-DB refusal.
+///
+/// [`V2Token`]: super::v2::run::V2Token
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Gate {
+    V1,
+    V2,
+}
 
 /// Run `body` under one migrate lock. Locks don't nest across pooled
 /// connections, so `body` must call the `LockHeld` runners, not re-lock.
@@ -2312,7 +2331,22 @@ where
     F: FnOnce(LockHeld) -> Fut,
     Fut: std::future::Future<Output = Result<R, MigrateError>>,
 {
-    hold_migrate_lock(pool, Box::pin(body(LockHeld(())))).await
+    hold_migrate_lock(pool, Box::pin(body(LockHeld(Gate::V1)))).await
+}
+
+/// [`with_migrate_lock_held`] for the engine v2 runner: the same lock key,
+/// so v1 and v2 runs exclude each other, and a [`LockHeld`] that lets the v1
+/// system chain run on a database switched to v2.
+pub(crate) async fn with_migrate_lock_held_v2<F, Fut, R>(
+    _: super::v2::run::V2Token,
+    pool: &crate::sql::Pool,
+    body: F,
+) -> Result<R, MigrateError>
+where
+    F: FnOnce(LockHeld) -> Fut,
+    Fut: std::future::Future<Output = Result<R, MigrateError>>,
+{
+    hold_migrate_lock(pool, Box::pin(body(LockHeld(Gate::V2)))).await
 }
 
 tokio::task_local! {

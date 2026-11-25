@@ -104,6 +104,29 @@ pub(crate) async fn migrate_chains_to(
     with_signals(run, pool, signals).await
 }
 
+/// The system chain for engine v2, under the v2 runner's lock. A v2
+/// project's tables are not read here: the chain sees only its own.
+///
+/// # Errors
+/// As [`runner::migrate_system_chain`].
+pub(crate) async fn system_chain_for_v2(
+    held: LockHeld,
+    pool: &Pool,
+    chain: &SystemChain,
+    scope: MigrationScope,
+) -> Result<Vec<Migration>, MigrateError> {
+    let owned = BTreeSet::new();
+    let run = Run {
+        held,
+        pool,
+        chain,
+        scope,
+        owned: &owned,
+        observer: None,
+    };
+    Ok(Box::pin(run.system_pass(&BTreeSet::new())).await?.applied)
+}
+
 async fn with_signals(
     run: impl Future<Output = Result<Option<Applied>, MigrateError>>,
     pool: &Pool,
