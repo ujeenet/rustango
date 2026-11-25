@@ -83,6 +83,10 @@ fn names_outside_the_footprint_are_load_errors() {
     // `{{t:}}` of a table the footprint does not list.
     let up = json!({"up": {"any": "UPDATE {{t:other}} SET {{c:locale}} = 1"}, "binds": []});
     assert_eq!(code(json!([users(), other(), data(up)])), Code::Footprint);
+    // A read of a table the footprint does not list.
+    let read = json!({"up": {"any": "UPDATE {{t:user}} SET {{c:locale}} = (SELECT MAX(id) FROM {{t:other}})"},
+        "binds": []});
+    assert_eq!(code(json!([users(), other(), data(read)])), Code::Footprint);
     // A write through a table the footprint only reads.
     let ro = json!({"tables": {"read": ["user", "other"], "write": ["user.locale"]},
         "up": {"any": "DELETE FROM {{t:other}}"}, "binds": []});

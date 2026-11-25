@@ -1005,7 +1005,7 @@ mod tests {
         assert_eq!(code(&v), Code::File);
         let v = file(json!([{"op": "teleport", "v": 1}]));
         assert_eq!(code(&v), Code::File);
-        let v = file(json!([{"op": "data_sql", "v": 1}]));
+        let v = file(json!([{"op": "data_rust", "v": 1}]));
         assert_eq!(code(&v), Code::NotEnabled);
         let v = file(json!([{"op": "add_check", "table": "t", "name": "c", "expr": "x"}]));
         assert_eq!(code(&v), Code::File, "missing `v`");

@@ -41,7 +41,14 @@ impl Drop for Db {
                     "DROP DATABASE IF EXISTS {}{force}",
                     admin.dialect().quote_ident(&name)
                 );
-                let _ = raw_execute_pool(&admin, &sql, Vec::new()).await;
+                // A session left open by a failed test must not hang the run.
+                let drop = raw_execute_pool(&admin, &sql, Vec::new());
+                if tokio::time::timeout(Duration::from_secs(30), drop)
+                    .await
+                    .is_err()
+                {
+                    eprintln!("leaving database `{name}`: its drop waited 30 s on a lock");
+                }
                 admin.close().await;
             });
         })
@@ -630,6 +637,15 @@ fn a_tenancy_folder_is_not_adopted_yet() {
     assert_eq!(e.code, Code::NotEnabled, "{e}");
 }
 
+/// A live test that waits on a lock past this fails instead of hanging.
+const HANG: Duration = Duration::from_secs(120);
+
+async fn bounded(test: impl std::future::Future<Output = ()>) {
+    tokio::time::timeout(HANG, test)
+        .await
+        .unwrap_or_else(|_| panic!("hung for {HANG:?}: waiting on a lock or a lost connection"));
+}
+
 macro_rules! per_backend {
     ($($name:ident),* $(,)?) => {
         mod per_backend {
@@ -637,13 +653,13 @@ macro_rules! per_backend {
                 pub(super) mod $name {
                     #[cfg(feature = "postgres")]
                     #[tokio::test]
-                    async fn postgres() { super::super::$name(super::super::B::Pg).await }
+                    async fn postgres() { super::super::bounded(super::super::$name(super::super::B::Pg)).await }
                     #[cfg(feature = "mysql")]
                     #[tokio::test]
-                    async fn mysql() { super::super::$name(super::super::B::My).await }
+                    async fn mysql() { super::super::bounded(super::super::$name(super::super::B::My)).await }
                     #[cfg(feature = "sqlite")]
                     #[tokio::test]
-                    async fn sqlite() { super::super::$name(super::super::B::Lite).await }
+                    async fn sqlite() { super::super::bounded(super::super::$name(super::super::B::Lite)).await }
                 }
             )*
         }
@@ -1147,16 +1163,28 @@ async fn a_swallowed_error_rolls_the_unit_back(b: B) {
             })
         }
     }
+    // As the runner does: commit only an Ok step, roll back otherwise, and
+    // end the transaction before any assertion can unwind past it.
     let mut conn = pool.acquire().await.unwrap();
+    conn.close_on_drop();
     let tx = conn.begin().await.unwrap();
     let (tx, r) = run_step(tx, swallow(false)).await;
-    assert!(matches!(r, Err(StepError::Poisoned)), "{r:?}");
-    tx.rollback().await.unwrap();
-    assert_eq!(count(pool, "SELECT COUNT(*) FROM sw_t").await, 0);
+    let poisoned = matches!(r, Err(StepError::Poisoned));
+    if r.is_ok() {
+        tx.commit().await.unwrap();
+    } else {
+        tx.rollback().await.unwrap();
+    }
     let tx = conn.begin().await.unwrap();
-    let (tx, r) = run_step(tx, swallow(true)).await;
-    assert!(r.is_ok(), "{r:?}");
-    tx.commit().await.unwrap();
+    let (tx, saved) = run_step(tx, swallow(true)).await;
+    if saved.is_ok() {
+        tx.commit().await.unwrap();
+    } else {
+        tx.rollback().await.unwrap();
+    }
+    drop(conn);
+    assert!(poisoned, "the swallowed error must poison the unit: {r:?}");
+    assert!(saved.is_ok(), "{saved:?}");
     assert_eq!(count(pool, "SELECT COUNT(*) FROM sw_t").await, 1);
 }
 
@@ -1170,37 +1198,53 @@ async fn the_escape_guard_refuses_pools(b: B) {
         pool: Pool,
     ) -> impl for<'a> FnOnce(&'a mut StepCtx<'t>) -> BoxFuture<'a, Result<(), crate::sql::ExecError>>
     {
+        // No panic inside the step: the unit's transaction is still open.
         move |_ctx| {
             Box::pin(async move {
                 let refused = |r: Result<(), crate::sql::ExecError>| {
-                    assert!(
-                        matches!(r, Err(crate::sql::ExecError::InMigrationStep)),
-                        "{r:?}"
-                    );
+                    matches!(r, Err(crate::sql::ExecError::InMigrationStep))
                 };
-                refused(
-                    raw_execute_pool(&pool, "SELECT 1", Vec::new())
-                        .await
-                        .map(drop),
-                );
-                refused(
-                    crate::sql::raw_query_pool::<(i64,)>("SELECT 1", Vec::new(), &pool)
-                        .await
-                        .map(drop),
-                );
-                refused(crate::sql::transaction_pool(&pool).await.map(drop));
-                refused(pool.acquire().await.map(drop));
-                assert!(crate::databases::get("default").is_none());
-                assert!(crate::databases::default().is_none());
-                Ok(())
+                let checks = [
+                    (
+                        "raw_execute_pool",
+                        refused(
+                            raw_execute_pool(&pool, "SELECT 1", Vec::new())
+                                .await
+                                .map(drop),
+                        ),
+                    ),
+                    (
+                        "raw_query_pool",
+                        refused(
+                            crate::sql::raw_query_pool::<(i64,)>("SELECT 1", Vec::new(), &pool)
+                                .await
+                                .map(drop),
+                        ),
+                    ),
+                    (
+                        "transaction_pool",
+                        refused(crate::sql::transaction_pool(&pool).await.map(drop)),
+                    ),
+                    ("acquire", refused(pool.acquire().await.map(drop))),
+                    ("databases::get", crate::databases::get("default").is_none()),
+                    ("databases::default", crate::databases::default().is_none()),
+                ];
+                match checks.iter().find(|(_, ok)| !ok) {
+                    None => Ok(()),
+                    Some((what, _)) => Err(crate::sql::ExecError::Driver(sqlx::Error::Protocol(
+                        format!("`{what}` reached a pool inside the step"),
+                    ))),
+                }
             })
         }
     }
     let mut conn = db.pool.acquire().await.unwrap();
+    conn.close_on_drop();
     let tx = conn.begin().await.unwrap();
     let (tx, r) = run_step(tx, escape(pool.clone())).await;
-    assert!(r.is_ok(), "{r:?}");
     tx.rollback().await.unwrap();
+    drop(conn);
+    assert!(r.is_ok(), "{r:?}");
     // Outside a step the pool works.
     raw_execute_pool(&pool, "SELECT 1", Vec::new())
         .await
@@ -1243,14 +1287,15 @@ async fn a_blocked_data_unit_times_out(b: B) {
         ..Options::default()
     };
     let started = std::time::Instant::now();
-    let r = tokio::time::timeout(Duration::from_secs(60), migrate(pool, &dir, &quick))
-        .await
-        .expect("the lock timeout ends the wait");
-    assert!(r.is_err(), "blocked");
-    assert!(started.elapsed() < Duration::from_secs(30));
+    let r = tokio::time::timeout(Duration::from_secs(30), migrate(pool, &dir, &quick)).await;
+    let waited = started.elapsed();
+    // Release the holder before any assertion can unwind past it.
     htx.rollback().await.unwrap();
     drop(hconn);
     holder.close().await;
+    let r = r.unwrap_or_else(|_| panic!("the lock timeout did not end the wait in 30 s"));
+    assert!(r.is_err(), "blocked");
+    assert!(waited < Duration::from_secs(20), "{waited:?}");
     assert_eq!(
         migrate(pool, &dir, &opts()).await.unwrap().applied,
         ["0003_fill"]
