@@ -38,6 +38,10 @@ pub(crate) struct Options {
     pub(crate) stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// The engine v1 ledger name whose v2 ledger this app uses; `None` = default.
     pub(crate) ledger: Option<String>,
+    /// A data unit waits this long for a row or table lock; `None` = 5 s.
+    pub(crate) data_lock_timeout: Option<std::time::Duration>,
+    /// A data unit's statement runs at most this long; `None` = 5 min.
+    pub(crate) data_statement_timeout: Option<std::time::Duration>,
     /// Test failpoint: stop as if the process died.
     #[cfg(test)]
     pub(crate) crash: Option<Crash>,
@@ -48,6 +52,8 @@ pub(crate) struct Options {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Crash {
     BeforeUnit(usize),
+    /// After a data unit's statement, before its commit.
+    AfterData(usize),
     /// After an autocommit unit's started mark, before its statement.
     AfterStart(usize),
     AfterStatement(usize),
@@ -237,6 +243,23 @@ async fn migrate_project(
 ) -> Result<Report, RunError> {
     refuse_registry(project)?;
     let ledger = Ledger::of(opts);
+    let b = backend_of(pool);
+    // Every data step the plan needs resolves before the lock and the
+    // system chain, so a miss runs zero statements (5.2).
+    let done: std::collections::HashSet<(String, String)> = ledger
+        .rows(pool)
+        .await?
+        .into_iter()
+        .map(|r| (r.app, r.id))
+        .collect();
+    let misses: Vec<String> = project
+        .files
+        .iter()
+        .filter(|f| !done.contains(&(f.file.app.clone(), f.file.id.clone())))
+        .flat_map(|f| super::data::misses(&f.file, b, false))
+        .collect();
+    super::data::refuse_misses(&misses, "plan")?;
+    let sweep = sweep_targets(project)?;
     let run_id = new_run_id();
     // A dry run writes nothing: no system chain, no ledger table.
     let ((applied, planned), system) =
@@ -252,6 +275,7 @@ async fn migrate_project(
                 opts,
                 units_run: 0,
                 planned: Vec::new(),
+                sweep: Some(sweep),
             };
             let applied = runner.apply_project(project).await?;
             Ok((applied, runner.planned))
@@ -290,6 +314,7 @@ pub(crate) async fn downgrade(
             opts,
             units_run: 0,
             planned: Vec::new(),
+            sweep: None,
         };
         runner.downgrade(steps).await
     })
@@ -302,6 +327,60 @@ pub(crate) async fn downgrade(
     })
 }
 
+/// A `data_sql` unit as a step: its one statement.
+fn sql_step<'t>(
+    sql: String,
+    binds: Vec<crate::core::SqlValue>,
+) -> impl for<'a> FnOnce(
+    &'a mut super::data::StepCtx<'t>,
+) -> futures_util::future::BoxFuture<'a, Result<(), crate::sql::ExecError>> {
+    move |ctx| Box::pin(async move { ctx.execute(&sql, binds).await.map(drop) })
+}
+
+/// Session timeouts of the runner's data connection (5.4); PG sets its own
+/// per transaction.
+async fn session_timeouts(
+    c: &mut crate::sql::PoolConn,
+    b: Backend,
+    lock: std::time::Duration,
+    stmt: std::time::Duration,
+) -> Result<(), RunError> {
+    let sql = match b {
+        Backend::Postgres => return Ok(()),
+        Backend::Mysql => format!(
+            "SET SESSION innodb_lock_wait_timeout = {}, SESSION lock_wait_timeout = {}, \
+             SESSION max_execution_time = {}",
+            lock.as_secs().max(1),
+            lock.as_secs().max(1),
+            stmt.as_millis()
+        ),
+        Backend::Sqlite => format!("PRAGMA busy_timeout = {}", lock.as_millis()),
+    };
+    let mut tx = c.begin().await?;
+    tx.execute_unprepared(&sql)
+        .await
+        .map_err(MigrateError::Driver)?;
+    tx.commit().await.map_err(MigrateError::Driver)?;
+    Ok(())
+}
+
+/// The SQLite datetime sweep's columns for a v2 run: every datetime column
+/// in the replayed state, and the ledgers (5.5, 5.7).
+fn sweep_targets(project: &Project) -> Result<Vec<(String, String)>, RunError> {
+    let mut out: Vec<(String, String)> = crate::migrate::runner::LEDGER_TABLES
+        .iter()
+        .filter_map(|t| t.legacy_datetime.map(|c| (t.name.to_owned(), c.to_owned())))
+        .collect();
+    if let Some(state) = super::load::replay(project)?.states.get(&Target::Tenant) {
+        for t in state.tables.values() {
+            for c in t.columns.iter().filter(|c| c.ty == "datetime") {
+                out.push((t.name.clone(), c.column.clone()));
+            }
+        }
+    }
+    Ok(out)
+}
+
 struct Runner<'a> {
     pool: &'a Pool,
     ledger: &'a Ledger,
@@ -312,6 +391,8 @@ struct Runner<'a> {
     units_run: usize,
     /// What a dry run would execute.
     planned: Vec<String>,
+    /// SQLite datetime columns to sweep before the first data unit; taken then.
+    sweep: Option<Vec<(String, String)>>,
 }
 
 fn renamed_name(r: &super::probe::Renamed) -> &str {
@@ -543,6 +624,7 @@ impl Runner<'_> {
             match u.kind {
                 UnitKind::Tx => self.tx_unit(k, u, n).await?,
                 UnitKind::Rebuild => self.rebuild_unit(k, u, n).await?,
+                UnitKind::Data => self.data_unit(k, u, n).await?,
                 UnitKind::Autocommit => {
                     self.ledger.start_unit(self.pool, k, self.run_id, n).await?;
                     #[cfg(test)]
@@ -562,6 +644,68 @@ impl Runner<'_> {
             }
             self.units_run += 1;
         }
+        Ok(())
+    }
+
+    /// A data step on the runner's own connection: timeouts set, the escape
+    /// guard on, rolled back when poisoned, the ledger moved in the same tx.
+    async fn data_unit(&mut self, k: (&str, &str), u: &Unit, n: i64) -> Result<(), RunError> {
+        if let Some(targets) = self.sweep.take() {
+            crate::migrate::sqlite_datetime::normalise_sqlite_datetimes_in(self.pool, targets)
+                .await?;
+        }
+        let lock = self
+            .opts
+            .data_lock_timeout
+            .unwrap_or(std::time::Duration::from_secs(5));
+        let stmt = self
+            .opts
+            .data_statement_timeout
+            .unwrap_or(std::time::Duration::from_secs(300));
+        // The runner's own connection, closed after the unit: its session
+        // settings never reach the app's pool, and an in-memory SQLite
+        // pool of one is free again for the next unit.
+        let mut conn = self.pool.acquire().await?;
+        conn.close_on_drop();
+        session_timeouts(&mut conn, self.b, lock, stmt).await?;
+        let binds = super::data::bind_values(&u.binds)
+            .map_err(|e| refused(Code::File, &format!("{}:{}", k.0, k.1), e))?;
+        let sql = u.sql.join("\n");
+        let (ledger_sql, ledger_binds) = self.ledger.advance(self.pool, k, self.run_id, n - 1, n);
+        let mut tx = conn.begin().await?;
+        if self.b == Backend::Postgres {
+            tx.execute_unprepared(&format!(
+                "SET LOCAL lock_timeout = {}; SET LOCAL statement_timeout = {}",
+                lock.as_millis(),
+                stmt.as_millis()
+            ))
+            .await
+            .map_err(MigrateError::Driver)?;
+        }
+        let (mut tx, r) = super::data::run_step(tx, sql_step(sql, binds)).await;
+        #[cfg(test)]
+        let r = match r {
+            Ok(()) if self.opts.crash == Some(Crash::AfterData(self.units_run)) => {
+                Err(super::data::StepError::Exec(crate::sql::ExecError::Driver(
+                    sqlx::Error::Protocol("test crash".into()),
+                )))
+            }
+            other => other,
+        };
+        if let Err(e) = r {
+            let _ = tx.rollback().await;
+            return Err(
+                MigrateError::Validation(format!("data step in `{}:{}`: {e}", k.0, k.1)).into(),
+            );
+        }
+        let moved = raw_execute_tx(&mut tx, &ledger_sql, ledger_binds).await?;
+        if moved != 1 {
+            let _ = tx.rollback().await;
+            return Err(super::ledger::fenced(moved)
+                .expect_err("not one row")
+                .into());
+        }
+        tx.commit().await.map_err(MigrateError::Driver)?;
         Ok(())
     }
 
@@ -781,6 +925,12 @@ impl Runner<'_> {
             .iter()
             .filter(|r| r.state == RowState::Applied)
             .collect();
+        let mut misses = Vec::new();
+        for idx in (0..applied.len()).rev().take(steps) {
+            let at = format!("ledger:{}:{}", applied[idx].app, applied[idx].id);
+            misses.extend(super::data::misses(&body(applied[idx], &at)?, self.b, true));
+        }
+        super::data::refuse_misses(&misses, "rollback plan")?;
         for idx in (0..applied.len()).rev().take(steps) {
             let row = applied[idx];
             let at = format!("ledger:{}:{}", row.app, row.id);

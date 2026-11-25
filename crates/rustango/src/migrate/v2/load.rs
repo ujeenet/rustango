@@ -45,6 +45,10 @@ impl crate::migrate::chains::ChainFacts for Loaded {
             out.extend(doc.tables.keys().map(|t| Fact::Created(t)));
         }
         for env in &self.file.operations {
+            if let Op::DataSql { tables, .. } = &env.op {
+                out.extend(tables.write_tables().map(Fact::Written));
+                continue;
+            }
             let written = match &env.op {
                 Op::CreateTable { table, .. } | Op::AdoptTable { table, .. } => {
                     out.push(Fact::Created(&table.name));
@@ -73,7 +77,8 @@ impl crate::migrate::chains::ChainFacts for Loaded {
                 Op::RawSql { .. }
                 | Op::StateOnly { .. }
                 | Op::CreateExtension { .. }
-                | Op::ExternTable { .. } => continue,
+                | Op::ExternTable { .. }
+                | Op::DataSql { .. } => continue,
             };
             out.push(Fact::Written(written));
         }

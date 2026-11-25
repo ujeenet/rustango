@@ -49,9 +49,14 @@ pub fn register(alias: impl Into<String>, pool: impl Into<Pool>) {
 }
 
 /// The pool for `alias`, or `None` if nothing is registered. Use
-/// [`pool`] when the alias should always be there.
+/// [`pool`] when the alias should always be there. `None` inside a
+/// migration data step, which writes only through its own unit.
 #[must_use]
 pub fn get(alias: &str) -> Option<Pool> {
+    if crate::sql::in_migration_step() {
+        tracing::error!(alias, "a migration data step asked for a pool; refused");
+        return None;
+    }
     registry()
         .read()
         .expect("databases registry not poisoned")
@@ -69,9 +74,14 @@ pub fn default() -> Option<Pool> {
 ///
 /// # Panics
 /// If `alias` is not registered. That is a wiring bug at startup, and
-/// failing loudly beats quietly using the wrong database.
+/// failing loudly beats quietly using the wrong database. Inside a
+/// migration data step, which fails its unit.
 #[must_use]
 pub fn pool(alias: &str) -> Pool {
+    assert!(
+        !crate::sql::in_migration_step(),
+        "a migration data step cannot use the `{alias}` pool; run SQL through the step's context"
+    );
     get(alias).unwrap_or_else(|| {
         panic!(
             "no database registered under alias `{alias}` — \

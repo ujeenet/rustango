@@ -86,13 +86,25 @@ impl Normalised {
 /// [`Normalised::missing`], because both are normal part-way through a
 /// migration run.
 pub async fn normalise_sqlite_datetimes(pool: &Pool) -> Result<Normalised, MigrateError> {
+    normalise_sqlite_datetimes_in(pool, targets()).await
+}
+
+/// [`normalise_sqlite_datetimes`] over the given `(table, column)` pairs:
+/// engine v2 reads them from its replayed state.
+///
+/// # Errors
+/// As [`normalise_sqlite_datetimes`].
+pub(crate) async fn normalise_sqlite_datetimes_in(
+    pool: &Pool,
+    targets: Vec<(String, String)>,
+) -> Result<Normalised, MigrateError> {
     let mut out = Normalised::default();
     if pool.dialect().kind() != crate::sql::DialectKind::Sqlite {
         return Ok(out);
     }
 
     let d = pool.dialect();
-    for (table, column) in targets() {
+    for (table, column) in targets {
         // Identifiers cannot be bound as placeholders, so quote them.
         // `quote_ident` doubles any embedded quote; `ModelSchema` has
         // public fields, so the name is not guaranteed safe on its own.

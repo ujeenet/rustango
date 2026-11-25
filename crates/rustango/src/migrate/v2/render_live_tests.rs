@@ -47,11 +47,12 @@ async fn run_unit(pool: &Pool, u: &Unit) -> Result<(), String> {
             }
             Ok(())
         }
-        UnitKind::Tx => {
+        UnitKind::Tx | UnitKind::Data => {
+            let binds = super::data::bind_values(&u.binds)?;
             let mut conn = pool.acquire().await.map_err(|e| e.to_string())?;
             let mut tx = conn.begin().await.map_err(|e| e.to_string())?;
             for s in &u.sql {
-                raw_execute_tx(&mut tx, s, Vec::new())
+                raw_execute_tx(&mut tx, s, binds.clone())
                     .await
                     .map_err(|e| format!("{s}: {e}"))?;
             }

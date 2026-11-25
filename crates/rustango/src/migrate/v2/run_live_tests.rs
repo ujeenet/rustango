@@ -910,6 +910,354 @@ async fn a_rename_keeps_the_data(b: B) {
     assert_eq!(got, [(1,)]);
 }
 
+/// `rd_user` with `name`; rows go in through `seed`.
+fn rd_users() -> Value {
+    json!({"op": "create_table", "v": 1, "table": {"name": "rd_user", "scope": "tenant", "fields": [
+        {"column": "id", "ty": "i64", "primary_key": true, "nullable": false},
+        {"column": "name", "ty": "string", "max_length": 20, "nullable": true}]}})
+}
+
+async fn seed(pool: &Pool, n: i64) {
+    for i in 1..=n {
+        raw_execute_pool(
+            pool,
+            &format!("INSERT INTO rd_user (id, name) VALUES ({i}, 'u{i}')"),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    }
+}
+
+async fn count(pool: &Pool, sql: &str) -> i64 {
+    let r: Vec<(i64,)> = crate::sql::raw_query_pool(sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    r[0].0
+}
+
+/// Example A without batching (2.5): add nullable, backfill, make required.
+fn example_a() -> Value {
+    json!([
+        {"op": "add_column", "v": 1, "table": "rd_user",
+         "column": {"column": "locale", "ty": "string", "max_length": 8, "nullable": true}},
+        {"op": "data_sql", "v": 1, "id": "backfill_locale_v1",
+         "tables": {"read": ["rd_user"], "write": ["rd_user.locale"]},
+         "up": {"any": "UPDATE {{t:rd_user}} SET {{c:locale}} = {{?}} WHERE {{c:locale}} IS NULL"},
+         "binds": [{"ty": "string", "value": "en"}],
+         "down": {"noop": "the column is dropped by the reverse of op 0"},
+         "on_fresh": "skip"},
+        {"op": "alter_column", "v": 1, "table": "rd_user", "column": "locale",
+         "changes": {"nullable": {"from": true, "to": false}}}
+    ])
+}
+
+fn rd_project() -> (tempfile::TempDir, PathBuf) {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    put(
+        &dir,
+        "0001_users",
+        &v2("0001_users", &[], json!([rd_users()])),
+    );
+    (root, dir)
+}
+
+/// Upgrade with rows, downgrade (the noop passes), re-apply, and fresh.
+async fn example_a_upgrade_downgrade_fresh(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let (_root, dir) = rd_project();
+    migrate(pool, &dir, &opts()).await.unwrap();
+    seed(pool, 3).await;
+    put(
+        &dir,
+        "0002_locale",
+        &v2("0002_locale", &["0001_users"], example_a()),
+    );
+    assert_eq!(
+        migrate(pool, &dir, &opts()).await.unwrap().applied,
+        ["0002_locale"]
+    );
+    assert_eq!(
+        count(pool, "SELECT COUNT(*) FROM rd_user WHERE locale = 'en'").await,
+        3
+    );
+    let t = super::super::catalog::read_table(pool, "rd_user")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(t.columns.iter().any(|c| c.name == "locale" && !c.nullable));
+    assert_eq!(
+        downgrade(pool, &dir, 1, &opts()).await.unwrap().rolled_back,
+        ["0002_locale"]
+    );
+    assert_eq!(columns(pool, "rd_user").await, ["id", "name"]);
+    migrate(pool, &dir, &opts()).await.unwrap();
+    assert_eq!(
+        count(pool, "SELECT COUNT(*) FROM rd_user WHERE locale = 'en'").await,
+        3
+    );
+    // Fresh: the whole chain on an empty database.
+    let Some(db2) = fresh(b).await else { return };
+    assert_eq!(
+        migrate(&db2.pool, &dir, &opts()).await.unwrap().applied,
+        ["0001_users", "0002_locale"]
+    );
+    // SQLite runs Example A as 3 units: add, data, rebuild.
+    if b == B::Lite {
+        let p = super::super::load::load_project(&dir).unwrap();
+        let units = super::super::render::render_project(&p, Backend::Sqlite).unwrap();
+        let kinds: Vec<UnitKind> = units[1].1.iter().map(|u| u.kind).collect();
+        assert_eq!(kinds, [UnitKind::Tx, UnitKind::Data, UnitKind::Rebuild]);
+    }
+}
+
+/// A failure after the data write rolls the unit and its ledger move back;
+/// the next run resumes from the unit.
+async fn a_failure_after_the_data_write_rolls_back(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let (_root, dir) = rd_project();
+    migrate(pool, &dir, &opts()).await.unwrap();
+    seed(pool, 2).await;
+    put(
+        &dir,
+        "0002_locale",
+        &v2("0002_locale", &["0001_users"], example_a()),
+    );
+    let crashing = Options {
+        crash: Some(Crash::AfterData(1)),
+        ..Options::default()
+    };
+    migrate(pool, &dir, &crashing).await.expect_err("crashed");
+    assert_eq!(
+        count(pool, "SELECT COUNT(*) FROM rd_user WHERE locale IS NULL").await,
+        2
+    );
+    let row = Ledger::default_names()
+        .rows(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.id == "0002_locale")
+        .unwrap();
+    assert_eq!(
+        (row.state, row.pos),
+        (RowState::Failed, 0),
+        "the add_column unit only"
+    );
+    assert_eq!(
+        migrate(pool, &dir, &opts()).await.unwrap().applied,
+        ["0002_locale"]
+    );
+    assert_eq!(
+        count(pool, "SELECT COUNT(*) FROM rd_user WHERE locale = 'en'").await,
+        2
+    );
+}
+
+/// Data steps with nothing to run here are refused together, before the
+/// lock, the system chain and the first statement.
+async fn missing_steps_run_nothing(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let other = if b == B::Pg { "mysql" } else { "postgres" };
+    let (_root, dir) = rd_project();
+    let step = |id: &str| {
+        json!({"op": "data_sql", "v": 1, "id": id,
+            "tables": {"read": ["rd_user"], "write": ["rd_user.name"]},
+            "up": {other: "UPDATE {{t:rd_user}} SET {{c:name}} = 'x'"},
+            "down": {"noop": "test"}, "allow": [{"code": "MV2-E028", "reason": "test"}]})
+    };
+    put(
+        &dir,
+        "0002_a",
+        &v2("0002_a", &["0001_users"], json!([step("a_v1")])),
+    );
+    put(
+        &dir,
+        "0003_b",
+        &v2("0003_b", &["0002_a"], json!([step("b_v1")])),
+    );
+    let e = migrate(pool, &dir, &opts()).await.expect_err("refused");
+    assert_eq!(e.code(), Some(Code::Unresolved), "{e}");
+    let msg = e.to_string();
+    assert!(msg.contains("`a_v1`") && msg.contains("`b_v1`"), "{msg}");
+    assert!(
+        columns(pool, "rd_user").await.is_empty(),
+        "0001 did not run"
+    );
+    assert!(rows(pool).await.is_empty());
+    assert!(
+        !crate::migrate::try_table_exists_here(pool, crate::migrate::SYSTEM_LEDGER_TABLE)
+            .await
+            .unwrap()
+    );
+    // The CLI says the same.
+    let mut out = Vec::new();
+    let e = crate::migrate::manage::run_with_writer(
+        pool,
+        &dir,
+        ["dbmigrate".to_owned(), "apply".to_owned()],
+        &mut out,
+    )
+    .await
+    .unwrap_err();
+    assert!(e.to_string().contains("MV2-E029"), "{e}");
+}
+
+/// Any statement error rolls the unit back even when the step goes on; a
+/// savepoint is the way to recover on purpose (5.4).
+async fn a_swallowed_error_rolls_the_unit_back(b: B) {
+    use super::super::data::{run_step, StepCtx, StepError};
+    use futures_util::future::BoxFuture;
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    raw_execute_pool(
+        pool,
+        "CREATE TABLE sw_t (id INTEGER PRIMARY KEY)",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    fn swallow<'t>(
+        savepoint: bool,
+    ) -> impl for<'a> FnOnce(&'a mut StepCtx<'t>) -> BoxFuture<'a, Result<(), crate::sql::ExecError>>
+    {
+        move |ctx| {
+            Box::pin(async move {
+                ctx.execute("INSERT INTO sw_t (id) VALUES (1)", Vec::new())
+                    .await?;
+                if savepoint {
+                    let _ = ctx
+                        .savepoint(|c| {
+                            Box::pin(async move {
+                                c.execute("INSERT INTO no_such_t (id) VALUES (1)", Vec::new())
+                                    .await
+                                    .map(drop)
+                            })
+                        })
+                        .await;
+                } else {
+                    let _ = ctx
+                        .execute("INSERT INTO no_such_t (id) VALUES (1)", Vec::new())
+                        .await;
+                }
+                Ok(())
+            })
+        }
+    }
+    let mut conn = pool.acquire().await.unwrap();
+    let tx = conn.begin().await.unwrap();
+    let (tx, r) = run_step(tx, swallow(false)).await;
+    assert!(matches!(r, Err(StepError::Poisoned)), "{r:?}");
+    tx.rollback().await.unwrap();
+    assert_eq!(count(pool, "SELECT COUNT(*) FROM sw_t").await, 0);
+    let tx = conn.begin().await.unwrap();
+    let (tx, r) = run_step(tx, swallow(true)).await;
+    assert!(r.is_ok(), "{r:?}");
+    tx.commit().await.unwrap();
+    assert_eq!(count(pool, "SELECT COUNT(*) FROM sw_t").await, 1);
+}
+
+/// Inside a step the app's pools are out of reach (5.4).
+async fn the_escape_guard_refuses_pools(b: B) {
+    use super::super::data::{run_step, StepCtx};
+    use futures_util::future::BoxFuture;
+    let Some(db) = fresh(b).await else { return };
+    let pool = db.pool.clone();
+    fn escape<'t>(
+        pool: Pool,
+    ) -> impl for<'a> FnOnce(&'a mut StepCtx<'t>) -> BoxFuture<'a, Result<(), crate::sql::ExecError>>
+    {
+        move |_ctx| {
+            Box::pin(async move {
+                let refused = |r: Result<(), crate::sql::ExecError>| {
+                    assert!(
+                        matches!(r, Err(crate::sql::ExecError::InMigrationStep)),
+                        "{r:?}"
+                    );
+                };
+                refused(
+                    raw_execute_pool(&pool, "SELECT 1", Vec::new())
+                        .await
+                        .map(drop),
+                );
+                refused(
+                    crate::sql::raw_query_pool::<(i64,)>("SELECT 1", Vec::new(), &pool)
+                        .await
+                        .map(drop),
+                );
+                refused(crate::sql::transaction_pool(&pool).await.map(drop));
+                refused(pool.acquire().await.map(drop));
+                assert!(crate::databases::get("default").is_none());
+                assert!(crate::databases::default().is_none());
+                Ok(())
+            })
+        }
+    }
+    let mut conn = db.pool.acquire().await.unwrap();
+    let tx = conn.begin().await.unwrap();
+    let (tx, r) = run_step(tx, escape(pool.clone())).await;
+    assert!(r.is_ok(), "{r:?}");
+    tx.rollback().await.unwrap();
+    // Outside a step the pool works.
+    raw_execute_pool(&pool, "SELECT 1", Vec::new())
+        .await
+        .unwrap();
+}
+
+/// A data unit blocked by a held lock fails after the lock timeout, and
+/// the next run resumes it.
+async fn a_blocked_data_unit_times_out(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let (_root, dir) = rd_project();
+    put(
+        &dir,
+        "0002_locale",
+        &v2("0002_locale", &["0001_users"], json!([example_a()[0]])),
+    );
+    migrate(pool, &dir, &opts()).await.unwrap();
+    seed(pool, 1).await;
+    let mut fill = example_a()[1].clone();
+    fill["allow"] = json!([{"code": "MV2-E028", "reason": "test"}]);
+    put(
+        &dir,
+        "0003_fill",
+        &v2("0003_fill", &["0002_locale"], json!([fill])),
+    );
+    // Another session holds the row (SQLite: the database) for writing.
+    let holder = Pool::connect(&db.url).await.unwrap();
+    let mut hconn = holder.acquire().await.unwrap();
+    let mut htx = hconn.begin().await.unwrap();
+    crate::sql::raw_execute_tx(
+        &mut htx,
+        "UPDATE rd_user SET name = 'held' WHERE id = 1",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let quick = Options {
+        data_lock_timeout: Some(Duration::from_secs(1)),
+        ..Options::default()
+    };
+    let started = std::time::Instant::now();
+    let r = tokio::time::timeout(Duration::from_secs(60), migrate(pool, &dir, &quick))
+        .await
+        .expect("the lock timeout ends the wait");
+    assert!(r.is_err(), "blocked");
+    assert!(started.elapsed() < Duration::from_secs(30));
+    htx.rollback().await.unwrap();
+    drop(hconn);
+    holder.close().await;
+    assert_eq!(
+        migrate(pool, &dir, &opts()).await.unwrap().applied,
+        ["0003_fill"]
+    );
+}
+
 per_backend!(
     apply_rollback_reapply,
     edited_file_and_stored_body,
@@ -925,4 +1273,51 @@ per_backend!(
     project_owns_a_framework_table,
     a_range_check_on_a_reserved_name,
     a_rename_keeps_the_data,
+    example_a_upgrade_downgrade_fresh,
+    a_failure_after_the_data_write_rolls_back,
+    missing_steps_run_nothing,
+    a_swallowed_error_rolls_the_unit_back,
+    the_escape_guard_refuses_pools,
+    a_blocked_data_unit_times_out,
 );
+
+/// Legacy SQLite datetime text is swept before the first data unit, so a
+/// range filter in the step sees it (5.5).
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn the_sqlite_sweep_runs_before_the_first_data_unit() {
+    let Some(db) = fresh(B::Lite).await else {
+        return;
+    };
+    let pool = &db.pool;
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    let ev = json!({"op": "create_table", "v": 1, "table": {"name": "sw_ev", "scope": "tenant",
+        "fields": [{"column": "id", "ty": "i64", "primary_key": true, "nullable": false},
+                   {"column": "at", "ty": "datetime", "nullable": true},
+                   {"column": "late", "ty": "bool", "nullable": true}]}});
+    put(&dir, "0001_ev", &v2("0001_ev", &[], json!([ev])));
+    migrate(pool, &dir, &opts()).await.unwrap();
+    raw_execute_pool(
+        pool,
+        "INSERT INTO sw_ev (id, at) VALUES (1, '2024-01-01 10:00:00')",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let step = json!({"op": "data_sql", "v": 1, "id": "late_v1",
+        "tables": {"read": ["sw_ev"], "write": ["sw_ev.late"]},
+        "up": {"any": "UPDATE {{t:sw_ev}} SET {{c:late}} = TRUE WHERE {{c:at}} >= {{?}}"},
+        "binds": [{"ty": "datetime", "value": "2024-01-01T00:00:00Z"}],
+        "down": {"noop": "test"}, "allow": [{"code": "MV2-E028", "reason": "test"}]});
+    put(
+        &dir,
+        "0002_late",
+        &v2("0002_late", &["0001_ev"], json!([step])),
+    );
+    migrate(pool, &dir, &opts()).await.unwrap();
+    assert_eq!(
+        count(pool, "SELECT COUNT(*) FROM sw_ev WHERE late = 1").await,
+        1
+    );
+}

@@ -309,6 +309,88 @@ pub(crate) struct ProbeSpec {
     pub(crate) sql: Option<PerBackend>,
 }
 
+/// A data op's footprint: tables it reads, and `table` or `table.column`
+/// it writes (a write is a read too).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Footprint {
+    #[serde(default)]
+    pub(crate) read: Vec<String>,
+    #[serde(default)]
+    pub(crate) write: Vec<String>,
+}
+
+impl Footprint {
+    /// The table of each write entry.
+    pub(crate) fn write_tables(&self) -> impl Iterator<Item = &str> {
+        self.write
+            .iter()
+            .map(|w| w.split_once('.').map_or(w.as_str(), |(t, _)| t))
+    }
+
+    /// Every table the op may name.
+    pub(crate) fn tables(&self) -> impl Iterator<Item = &str> {
+        self.read
+            .iter()
+            .map(String::as_str)
+            .chain(self.write_tables())
+    }
+}
+
+/// One `{{?}}` value: its column type and JSON value (`null` allowed).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Bind {
+    pub(crate) ty: String,
+    pub(crate) value: Value,
+}
+
+/// `down` of a data op.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DataDown {
+    /// SQL per backend, run as the reverse data unit.
+    Sql(PerBackend),
+    /// Nothing to undo; verified at load (7.5).
+    Noop(String),
+    /// Rollback stops here.
+    Irreversible(String),
+}
+
+impl<'de> Deserialize<'de> for DataDown {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = Value::deserialize(d)?;
+        let reason = |k: &str| -> Option<Result<String, D::Error>> {
+            let o = v.as_object()?;
+            let r = o.get(k)?;
+            Some(if o.len() == 1 {
+                r.as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| serde::de::Error::custom(format!("`{k}` is a reason string")))
+            } else {
+                Err(serde::de::Error::custom(format!("`{k}` stands alone")))
+            })
+        };
+        if let Some(r) = reason("noop") {
+            return r.map(Self::Noop);
+        }
+        if let Some(r) = reason("irreversible") {
+            return r.map(Self::Irreversible);
+        }
+        PerBackend::deserialize(v)
+            .map(Self::Sql)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Whether a data op runs on a fresh install.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum OnFresh {
+    #[default]
+    Run,
+    Skip,
+}
+
 /// The ops this release runs. Each op renders and replays only itself.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
@@ -438,11 +520,26 @@ pub(crate) enum Op {
         unique_sets: Vec<Vec<String>>,
         owner: ExternOwner,
     },
+    /// SQL data step (5.1), not batched in this release.
+    DataSql {
+        id: String,
+        tables: Footprint,
+        up: PerBackend,
+        #[serde(default)]
+        binds: Vec<Bind>,
+        down: DataDown,
+        #[serde(default)]
+        down_binds: Vec<Bind>,
+        #[serde(default)]
+        on_fresh: OnFresh,
+        #[serde(default)]
+        restores: Vec<String>,
+    },
 }
 
 /// Ops the format defines that this release does not run yet: each gets
 /// goldens on three backends before it is enabled.
-const NOT_ENABLED: [&str; 11] = [
+const NOT_ENABLED: [&str; 10] = [
     "alter_check",
     "rename_constraint",
     "add_exclusion",
@@ -451,7 +548,6 @@ const NOT_ENABLED: [&str; 11] = [
     "drop_composite_fk",
     "create_m2m",
     "drop_m2m",
-    "data_sql",
     "data_rust",
     "verify",
 ];
@@ -610,6 +706,25 @@ fn decode_op(v: &Value, at: &str) -> Result<OpEnvelope, LoadError> {
             ),
         ));
     }
+    if kind == "data_sql" {
+        if let Some(k) = ["batch", "verify", "undo"]
+            .iter()
+            .find(|k| obj.contains_key(**k))
+        {
+            return Err(LoadError::new(
+                Code::NotEnabled,
+                format!("{at}/{k}"),
+                format!("`{k}` on a data op comes in a later release"),
+            ));
+        }
+        if obj.get("tx").and_then(Value::as_str) == Some("autocommit") {
+            return Err(LoadError::new(
+                Code::File,
+                format!("{at}/tx"),
+                "a data op always runs in a transaction",
+            ));
+        }
+    }
     let mut payload: Map<String, Value> = obj.clone();
     let tx = payload.remove("tx");
     let allow = payload.remove("allow");
@@ -660,6 +775,7 @@ fn validate(
     irreversible_below: Option<&String>,
     at: &str,
 ) -> Result<(), LoadError> {
+    verified_noops(file, at)?;
     let checkpoint = file.kind == Kind::Checkpoint;
     if !checkpoint && (file.state.is_some() || file.base.is_some()) {
         return Err(LoadError::new(
@@ -763,6 +879,46 @@ fn validate(
     Ok(())
 }
 
+/// A `noop` down passes when the reverse of an earlier op of this file
+/// drops everything the step writes; otherwise it needs `allow` (7.5).
+fn verified_noops(file: &File, at: &str) -> Result<(), LoadError> {
+    let mut tables: Vec<&str> = Vec::new();
+    let mut columns: Vec<(&str, &str)> = Vec::new();
+    for (i, env) in file.operations.iter().enumerate() {
+        match &env.op {
+            Op::CreateTable { table, .. } => tables.push(&table.name),
+            Op::AddColumn { table, column, .. } => columns.push((table, &column.column.column)),
+            Op::DataSql {
+                tables: fp,
+                down: DataDown::Noop(_),
+                ..
+            } => {
+                let dropped = |w: &String| match w.split_once('.') {
+                    Some((t, c)) => tables.contains(&t) || columns.contains(&(t, c)),
+                    None => tables.contains(&w.as_str()),
+                };
+                let allowed = env.allow.iter().any(|a| a.code == Code::Noop.as_str());
+                if let Some(w) = fp.write.iter().find(|w| !dropped(w)) {
+                    if !allowed {
+                        return Err(LoadError::new(
+                            Code::Noop,
+                            format!("{at}#/operations/{i}/down"),
+                            format!(
+                                "`noop` down, but `{w}` is not created earlier in this file, so \
+                                 rollback leaves the written data; write a down, or allow {} \
+                                 with a reason",
+                                Code::Noop.as_str()
+                            ),
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn skips(op: &Op, b: Backend) -> bool {
     match op {
         Op::AddIndex { index, .. } => index.skipped_on.contains(&b),
@@ -794,6 +950,7 @@ pub(crate) fn op_name(op: &Op) -> &'static str {
         Op::StateOnly { .. } => "state_only",
         Op::CreateExtension { .. } => "create_extension",
         Op::ExternTable { .. } => "extern_table",
+        Op::DataSql { .. } => "data_sql",
     }
 }
 

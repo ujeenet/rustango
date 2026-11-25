@@ -1223,6 +1223,7 @@ async fn begin_block(
     (begin, opts): (Begin, &AtomicOptions),
     top: bool,
 ) -> Result<PoolTx<'static>, ExecError> {
+    super::refuse_in_migration_step()?;
     if !opts.settings.is_empty() && pool.dialect().kind() != crate::sql::DialectKind::Postgres {
         return Err(ExecError::Sql(
             crate::sql::SqlError::OperatorNotSupportedInDialect {

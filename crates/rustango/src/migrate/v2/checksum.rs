@@ -39,14 +39,14 @@ fn top_default(key: &str, v: &Value) -> bool {
 fn field_default(key: &str, v: &Value) -> bool {
     match key {
         "restore" => v == "shape_only",
+        "on_fresh" => v == "run",
         "method" => v == "btree",
         "on_delete" => v == "no_action",
         "unique" | "primary_key" | "auto" | "case_insensitive" | "sealed" | "idempotent" => {
             v == false
         }
-        "allow" | "include" | "skipped_on" | "indexes" | "checks" | "unique_sets" => {
-            is_empty_array(v)
-        }
+        "allow" | "include" | "skipped_on" | "indexes" | "checks" | "unique_sets" | "binds"
+        | "down_binds" | "restores" => is_empty_array(v),
         "tx" | "concurrently" | "where" | "to_ty" | "max_length" | "default" | "comment"
         | "generated_as" | "min" | "max" | "fill" | "schema" | "probe" | "down" | "using"
         | "using_down" | "fk" => v.is_null(),

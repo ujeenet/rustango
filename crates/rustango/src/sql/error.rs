@@ -294,6 +294,11 @@ pub enum ExecError {
     #[error("{}", super::auto::UnsavedRow { table: *table })]
     UnsavedRow { table: &'static str },
 
+    /// A pool query inside a migration data step: a step writes only
+    /// through its own unit, never through the app's pools.
+    #[error("a migration data step cannot use a pool; run SQL through the step's context")]
+    InMigrationStep,
+
     /// `insert_returning` was called with an `InsertQuery` carrying no
     /// `RETURNING` columns. Use `insert` for those.
     #[error("`insert_returning` requires `query.returning` to be non-empty; use `insert` instead")]

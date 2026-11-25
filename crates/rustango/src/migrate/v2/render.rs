@@ -26,6 +26,9 @@ pub(crate) enum UnitKind {
     Autocommit,
     /// SQLite rebuild: FK enforcement off outside, `foreign_key_check` before commit.
     Rebuild,
+    /// A data step: one transaction on the runner's own connection, with
+    /// the ledger update, rolled back when poisoned (5.4).
+    Data,
 }
 
 /// What a probe checks after an autocommit unit: the state just after it.
@@ -88,6 +91,9 @@ pub(crate) struct Unit {
     pub(crate) kind: UnitKind,
     pub(crate) sql: Vec<String>,
     pub(crate) probe: Option<Vec<Expect>>,
+    /// A data unit's `{{?}}` values, in text order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) binds: Vec<super::format::Bind>,
 }
 
 /// Session and transaction statements: refused in a transactional unit.
@@ -237,6 +243,7 @@ fn tx(sql: Vec<String>) -> Vec<Unit> {
         kind: UnitKind::Tx,
         sql,
         probe: None,
+        binds: Vec::new(),
     }]
 }
 
@@ -246,6 +253,7 @@ fn auto(sql: String, probe: Vec<Expect>) -> Unit {
         kind: UnitKind::Autocommit,
         sql: vec![sql],
         probe: Some(probe),
+        binds: Vec::new(),
     }
 }
 
@@ -472,6 +480,7 @@ pub(crate) fn rename_unit(b: Backend, r: &super::probe::Rename) -> Option<Unit> 
                     create_index(d, &r.table, ix, false),
                 ],
                 probe: None,
+                binds: Vec::new(),
             })
         }
         (Renamed::Check(k), Backend::Postgres) => (
@@ -522,6 +531,7 @@ pub(crate) fn rename_unit(b: Backend, r: &super::probe::Rename) -> Option<Unit> 
         kind: UnitKind::Autocommit,
         sql,
         probe: Some(vec![probe]),
+        binds: Vec::new(),
     })
 }
 
@@ -561,6 +571,7 @@ impl Render<'_> {
                 kind: UnitKind::Autocommit,
                 sql: vec![s],
                 probe: (i + 1 == n).then(|| probe.clone()),
+                binds: Vec::new(),
             })
             .collect()
     }
@@ -609,6 +620,7 @@ impl Render<'_> {
             kind: UnitKind::Rebuild,
             sql,
             probe: None,
+            binds: Vec::new(),
         }]
     }
 
@@ -954,10 +966,35 @@ impl Render<'_> {
                         kind: UnitKind::Autocommit,
                         sql: vec![stmt],
                         probe: self.raw_probe(op, probe.as_ref())?,
+                        binds: Vec::new(),
                     }]
                 } else {
                     tx(vec![stmt])
                 }
+            }
+            Op::DataSql { up, binds, .. } => {
+                let text = match super::data::sql_for(up, self.b) {
+                    None => {
+                        return Err(self.err(
+                            Code::Unresolved,
+                            format!("`up` has no SQL for {} and no `any`", self.b.as_str()),
+                        ))
+                    }
+                    Some(None) => return Ok(Vec::new()),
+                    Some(Some(t)) => t,
+                };
+                let Op::DataSql { tables, .. } = op else {
+                    unreachable!()
+                };
+                let sql =
+                    super::data::resolve(text, self.b, self.before, tables, binds.len(), self.at)?;
+                vec![Unit {
+                    op: 0,
+                    kind: UnitKind::Data,
+                    sql: vec![self.raw_statement(&sql, false)?],
+                    probe: None,
+                    binds: binds.clone(),
+                }]
             }
             Op::StateOnly { .. } | Op::ExternTable { .. } | Op::AdoptTable { .. } => Vec::new(),
             Op::CreateExtension {
@@ -1205,6 +1242,7 @@ impl Render<'_> {
                         kind: UnitKind::Tx,
                         sql: vec![format!("UPDATE {t} SET {c} = {f}")],
                         probe: None,
+                        binds: Vec::new(),
                     },
                     auto(
                         format!("ALTER TABLE {t} MODIFY COLUMN {}", col_def(d, column)),
@@ -1364,6 +1402,7 @@ pub(crate) fn golden(units: &[Unit]) -> String {
             UnitKind::Tx => "tx",
             UnitKind::Autocommit => "autocommit",
             UnitKind::Rebuild => "rebuild",
+            UnitKind::Data => "data",
         };
         s.push_str(&format!("[op {}] {kind}\n", u.op));
         for stmt in &u.sql {

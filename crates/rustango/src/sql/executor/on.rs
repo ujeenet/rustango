@@ -49,6 +49,7 @@ impl Pool {
     /// # Errors
     /// The driver's acquire error, e.g. a pool timeout.
     pub async fn acquire(&self) -> Result<PoolConn, ExecError> {
+        super::refuse_in_migration_step()?;
         let conn = match self {
             #[cfg(feature = "postgres")]
             Pool::Postgres(p) => PooledConn::Postgres(p.acquire().await?),
@@ -481,7 +482,8 @@ macro_rules! fetch_rows_or_count {
 /// statement joins a block through here, so all get the same savepoint,
 /// gate and one-statement-at-a-time rules ([`atomic::Joined`]).
 macro_rules! on_pool {
-    ($pool:expr, $stmt:expr, |$tx:ident| $joined:expr, $alone:expr $(,)?) => {
+    ($pool:expr, $stmt:expr, |$tx:ident| $joined:expr, $alone:expr $(,)?) => {{
+        $crate::sql::executor::refuse_in_migration_step()?;
         match $crate::sql::executor::atomic::join($pool, $stmt).await {
             Some(joined) => {
                 let mut joined = joined?;
@@ -493,7 +495,7 @@ macro_rules! on_pool {
             }
             None => $alone,
         }
-    };
+    }};
 }
 pub(super) use on_pool;
 

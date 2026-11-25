@@ -57,7 +57,7 @@ mod check;
 mod db;
 mod deploy_audit;
 mod email;
-mod fixtures;
+pub(crate) mod fixtures;
 mod flush;
 mod generate;
 mod info;

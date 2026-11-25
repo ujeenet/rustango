@@ -9,6 +9,7 @@ pub(crate) mod catalog;
 pub(crate) mod check;
 pub(crate) mod checksum;
 pub(crate) mod cli;
+pub(crate) mod data;
 pub(crate) mod format;
 pub(crate) mod graph;
 pub(crate) mod invert;
@@ -96,6 +97,12 @@ pub(crate) enum Code {
     Io,
     /// makemigrations: a drop and an add of one type need `--rename` or `--no-rename`.
     Rename,
+    /// A data op names a table or column outside its footprint, or one not in state.
+    Footprint,
+    /// A `noop` down whose writes the reverse does not drop, with no `allow`.
+    Noop,
+    /// A data step the plan needs has nothing to run on this backend.
+    Unresolved,
 }
 
 impl Code {
@@ -127,6 +134,9 @@ impl Code {
             Self::Behind => "MV2-E024",
             Self::Unowned => "MV2-E025",
             Self::Rename => "MV2-E026",
+            Self::Footprint => "MV2-E027",
+            Self::Noop => "MV2-E028",
+            Self::Unresolved => "MV2-E029",
             Self::CrossTarget => "MV2-E030",
             Self::FkType => "MV2-E3780",
             Self::CheckColumn => "MV2-E3959",

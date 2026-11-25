@@ -98,6 +98,7 @@ pub(crate) use executor::{
     inserted_pk, rows_per_batch, run_delete_statements_tx, truncate_refusal, truncate_tx, write_tx,
 };
 pub(crate) use executor::{caught, in_block, refuse_ddl_in_block, Ddl};
+pub(crate) use executor::{in_migration_step, migration_step};
 #[allow(deprecated)]
 pub use executor::{
     AtomicOptions, AtomicTx, CounterPool, DecodeModel, ExistsPool, ExplainFormat, ExplainOptions,

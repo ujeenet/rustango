@@ -2782,6 +2782,37 @@ mod tests {
             .expect("the next start runs it");
     }
 
+    /// A data step with nothing to run here stops boot before any statement.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn v2_boot_refuses_a_missing_data_step_first() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = serde_json::json!({"engine": 2, "format": 1, "id": "0001_t", "app": "project",
+            "parents": [], "target": "tenant", "operations": [
+            {"op": "create_table", "v": 1, "table": {"name": "bm_t", "scope": "tenant", "fields": [
+                {"column": "id", "ty": "i64", "primary_key": true, "nullable": false}]}},
+            {"op": "data_sql", "v": 1, "id": "pg_only_v1", "tables": {"write": ["bm_t"]},
+             "up": {"postgres": "DELETE FROM {{t:bm_t}}"}, "down": {"noop": "dropped"}}]});
+        std::fs::write(dir.join("0001_t.json"), file.to_string()).unwrap();
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("app.db").display());
+        let pool = crate::sql::Pool::connect(&url).await.expect("connect");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let e = boot_migrate_v2(&pool, &dir, stop)
+            .await
+            .expect_err("refused");
+        assert!(e.to_string().contains("MV2-E029"), "{e}");
+        assert!(!crate::migrate::try_table_exists_here(&pool, "bm_t")
+            .await
+            .unwrap());
+        assert!(
+            !crate::migrate::try_table_exists_here(&pool, crate::migrate::SYSTEM_LEDGER_TABLE)
+                .await
+                .unwrap()
+        );
+    }
+
     /// Boot on a database switched to engine v2 warns and serves; the CLI
     /// verb refuses.
     #[cfg(feature = "sqlite")]
