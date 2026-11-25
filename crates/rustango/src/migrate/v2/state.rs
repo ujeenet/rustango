@@ -46,6 +46,15 @@ pub(crate) enum Backend {
 impl Backend {
     pub(crate) const ALL: [Self; 3] = [Self::Postgres, Self::Mysql, Self::Sqlite];
 
+    /// The backend of a dialect.
+    pub(crate) const fn of(kind: crate::sql::DialectKind) -> Self {
+        match kind {
+            crate::sql::DialectKind::Postgres => Self::Postgres,
+            crate::sql::DialectKind::Mysql => Self::Mysql,
+            crate::sql::DialectKind::Sqlite => Self::Sqlite,
+        }
+    }
+
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Postgres => "postgres",
@@ -99,6 +108,10 @@ pub(crate) struct IndexDef {
     pub(crate) include: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) skipped_on: Vec<Backend>,
+    /// A UNIQUE constraint, not a plain unique index: PG drops it with
+    /// `DROP CONSTRAINT`, SQLite keeps it in the table's DDL.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) constraint: bool,
 }
 
 impl IndexDef {
@@ -307,6 +320,19 @@ pub(crate) enum OnDelete {
     Cascade,
     SetNull,
     SetDefault,
+}
+
+impl OnDelete {
+    /// The SQL words, `NO ACTION` included.
+    pub(crate) const fn sql(self) -> &'static str {
+        match self {
+            Self::NoAction => "NO ACTION",
+            Self::Restrict => "RESTRICT",
+            Self::Cascade => "CASCADE",
+            Self::SetNull => "SET NULL",
+            Self::SetDefault => "SET DEFAULT",
+        }
+    }
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]

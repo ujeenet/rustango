@@ -325,6 +325,7 @@ pub(super) fn table_of(
                 predicate: None,
                 include: Vec::new(),
                 skipped_on: Vec::new(),
+                constraint: true,
             });
         }
         if f.min.is_some() || f.max.is_some() {
@@ -362,6 +363,7 @@ pub(super) fn table_of(
             predicate: i.where_clause.clone(),
             include: i.include.clone(),
             skipped_on: Vec::new(),
+            constraint: false,
         });
     }
     for c in snap.checks.iter().filter(|c| c.table == t.name) {
@@ -561,6 +563,7 @@ fn diff(
                     predicate: None,
                     include: Vec::new(),
                     skipped_on: Vec::new(),
+                    constraint: false,
                 },
             };
             t.indexes.push(ix);

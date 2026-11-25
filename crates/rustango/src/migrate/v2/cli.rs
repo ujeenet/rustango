@@ -215,7 +215,15 @@ async fn down<W: Write>(
         ..super::run::Options::default()
     };
     let steps = match value(args, "--to")? {
-        Some(to) => steps_to(pool, dir, to).await?,
+        Some(to) => {
+            let report = super::run::downgrade_to(pool, dir, to, &opts)
+                .await
+                .map_err(run_err)?;
+            for id in &report.rolled_back {
+                writeln!(w, "Rolled back {id}").map_err(io)?;
+            }
+            return Ok(());
+        }
         None => match positional(args, &["--to"]) {
             Some(n) => n
                 .parse()
@@ -232,42 +240,12 @@ async fn down<W: Write>(
     Ok(())
 }
 
-/// How many applied migrations come after `to` (`<app>:<id>` or `<id>`).
-async fn steps_to(pool: &Pool, dir: &Path, to: &str) -> Result<usize, MigrateError> {
-    let project = super::load::load_project(dir).map_err(load)?;
-    let order = project
-        .order
-        .get(&Target::Tenant)
-        .cloned()
-        .unwrap_or_default();
-    let (app, id) = to.split_once(':').map_or((None, to), |(a, i)| (Some(a), i));
-    let pos = order
-        .iter()
-        .position(|&i| {
-            let f = &project.files[i].file;
-            f.id == id && app.is_none_or(|a| a == f.app)
-        })
-        .ok_or_else(|| usage(format!("`--to {to}`: no such migration")))?;
-    let applied: std::collections::HashSet<(String, String)> =
-        super::ledger::Ledger::default_names()
-            .rows(pool)
-            .await?
-            .into_iter()
-            .map(|r| (r.app, r.id))
-            .collect();
-    Ok(order[pos + 1..]
-        .iter()
-        .filter(|&&i| {
-            let f = &project.files[i].file;
-            applied.contains(&(f.app.clone(), f.id.clone()))
-        })
-        .count())
-}
-
 async fn status<W: Write>(pool: &Pool, dir: &Path, w: &mut W) -> Result<(), MigrateError> {
     use super::ledger::RowState;
     let project = super::load::load_project(dir).map_err(load)?;
-    let rows = super::ledger::Ledger::default_names().rows(pool).await?;
+    let rows = super::ledger::Ledger::of(&super::run::Options::default())
+        .rows(pool)
+        .await?;
     for &i in project.order.get(&Target::Tenant).into_iter().flatten() {
         let f = &project.files[i].file;
         let mark = match rows.iter().find(|r| r.app == f.app && r.id == f.id) {

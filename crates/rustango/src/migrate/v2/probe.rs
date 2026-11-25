@@ -7,8 +7,7 @@
 use super::catalog::{read_table, CatalogError, LiveColumn, LiveFk, LiveIndex, LiveTable};
 use super::norm::{self, DefaultCtx};
 use super::render::{snapshot, Expect};
-use super::state::{CheckDef, ColumnDef, FkDef, IndexDef, OnDelete, State, TableState};
-use crate::core::SqlValue;
+use super::state::{CheckDef, ColumnDef, FkDef, IndexDef, State, TableState};
 use crate::sql::{DialectKind, Pool};
 
 /// One property that differs from what state says.
@@ -65,6 +64,15 @@ enum Names {
 /// # Errors
 /// Catalog read failures.
 pub(crate) async fn probe(pool: &Pool, expects: &[Expect]) -> Result<Verdict, CatalogError> {
+    if expects.is_empty() {
+        // Nothing to check proves nothing: never "present".
+        return Ok(Verdict::Partial(vec![Mismatch {
+            object: "unit".into(),
+            what: "probe",
+            want: "facts to check".into(),
+            got: "none".into(),
+        }]));
+    }
     let mut present = 0;
     let mut absent = 0;
     let mut diffs = Vec::new();
@@ -85,6 +93,15 @@ pub(crate) async fn probe(pool: &Pool, expects: &[Expect]) -> Result<Verdict, Ca
         }
         Verdict::Partial(diffs)
     })
+}
+
+/// What a cut-off `DROP INDEX CONCURRENTLY` leaves behind.
+pub(crate) const LEFT_BY_A_DROP: &str = "invalid index left by a drop";
+
+/// A Partial that running the unit again repairs: only invalid indexes a
+/// cut-off drop left.
+pub(crate) fn rerun_repairs(diff: &[Mismatch]) -> bool {
+    !diff.is_empty() && diff.iter().all(|m| m.what == LEFT_BY_A_DROP)
 }
 
 fn verdict(m: Vec<Mismatch>) -> Verdict {
@@ -151,10 +168,14 @@ async fn one(pool: &Pool, e: &Expect) -> Result<Verdict, CatalogError> {
         },
         Expect::NoIndex { table, name } => match read_table(pool, table).await? {
             Some(l) => match l.indexes.iter().find(|i| &i.name == name) {
-                // A drop left an invalid index behind: Partial, so resume drops again.
-                Some(li) if !li.valid => {
-                    Verdict::Partial(vec![mm(name, "index", "dropped", "still there, invalid")])
-                }
+                // A cut-off `DROP INDEX CONCURRENTLY` leaves an invalid index:
+                // Partial with only this mismatch, which resume runs again.
+                Some(li) if !li.valid => Verdict::Partial(vec![mm(
+                    name,
+                    LEFT_BY_A_DROP,
+                    "dropped",
+                    "still there, invalid",
+                )]),
                 Some(_) => Verdict::Absent,
                 None => Verdict::Present,
             },
@@ -248,7 +269,7 @@ pub(crate) async fn renames(pool: &Pool, state: &State) -> Result<Vec<Rename>, C
         d: pool.dialect().kind(),
         names: Names::Shape,
     };
-    let b = backend(c.d);
+    let b = super::state::Backend::of(c.d);
     let mut out = Vec::new();
     for t in state.tables.values() {
         let Some(live) = read_table(pool, &t.name).await? else {
@@ -279,7 +300,9 @@ pub(crate) async fn renames(pool: &Pool, state: &State) -> Result<Vec<Rename>, C
             for l in &live.checks {
                 let Some(name) = &l.name else { continue };
                 let sql = k.body.sql(pool.dialect());
-                if c.expr_eq(&live, ExprKind::Check, &sql, &l.expr).await? {
+                if c.expr_eq(&live, super::catalog::ExprKind::Check, &sql, &l.expr)
+                    .await?
+                {
                     out.push(Rename {
                         table: t.name.clone(),
                         old: name.clone(),
@@ -318,28 +341,10 @@ fn action(d: DialectKind, a: &str) -> String {
     }
 }
 
-fn on_delete_sql(o: OnDelete) -> &'static str {
-    match o {
-        OnDelete::NoAction => "NO ACTION",
-        OnDelete::Restrict => "RESTRICT",
-        OnDelete::Cascade => "CASCADE",
-        OnDelete::SetNull => "SET NULL",
-        OnDelete::SetDefault => "SET DEFAULT",
-    }
-}
-
 struct Cmp<'a> {
     pool: &'a Pool,
     d: DialectKind,
     names: Names,
-}
-
-/// What an expression is, for the server round-trip.
-enum ExprKind<'a> {
-    Default { column: &'a ColumnDef },
-    Check,
-    Predicate { columns: &'a [String] },
-    Generated { column: &'a ColumnDef },
 }
 
 impl Cmp<'_> {
@@ -374,7 +379,7 @@ impl Cmp<'_> {
         let wanted: Vec<&IndexDef> = t
             .indexes
             .iter()
-            .filter(|i| !i.skipped_on.contains(&backend(self.d)))
+            .filter(|i| !i.skipped_on.contains(&super::state::Backend::of(self.d)))
             .collect();
         for ix in &wanted {
             match self.find_index(live, ix) {
@@ -467,7 +472,7 @@ impl Cmp<'_> {
             (None, None) => {}
             (Some(w), Some(g)) => {
                 if !self
-                    .expr_eq(live, ExprKind::Default { column: c }, w, g)
+                    .expr_eq(live, super::catalog::ExprKind::Default { column: c }, w, g)
                     .await?
                 {
                     out.push(mm(&obj, "default", w.clone(), g.clone()));
@@ -479,7 +484,12 @@ impl Cmp<'_> {
             (None, None) => {}
             (Some(w), Some(g)) if g.stored => {
                 if !self
-                    .expr_eq(live, ExprKind::Generated { column: c }, w, &g.expr)
+                    .expr_eq(
+                        live,
+                        super::catalog::ExprKind::Generated { column: c },
+                        w,
+                        &g.expr,
+                    )
                     .await?
                 {
                     out.push(mm(&obj, "generated", w.clone(), g.expr.clone()));
@@ -530,6 +540,15 @@ impl Cmp<'_> {
                 l.unique.to_string(),
             ));
         }
+        // MySQL has no unique index apart from its constraint.
+        if self.d != DialectKind::Mysql && ix.constraint != l.constraint {
+            out.push(mm(
+                &ix.name,
+                "constraint",
+                ix.constraint.to_string(),
+                l.constraint.to_string(),
+            ));
+        }
         if self.d == DialectKind::Postgres {
             if ix.method != l.method {
                 out.push(mm(&ix.name, "method", ix.method.clone(), l.method.clone()));
@@ -553,7 +572,7 @@ impl Cmp<'_> {
                     if !self
                         .expr_eq(
                             live,
-                            ExprKind::Predicate {
+                            super::catalog::ExprKind::Predicate {
                                 columns: &ix.columns,
                             },
                             w,
@@ -586,7 +605,10 @@ impl Cmp<'_> {
             None if self.names == Names::Shape => {
                 let mut found = None;
                 for l in &live.checks {
-                    if self.expr_eq(live, ExprKind::Check, &sql, &l.expr).await? {
+                    if self
+                        .expr_eq(live, super::catalog::ExprKind::Check, &sql, &l.expr)
+                        .await?
+                    {
                         found = Some(l);
                         break;
                     }
@@ -599,7 +621,10 @@ impl Cmp<'_> {
             None => return Ok(vec![mm(&k.name, "check", "present", "absent")]),
         };
         let mut out = Vec::new();
-        if !self.expr_eq(live, ExprKind::Check, &sql, &l.expr).await? {
+        if !self
+            .expr_eq(live, super::catalog::ExprKind::Check, &sql, &l.expr)
+            .await?
+        {
             out.push(mm(&k.name, "check expr", sql, l.expr.clone()));
         }
         if self.d == DialectKind::Postgres && !l.validated {
@@ -644,7 +669,7 @@ impl Cmp<'_> {
             ));
         }
         let (w, g) = (
-            action(self.d, on_delete_sql(f.on_delete)),
+            action(self.d, f.on_delete.sql()),
             action(self.d, &l.on_delete),
         );
         if w != g {
@@ -661,12 +686,12 @@ impl Cmp<'_> {
     async fn expr_eq(
         &self,
         live: &LiveTable,
-        kind: ExprKind<'_>,
+        kind: super::catalog::ExprKind<'_>,
         declared: &str,
         got: &str,
     ) -> Result<bool, CatalogError> {
         let ctx = match &kind {
-            ExprKind::Default { column } => DefaultCtx {
+            super::catalog::ExprKind::Default { column } => DefaultCtx {
                 boolean: column.ty == "bool",
             },
             _ => DefaultCtx::default(),
@@ -675,212 +700,9 @@ impl Cmp<'_> {
         if norm::norm_default(self.d, declared, ctx)? == g {
             return Ok(true);
         }
-        match roundtrip(self.pool, live, &kind, declared).await? {
+        match super::catalog::roundtrip(self.pool, live, &kind, declared).await? {
             Some(canon) => Ok(norm::norm_default(self.d, &canon, ctx)? == g),
             None => Ok(false),
         }
     }
-}
-
-fn backend(d: DialectKind) -> super::state::Backend {
-    match d {
-        DialectKind::Postgres => super::state::Backend::Postgres,
-        DialectKind::Mysql => super::state::Backend::Mysql,
-        _ => super::state::Backend::Sqlite,
-    }
-}
-
-/// Whether `declared` works as `c`'s DEFAULT here (2.6): a scratch temp
-/// table and one default row, in a transaction rolled back on a pinned
-/// connection closed afterwards. `Err` carries the server's message.
-pub(crate) async fn default_runs(pool: &Pool, c: &ColumnDef, declared: &str) -> Result<(), String> {
-    use crate::sql::raw_execute_tx;
-    let d = pool.dialect();
-    let name = d.quote_ident("_rgo_v2_default");
-    let ty = crate::migrate::diff::sql_type_with_dialect(&snapshot(c), d);
-    let not_null = if c.nullable { "" } else { " NOT NULL" };
-    let (temp, tail) = match d.kind() {
-        DialectKind::Postgres => ("TEMP", " ON COMMIT DROP"),
-        DialectKind::Mysql => ("TEMPORARY", ""),
-        _ => ("TEMP", ""),
-    };
-    let create = format!(
-        "CREATE {temp} TABLE {name} ({} {ty} DEFAULT {declared}{not_null}){tail}",
-        d.quote_ident(&c.column)
-    );
-    let insert = format!("INSERT INTO {name}{}", d.default_values_clause());
-    let mut conn = pool.acquire().await.map_err(|e| e.to_string())?;
-    conn.close_on_drop();
-    let mut tx = conn.begin().await.map_err(|e| e.to_string())?;
-    raw_execute_tx(&mut tx, &create, Vec::new())
-        .await
-        .map_err(|e| e.to_string())?;
-    raw_execute_tx(&mut tx, &insert, Vec::new())
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-/// The server's own spelling of `declared`, read back from a scratch temp
-/// table on one pinned connection that is closed afterwards (MySQL temp
-/// tables are session state and survive ROLLBACK). `None` on SQLite, which
-/// stores the text as written.
-async fn roundtrip(
-    pool: &Pool,
-    live: &LiveTable,
-    kind: &ExprKind<'_>,
-    declared: &str,
-) -> Result<Option<String>, CatalogError> {
-    use crate::sql::{raw_execute_tx, raw_query_tx};
-    let d = pool.dialect();
-    let k = d.kind();
-    if !matches!(k, DialectKind::Postgres | DialectKind::Mysql) {
-        return Ok(None);
-    }
-    let sql_type = |c: &ColumnDef| crate::migrate::diff::sql_type_with_dialect(&snapshot(c), d);
-    let name = "_rgo_v2_canon";
-    let mut cols: Vec<String> = live
-        .columns
-        .iter()
-        .filter(|c| !matches!(kind, ExprKind::Default { column } if column.column == c.name))
-        .map(|c| format!("{} {}", d.quote_ident(&c.name), c.raw_type))
-        .collect();
-    match kind {
-        ExprKind::Default { column } => cols.push(format!(
-            "{} {} DEFAULT {declared}",
-            d.quote_ident(&column.column),
-            sql_type(column)
-        )),
-        ExprKind::Generated { column } => cols.push(format!(
-            "{} {} GENERATED ALWAYS AS ({declared}) STORED",
-            d.quote_ident("_rgo_g"),
-            sql_type(column)
-        )),
-        ExprKind::Check => cols.push(format!(
-            "CONSTRAINT {} CHECK ({declared})",
-            d.quote_ident("_rgo_c")
-        )),
-        ExprKind::Predicate { .. } => {}
-    }
-    let (temp, tail) = if k == DialectKind::Postgres {
-        ("TEMP", " ON COMMIT DROP")
-    } else {
-        ("TEMPORARY", "")
-    };
-    let create = format!(
-        "CREATE {temp} TABLE {} ({}){tail}",
-        d.quote_ident(name),
-        cols.join(", ")
-    );
-    let mut conn = pool.acquire().await?;
-    conn.close_on_drop();
-    let mut tx = conn.begin().await?;
-    raw_execute_tx(&mut tx, &create, Vec::new()).await?;
-    let out: Option<String> = if k == DialectKind::Postgres {
-        let reg = SqlValue::from(format!("pg_temp.{name}"));
-        let attr = "SELECT pg_get_expr(d.adbin, d.adrelid) FROM pg_attrdef d JOIN pg_attribute a \
-                    ON a.attrelid = d.adrelid AND a.attnum = d.adnum \
-                    WHERE d.adrelid = to_regclass($1) AND a.attname = $2";
-        match kind {
-            ExprKind::Default { column } => raw_query_tx::<(String,)>(
-                &mut tx,
-                attr,
-                vec![reg, SqlValue::from(column.column.clone())],
-            )
-            .await?
-            .pop()
-            .map(|r| r.0),
-            ExprKind::Generated { .. } => raw_query_tx::<(String,)>(
-                &mut tx,
-                attr,
-                vec![reg, SqlValue::from("_rgo_g".to_owned())],
-            )
-            .await?
-            .pop()
-            .map(|r| r.0),
-            ExprKind::Check => raw_query_tx::<(String,)>(
-                &mut tx,
-                "SELECT pg_get_expr(conbin, conrelid) FROM pg_constraint \
-                 WHERE conrelid = to_regclass($1) AND conname = '_rgo_c'",
-                vec![reg],
-            )
-            .await?
-            .pop()
-            .map(|r| r.0),
-            ExprKind::Predicate { columns } => {
-                let keys = columns
-                    .iter()
-                    .map(|c| d.quote_ident(c))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                raw_execute_tx(
-                    &mut tx,
-                    &format!(
-                        "CREATE INDEX _rgo_i ON {} ({keys}) WHERE {declared}",
-                        d.quote_ident(name)
-                    ),
-                    Vec::new(),
-                )
-                .await?;
-                raw_query_tx::<(String,)>(
-                    &mut tx,
-                    "SELECT pg_get_expr(i.indpred, i.indrelid) FROM pg_index i WHERE i.indrelid = to_regclass($1)",
-                    vec![reg],
-                )
-                .await?
-                .pop()
-                .map(|r| r.0)
-            }
-        }
-    } else {
-        let show: Vec<(String, String)> = raw_query_tx(
-            &mut tx,
-            &format!("SHOW CREATE TABLE {}", d.quote_ident(name)),
-            Vec::new(),
-        )
-        .await?;
-        let ddl = show.into_iter().next().map(|r| r.1).unwrap_or_default();
-        match kind {
-            ExprKind::Check => body_after(&ddl, "CONSTRAINT `_rgo_c` CHECK ("),
-            ExprKind::Generated { .. } => ddl
-                .find("`_rgo_g`")
-                .and_then(|at| body_after(&ddl[at..], "GENERATED ALWAYS AS (")),
-            // MySQL's default printer is close to its input; the pure form covers it.
-            ExprKind::Default { .. } | ExprKind::Predicate { .. } => None,
-        }
-    };
-    let _ = tx.rollback().await;
-    Ok(out)
-}
-
-/// The balanced-paren body that follows `marker` (which ends in `(`).
-fn body_after(s: &str, marker: &str) -> Option<String> {
-    let start = s.find(marker)? + marker.len();
-    let mut depth = 1i32;
-    let mut in_str = false;
-    let b = s.as_bytes();
-    let mut i = start;
-    while i < b.len() {
-        let c = b[i];
-        if in_str {
-            if c == b'\\' {
-                i += 2;
-                continue;
-            }
-            if c == b'\'' {
-                in_str = false;
-            }
-        } else if c == b'\'' {
-            in_str = true;
-        } else if c == b'(' {
-            depth += 1;
-        } else if c == b')' {
-            depth -= 1;
-            if depth == 0 {
-                return Some(s[start..i].to_owned());
-            }
-        }
-        i += 1;
-    }
-    None
 }

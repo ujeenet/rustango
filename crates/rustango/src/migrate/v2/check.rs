@@ -167,7 +167,7 @@ pub(crate) async fn check(
         }
         if let Some(pool) = pool {
             let b = super::run::backend_of(pool);
-            if let Err(e) = super::probe::default_runs(pool, c, text).await {
+            if let Err(e) = super::catalog::default_runs(pool, c, text).await {
                 out.push(Finding {
                     severity: Severity::Error,
                     at: at.clone(),
@@ -206,7 +206,7 @@ async fn sqlite_memory(c: &ColumnDef, text: &str) -> Result<(), String> {
     let pool = Pool::connect("sqlite::memory:")
         .await
         .map_err(|e| e.to_string())?;
-    let r = super::probe::default_runs(&pool, c, text).await;
+    let r = super::catalog::default_runs(&pool, c, text).await;
     pool.close().await;
     r
 }

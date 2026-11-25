@@ -118,11 +118,7 @@ fn refused(code: Code, at: &str, msg: impl Into<String>) -> RunError {
 }
 
 pub(crate) fn backend_of(pool: &Pool) -> Backend {
-    match pool.dialect().kind() {
-        crate::sql::DialectKind::Postgres => Backend::Postgres,
-        crate::sql::DialectKind::Mysql => Backend::Mysql,
-        _ => Backend::Sqlite,
-    }
+    Backend::of(pool.dialect().kind())
 }
 
 /// A fencing token unique to this run: time, process and a counter, hashed.
@@ -301,6 +297,36 @@ pub(crate) async fn downgrade(
     steps: usize,
     opts: &Options,
 ) -> Result<Report, RunError> {
+    rollback(pool, dir, Back::Steps(steps), opts).await
+}
+
+/// Roll back every migration the ledger applied after `to` (`<app>:<id>`
+/// or `<id>`), newest first: ledger order, never file order.
+///
+/// # Errors
+/// As [`downgrade`], and a `to` the ledger has not applied.
+pub(crate) async fn downgrade_to(
+    pool: &Pool,
+    dir: &Path,
+    to: &str,
+    opts: &Options,
+) -> Result<Report, RunError> {
+    rollback(pool, dir, Back::To(to), opts).await
+}
+
+/// How far a rollback goes.
+#[derive(Clone, Copy)]
+enum Back<'a> {
+    Steps(usize),
+    To(&'a str),
+}
+
+async fn rollback(
+    pool: &Pool,
+    dir: &Path,
+    back: Back<'_>,
+    opts: &Options,
+) -> Result<Report, RunError> {
     let project = load_project(dir)?;
     let ledger = Ledger::of(opts);
     let run_id = new_run_id();
@@ -316,7 +342,7 @@ pub(crate) async fn downgrade(
             planned: Vec::new(),
             sweep: None,
         };
-        runner.downgrade(steps).await
+        runner.downgrade(back).await
     })
     .await?;
     Ok(Report {
@@ -456,6 +482,10 @@ impl Runner<'_> {
                                 "this migration is half rolled back: finish `downgrade` first",
                             ))
                         }
+                        RowState::Running | RowState::Failed if self.opts.dry_run => {
+                            let from = usize::try_from(row.pos + 1).unwrap_or(0);
+                            self.plan(&f.file.id, &row.unit_plan[from.min(row.unit_plan.len())..]);
+                        }
                         RowState::Running | RowState::Failed => {
                             self.resume(f, row).await?;
                             applied.push(f.file.id.clone());
@@ -568,37 +598,51 @@ impl Runner<'_> {
             )
             .await?;
         let units = &row.unit_plan;
-        let mut from = usize::try_from(row.pos + 1).unwrap_or(0);
-        if let Some(started) = row.started_unit {
-            let unit = usize::try_from(started).unwrap_or(0);
-            let expects = units
-                .get(unit)
-                .and_then(|u| u.probe.clone())
-                .unwrap_or_default();
-            match probe(self.pool, &expects).await? {
-                Verdict::Present => {
-                    let (sql, binds) =
-                        self.ledger
-                            .advance(self.pool, k, self.run_id, started - 1, started);
-                    super::ledger::fenced(raw_execute_pool(self.pool, &sql, binds).await?)?;
-                    from = unit + 1;
-                }
-                Verdict::Absent => from = unit,
-                Verdict::Partial(diff) => {
-                    let list: Vec<String> = diff.iter().map(ToString::to_string).collect();
-                    return Err(refused(
-                        Code::State,
-                        &f.at,
-                        format!(
-                            "unit {unit} was cut off and the catalog is half way: {}; the \
-                             ledger is untouched",
-                            list.join("; ")
-                        ),
-                    ));
-                }
+        let from = self.resume_point(k, row, &f.at).await?;
+        self.finish(f, units, from).await
+    }
+
+    /// Where a crashed row goes on: after its last unit, or, for an
+    /// autocommit unit cut off after it started, what its probe says.
+    async fn resume_point(
+        &mut self,
+        k: (&str, &str),
+        row: &Row,
+        at: &str,
+    ) -> Result<usize, RunError> {
+        let units = &row.unit_plan;
+        let from = usize::try_from(row.pos + 1).unwrap_or(0);
+        let Some(started) = row.started_unit else {
+            return Ok(from);
+        };
+        let unit = usize::try_from(started).unwrap_or(0);
+        let expects = units
+            .get(unit)
+            .and_then(|u| u.probe.clone())
+            .unwrap_or_default();
+        match probe(self.pool, &expects).await? {
+            Verdict::Present => {
+                let (sql, binds) =
+                    self.ledger
+                        .advance(self.pool, k, self.run_id, started - 1, started);
+                super::ledger::fenced(raw_execute_pool(self.pool, &sql, binds).await?)?;
+                Ok(unit + 1)
+            }
+            Verdict::Absent => Ok(unit),
+            Verdict::Partial(diff) if super::probe::rerun_repairs(&diff) => Ok(unit),
+            Verdict::Partial(diff) => {
+                let list: Vec<String> = diff.iter().map(ToString::to_string).collect();
+                Err(refused(
+                    Code::State,
+                    at,
+                    format!(
+                        "unit {unit} was cut off and the catalog is half way: {}; the ledger is \
+                         untouched",
+                        list.join("; ")
+                    ),
+                ))
             }
         }
-        self.finish(f, units, from).await
     }
 
     /// Run units `from..`, each committing with its fenced position update.
@@ -742,11 +786,16 @@ impl Runner<'_> {
             for s in &u.sql {
                 crate::sql::sqlx::query(s).execute(&mut *tx).await?;
             }
-            let moved =
-                crate::sql::sqlx::query(&self.ledger.advance_literal(k, self.run_id, n - 1, n))
-                    .execute(&mut *tx)
-                    .await?
-                    .rows_affected();
+            let (sql, binds) = self.ledger.advance(self.pool, k, self.run_id, n - 1, n);
+            let mut q = crate::sql::sqlx::query(&sql);
+            for b in binds {
+                q = match b {
+                    crate::core::SqlValue::I64(v) => q.bind(v),
+                    crate::core::SqlValue::String(v) => q.bind(v),
+                    other => unreachable!("the ledger binds text and integers: {other:?}"),
+                };
+            }
+            let moved = q.execute(&mut *tx).await?.rows_affected();
             super::ledger::fenced(moved)?;
             tx.commit().await?;
             Ok(())
@@ -781,7 +830,11 @@ impl Runner<'_> {
         apply_file(&mut after, &f.file, &f.at, &CTX)?;
         let doc = f.file.state.clone().unwrap_or_default();
         let checkpoint = State::from_doc(doc.clone());
-        let v1 = crate::migrate::LEDGER_TABLE;
+        let v1 = self
+            .opts
+            .ledger
+            .as_deref()
+            .unwrap_or(crate::migrate::LEDGER_TABLE);
         let legacy: std::collections::HashSet<String> =
             if crate::migrate::try_table_exists_here(self.pool, v1).await? {
                 crate::migrate::applied_set_pool_with_ledger(self.pool, v1).await?
@@ -891,6 +944,10 @@ impl Runner<'_> {
         externs.externs.extend(checkpoint.externs.clone());
         let order = fk_order(&checkpoint, &f.at)?;
         let units = super::render::render_install(&externs, &order, &f.at, self.b)?;
+        if self.opts.dry_run {
+            self.plan(&f.file.id, &units);
+            return Ok(after);
+        }
         self.ledger
             .insert(
                 self.pool,
@@ -908,29 +965,49 @@ impl Runner<'_> {
         Ok(after)
     }
 
-    async fn downgrade(&mut self, steps: usize) -> Result<Vec<String>, RunError> {
+    /// Plan every rollback first (each inverse and blocker), then run them,
+    /// newest first: a blocker anywhere runs zero statements (7.1).
+    async fn downgrade(&mut self, back: Back<'_>) -> Result<Vec<String>, RunError> {
         let rows = self.ledger.rows(self.pool).await?;
-        let mut done = Vec::new();
-        // A half-finished rollback finishes first.
-        for row in rows.iter().filter(|r| r.state == RowState::RollingBack) {
-            self.finish_rollback(
-                row,
-                &row.unit_plan,
-                usize::try_from(row.pos + 1).unwrap_or(0),
-            )
-            .await?;
-            done.push(row.id.clone());
+        if let Some(r) = rows
+            .iter()
+            .find(|r| matches!(r.state, RowState::Running | RowState::Failed))
+        {
+            return Err(refused(
+                Code::State,
+                &format!("ledger:{}:{}", r.app, r.id),
+                format!(
+                    "`{}:{}` did not finish: run `manage dbmigrate apply` to resume it before \
+                     rolling back",
+                    r.app, r.id
+                ),
+            ));
         }
         let applied: Vec<&Row> = rows
             .iter()
             .filter(|r| r.state == RowState::Applied)
             .collect();
+        // Rows come in `seq` order: `--to` keeps the target and every row before it.
+        let steps = match back {
+            Back::Steps(n) => n,
+            Back::To(to) => {
+                let (app, id) = to.split_once(':').map_or((None, to), |(a, i)| (Some(a), i));
+                let pos = applied
+                    .iter()
+                    .position(|r| r.id == id && app.is_none_or(|a| a == r.app))
+                    .ok_or_else(|| {
+                        refused(Code::State, to, format!("`{to}` is not applied here"))
+                    })?;
+                applied.len() - pos - 1
+            }
+        };
         let mut misses = Vec::new();
         for idx in (0..applied.len()).rev().take(steps) {
             let at = format!("ledger:{}:{}", applied[idx].app, applied[idx].id);
             misses.extend(super::data::misses(&body(applied[idx], &at)?, self.b, true));
         }
         super::data::refuse_misses(&misses, "rollback plan")?;
+        let mut plan: Vec<(&Row, Vec<Unit>)> = Vec::new();
         for idx in (0..applied.len()).rev().take(steps) {
             let row = applied[idx];
             let at = format!("ledger:{}:{}", row.app, row.id);
@@ -955,6 +1032,15 @@ impl Runner<'_> {
             let mut after = state.clone();
             apply_file(&mut after, &file, &at, &CTX)?;
             let (units, _) = render_file(&after, &down, &at, &CTX, self.b)?;
+            plan.push((row, units));
+        }
+        let mut done = Vec::new();
+        // A half-finished rollback finishes first, from its frozen plan.
+        for row in rows.iter().filter(|r| r.state == RowState::RollingBack) {
+            self.finish_rollback(row, &row.unit_plan, None).await?;
+            done.push(row.id.clone());
+        }
+        for (row, units) in plan {
             let k = (row.app.as_str(), row.id.as_str());
             self.ledger
                 .begin_rollback(self.pool, k, &row.run_id, self.run_id, &units)
@@ -965,17 +1051,19 @@ impl Runner<'_> {
                 started_unit: None,
                 ..row.clone()
             };
-            self.finish_rollback(&mine, &units, 0).await?;
+            self.finish_rollback(&mine, &units, Some(0)).await?;
             done.push(row.id.clone());
         }
         Ok(done)
     }
 
+    /// Run a rollback's units from `from`, or, for a cut-off one, from where
+    /// its probe says, then drop its row.
     async fn finish_rollback(
         &mut self,
         row: &Row,
         units: &[Unit],
-        from: usize,
+        from: Option<usize>,
     ) -> Result<(), RunError> {
         let k = (row.app.as_str(), row.id.as_str());
         if row.run_id != self.run_id {
@@ -983,6 +1071,13 @@ impl Runner<'_> {
                 .claim(self.pool, k, &row.run_id, self.run_id)
                 .await?;
         }
+        let from = match from {
+            Some(n) => n,
+            None => {
+                let at = format!("ledger:{}:{}", row.app, row.id);
+                self.resume_point(k, row, &at).await?
+            }
+        };
         self.run_units(k, units, from).await?;
         self.ledger.remove(self.pool, k, self.run_id).await?;
         self.ledger

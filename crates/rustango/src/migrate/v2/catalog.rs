@@ -5,6 +5,8 @@
 //! Catalog SQL is per backend by nature, like `inspectdb`.
 
 use super::norm::{self, Tok};
+use super::render::snapshot;
+use super::state::ColumnDef;
 use crate::core::SqlValue;
 use crate::sql::{raw_query_pool, DialectKind, Pool};
 
@@ -785,6 +787,209 @@ pub fn parse_create_index(sql: &str) -> Result<ParsedIndex, CatalogError> {
         .filter(|s| ident(&s.tok) == Some("where"))
         .map(|s| sql[s.end..].trim().to_owned());
     Ok(ParsedIndex { columns, predicate })
+}
+
+/// What an expression is, for the server round-trip.
+pub(crate) enum ExprKind<'a> {
+    Default { column: &'a ColumnDef },
+    Check,
+    Predicate { columns: &'a [String] },
+    Generated { column: &'a ColumnDef },
+}
+
+/// Whether `declared` works as `c`'s DEFAULT here (2.6): a scratch temp
+/// table and one default row, in a transaction rolled back on a pinned
+/// connection closed afterwards. `Err` carries the server's message.
+pub(crate) async fn default_runs(pool: &Pool, c: &ColumnDef, declared: &str) -> Result<(), String> {
+    use crate::sql::raw_execute_tx;
+    let d = pool.dialect();
+    let name = d.quote_ident("_rgo_v2_default");
+    let ty = crate::migrate::diff::sql_type_with_dialect(&snapshot(c), d);
+    let not_null = if c.nullable { "" } else { " NOT NULL" };
+    let (temp, tail) = match d.kind() {
+        DialectKind::Postgres => ("TEMP", " ON COMMIT DROP"),
+        DialectKind::Mysql => ("TEMPORARY", ""),
+        _ => ("TEMP", ""),
+    };
+    let create = format!(
+        "CREATE {temp} TABLE {name} ({} {ty} DEFAULT {declared}{not_null}){tail}",
+        d.quote_ident(&c.column)
+    );
+    let insert = format!("INSERT INTO {name}{}", d.default_values_clause());
+    let mut conn = pool.acquire().await.map_err(|e| e.to_string())?;
+    conn.close_on_drop();
+    let mut tx = conn.begin().await.map_err(|e| e.to_string())?;
+    raw_execute_tx(&mut tx, &create, Vec::new())
+        .await
+        .map_err(|e| e.to_string())?;
+    raw_execute_tx(&mut tx, &insert, Vec::new())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// The server's own spelling of `declared`, read back from a scratch temp
+/// table on one pinned connection that is closed afterwards (MySQL temp
+/// tables are session state and survive ROLLBACK). `None` on SQLite, which
+/// stores the text as written.
+pub(crate) async fn roundtrip(
+    pool: &Pool,
+    live: &LiveTable,
+    kind: &ExprKind<'_>,
+    declared: &str,
+) -> Result<Option<String>, CatalogError> {
+    use crate::sql::{raw_execute_tx, raw_query_tx};
+    let d = pool.dialect();
+    let k = d.kind();
+    if !matches!(k, DialectKind::Postgres | DialectKind::Mysql) {
+        return Ok(None);
+    }
+    let sql_type = |c: &ColumnDef| crate::migrate::diff::sql_type_with_dialect(&snapshot(c), d);
+    let name = "_rgo_v2_canon";
+    let mut cols: Vec<String> = live
+        .columns
+        .iter()
+        .filter(|c| !matches!(kind, ExprKind::Default { column } if column.column == c.name))
+        .map(|c| format!("{} {}", d.quote_ident(&c.name), c.raw_type))
+        .collect();
+    match kind {
+        ExprKind::Default { column } => cols.push(format!(
+            "{} {} DEFAULT {declared}",
+            d.quote_ident(&column.column),
+            sql_type(column)
+        )),
+        ExprKind::Generated { column } => cols.push(format!(
+            "{} {} GENERATED ALWAYS AS ({declared}) STORED",
+            d.quote_ident("_rgo_g"),
+            sql_type(column)
+        )),
+        ExprKind::Check => cols.push(format!(
+            "CONSTRAINT {} CHECK ({declared})",
+            d.quote_ident("_rgo_c")
+        )),
+        ExprKind::Predicate { .. } => {}
+    }
+    let (temp, tail) = if k == DialectKind::Postgres {
+        ("TEMP", " ON COMMIT DROP")
+    } else {
+        ("TEMPORARY", "")
+    };
+    let create = format!(
+        "CREATE {temp} TABLE {} ({}){tail}",
+        d.quote_ident(name),
+        cols.join(", ")
+    );
+    let mut conn = pool.acquire().await?;
+    conn.close_on_drop();
+    let mut tx = conn.begin().await?;
+    raw_execute_tx(&mut tx, &create, Vec::new()).await?;
+    let out: Option<String> = if k == DialectKind::Postgres {
+        let reg = SqlValue::from(format!("pg_temp.{name}"));
+        let attr = "SELECT pg_get_expr(d.adbin, d.adrelid) FROM pg_attrdef d JOIN pg_attribute a \
+                    ON a.attrelid = d.adrelid AND a.attnum = d.adnum \
+                    WHERE d.adrelid = to_regclass($1) AND a.attname = $2";
+        match kind {
+            ExprKind::Default { column } => raw_query_tx::<(String,)>(
+                &mut tx,
+                attr,
+                vec![reg, SqlValue::from(column.column.clone())],
+            )
+            .await?
+            .pop()
+            .map(|r| r.0),
+            ExprKind::Generated { .. } => raw_query_tx::<(String,)>(
+                &mut tx,
+                attr,
+                vec![reg, SqlValue::from("_rgo_g".to_owned())],
+            )
+            .await?
+            .pop()
+            .map(|r| r.0),
+            ExprKind::Check => raw_query_tx::<(String,)>(
+                &mut tx,
+                "SELECT pg_get_expr(conbin, conrelid) FROM pg_constraint \
+                 WHERE conrelid = to_regclass($1) AND conname = '_rgo_c'",
+                vec![reg],
+            )
+            .await?
+            .pop()
+            .map(|r| r.0),
+            ExprKind::Predicate { columns } => {
+                let keys = columns
+                    .iter()
+                    .map(|c| d.quote_ident(c))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                raw_execute_tx(
+                    &mut tx,
+                    &format!(
+                        "CREATE INDEX _rgo_i ON {} ({keys}) WHERE {declared}",
+                        d.quote_ident(name)
+                    ),
+                    Vec::new(),
+                )
+                .await?;
+                raw_query_tx::<(String,)>(
+                    &mut tx,
+                    "SELECT pg_get_expr(i.indpred, i.indrelid) FROM pg_index i WHERE i.indrelid = to_regclass($1)",
+                    vec![reg],
+                )
+                .await?
+                .pop()
+                .map(|r| r.0)
+            }
+        }
+    } else {
+        let show: Vec<(String, String)> = raw_query_tx(
+            &mut tx,
+            &format!("SHOW CREATE TABLE {}", d.quote_ident(name)),
+            Vec::new(),
+        )
+        .await?;
+        let ddl = show.into_iter().next().map(|r| r.1).unwrap_or_default();
+        match kind {
+            ExprKind::Check => body_after(&ddl, "CONSTRAINT `_rgo_c` CHECK ("),
+            ExprKind::Generated { .. } => ddl
+                .find("`_rgo_g`")
+                .and_then(|at| body_after(&ddl[at..], "GENERATED ALWAYS AS (")),
+            // MySQL's default printer is close to its input; the pure form covers it.
+            ExprKind::Default { .. } | ExprKind::Predicate { .. } => None,
+        }
+    };
+    let _ = tx.rollback().await;
+    Ok(out)
+}
+
+/// The balanced-paren body that follows `marker` (which ends in `(`).
+fn body_after(s: &str, marker: &str) -> Option<String> {
+    let start = s.find(marker)? + marker.len();
+    let mut depth = 1i32;
+    let mut in_str = false;
+    let b = s.as_bytes();
+    let mut i = start;
+    while i < b.len() {
+        let c = b[i];
+        if in_str {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == b'\'' {
+                in_str = false;
+            }
+        } else if c == b'\'' {
+            in_str = true;
+        } else if c == b'(' {
+            depth += 1;
+        } else if c == b')' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(s[start..i].to_owned());
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 #[cfg(test)]

@@ -42,9 +42,8 @@ fn field_default(key: &str, v: &Value) -> bool {
         "on_fresh" => v == "run",
         "method" => v == "btree",
         "on_delete" => v == "no_action",
-        "unique" | "primary_key" | "auto" | "case_insensitive" | "sealed" | "idempotent" => {
-            v == false
-        }
+        "unique" | "primary_key" | "auto" | "case_insensitive" | "sealed" | "idempotent"
+        | "constraint" => v == false,
         "allow" | "include" | "skipped_on" | "indexes" | "checks" | "unique_sets" | "binds"
         | "down_binds" | "restores" => is_empty_array(v),
         "tx" | "concurrently" | "where" | "to_ty" | "max_length" | "default" | "comment"

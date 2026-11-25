@@ -556,7 +556,6 @@ async fn shape(pool: &Pool, t: &str) -> super::super::catalog::LiveTable {
         .unwrap();
     let lite = pool.dialect().kind() == crate::sql::DialectKind::Sqlite;
     for i in &mut live.indexes {
-        i.constraint = false;
         if lite && i.unique && !i.primary {
             i.name = format!("unique({})", i.columns.join(","));
         }
@@ -1258,6 +1257,294 @@ async fn a_blocked_data_unit_times_out(b: B) {
     );
 }
 
+/// `0001_author` applied, `0002_bio` failed after its first unit.
+async fn crashed_bio(pool: &Pool, dir: &Path) {
+    migrate(pool, dir, &opts()).await.unwrap_or_default();
+    let crashing = Options {
+        crash: Some(Crash::BeforeUnit(1)),
+        ..Options::default()
+    };
+    put(
+        dir,
+        "0002_bio",
+        &v2("0002_bio", &["0001_author"], add_bio()),
+    );
+    migrate(pool, dir, &crashing).await.expect_err("crashed");
+}
+
+fn author_only() -> (tempfile::TempDir, PathBuf) {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    put(
+        &dir,
+        "0001_author",
+        &v2("0001_author", &[], json!([author()])),
+    );
+    (root, dir)
+}
+
+async fn ledger_snapshot(pool: &Pool) -> Vec<(String, RowState, i64, Vec<String>)> {
+    let l = Ledger::default_names();
+    let mut out = Vec::new();
+    for r in l.rows(pool).await.unwrap() {
+        let kinds = l.event_kinds(pool, (&r.app, &r.id)).await.unwrap();
+        out.push((r.id, r.state, r.pos, kinds));
+    }
+    out
+}
+
+/// Dry runs never write: no resume of a crashed row, no ledger row and no
+/// DDL for a fresh adopt (review fix 1).
+async fn dry_runs_never_write(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let (_root, dir) = author_only();
+    crashed_bio(pool, &dir).await;
+    let before = ledger_snapshot(pool).await;
+    assert_eq!(before.last().unwrap().1, RowState::Failed);
+    let cols = columns(pool, "rv_author").await;
+    let dry = Options {
+        dry_run: true,
+        ..Options::default()
+    };
+    let rep = migrate(pool, &dir, &dry).await.unwrap();
+    assert!(
+        rep.planned.iter().any(|l| l.contains("rv_author_name_idx")),
+        "{rep:?}"
+    );
+    assert_eq!(ledger_snapshot(pool).await, before);
+    assert_eq!(columns(pool, "rv_author").await, cols);
+    // A fresh adopt, with and without the v2 ledger table.
+    for with_ledger in [true, false] {
+        let Some(db2) = fresh(b).await else { return };
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("migrations");
+        v1_project(&dir);
+        super::super::adopt::adopt(&dir, backend_of(&db2.pool)).unwrap();
+        if with_ledger {
+            Ledger::default_names().ensure(&db2.pool).await.unwrap();
+        }
+        let rep = migrate(&db2.pool, &dir, &dry).await.unwrap();
+        assert!(
+            rep.planned.iter().any(|l| l.contains("CREATE TABLE")),
+            "{rep:?}"
+        );
+        assert!(rows(&db2.pool).await.is_empty());
+        assert!(columns(&db2.pool, "ad_author").await.is_empty());
+    }
+}
+
+/// `--to` rolls back what the ledger applied after the target, in `seq`
+/// order across apps (review fix 2).
+async fn down_to_follows_the_ledger(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    let table = |name: &str| {
+        json!({"op": "create_table", "v": 1, "table": {"name": name, "scope": "tenant",
+            "fields": [{"column": "id", "ty": "i64", "primary_key": true, "nullable": false}]}})
+    };
+    put(
+        &dir,
+        "0001_pa",
+        &v2("0001_pa", &[], json!([table("dt_pa")])),
+    );
+    let blog = root.path().join("blog/migrations");
+    let mut b1 = v2("0001_bl", &[], json!([table("dt_bl")]));
+    b1["app"] = json!("blog");
+    b1["depends_on"] = json!(["project:0001_pa"]);
+    put(&blog, "0001_bl", &b1);
+    let mut p2 = v2("0002_pb", &["0001_pa"], json!([table("dt_pb")]));
+    p2["depends_on"] = json!(["blog:0001_bl"]);
+    put(&dir, "0002_pb", &p2);
+    assert_eq!(
+        migrate(pool, &dir, &opts()).await.unwrap().applied,
+        ["0001_pa", "0001_bl", "0002_pb"]
+    );
+    let rep = downgrade_to(pool, &dir, "project:0002_pb", &opts())
+        .await
+        .unwrap();
+    assert!(rep.rolled_back.is_empty(), "{rep:?}");
+    let mut out = Vec::new();
+    crate::migrate::manage::run_with_writer(
+        pool,
+        &dir,
+        ["dbmigrate", "down", "--to", "blog:0001_bl"].map(String::from),
+        &mut out,
+    )
+    .await
+    .unwrap();
+    assert_eq!(String::from_utf8(out).unwrap(), "Rolled back 0002_pb\n");
+    assert_eq!(columns(pool, "dt_bl").await, ["id"]);
+}
+
+/// A rollback cut off after a statement resumes from its probe (review fix 3).
+async fn a_cut_off_rollback_resumes_by_probe(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let (_root, dir) = project();
+    migrate(pool, &dir, &opts()).await.unwrap();
+    let crashing = Options {
+        crash: Some(Crash::AfterStatement(0)),
+        ..Options::default()
+    };
+    let cut = downgrade(pool, &dir, 1, &crashing).await;
+    // The first reverse unit is autocommit on MySQL (DDL) and PG (DROP INDEX
+    // CONCURRENTLY), where the cut lands; SQLite has none.
+    assert_eq!(cut.is_err(), b != B::Lite, "{cut:?}");
+    if cut.is_err() {
+        // Zero more steps: only the half-finished rollback finishes.
+        assert_eq!(
+            downgrade(pool, &dir, 0, &opts()).await.unwrap().rolled_back,
+            ["0002_bio"]
+        );
+    }
+    assert_eq!(columns(pool, "rv_author").await, ["id", "name"]);
+}
+
+/// Every inverse and blocker is planned before the first statement
+/// (review fix 4), and a failed row blocks rollback (review fix 5).
+async fn rollback_is_planned_up_front(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let (_root, dir) = project();
+    let drop = json!([{"op": "drop_column", "v": 1, "table": "rv_author", "column": "bio",
+        "was": {"column": "bio", "ty": "string", "max_length": 80, "nullable": true}}]);
+    put(&dir, "0003_drop", &v2("0003_drop", &["0002_bio"], drop));
+    let nick = json!([{"op": "add_column", "v": 1, "table": "rv_author",
+        "column": {"column": "nick", "ty": "string", "max_length": 20, "nullable": true}}]);
+    put(&dir, "0004_nick", &v2("0004_nick", &["0003_drop"], nick));
+    migrate(pool, &dir, &opts()).await.unwrap();
+    assert_eq!(code(downgrade(pool, &dir, 2, &opts()).await), Code::Blocked);
+    assert_eq!(columns(pool, "rv_author").await, ["id", "name", "nick"]);
+    assert_eq!(rows(pool).await.len(), 4);
+    // A failed row: rollback waits for it.
+    let Some(db2) = fresh(b).await else { return };
+    let (_root, dir) = author_only();
+    crashed_bio(&db2.pool, &dir).await;
+    let before = ledger_snapshot(&db2.pool).await;
+    assert_eq!(
+        code(downgrade(&db2.pool, &dir, 1, &opts()).await),
+        Code::State
+    );
+    assert_eq!(ledger_snapshot(&db2.pool).await, before);
+}
+
+/// A custom ledger name keeps its case on every query (review fix 11), and
+/// adopt reads the app's own v1 ledger (review fix 7).
+async fn custom_ledgers_keep_their_names(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let caps = Options {
+        ledger: Some("__MyApp_Migrations__".to_owned()),
+        ..Options::default()
+    };
+    let (_root, dir) = project();
+    assert_eq!(migrate(pool, &dir, &caps).await.unwrap().applied.len(), 2);
+    assert_eq!(Ledger::of(&caps).rows(pool).await.unwrap().len(), 2);
+    downgrade(pool, &dir, 1, &caps).await.unwrap();
+    assert_eq!(
+        migrate(pool, &dir, &caps).await.unwrap().applied,
+        ["0002_bio"]
+    );
+    // An app whose v1 ledger is its own: the default one has none of its names.
+    let Some(db2) = fresh(b).await else { return };
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    v1_project(&dir);
+    crate::migrate::Builder::new()
+        .ledger("__alpha_migrations__")
+        .migrate(&db2.pool, &dir)
+        .await
+        .unwrap();
+    super::super::adopt::adopt(&dir, backend_of(&db2.pool)).unwrap();
+    let alpha = Options {
+        ledger: Some("__alpha_migrations__".to_owned()),
+        ..Options::default()
+    };
+    assert_eq!(
+        migrate(&db2.pool, &dir, &alpha).await.unwrap().applied,
+        ["0003_adopt"]
+    );
+    let kinds = Ledger::of(&alpha)
+        .event_kinds(&db2.pool, ("project", "0003_adopt"))
+        .await
+        .unwrap();
+    assert!(kinds.contains(&"adopted".to_owned()), "{kinds:?}");
+}
+
+/// A drop cut off by a kill leaves an invalid index on PG: resume runs the
+/// drop again (review fix 10).
+async fn an_invalid_index_left_by_a_drop_is_dropped_again(b: B) {
+    if b != B::Pg {
+        return;
+    }
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let (_root, dir) = project();
+    migrate(pool, &dir, &opts()).await.unwrap();
+    let drop = json!([{"op": "drop_index", "v": 1, "table": "rv_author", "name": "rv_author_name_idx",
+        "was": {"name": "rv_author_name_idx", "columns": ["name"]}}]);
+    put(&dir, "0003_drop", &v2("0003_drop", &["0002_bio"], drop));
+    let crashing = Options {
+        crash: Some(Crash::AfterStart(0)),
+        ..Options::default()
+    };
+    migrate(pool, &dir, &crashing).await.expect_err("cut off");
+    // What a killed CONCURRENTLY drop leaves: the index, invalid.
+    let marked = raw_execute_pool(
+        pool,
+        "UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'rv_author_name_idx'::regclass",
+        Vec::new(),
+    )
+    .await;
+    if marked.is_err() {
+        eprintln!("skipping: the test role cannot mark an index invalid");
+        return;
+    }
+    assert_eq!(
+        migrate(pool, &dir, &opts()).await.unwrap().applied,
+        ["0003_drop"]
+    );
+}
+
+/// Drift tells a unique index from a unique constraint (review fix 8).
+async fn drift_sees_a_constraint_kind(b: B) {
+    if b == B::My {
+        return;
+    }
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let (_root, dir) = author_only();
+    migrate(pool, &dir, &opts()).await.unwrap();
+    raw_execute_pool(
+        pool,
+        "CREATE UNIQUE INDEX rv_author_name_key ON rv_author (name)",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let p = super::super::load::load_project(&dir).unwrap();
+    let mut state = super::super::load::replay(&p).unwrap().states[&Target::Tenant].clone();
+    let mut t = (*state.tables["rv_author"]).clone();
+    t.indexes.push(super::super::state::IndexDef {
+        name: "rv_author_name_key".into(),
+        columns: vec!["name".into()],
+        unique: true,
+        method: "btree".into(),
+        predicate: None,
+        include: Vec::new(),
+        skipped_on: Vec::new(),
+        constraint: true,
+    });
+    state
+        .tables
+        .insert("rv_author".into(), std::sync::Arc::new(t));
+    let diff = super::super::probe::drift(pool, &state).await.unwrap();
+    assert!(diff.iter().any(|m| m.what == "constraint"), "{diff:?}");
+}
+
 per_backend!(
     apply_rollback_reapply,
     edited_file_and_stored_body,
@@ -1279,6 +1566,13 @@ per_backend!(
     a_swallowed_error_rolls_the_unit_back,
     the_escape_guard_refuses_pools,
     a_blocked_data_unit_times_out,
+    dry_runs_never_write,
+    down_to_follows_the_ledger,
+    a_cut_off_rollback_resumes_by_probe,
+    rollback_is_planned_up_front,
+    custom_ledgers_keep_their_names,
+    an_invalid_index_left_by_a_drop_is_dropped_again,
+    drift_sees_a_constraint_kind,
 );
 
 /// Legacy SQLite datetime text is swept before the first data unit, so a

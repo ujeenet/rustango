@@ -184,6 +184,16 @@ fn s(v: impl Into<String>) -> SqlValue {
 }
 
 impl Ledger {
+    /// The ledger table's name, quoted: a configured base may need it.
+    fn qt(&self, pool: &Pool) -> String {
+        pool.dialect().quote_ident(&self.table)
+    }
+
+    /// The events table's name, quoted.
+    fn qe(&self, pool: &Pool) -> String {
+        pool.dialect().quote_ident(&self.events)
+    }
+
     /// Create the ledger and events tables if absent (the caller holds the lock).
     ///
     /// # Errors
@@ -220,7 +230,7 @@ impl Ledger {
         let sql = format!(
             "SELECT app, id, checksum, applied_body, state, unit_plan, pos, started_unit, run_id \
              FROM {} ORDER BY seq",
-            self.table
+            self.qt(pool)
         );
         let raw: Vec<Raw> = raw_query_pool(&sql, Vec::new(), pool).await?;
         raw.into_iter()
@@ -261,7 +271,7 @@ impl Ledger {
         adopted: bool,
     ) -> Result<(), MigrateError> {
         let next: Vec<(i64,)> = raw_query_pool(
-            &format!("SELECT COALESCE(MAX(seq), 0) FROM {}", self.table),
+            &format!("SELECT COALESCE(MAX(seq), 0) FROM {}", self.qt(pool)),
             Vec::new(),
             pool,
         )
@@ -277,7 +287,7 @@ impl Ledger {
              unit_plan_hash, engine_version, pos, run_id, heartbeat_at, started_at, \
              state_before_hash, state_after_hash, adopted_from_legacy) VALUES ({}, {}, {}, {}, {}, \
              {}, {}, {}, {}, {}, -1, {}, {now}, {now}, {}, {}, {})",
-            self.table,
+            self.qt(pool),
             p(pool, 1),
             p(pool, 2),
             p(pool, 3),
@@ -330,7 +340,7 @@ impl Ledger {
     ) -> Result<(), MigrateError> {
         let sql = format!(
             "UPDATE {} SET run_id = {}, heartbeat_at = {} WHERE app = {} AND id = {} AND run_id = {}",
-            self.table,
+            self.qt(pool),
             p(pool, 1),
             pool.dialect().utc_now_sql(),
             p(pool, 2),
@@ -354,7 +364,7 @@ impl Ledger {
         let sql = format!(
             "UPDATE {} SET pos = {}, started_unit = NULL, session = NULL, heartbeat_at = {} \
              WHERE app = {} AND id = {} AND run_id = {} AND pos = {}",
-            self.table,
+            self.qt(pool),
             p(pool, 1),
             pool.dialect().utc_now_sql(),
             p(pool, 2),
@@ -374,26 +384,6 @@ impl Ledger {
         )
     }
 
-    /// [`Self::advance`] with literal values, for a SQLite rebuild's own
-    /// transaction (it runs on a raw driver connection).
-    pub(crate) fn advance_literal(
-        &self,
-        key: (&str, &str),
-        run_id: &str,
-        from: i64,
-        to: i64,
-    ) -> String {
-        let lit = |v: &str| format!("'{}'", v.replace('\'', "''"));
-        format!(
-            "UPDATE {} SET pos = {to}, started_unit = NULL, session = NULL WHERE app = {} AND id = {} \
-             AND run_id = {} AND pos = {from}",
-            self.table,
-            lit(key.0),
-            lit(key.1),
-            lit(run_id),
-        )
-    }
-
     /// Mark autocommit unit `unit` as started (fenced on `pos = unit - 1`).
     ///
     /// # Errors
@@ -408,7 +398,7 @@ impl Ledger {
         let sql = format!(
             "UPDATE {} SET started_unit = {}, heartbeat_at = {} \
              WHERE app = {} AND id = {} AND run_id = {} AND pos = {}",
-            self.table,
+            self.qt(pool),
             p(pool, 1),
             pool.dialect().utc_now_sql(),
             p(pool, 2),
@@ -450,7 +440,7 @@ impl Ledger {
         };
         let sql = format!(
             "UPDATE {} SET state = {}, error_class = {}{finished} WHERE app = {} AND id = {} AND run_id = {}",
-            self.table,
+            self.qt(pool),
             p(pool, 1),
             p(pool, 2),
             p(pool, 3),
@@ -487,7 +477,7 @@ impl Ledger {
         let sql = format!(
             "UPDATE {} SET state = {}, unit_plan = {}, pos = -1, started_unit = NULL, run_id = {} \
              WHERE app = {} AND id = {} AND run_id = {}",
-            self.table,
+            self.qt(pool),
             p(pool, 1),
             p(pool, 2),
             p(pool, 3),
@@ -523,7 +513,7 @@ impl Ledger {
     ) -> Result<(), MigrateError> {
         let sql = format!(
             "DELETE FROM {} WHERE app = {} AND id = {} AND run_id = {}",
-            self.table,
+            self.qt(pool),
             p(pool, 1),
             p(pool, 2),
             p(pool, 3),
@@ -548,7 +538,7 @@ impl Ledger {
         let sql = format!(
             "INSERT INTO {} (kind, app, mig, checksum, run_id, os_user, host, app_version, reason, at) \
              VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
-            self.events,
+            self.qe(pool),
             p(pool, 1),
             p(pool, 2),
             p(pool, 3),
@@ -591,7 +581,7 @@ impl Ledger {
     ) -> Result<Vec<String>, MigrateError> {
         let sql = format!(
             "SELECT kind FROM {} WHERE app = {} AND mig = {} ORDER BY id",
-            self.events,
+            self.qe(pool),
             p(pool, 1),
             p(pool, 2),
         );

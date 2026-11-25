@@ -448,6 +448,18 @@ fn add_index(s: &mut State, at: &str, table: &str, ix: &IndexDef) -> Result<(), 
     if ix.columns.is_empty() {
         return Err(fail(at, format!("index `{}` has no columns", ix.name)));
     }
+    if ix.constraint
+        && (!ix.unique || ix.predicate.is_some() || !ix.include.is_empty() || ix.method != "btree")
+    {
+        return Err(coded(
+            Code::File,
+            at,
+            format!(
+                "index `{}`: a constraint is a plain unique btree (no `where`, no `include`)",
+                ix.name
+            ),
+        ));
+    }
     if let Some(c) = ix
         .columns
         .iter()

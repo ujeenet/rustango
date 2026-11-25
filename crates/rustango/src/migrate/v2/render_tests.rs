@@ -786,3 +786,91 @@ fn concurrently_is_three_state() {
     );
     assert!(last(r(&fresh, json!([t(), ix(json!(true))]))));
 }
+
+/// An empty `probe: "state"` is no probe (review fix 6).
+#[test]
+fn an_empty_state_probe_is_no_probe() {
+    let s0 = state_of(&json!([s3_t(
+        json!([col("a", "i32", json!({}))]),
+        json!({})
+    )]));
+    let ops = json!([{"op": "raw_sql", "v": 1, "id": "noop", "tx": "autocommit",
+        "probe": "state", "up": {"any": "UPDATE s3_t SET a = 1"}, "state": []}]);
+    for b in Backend::ALL {
+        expect_err(&s0, &ops, b, Code::Probe);
+    }
+}
+
+/// Comments do not hide a statement, and one op is one statement (review fix 9).
+#[test]
+fn raw_sql_guards_read_past_comments() {
+    let s0 = state_of(&json!([s3_t(
+        json!([col("a", "i32", json!({}))]),
+        json!({})
+    )]));
+    let raw =
+        |sql: &str| json!([{"op": "raw_sql", "v": 1, "id": "x", "up": {"any": sql}, "state": []}]);
+    for b in Backend::ALL {
+        expect_err(&s0, &raw("/* x */ PRAGMA foreign_keys = OFF"), b, Code::Raw);
+        expect_err(&s0, &raw("-- note\nBEGIN"), b, Code::Raw);
+        expect_err(
+            &s0,
+            &raw("UPDATE s3_t SET a = 1; UPDATE s3_t SET a = 2"),
+            b,
+            Code::Raw,
+        );
+        // A `;` inside a string or a trailing `;` is still one statement.
+        render(&s0, &raw("UPDATE s3_t SET a = length('x;y');"), b).unwrap();
+    }
+    for sql in [
+        "/* lead */ CREATE INDEX s3_t_a_idx ON s3_t (a)",
+        "GRANT SELECT ON s3_t TO someone",
+        "REVOKE SELECT ON s3_t FROM someone",
+        "LOCK TABLES s3_t WRITE",
+        "UNLOCK TABLES",
+        "ANALYZE TABLE s3_t",
+        "OPTIMIZE TABLE s3_t",
+        "REPAIR TABLE s3_t",
+    ] {
+        expect_err(&s0, &raw(sql), Backend::Mysql, Code::Raw);
+    }
+}
+
+/// A unique constraint renders as one: inline at create, `DROP CONSTRAINT`
+/// on PG, a rebuild on SQLite (review fix 8).
+#[test]
+fn a_unique_constraint_renders_as_a_constraint() {
+    let s0 = state_of(&json!([s3_t(
+        json!([col("a", "i32", json!({}))]),
+        json!({})
+    )]));
+    let ix = json!({"name": "s3_t_a_key", "columns": ["a"], "unique": true, "constraint": true});
+    let mut add = ix.clone();
+    add["op"] = json!("add_index");
+    add["v"] = json!(1);
+    add["table"] = json!("s3_t");
+    let (pg, _) = render(&s0, &json!([add.clone()]), Backend::Postgres).unwrap();
+    assert!(
+        pg[0].sql[0].contains("ADD CONSTRAINT \"s3_t_a_key\" UNIQUE"),
+        "{pg:?}"
+    );
+    let (lite, _) = render(&s0, &json!([add.clone()]), Backend::Sqlite).unwrap();
+    assert_eq!(lite[0].kind, UnitKind::Rebuild, "{lite:?}");
+    assert!(
+        lite[0].sql[0].contains("CONSTRAINT \"s3_t_a_key\" UNIQUE"),
+        "{lite:?}"
+    );
+    let s1 = state_of(&json!([
+        s3_t(json!([col("a", "i32", json!({}))]), json!({}),),
+        add
+    ]));
+    let drop = json!([{"op": "drop_index", "v": 1, "table": "s3_t", "name": "s3_t_a_key",
+        "was": ix}]);
+    let (pg, _) = render(&s1, &drop, Backend::Postgres).unwrap();
+    assert!(
+        pg[0].sql[0].contains("DROP CONSTRAINT \"s3_t_a_key\""),
+        "{pg:?}"
+    );
+    let (lite, _) = render(&s1, &drop, Backend::Sqlite).unwrap();
+    assert_eq!(lite[0].kind, UnitKind::Rebuild, "{lite:?}");
+}

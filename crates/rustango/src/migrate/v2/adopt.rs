@@ -161,6 +161,7 @@ fn state_of(snap: &SchemaSnapshot, b: Backend, at: &str) -> Result<StateDoc, Loa
                         predicate: None,
                         include: Vec::new(),
                         skipped_on: Vec::new(),
+                        constraint: false,
                     });
                 }
             }

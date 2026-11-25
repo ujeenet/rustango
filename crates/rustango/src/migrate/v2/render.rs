@@ -108,8 +108,108 @@ const SESSION_STMTS: &[&str] = &[
     "USE ",
 ];
 
-/// DDL MySQL commits on its own: refused in a transactional raw_sql unit there.
-const MYSQL_DDL: &[&str] = &["CREATE ", "ALTER ", "DROP ", "RENAME ", "TRUNCATE "];
+/// Statements MySQL commits on its own, by their first keywords: refused
+/// in a transactional raw_sql unit there.
+const MYSQL_DDL: &[&str] = &[
+    "CREATE",
+    "ALTER",
+    "DROP",
+    "RENAME",
+    "TRUNCATE",
+    "GRANT",
+    "REVOKE",
+    "LOCK TABLES",
+    "UNLOCK TABLES",
+    "ANALYZE TABLE",
+    "OPTIMIZE TABLE",
+    "REPAIR TABLE",
+];
+
+/// `sql` without comments, and the number of statements in it (a `;`
+/// outside strings and quoted names ends one). `#` starts a comment on
+/// MySQL only; elsewhere it is an operator.
+fn strip_comments(sql: &str, mysql: bool) -> (String, usize) {
+    let b: Vec<char> = sql.chars().collect();
+    let mut out = String::with_capacity(sql.len());
+    let mut stmts = 0;
+    let mut tail = false;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        match c {
+            '-' if b.get(i + 1) == Some(&'-') => {
+                while i < b.len() && b[i] != '\n' {
+                    i += 1;
+                }
+                out.push(' ');
+                continue;
+            }
+            '#' if mysql => {
+                while i < b.len() && b[i] != '\n' {
+                    i += 1;
+                }
+                out.push(' ');
+                continue;
+            }
+            '/' if b.get(i + 1) == Some(&'*') => {
+                i += 2;
+                while i < b.len() && !(b[i] == '*' && b.get(i + 1) == Some(&'/')) {
+                    i += 1;
+                }
+                i += 2;
+                out.push(' ');
+                continue;
+            }
+            '\'' | '"' | '`' => {
+                out.push(c);
+                i += 1;
+                while i < b.len() {
+                    out.push(b[i]);
+                    if b[i] == '\\' && c == '\'' {
+                        if let Some(n) = b.get(i + 1) {
+                            out.push(*n);
+                        }
+                        i += 2;
+                        continue;
+                    }
+                    if b[i] == c {
+                        break;
+                    }
+                    i += 1;
+                }
+                i += 1;
+                tail = true;
+                continue;
+            }
+            ';' => {
+                if tail {
+                    stmts += 1;
+                }
+                tail = false;
+                out.push(c);
+                i += 1;
+                continue;
+            }
+            c if !c.is_whitespace() => tail = true,
+            _ => {}
+        }
+        out.push(c);
+        i += 1;
+    }
+    if tail {
+        stmts += 1;
+    }
+    (out, stmts)
+}
+
+/// The first `n` words of `sql`, upper case, one space apart.
+fn first_words(sql: &str, n: usize) -> String {
+    sql.split_whitespace()
+        .take(n)
+        .map(str::to_ascii_uppercase)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 pub(crate) fn dialect(b: Backend) -> &'static dyn Dialect {
     match b {
@@ -301,13 +401,7 @@ fn col_def(d: &dyn Dialect, c: &ColumnDef) -> String {
 }
 
 fn on_delete(o: OnDelete) -> Option<&'static str> {
-    match o {
-        OnDelete::NoAction => None,
-        OnDelete::Restrict => Some("RESTRICT"),
-        OnDelete::Cascade => Some("CASCADE"),
-        OnDelete::SetNull => Some("SET NULL"),
-        OnDelete::SetDefault => Some("SET DEFAULT"),
-    }
+    (o != OnDelete::NoAction).then(|| o.sql())
 }
 
 fn fk_clause(d: &dyn Dialect, fk: &FkDef) -> String {
@@ -383,6 +477,16 @@ fn create_table_sql(d: &dyn Dialect, t: &TableState, name: &str, inline: &[&Inde
     }
     for f in &t.fks {
         parts.push(fk_clause(d, f));
+    }
+    // MySQL takes every index inline; elsewhere a UNIQUE constraint lives here.
+    if d.kind() != crate::sql::DialectKind::Mysql {
+        for ix in t.indexes.iter().filter(|i| i.constraint) {
+            parts.push(format!(
+                "CONSTRAINT {} UNIQUE ({})",
+                q(d, &ix.name),
+                list(d, &ix.columns)
+            ));
+        }
     }
     for ix in inline {
         parts.push(mysql_index_clause(d, ix));
@@ -612,7 +716,11 @@ impl Render<'_> {
         }
         let mut sql = vec![create_table_sql(d, t, &new, &[])];
         sql.extend(rb.copy_and_swap(d, &new));
-        for ix in t.indexes.iter().filter(|i| !skipped(i, self.b)) {
+        for ix in t
+            .indexes
+            .iter()
+            .filter(|i| !skipped(i, self.b) && !i.constraint)
+        {
             sql.push(create_index(d, &t.name, ix, false));
         }
         vec![Unit {
@@ -690,7 +798,11 @@ impl Render<'_> {
                             sql.extend(d.column_comment_statement(tgt(&ts.name), &c.column, cm));
                         }
                     }
-                    for ix in ts.indexes.iter().filter(|i| !skipped(i, self.b)) {
+                    for ix in ts
+                        .indexes
+                        .iter()
+                        .filter(|i| !skipped(i, self.b) && !i.constraint)
+                    {
                         sql.push(create_index(d, &ts.name, ix, false));
                     }
                     tx(sql)
@@ -793,6 +905,17 @@ impl Render<'_> {
                     table: table.clone(),
                     index: index.clone(),
                 }];
+                if index.constraint && lite {
+                    return Ok(self.rebuild(&*self.table(self.after, table)?, &[]));
+                }
+                if index.constraint && pg {
+                    return Ok(tx(vec![format!(
+                        "ALTER TABLE {} ADD CONSTRAINT {} UNIQUE ({})",
+                        q(d, table),
+                        q(d, &index.name),
+                        list(d, &index.columns)
+                    )]));
+                }
                 if my {
                     let mut s = format!(
                         "ALTER TABLE {} ADD {}",
@@ -826,6 +949,16 @@ impl Render<'_> {
                     table: table.clone(),
                     name: name.clone(),
                 }];
+                if was.constraint && lite {
+                    return Ok(self.rebuild(&*self.table(self.after, table)?, &[]));
+                }
+                if was.constraint && pg {
+                    return Ok(tx(vec![format!(
+                        "ALTER TABLE {} DROP CONSTRAINT {}",
+                        q(d, table),
+                        q(d, name)
+                    )]));
+                }
                 if my {
                     return Ok(vec![auto(
                         format!("ALTER TABLE {} DROP INDEX {}", q(d, table), q(d, name)),
@@ -878,6 +1011,8 @@ impl Render<'_> {
                             },
                         ],
                     )],
+                    // A constraint lives in the table's DDL.
+                    Backend::Sqlite if ix.constraint => self.rebuild(&t, &[]),
                     // No RENAME INDEX: drop and re-create from state.
                     Backend::Sqlite => tx(vec![
                         format!("DROP INDEX {}", q(d, from)),
@@ -1044,18 +1179,25 @@ impl Render<'_> {
     /// unless the op is `tx: "autocommit"` (MySQL commits it anyway).
     fn raw_statement(&self, text: &str, autocommit: bool) -> Result<String, LoadError> {
         let s = self.expand(text.trim())?;
-        let head = s.trim_start().to_ascii_uppercase();
-        if head.starts_with("PRAGMA") {
+        let (code, stmts) = strip_comments(&s, self.b == Backend::Mysql);
+        if stmts > 1 {
+            return Err(self.err(
+                Code::Raw,
+                format!("{stmts} statements in one op: write one op per statement"),
+            ));
+        }
+        let head = first_words(&code, 2);
+        let starts = |p: &str| head == p || head.starts_with(&format!("{p} "));
+        if starts("PRAGMA") {
             return Err(self.err(Code::Raw, "`PRAGMA` is not allowed in raw_sql"));
         }
-        if !autocommit && SESSION_STMTS.iter().any(|p| head.starts_with(p)) {
+        if !autocommit && SESSION_STMTS.iter().any(|p| starts(p.trim_end())) {
             return Err(self.err(
                 Code::Raw,
                 format!("`{s}` is not allowed in a transactional unit"),
             ));
         }
-        if !autocommit && self.b == Backend::Mysql && MYSQL_DDL.iter().any(|p| head.starts_with(p))
-        {
+        if !autocommit && self.b == Backend::Mysql && MYSQL_DDL.iter().any(|p| starts(p)) {
             return Err(self.err(
                 Code::Raw,
                 format!(
@@ -1073,9 +1215,12 @@ impl Render<'_> {
         op: &Op,
         probe: Option<&FileProbe>,
     ) -> Result<Option<Vec<Expect>>, LoadError> {
+        // An empty probe is no probe: it would say "present" for anything.
         Ok(match probe {
             None => None,
-            Some(FileProbe::Named(ProbeKind::State)) => Some(self.declared(op)?),
+            Some(FileProbe::Named(ProbeKind::State)) => {
+                Some(self.declared(op)?).filter(|v| !v.is_empty())
+            }
             Some(FileProbe::Spec(spec)) if spec.idempotent => Some(vec![Expect::Idempotent]),
             Some(FileProbe::Spec(spec)) => spec
                 .sql
