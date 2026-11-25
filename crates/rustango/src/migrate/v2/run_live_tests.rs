@@ -47,7 +47,9 @@ impl Drop for Db {
                     .await
                     .is_err()
                 {
+                    // `close` would wait for the drop still in flight.
                     eprintln!("leaving database `{name}`: its drop waited 30 s on a lock");
+                    return;
                 }
                 admin.close().await;
             });
