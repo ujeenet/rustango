@@ -1590,6 +1590,61 @@ async fn drift_sees_a_constraint_kind(b: B) {
     assert!(diff.iter().any(|m| m.what == "constraint"), "{diff:?}");
 }
 
+/// A run dropped mid-unit (SIGTERM, task abort, a timeout) frees the
+/// migrate lock: the next run takes it at once.
+async fn a_dropped_run_frees_the_lock(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let (_root, dir) = rd_project();
+    put(
+        &dir,
+        "0002_locale",
+        &v2("0002_locale", &["0001_users"], json!([example_a()[0]])),
+    );
+    migrate(pool, &dir, &opts()).await.unwrap();
+    seed(pool, 1).await;
+    let mut fill = example_a()[1].clone();
+    fill["allow"] = json!([{"code": "MV2-E028", "reason": "test"}]);
+    put(
+        &dir,
+        "0003_fill",
+        &v2("0003_fill", &["0002_locale"], json!([fill])),
+    );
+    // Block the data unit on a held row, then drop the run while it waits.
+    let holder = Pool::connect(&db.url).await.unwrap();
+    let mut hconn = holder.acquire().await.unwrap();
+    let mut htx = hconn.begin().await.unwrap();
+    crate::sql::raw_execute_tx(
+        &mut htx,
+        "UPDATE rd_user SET name = 'held' WHERE id = 1",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let slow = Options {
+        data_lock_timeout: Some(Duration::from_secs(60)),
+        ..Options::default()
+    };
+    let cut = tokio::time::timeout(Duration::from_secs(3), migrate(pool, &dir, &slow)).await;
+    // The dropped run's statement may still wait server-side: the lock must
+    // be free anyway, while the row is still held.
+    let lock = crate::migrate::with_lock_timeout(
+        Duration::from_secs(3),
+        crate::migrate::with_migrate_lock_held_v2(V2Token(()), pool, |_| async { Ok(()) }),
+    )
+    .await;
+    htx.rollback().await.unwrap();
+    drop(hconn);
+    holder.close().await;
+    assert!(cut.is_err(), "the run was still waiting");
+    lock.unwrap_or_else(|e| panic!("the dropped run kept the migrate lock: {e}"));
+    let next =
+        crate::migrate::with_lock_timeout(Duration::from_secs(5), migrate(pool, &dir, &opts()))
+            .await;
+    let rep = next.unwrap_or_else(|e| panic!("the dropped run kept the lock: {e}"));
+    assert_eq!(rep.applied, ["0003_fill"]);
+}
+
 per_backend!(
     apply_rollback_reapply,
     edited_file_and_stored_body,
@@ -1618,6 +1673,7 @@ per_backend!(
     custom_ledgers_keep_their_names,
     an_invalid_index_left_by_a_drop_is_dropped_again,
     drift_sees_a_constraint_kind,
+    a_dropped_run_frees_the_lock,
 );
 
 /// Legacy SQLite datetime text is swept before the first data unit, so a
