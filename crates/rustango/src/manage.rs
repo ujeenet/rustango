@@ -2782,6 +2782,88 @@ mod tests {
             .expect("the next start runs it");
     }
 
+    const BOOT_CHILD: &str = "RUSTANGO_TEST_V2_BOOT_CHILD";
+
+    /// A missing data step makes `runserver` exit non-zero before any
+    /// statement: a real process, run as this test binary's child.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn v2_boot_with_a_missing_step_exits_non_zero() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = serde_json::json!({"engine": 2, "format": 1, "id": "0001_t", "app": "project",
+            "parents": [], "target": "tenant", "operations": [
+            {"op": "create_table", "v": 1, "table": {"name": "bx_t", "scope": "tenant", "fields": [
+                {"column": "id", "ty": "i64", "primary_key": true, "nullable": false}]}},
+            {"op": "data_rust", "v": 1, "id": "no_such_step_v1", "tables": {"write": ["bx_t"]},
+             "down": {"noop": "dropped"}}]});
+        std::fs::write(dir.join("0001_t.json"), file.to_string()).unwrap();
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("app.db").display());
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--ignored",
+                "--exact",
+                "manage::tests::v2_boot_child",
+                "--nocapture",
+            ])
+            .env(BOOT_CHILD, &dir)
+            .env("DATABASE_URL", &url)
+            .env("RUSTANGO_BIND", "127.0.0.1:0")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut proc = child.spawn().unwrap();
+        // A server that started would never exit: give up after 60 s.
+        let started = std::time::Instant::now();
+        let status = loop {
+            if let Some(s) = proc.try_wait().unwrap() {
+                break s;
+            }
+            if started.elapsed() > std::time::Duration::from_secs(60) {
+                let _ = proc.kill();
+                panic!("the booting process did not exit");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        };
+        let mut err = String::new();
+        std::io::Read::read_to_string(proc.stderr.as_mut().unwrap(), &mut err).unwrap();
+        assert_eq!(status.code(), Some(3), "{err}");
+        assert!(err.contains("MV2-E029"), "{err}");
+        let pool = crate::sql::Pool::connect(&url).await.expect("connect");
+        for t in [
+            "bx_t",
+            "__rustango_migrations_v2",
+            crate::migrate::SYSTEM_LEDGER_TABLE,
+        ] {
+            assert!(
+                !crate::migrate::try_table_exists_here(&pool, t)
+                    .await
+                    .unwrap(),
+                "{t}"
+            );
+        }
+    }
+
+    /// The child of [`v2_boot_with_a_missing_step_exits_non_zero`]: an app's
+    /// `main`, running `runserver`; exit 3 when it returns an error.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    #[ignore = "run by v2_boot_with_a_missing_step_exits_non_zero"]
+    async fn v2_boot_child() {
+        let Some(dir) = std::env::var_os(BOOT_CHILD) else {
+            return;
+        };
+        let res = Cli::new()
+            .migrations_dir(std::path::PathBuf::from(dir))
+            .run_with_args(vec!["runserver".into()])
+            .await;
+        if let Err(e) = res {
+            eprintln!("{e}");
+            std::process::exit(3);
+        }
+    }
+
     /// A data step with nothing to run here stops boot before any statement.
     #[cfg(feature = "sqlite")]
     #[tokio::test]

@@ -1,7 +1,7 @@
 //! Engine v2 historical tables (5.3, 5.5) through a step context, on
 //! every backend: the 14 types, strict decode, coercion, auto keys,
-//! upsert/insert_ignore/insert_many/exists/raw, interning, and one
-//! statement per write on an audited generic-M2M owner.
+//! upsert/insert_ignore/insert_many/exists/raw, interning, two tenants in
+//! parallel, and one statement per write on audited tables.
 
 #![cfg(all(
     feature = "testkit",
@@ -16,7 +16,9 @@ use rustango::migrate::v2::testing::{end, session};
 use rustango::migrate::v2::{leaked_bytes, HistError, HistTable, StepCtx};
 use rustango::migrate::{detect_changes, render_changes_split_with_dialect};
 use rustango::migrate::{SchemaSnapshot, TableSnapshot};
+use rustango::sql::ForeignKey;
 use rustango::sql::{CounterPool as _, Pool};
+use rustango::test_assertions::query_counter::assert_num_queries;
 use rustango::testkit::matrix::{drop_table, fresh_table};
 use rustango::{tri_dialect_test, Model};
 use serde_json::json;
@@ -39,6 +41,28 @@ pub struct S1Gaudited {
     pub label: String,
 }
 
+/// A plain parent table whose child is audited.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "s1_parent", app = "s1")]
+pub struct S1Parent {
+    #[rustango(primary_key)]
+    pub id: i64,
+    #[rustango(max_length = 16)]
+    pub label: String,
+}
+
+/// An audited child with an FK to [`S1Parent`]: a shared parent delete
+/// would walk to it for audit.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "s1_child", app = "s1", audit(track = "label"))]
+pub struct S1Child {
+    #[rustango(primary_key)]
+    pub id: i64,
+    pub parent_id: ForeignKey<S1Parent, i64>,
+    #[rustango(max_length = 16)]
+    pub label: String,
+}
+
 const TAGGABLES: &ModelSchema = &{
     const FIELDS: &[FieldSchema] = &[
         FieldSchema::new("taggable_id", "taggable_id", FieldType::I64),
@@ -50,7 +74,14 @@ const TAGGABLES: &ModelSchema = &{
     s
 };
 
-const TABLES: &[&str] = &["s1_kinds", "s1_points", "s1_bad", "s1_up"];
+const TABLES: &[&str] = &[
+    "s1_kinds",
+    "s1_points",
+    "s1_bad",
+    "s1_up",
+    "s1_tenant",
+    "s1_child",
+];
 
 fn snap(v: serde_json::Value) -> TableSnapshot {
     serde_json::from_value(v).expect("snapshot json")
@@ -107,6 +138,8 @@ async fn setup(pool: &Pool) {
     }
     drop_table(pool, TAGGABLES.table).await;
     fresh_table::<S1Gaudited>(pool).await;
+    fresh_table::<S1Parent>(pool).await;
+    fresh_table::<S1Child>(pool).await;
     audit::ensure_table_pool(pool).await.expect("audit table");
     rustango::testkit::create_tables(pool, &[TAGGABLES])
         .await
@@ -433,6 +466,206 @@ async fn hist_strict_decode_fails_on_a_bad_cell(pool: &Pool) {
     end(ctx, false).await.unwrap();
 }
 
+async fn child_audits(pool: &Pool) -> i64 {
+    AuditLog::objects()
+        .filter("entity_table", "s1_child")
+        .count(pool)
+        .await
+        .unwrap()
+}
+
+/// A historical parent of an audited FK child: an update and a delete on
+/// the parent are one statement each and write no audit row.
+async fn hist_parent_of_an_audited_fk_child(pool: &Pool) {
+    for id in [1_i64, 2] {
+        let p = S1Parent {
+            id,
+            label: "p".into(),
+        };
+        p.insert(pool).await.unwrap();
+    }
+    let mut c = S1Child {
+        id: 1,
+        parent_id: ForeignKey::unloaded(1),
+        label: "c".into(),
+    };
+    c.insert(pool).await.unwrap();
+    let audits = child_audits(pool).await;
+    let state = SchemaSnapshot::from_models_forced(&[S1Parent::SCHEMA]);
+    let snap = state.tables.iter().find(|t| t.name == "s1_parent").unwrap();
+    let (mut ctx, t) = ctx_on(pool, snap).await;
+    assert!(ModelEntry::for_schema(t.schema()).is_none());
+    let n = assert_num_queries(
+        1,
+        t.query()
+            .filter_eq("id", 1_i64)
+            .update(&mut ctx, &[("label", "q".into())]),
+    )
+    .await;
+    assert_eq!(n.unwrap(), 1);
+    let n = assert_num_queries(1, t.query().filter_eq("id", 2_i64).delete(&mut ctx)).await;
+    assert_eq!(n.unwrap(), 1);
+    end(ctx, true).await.unwrap();
+    assert_eq!(
+        child_audits(pool).await,
+        audits,
+        "a parent write was audited"
+    );
+}
+
+/// A second tenant with the same table: PG another schema (search_path
+/// only that schema), MySQL another database, SQLite another memory DB.
+async fn tenant_b(pool: &Pool) -> (Pool, Option<String>) {
+    use rustango::testkit::matrix::Backend;
+    let with_query = |url: String, q: &str| {
+        let sep = if url.contains('?') { '&' } else { '?' };
+        format!("{url}{sep}{q}")
+    };
+    match backend(pool) {
+        "postgres" => {
+            for sql in [
+                "DROP SCHEMA IF EXISTS s1_tenant_b CASCADE",
+                "CREATE SCHEMA s1_tenant_b",
+            ] {
+                rustango::sql::raw_execute_pool(pool, sql, Vec::new())
+                    .await
+                    .unwrap();
+            }
+            let url = Backend::Postgres.url().unwrap();
+            let b = Pool::connect(&with_query(url, "options=-c%20search_path%3Ds1_tenant_b"))
+                .await
+                .unwrap();
+            (b, Some("DROP SCHEMA IF EXISTS s1_tenant_b CASCADE".into()))
+        }
+        "mysql" => {
+            let url = Backend::MySql.url().unwrap();
+            let (base, db) = url.rsplit_once('/').unwrap();
+            let db = db.split('?').next().unwrap();
+            let name = format!("{}-tb", db.replace('_', "-"));
+            let dbn = rustango::sql::server::DatabaseName::new(name.clone()).unwrap();
+            let d = pool.dialect();
+            let drop = d.drop_database_sql(&dbn).unwrap();
+            let create = d.create_database_sql(&dbn, None).unwrap();
+            for sql in [drop.clone(), create] {
+                rustango::sql::raw_execute_pool(pool, &sql, Vec::new())
+                    .await
+                    .unwrap();
+            }
+            (
+                Pool::connect(&format!("{base}/{name}")).await.unwrap(),
+                Some(drop),
+            )
+        }
+        _ => (Pool::connect("sqlite::memory:").await.unwrap(), None),
+    }
+}
+
+fn tenant_snap() -> TableSnapshot {
+    snap(json!({"name": "s1_tenant", "model": "Tn", "fields": [
+        with(f("id", "i64"), json!({"primary_key": true})),
+        with(f("label", "string"), json!({"max_length": 32})),
+    ]}))
+}
+
+async fn tenant_work(pool: Pool, tag: &'static str, deletes: Vec<i64>, new_id: i64) {
+    let (mut ctx, t) = ctx_on(&pool, &tenant_snap()).await;
+    for round in 0..20_i64 {
+        for id in 1..=20_i64 {
+            t.query()
+                .filter_eq("id", id)
+                .update(&mut ctx, &[("label", format!("{tag}{round}").into())])
+                .await
+                .unwrap();
+            tokio::task::yield_now().await;
+        }
+    }
+    t.query()
+        .filter_in("id", deletes.into_iter().map(SqlValue::I64).collect())
+        .delete(&mut ctx)
+        .await
+        .unwrap();
+    t.insert(&mut ctx, &[("id", new_id.into()), ("label", tag.into())])
+        .await
+        .unwrap();
+    end(ctx, true).await.unwrap();
+}
+
+/// Two tenants, same table def and row ids, in parallel: one interned
+/// schema, no crossed writes.
+async fn hist_two_tenants_in_parallel_never_cross(pool: &Pool) {
+    let (b, cleanup) = tenant_b(pool).await;
+    for p in [pool, &b] {
+        apply(p, &[], &[tenant_snap()]).await;
+        let (mut ctx, t) = ctx_on(p, &tenant_snap()).await;
+        for id in 1..=20_i64 {
+            t.insert(&mut ctx, &[("id", id.into()), ("label", "seed".into())])
+                .await
+                .unwrap();
+        }
+        end(ctx, true).await.unwrap();
+    }
+    let (ca, ta) = ctx_on(pool, &tenant_snap()).await;
+    let (cb, tb) = ctx_on(&b, &tenant_snap()).await;
+    assert!(
+        std::ptr::eq(ta.schema(), tb.schema()),
+        "one interned schema"
+    );
+    end(ca, false).await.unwrap();
+    end(cb, false).await.unwrap();
+    let a_task = tokio::spawn(tenant_work(pool.clone(), "A", (1..=5).collect(), 100));
+    let b_task = tokio::spawn(tenant_work(b.clone(), "B", (16..=20).collect(), 200));
+    a_task.await.unwrap();
+    b_task.await.unwrap();
+    for (p, tag, gone, kept_new, foreign_new) in [
+        (pool, "A", 1..=5_i64, 100_i64, 200_i64),
+        (&b, "B", 16..=20, 200, 100),
+    ] {
+        let (mut ctx, t) = ctx_on(p, &tenant_snap()).await;
+        let rows = t
+            .query()
+            .order_by("id", false)
+            .fetch(&mut ctx)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 16, "{tag}: rows");
+        for r in &rows {
+            let SqlValue::String(label) = r.get("label").unwrap() else {
+                panic!("label")
+            };
+            assert!(label.starts_with(tag), "{tag} sees {label}: a cross write");
+        }
+        for id in gone {
+            assert_eq!(
+                t.query().filter_eq("id", id).count(&mut ctx).await.unwrap(),
+                0
+            );
+        }
+        assert_eq!(
+            t.query()
+                .filter_eq("id", kept_new)
+                .count(&mut ctx)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            t.query()
+                .filter_eq("id", foreign_new)
+                .count(&mut ctx)
+                .await
+                .unwrap(),
+            0
+        );
+        end(ctx, false).await.unwrap();
+    }
+    b.close().await;
+    if let Some(sql) = cleanup {
+        rustango::sql::raw_execute_pool(pool, &sql, Vec::new())
+            .await
+            .unwrap();
+    }
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -441,6 +674,8 @@ tri_dialect_test! {
         hist_writes_on_an_audited_generic_m2m_owner,
         hist_delete_of_an_audited_row_is_not_audited,
         hist_strict_decode_fails_on_a_bad_cell,
+        hist_parent_of_an_audited_fk_child,
+        hist_two_tenants_in_parallel_never_cross,
     ]
 }
 

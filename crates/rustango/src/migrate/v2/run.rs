@@ -263,6 +263,7 @@ async fn migrate_project(
         .collect();
     super::data::refuse_misses(&misses, "plan")?;
     let warnings = step_changes(pool, &ledger, project, &rows, opts).await?;
+    let leaked_before = super::step::leaked_bytes();
     let sweep = sweep_targets(project)?;
     let run_id = new_run_id();
     // A dry run writes nothing: no system chain, no ledger table.
@@ -285,6 +286,15 @@ async fn migrate_project(
             Ok((applied, runner.planned))
         })
         .await?;
+    let leaked = super::step::leaked_bytes() - leaked_before;
+    if leaked > 0 {
+        tracing::info!(
+            target: "rustango::migrate",
+            leaked_bytes = leaked,
+            total_bytes = super::step::leaked_bytes(),
+            "historical tables interned this run"
+        );
+    }
     Ok(Report {
         planned,
         system,
@@ -375,6 +385,7 @@ async fn step_changes(
 ) -> Result<Vec<String>, RunError> {
     let recorded = ledger.step_hashes(pool).await?;
     let mut warnings = Vec::new();
+    let mut accepted: Vec<(String, String, String, String, String)> = Vec::new();
     for f in &project.files {
         let Some(row) = rows
             .iter()
@@ -408,26 +419,13 @@ async fn step_changes(
                 continue;
             }
             match &opts.accept_step_change {
-                Some((accepted, reason)) if accepted == id => {
-                    if !opts.dry_run {
-                        let k = (f.file.app.as_str(), f.file.id.as_str());
-                        let detail = format!("{id} {now} {reason}");
-                        ledger
-                            .event(
-                                pool,
-                                "step_change_accepted",
-                                k,
-                                None,
-                                &row.run_id,
-                                Some(&detail),
-                            )
-                            .await?;
-                        let detail = format!("{id} {now}");
-                        ledger
-                            .event(pool, STEP_HASH, k, None, &row.run_id, Some(&detail))
-                            .await?;
-                    }
-                }
+                Some((want, reason)) if want == id => accepted.push((
+                    f.file.app.clone(),
+                    f.file.id.clone(),
+                    row.run_id.clone(),
+                    format!("{id} {now}"),
+                    reason.clone(),
+                )),
                 _ => {
                     return Err(refused(
                         Code::StepChanged,
@@ -439,6 +437,32 @@ async fn step_changes(
                     ))
                 }
             }
+        }
+    }
+    // Only a partial or failed step's change is accepted; an applied one
+    // only warns.
+    if let Some((want, _)) = &opts.accept_step_change {
+        if accepted.is_empty() {
+            return Err(refused(
+                Code::StepChanged,
+                want,
+                format!(
+                    "`--accept-step-change {want}`: no partial or failed migration runs a changed \
+                     `{want}`; an applied one only warns"
+                ),
+            ));
+        }
+    }
+    if !opts.dry_run {
+        for (app, mig, run_id, detail, reason) in &accepted {
+            let k = (app.as_str(), mig.as_str());
+            let why = format!("{detail} {reason}");
+            ledger
+                .event(pool, "step_change_accepted", k, None, run_id, Some(&why))
+                .await?;
+            ledger
+                .event(pool, STEP_HASH, k, None, run_id, Some(detail))
+                .await?;
         }
     }
     Ok(warnings)

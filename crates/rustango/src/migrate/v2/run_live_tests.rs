@@ -1911,6 +1911,15 @@ async fn a_changed_step_is_warned_or_refused(b: B) {
         found.iter().any(|f| f.msg.contains("changed after it ran")),
         "{found:#?}"
     );
+    // Accepting a change is for a partial or failed step: an applied one only warns.
+    let accept_applied = Options {
+        accept_step_change: Some(("greet_v1".into(), "reviewed".into())),
+        ..Options::default()
+    };
+    assert_eq!(
+        code(migrate(pool, &dir, &accept_applied).await),
+        Code::StepChanged
+    );
     // A failed row whose step changed.
     let Some(db2) = fresh(b).await else { return };
     let pool = &db2.pool;
@@ -1980,6 +1989,87 @@ async fn the_testing_helper_runs_a_step(b: B) {
         .await,
         1
     );
+}
+
+static LOCK_PROBE_URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+static LOCK_PROBE: std::sync::Mutex<Option<bool>> = std::sync::Mutex::new(None);
+
+/// Before writing anything, asks a second SQLite connection for the write
+/// lock: under `BEGIN IMMEDIATE` it is already taken.
+#[crate::data_step(app = "steps", id = "lock_probe_v1")]
+impl LockProbeV1 {
+    async fn up(_ctx: &mut StepCtx<'_>, batch: Batch) -> StepResult {
+        use sqlx::Connection as _;
+        let url = LOCK_PROBE_URL.get().expect("set by the test");
+        let mut other = sqlx::SqliteConnection::connect(url)
+            .await
+            .map_err(|e| StepError::Message(e.to_string()))?;
+        sqlx::query("PRAGMA busy_timeout = 0")
+            .execute(&mut other)
+            .await
+            .map_err(|e| StepError::Message(e.to_string()))?;
+        let taken = sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut other)
+            .await
+            .is_err();
+        *LOCK_PROBE.lock().unwrap() = Some(taken);
+        let _ = other.close().await;
+        Ok(batch.done())
+    }
+}
+
+/// SQLite data units take the write lock at `BEGIN` (6.9).
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_data_units_begin_immediate() {
+    bounded(async {
+        let Some(db) = fresh(B::Lite).await else {
+            return;
+        };
+        LOCK_PROBE_URL.set(db.url.clone()).unwrap();
+        let (_root, dir) = st_project(
+            &db.pool,
+            json!([rust_op("lock_probe_v1", json!({"noop": "t"}))]),
+        )
+        .await;
+        migrate(&db.pool, &dir, &opts()).await.unwrap();
+        assert_eq!(
+            *LOCK_PROBE.lock().unwrap(),
+            Some(true),
+            "the unit began deferred"
+        );
+    })
+    .await;
+}
+
+/// The leaked historical-table bytes are logged once per run.
+#[cfg(all(feature = "sqlite", feature = "runtime", feature = "testkit"))]
+#[tokio::test]
+async fn leaked_bytes_are_logged_once_per_run() {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    let buf = crate::testkit::CaptureWriter::default();
+    let subscriber = tracing_subscriber::registry().with(
+        tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(buf.clone()),
+    );
+    let _guard = tracing::subscriber::set_default(subscriber);
+    tracing::callsite::rebuild_interest_cache();
+    bounded(async {
+        let Some(db) = fresh(B::Lite).await else {
+            return;
+        };
+        let (_root, dir) = st_project(&db.pool, json!([rust_op("greet_v1", json!("rust"))])).await;
+        migrate(&db.pool, &dir, &opts()).await.unwrap();
+    })
+    .await;
+    let out = buf.contents();
+    let lines: Vec<&str> = out
+        .lines()
+        .filter(|l| l.contains("historical tables interned this run"))
+        .collect();
+    assert_eq!(lines.len(), 1, "{out}");
+    assert!(lines[0].contains("leaked_bytes="), "{}", lines[0]);
 }
 
 per_backend!(
