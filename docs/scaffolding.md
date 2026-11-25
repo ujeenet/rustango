@@ -200,7 +200,7 @@ Every template writes a self-contained Cargo project:
   Dockerfile.dev        # the dev image docker-compose.yml builds
   .dockerignore
   README.md
-  config/
+  config/               # not written by --template api: it reads env vars only
     default.toml        # settings shared across every environment
     dev_settings.toml   # per-tier overrides …
     staging_settings.toml
