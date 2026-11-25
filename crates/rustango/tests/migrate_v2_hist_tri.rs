@@ -16,7 +16,6 @@ use rustango::migrate::v2::testing::{end, session};
 use rustango::migrate::v2::{leaked_bytes, HistError, HistTable, StepCtx};
 use rustango::migrate::{detect_changes, render_changes_split_with_dialect};
 use rustango::migrate::{SchemaSnapshot, TableSnapshot};
-use rustango::sql::ForeignKey;
 use rustango::sql::{CounterPool as _, Pool};
 use rustango::test_assertions::query_counter::assert_num_queries;
 use rustango::testkit::matrix::{drop_table, fresh_table};
@@ -51,14 +50,15 @@ pub struct S1Parent {
     pub label: String,
 }
 
-/// An audited child with an FK to [`S1Parent`]: a shared parent delete
-/// would walk to it for audit.
+/// An audited child whose FK to [`S1Parent`] cascades: a shared parent
+/// delete would audit the child rows it removes.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "s1_child", app = "s1", audit(track = "label"))]
 pub struct S1Child {
     #[rustango(primary_key)]
     pub id: i64,
-    pub parent_id: ForeignKey<S1Parent, i64>,
+    #[rustango(fk = "s1_parent", on = "id", on_delete = "cascade")]
+    pub parent_id: i64,
     #[rustango(max_length = 16)]
     pub label: String,
 }
@@ -486,7 +486,7 @@ async fn hist_parent_of_an_audited_fk_child(pool: &Pool) {
     }
     let mut c = S1Child {
         id: 1,
-        parent_id: ForeignKey::unloaded(1),
+        parent_id: 1,
         label: "c".into(),
     };
     c.insert(pool).await.unwrap();
@@ -498,14 +498,20 @@ async fn hist_parent_of_an_audited_fk_child(pool: &Pool) {
     let n = assert_num_queries(
         1,
         t.query()
-            .filter_eq("id", 1_i64)
+            .filter_eq("id", 2_i64)
             .update(&mut ctx, &[("label", "q".into())]),
     )
     .await;
     assert_eq!(n.unwrap(), 1);
-    let n = assert_num_queries(1, t.query().filter_eq("id", 2_i64).delete(&mut ctx)).await;
+    // Parent 1 has a child: the DB cascades, the delete stays one statement.
+    let n = assert_num_queries(1, t.query().filter_eq("id", 1_i64).delete(&mut ctx)).await;
     assert_eq!(n.unwrap(), 1);
     end(ctx, true).await.unwrap();
+    let left: Vec<(i64,)> =
+        rustango::sql::raw_query_pool("SELECT COUNT(*) FROM s1_child", Vec::new(), pool)
+            .await
+            .unwrap();
+    assert_eq!(left[0].0, 0, "the FK cascade removed the child");
     assert_eq!(
         child_audits(pool).await,
         audits,
