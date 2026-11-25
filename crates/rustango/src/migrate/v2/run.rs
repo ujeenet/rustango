@@ -31,6 +31,8 @@ pub(crate) struct Options {
     pub(crate) accept_drift: Option<String>,
     /// Let a rollback re-create dropped tables and columns empty.
     pub(crate) accept_data_loss: bool,
+    /// Plan only: list the SQL each pending migration would run.
+    pub(crate) dry_run: bool,
     /// Test failpoint: stop as if the process died.
     #[cfg(test)]
     pub(crate) crash: Option<Crash>,
@@ -49,6 +51,8 @@ pub(crate) enum Crash {
 /// What a run did.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct Report {
+    /// With `dry_run`: per migration, the SQL it would run.
+    pub(crate) planned: Vec<String>,
     pub(crate) system: Vec<String>,
     pub(crate) applied: Vec<String>,
     pub(crate) rolled_back: Vec<String>,
@@ -135,8 +139,14 @@ fn refuse_registry(project: &Project) -> Result<(), RunError> {
 }
 
 /// The lock, the v1 system chain first, then `body`, then the framework's
-/// bootstrap tables. One lock for all of it.
-async fn locked<F, Fut, R>(pool: &Pool, dir: &Path, body: F) -> Result<(R, Vec<String>), RunError>
+/// bootstrap tables. One lock for all of it. Without `write` (a dry run)
+/// only `body` runs.
+async fn locked<F, Fut, R>(
+    pool: &Pool,
+    dir: &Path,
+    write: bool,
+    body: F,
+) -> Result<(R, Vec<String>), RunError>
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<R, RunError>>,
@@ -147,15 +157,19 @@ where
         &[ModelScope::Registry, ModelScope::Tenant],
     )?;
     let out = crate::migrate::with_migrate_lock_held_v2(V2Token(()), pool, |held| async move {
-        let system = crate::migrate::chains::system_chain_for_v2(
-            held,
-            pool,
-            &chain,
-            crate::migrate::MigrationScope::Tenant,
-        )
-        .await?;
+        let system = if write {
+            crate::migrate::chains::system_chain_for_v2(
+                held,
+                pool,
+                &chain,
+                crate::migrate::MigrationScope::Tenant,
+            )
+            .await?
+        } else {
+            Vec::new()
+        };
         let result = body().await;
-        if result.is_ok() {
+        if result.is_ok() && write {
             crate::migrate::manage::ensure_bootstrap_tables(pool).await?;
             crate::migrate::manage::ensure_tenant_bootstrap_tables(pool).await?;
         }
@@ -180,8 +194,11 @@ pub(crate) async fn migrate(pool: &Pool, dir: &Path, opts: &Options) -> Result<R
     refuse_registry(&project)?;
     let ledger = Ledger::default_names();
     let run_id = new_run_id();
-    let (applied, system) = locked(pool, dir, || async {
-        ledger.ensure(pool).await?;
+    // A dry run writes nothing: no system chain, no ledger table.
+    let ((applied, planned), system) = locked(pool, dir, !opts.dry_run, || async {
+        if !opts.dry_run {
+            ledger.ensure(pool).await?;
+        }
         let mut runner = Runner {
             pool,
             ledger: &ledger,
@@ -189,11 +206,14 @@ pub(crate) async fn migrate(pool: &Pool, dir: &Path, opts: &Options) -> Result<R
             b: backend_of(pool),
             opts,
             units_run: 0,
+            planned: Vec::new(),
         };
-        runner.apply_project(&project).await
+        let applied = runner.apply_project(&project).await?;
+        Ok((applied, runner.planned))
     })
     .await?;
     Ok(Report {
+        planned,
         system,
         applied,
         rolled_back: Vec::new(),
@@ -215,7 +235,7 @@ pub(crate) async fn downgrade(
     load_project(dir)?;
     let ledger = Ledger::default_names();
     let run_id = new_run_id();
-    let (rolled_back, system) = locked(pool, dir, || async {
+    let (rolled_back, system) = locked(pool, dir, true, || async {
         ledger.ensure(pool).await?;
         let mut runner = Runner {
             pool,
@@ -224,11 +244,13 @@ pub(crate) async fn downgrade(
             b: backend_of(pool),
             opts,
             units_run: 0,
+            planned: Vec::new(),
         };
         runner.downgrade(steps).await
     })
     .await?;
     Ok(Report {
+        planned: Vec::new(),
         system,
         applied: Vec::new(),
         rolled_back,
@@ -243,6 +265,16 @@ struct Runner<'a> {
     opts: &'a Options,
     /// Units run so far in this run, for the test failpoints.
     units_run: usize,
+    /// What a dry run would execute.
+    planned: Vec<String>,
+}
+
+fn renamed_name(r: &super::probe::Renamed) -> &str {
+    match r {
+        super::probe::Renamed::Index(i) => &i.name,
+        super::probe::Renamed::Check(c) => &c.name,
+        super::probe::Renamed::Fk(f) => &f.name,
+    }
 }
 
 fn key(f: &File) -> (&str, &str) {
@@ -319,6 +351,10 @@ impl Runner<'_> {
         memo: &mut HashMemo,
     ) -> Result<State, RunError> {
         let (units, after) = render_file(&state, &f.file, &f.at, &CTX, self.b)?;
+        if self.opts.dry_run {
+            self.plan(&f.file.id, &units);
+            return Ok(after);
+        }
         let hashes = (state.hash(memo), after.hash(memo));
         self.ledger
             .insert(
@@ -335,6 +371,15 @@ impl Runner<'_> {
             .await?;
         self.finish(f, &units, 0).await?;
         Ok(after)
+    }
+
+    fn plan(&mut self, id: &str, units: &[Unit]) {
+        self.planned.push(format!("-- {id}"));
+        self.planned.extend(
+            units
+                .iter()
+                .flat_map(|u| u.sql.iter().map(|s| format!("{s};"))),
+        );
     }
 
     /// Run `units` from `from`, then mark the row applied.
@@ -556,6 +601,17 @@ impl Runner<'_> {
                     ),
                 ));
             }
+            // Names v1 left to the backend become the checkpoint's: the only
+            // DDL the switch runs, one unit per object.
+            let renames = super::probe::renames(self.pool, &checkpoint).await?;
+            let units: Vec<Unit> = renames
+                .iter()
+                .filter_map(|r| super::render::rename_unit(self.b, r))
+                .collect();
+            if self.opts.dry_run {
+                self.plan(&f.file.id, &units);
+                return Ok(after);
+            }
             self.ledger
                 .insert(
                     self.pool,
@@ -563,13 +619,14 @@ impl Runner<'_> {
                     &f.checksum,
                     &f.body,
                     RowState::Running,
-                    &[],
+                    &units,
                     self.run_id,
                     (&hashes.0, Some(&hashes.1)),
                     true,
                 )
                 .await?;
             if !diff.is_empty() {
+                let reason = self.opts.accept_drift.as_deref();
                 self.ledger
                     .event(
                         self.pool,
@@ -577,7 +634,20 @@ impl Runner<'_> {
                         k,
                         Some(&f.checksum),
                         self.run_id,
-                        self.opts.accept_drift.as_deref(),
+                        reason,
+                    )
+                    .await?;
+            }
+            for r in &renames {
+                let what = format!("{} -> {}", r.old, renamed_name(&r.to));
+                self.ledger
+                    .event(
+                        self.pool,
+                        "renamed",
+                        k,
+                        Some(&f.checksum),
+                        self.run_id,
+                        Some(&what),
                     )
                     .await?;
             }
@@ -591,9 +661,7 @@ impl Runner<'_> {
                     None,
                 )
                 .await?;
-            self.ledger
-                .set_state(self.pool, k, self.run_id, RowState::Applied, None)
-                .await?;
+            self.finish(f, &units, 0).await?;
             return Ok(after);
         }
         if !legacy.is_empty() {

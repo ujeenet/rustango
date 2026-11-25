@@ -433,6 +433,94 @@ pub(crate) fn render_install(
     Ok(units)
 }
 
+/// The unit renaming one object to its checkpoint name at the switch:
+/// autocommit with a probe on PG and MySQL, one transaction on SQLite.
+/// `None` where the backend cannot rename it in place (a SQLite constraint).
+pub(crate) fn rename_unit(b: Backend, r: &super::probe::Rename) -> Option<Unit> {
+    use super::probe::Renamed;
+    let d = dialect(b);
+    let t = q(d, &r.table);
+    let old = q(d, &r.old);
+    let (sql, probe) = match (&r.to, b) {
+        (Renamed::Index(ix), Backend::Postgres) => (
+            vec![format!("ALTER INDEX {old} RENAME TO {}", q(d, &ix.name))],
+            Expect::Index {
+                table: r.table.clone(),
+                index: ix.clone(),
+            },
+        ),
+        (Renamed::Index(ix), Backend::Mysql) => (
+            vec![format!(
+                "ALTER TABLE {t} RENAME INDEX {old} TO {}",
+                q(d, &ix.name)
+            )],
+            Expect::Index {
+                table: r.table.clone(),
+                index: ix.clone(),
+            },
+        ),
+        (Renamed::Index(ix), Backend::Sqlite) => {
+            return Some(Unit {
+                op: 0,
+                kind: UnitKind::Tx,
+                sql: vec![
+                    format!("DROP INDEX {old}"),
+                    create_index(d, &r.table, ix, false),
+                ],
+                probe: None,
+            })
+        }
+        (Renamed::Check(k), Backend::Postgres) => (
+            vec![format!(
+                "ALTER TABLE {t} RENAME CONSTRAINT {old} TO {}",
+                q(d, &k.name)
+            )],
+            Expect::Check {
+                table: r.table.clone(),
+                check: k.clone(),
+            },
+        ),
+        (Renamed::Check(k), Backend::Mysql) => (
+            vec![format!(
+                "ALTER TABLE {t} DROP CHECK {old}, ADD CONSTRAINT {} CHECK ({})",
+                q(d, &k.name),
+                k.expr
+            )],
+            Expect::Check {
+                table: r.table.clone(),
+                check: k.clone(),
+            },
+        ),
+        (Renamed::Fk(f), Backend::Postgres) => (
+            vec![format!(
+                "ALTER TABLE {t} RENAME CONSTRAINT {old} TO {}",
+                q(d, &f.name)
+            )],
+            Expect::Fk {
+                table: r.table.clone(),
+                fk: f.clone(),
+            },
+        ),
+        (Renamed::Fk(f), Backend::Mysql) => (
+            vec![format!(
+                "ALTER TABLE {t} DROP FOREIGN KEY {old}, ADD {}",
+                fk_clause(d, f)
+            )],
+            Expect::Fk {
+                table: r.table.clone(),
+                fk: f.clone(),
+            },
+        ),
+        (Renamed::Check(_) | Renamed::Fk(_), Backend::Sqlite) => return None,
+    };
+    Some(Unit {
+        op: 0,
+        kind: UnitKind::Autocommit,
+        sql,
+        probe: Some(vec![probe]),
+    })
+}
+
 /// `CREATE TABLE` for `t` alone (no MySQL inline indexes): the v2 ledger
 /// tables are built with it.
 pub(crate) fn create_table_sql_for(d: &dyn Dialect, t: &TableState) -> String {

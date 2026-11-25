@@ -228,11 +228,8 @@ fn table_of(
     for f in &t.fields {
         columns.push(column_of(f, d));
         if f.unique && !f.primary_key {
-            // PG names an inline UNIQUE `<t>_<c>_key`, MySQL after the column.
-            let name = match b {
-                Backend::Mysql => f.column.clone(),
-                _ => pg_object_name(&t.name, Some(&f.column), "key", |_| false),
-            };
+            // The name engine v1 gives an inline UNIQUE, on every backend.
+            let name = crate::migrate::ddl::unique_constraint_name(&t.name, &f.column);
             indexes.push(IndexDef {
                 name,
                 columns: vec![f.column.clone()],
@@ -258,7 +255,7 @@ fn table_of(
             });
         }
         if let Some(rel) = &f.fk {
-            let name = format!("{}_{}_fkey", t.name, f.column);
+            let name = crate::migrate::ddl::fk_constraint_name(&t.name, &f.column);
             fks.push(FkDef {
                 name,
                 columns: vec![f.column.clone()],

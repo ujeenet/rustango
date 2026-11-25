@@ -221,6 +221,89 @@ pub(crate) async fn drift(pool: &Pool, state: &State) -> Result<Vec<Mismatch>, C
     Ok(out)
 }
 
+/// What the per-database switch renames to the checkpoint's name.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Renamed {
+    Index(IndexDef),
+    Check(CheckDef),
+    Fk(FkDef),
+}
+
+/// An object found by shape under another name than the checkpoint's.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Rename {
+    pub(crate) table: String,
+    pub(crate) old: String,
+    pub(crate) to: Renamed,
+}
+
+/// Objects of `state` the catalog holds under another name. Unnamed ones
+/// (SQLite, an autoindex) have no name to change and are left alone.
+///
+/// # Errors
+/// Catalog read failures.
+pub(crate) async fn renames(pool: &Pool, state: &State) -> Result<Vec<Rename>, CatalogError> {
+    let c = Cmp {
+        pool,
+        d: pool.dialect().kind(),
+        names: Names::Shape,
+    };
+    let b = backend(c.d);
+    let mut out = Vec::new();
+    for t in state.tables.values() {
+        let Some(live) = read_table(pool, &t.name).await? else {
+            continue;
+        };
+        for ix in t.indexes.iter().filter(|i| !i.skipped_on.contains(&b)) {
+            if live.indexes.iter().any(|l| l.name == ix.name) {
+                continue;
+            }
+            if let Some(l) = live.indexes.iter().find(|l| {
+                !l.primary && !l.name.starts_with("sqlite_autoindex") && c.same_index(l, ix)
+            }) {
+                out.push(Rename {
+                    table: t.name.clone(),
+                    old: l.name.clone(),
+                    to: Renamed::Index(ix.clone()),
+                });
+            }
+        }
+        for k in &t.checks {
+            if live
+                .checks
+                .iter()
+                .any(|l| l.name.as_deref() == Some(&k.name))
+            {
+                continue;
+            }
+            for l in &live.checks {
+                let Some(name) = &l.name else { continue };
+                if c.expr_eq(&live, ExprKind::Check, &k.expr, &l.expr).await? {
+                    out.push(Rename {
+                        table: t.name.clone(),
+                        old: name.clone(),
+                        to: Renamed::Check(k.clone()),
+                    });
+                    break;
+                }
+            }
+        }
+        for f in &t.fks {
+            if live.fks.iter().any(|l| l.name.as_deref() == Some(&f.name)) {
+                continue;
+            }
+            if let Some(name) = c.find_fk(&live, f).and_then(|l| l.name.clone()) {
+                out.push(Rename {
+                    table: t.name.clone(),
+                    old: name,
+                    to: Renamed::Fk(f.clone()),
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// RESTRICT and NO ACTION are apart in state; the catalog of MySQL and
 /// SQLite cannot tell them apart, so there they compare equal.
 fn action(d: DialectKind, a: &str) -> String {

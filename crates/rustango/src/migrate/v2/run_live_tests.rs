@@ -373,7 +373,8 @@ fn v1_project(dir: &Path) {
     let author = json!({"name": "ad_author", "model": "AdAuthor", "fields": [
         v1_field("id", "i64", json!({"primary_key": true, "auto": true, "nullable": false})),
         v1_field("name", "string", json!({"max_length": 50, "nullable": false, "default": "'x'"})),
-        v1_field("email", "string", json!({"max_length": 100, "unique": true}))]});
+        v1_field("email", "string", json!({"max_length": 100, "unique": true})),
+        v1_field("rank", "i32", json!({"min": 0, "max": 9}))]});
     let book = json!({"name": "ad_book", "model": "AdBook", "fields": [
         v1_field("id", "i64", json!({"primary_key": true, "auto": true, "nullable": false})),
         v1_field("author_id", "i64", json!({"nullable": false,
@@ -424,7 +425,9 @@ async fn adopt_and_switch(b: B) {
         .event_kinds(pool, ("project", "0003_adopt"))
         .await
         .unwrap();
-    assert_eq!(kinds, ["adopted"]);
+    // MySQL named v1's inline CHECK `<t>_chk_1`: the switch renames it.
+    let renamed: &[&str] = if b == B::My { &["renamed"] } else { &[] };
+    assert_eq!(kinds, [renamed, &["adopted", "applied"]].concat());
     put(
         &dir,
         "0004_isbn",
@@ -490,7 +493,11 @@ async fn adopt_switch_cases(b: B) {
         .event_kinds(&drifted.pool, ("project", "0003_adopt"))
         .await
         .unwrap();
-    assert_eq!(kinds, ["drift_accepted", "adopted"]);
+    let renamed: &[&str] = if b == B::My { &["renamed"] } else { &[] };
+    assert_eq!(
+        kinds,
+        [&["drift_accepted"][..], renamed, &["adopted", "applied"]].concat()
+    );
     // Fresh: the checkpoint creates its tables; rollback still stops there.
     let fresh_db = fresh(b).await.unwrap();
     migrate(&fresh_db.pool, &dir, &opts())
@@ -535,6 +542,77 @@ async fn registry_files_are_refused() {
     );
 }
 
+/// The catalog's view of `t`, with what engine v1 and a fresh install may
+/// spell differently left out: SQLite constraint names (v1 leaves them
+/// unnamed) and whether a unique index backs a constraint.
+async fn shape(pool: &Pool, t: &str) -> super::super::catalog::LiveTable {
+    let mut live = super::super::catalog::read_table(pool, t)
+        .await
+        .unwrap()
+        .unwrap();
+    let lite = pool.dialect().kind() == crate::sql::DialectKind::Sqlite;
+    for i in &mut live.indexes {
+        i.constraint = false;
+        if lite && i.unique && !i.primary {
+            i.name = format!("unique({})", i.columns.join(","));
+        }
+    }
+    live.indexes.sort_by(|a, b| a.name.cmp(&b.name));
+    if lite {
+        live.checks.iter_mut().for_each(|c| c.name = None);
+        live.fks.iter_mut().for_each(|f| f.name = None);
+    }
+    live.checks.sort_by(|a, b| a.expr.cmp(&b.expr));
+    live.fks.sort_by(|a, b| a.columns.cmp(&b.columns));
+    live
+}
+
+/// The switch renames objects v1 left under another name (a MySQL
+/// `_chk_<n>`) to the checkpoint's, listed by a dry run; afterwards an
+/// adopted database and a fresh install of the checkpoint have one catalog.
+async fn switch_renames_and_fresh_matches(b: B) {
+    let Some(adopted) = fresh(b).await else {
+        return;
+    };
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    v1_project(&dir);
+    crate::migrate::migrate_pool(&adopted.pool, &dir)
+        .await
+        .unwrap();
+    super::super::adopt::adopt(&dir, backend_of(&adopted.pool)).unwrap();
+    let dry = Options {
+        dry_run: true,
+        ..Options::default()
+    };
+    let plan = migrate(&adopted.pool, &dir, &dry).await.unwrap().planned;
+    let renamed = plan.iter().any(|l| l.contains("ad_author_rank_check"));
+    assert_eq!(renamed, b == B::My, "{b:?}: {plan:?}");
+    assert!(
+        rows(&adopted.pool).await.is_empty(),
+        "a dry run writes nothing"
+    );
+    migrate(&adopted.pool, &dir, &opts()).await.unwrap();
+    let kinds = Ledger::default_names()
+        .event_kinds(&adopted.pool, ("project", "0003_adopt"))
+        .await
+        .unwrap();
+    assert_eq!(
+        kinds.contains(&"renamed".to_owned()),
+        b == B::My,
+        "{kinds:?}"
+    );
+    let installed = fresh(b).await.unwrap();
+    migrate(&installed.pool, &dir, &opts()).await.unwrap();
+    for t in ["ad_author", "ad_book"] {
+        assert_eq!(
+            shape(&adopted.pool, t).await,
+            shape(&installed.pool, t).await,
+            "{b:?}: {t}"
+        );
+    }
+}
+
 #[test]
 fn a_tenancy_folder_is_not_adopted_yet() {
     let root = tempfile::tempdir().unwrap();
@@ -576,4 +654,5 @@ per_backend!(
     runs_exclude_each_other,
     adopt_and_switch,
     adopt_switch_cases,
+    switch_renames_and_fresh_matches,
 );

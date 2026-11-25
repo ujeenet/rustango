@@ -191,6 +191,9 @@ impl Ledger {
     /// # Errors
     /// Driver failures, or a row that does not decode.
     pub(crate) async fn rows(&self, pool: &Pool) -> Result<Vec<Row>, MigrateError> {
+        if !crate::migrate::try_table_exists_here(pool, &self.table).await? {
+            return Ok(Vec::new());
+        }
         type Raw = (
             String,
             String,
