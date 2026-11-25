@@ -40,6 +40,9 @@ pub(crate) struct Options {
     pub(crate) ledger: Option<String>,
     /// A data unit waits this long for a row or table lock; `None` = 5 s.
     pub(crate) data_lock_timeout: Option<std::time::Duration>,
+    /// `--accept-step-change <id> --reason <why>`: resume a partial or
+    /// failed data step whose code changed, recording the new hash.
+    pub(crate) accept_step_change: Option<(String, String)>,
     /// A data unit's statement runs at most this long; `None` = 5 min.
     pub(crate) data_statement_timeout: Option<std::time::Duration>,
     /// Test failpoint: stop as if the process died.
@@ -67,6 +70,8 @@ pub(crate) struct Report {
     pub(crate) system: Vec<String>,
     pub(crate) applied: Vec<String>,
     pub(crate) rolled_back: Vec<String>,
+    /// Data steps whose code changed after they ran.
+    pub(crate) warnings: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -238,15 +243,17 @@ async fn migrate_project(
     opts: &Options,
 ) -> Result<Report, RunError> {
     refuse_registry(project)?;
+    super::step::refuse_duplicates().map_err(|e| refused(Code::Unresolved, "data steps", e))?;
     let ledger = Ledger::of(opts);
     let b = backend_of(pool);
     // Every data step the plan needs resolves before the lock and the
-    // system chain, so a miss runs zero statements (5.2).
-    let done: std::collections::HashSet<(String, String)> = ledger
-        .rows(pool)
-        .await?
-        .into_iter()
-        .map(|r| (r.app, r.id))
+    // system chain, so a miss runs zero statements (5.2). A crashed row
+    // resumes, so its steps count too.
+    let rows = ledger.rows(pool).await?;
+    let done: std::collections::HashSet<(String, String)> = rows
+        .iter()
+        .filter(|r| r.state == RowState::Applied)
+        .map(|r| (r.app.clone(), r.id.clone()))
         .collect();
     let misses: Vec<String> = project
         .files
@@ -255,6 +262,7 @@ async fn migrate_project(
         .flat_map(|f| super::data::misses(&f.file, b, false))
         .collect();
     super::data::refuse_misses(&misses, "plan")?;
+    let warnings = step_changes(pool, &ledger, project, &rows, opts).await?;
     let sweep = sweep_targets(project)?;
     let run_id = new_run_id();
     // A dry run writes nothing: no system chain, no ledger table.
@@ -282,6 +290,7 @@ async fn migrate_project(
         system,
         applied,
         rolled_back: Vec::new(),
+        warnings,
     })
 }
 
@@ -350,17 +359,111 @@ async fn rollback(
         system,
         applied: Vec::new(),
         rolled_back,
+        warnings: Vec::new(),
     })
 }
+
+/// Data steps whose code hash changed since the ledger recorded it: a
+/// warning for an applied migration; for a partial or failed one, a
+/// refusal unless `--accept-step-change` names the step (5.2).
+async fn step_changes(
+    pool: &Pool,
+    ledger: &Ledger,
+    project: &Project,
+    rows: &[Row],
+    opts: &Options,
+) -> Result<Vec<String>, RunError> {
+    let recorded = ledger.step_hashes(pool).await?;
+    let mut warnings = Vec::new();
+    for f in &project.files {
+        let Some(row) = rows
+            .iter()
+            .find(|r| r.app == f.file.app && r.id == f.file.id)
+        else {
+            continue;
+        };
+        for env in &f.file.operations {
+            let Op::DataRust { id, .. } = &env.op else {
+                continue;
+            };
+            let key = (f.file.app.clone(), id.clone());
+            let (Some(was), Some(now)) = (
+                recorded.get(&key),
+                super::step::registered(&f.file.app, id)
+                    .first()
+                    .map(|s| s.code_hash()),
+            ) else {
+                continue;
+            };
+            if *was == now {
+                continue;
+            }
+            let what = format!(
+                "data step `{}:{id}` changed since it ran in `{}`",
+                f.file.app, f.file.id
+            );
+            if row.state == RowState::Applied {
+                tracing::warn!(target: "rustango::migrate", "{what}");
+                warnings.push(what);
+                continue;
+            }
+            match &opts.accept_step_change {
+                Some((accepted, reason)) if accepted == id => {
+                    if !opts.dry_run {
+                        let k = (f.file.app.as_str(), f.file.id.as_str());
+                        let detail = format!("{id} {now} {reason}");
+                        ledger
+                            .event(
+                                pool,
+                                "step_change_accepted",
+                                k,
+                                None,
+                                &row.run_id,
+                                Some(&detail),
+                            )
+                            .await?;
+                        let detail = format!("{id} {now}");
+                        ledger
+                            .event(pool, STEP_HASH, k, None, &row.run_id, Some(&detail))
+                            .await?;
+                    }
+                }
+                _ => {
+                    return Err(refused(
+                        Code::StepChanged,
+                        &f.at,
+                        format!(
+                            "{what} and did not finish: check the change, then pass \
+                             `--accept-step-change {id} --reason <why>`"
+                        ),
+                    ))
+                }
+            }
+        }
+    }
+    Ok(warnings)
+}
+
+/// The ledger event that records a data step's code hash: `"<id> <hash>"`.
+pub(crate) const STEP_HASH: &str = "step_hash";
 
 /// A `data_sql` unit as a step: its one statement.
 fn sql_step<'t>(
     sql: String,
     binds: Vec<crate::core::SqlValue>,
 ) -> impl for<'a> FnOnce(
-    &'a mut super::data::StepCtx<'t>,
-) -> futures_util::future::BoxFuture<'a, Result<(), crate::sql::ExecError>> {
-    move |ctx| Box::pin(async move { ctx.execute(&sql, binds).await.map(drop) })
+    &'a mut super::step::StepCtx<'t>,
+) -> futures_util::future::BoxFuture<'a, Result<(), super::step::StepError>> {
+    move |ctx| Box::pin(async move { Ok(ctx.execute(&sql, binds).await.map(drop)?) })
+}
+
+/// A `data_rust` unit: the registered `up` or `down`, unbatched.
+fn rust_step<'t>(
+    f: super::step::StepFn,
+) -> impl for<'a> FnOnce(
+    &'a mut super::step::StepCtx<'t>,
+) -> futures_util::future::BoxFuture<'a, Result<(), super::step::StepError>> {
+    move |ctx| Box::pin(async move { f(ctx, super::step::Batch::whole()).await.map(drop) })
 }
 
 /// Session timeouts of the runner's data connection (5.4); PG sets its own
@@ -714,9 +817,8 @@ impl Runner<'_> {
         session_timeouts(&mut conn, self.b, lock, stmt).await?;
         let binds = super::data::bind_values(&u.binds)
             .map_err(|e| refused(Code::File, &format!("{}:{}", k.0, k.1), e))?;
-        let sql = u.sql.join("\n");
         let (ledger_sql, ledger_binds) = self.ledger.advance(self.pool, k, self.run_id, n - 1, n);
-        let mut tx = conn.begin().await?;
+        let mut tx = conn.begin_write().await?;
         if self.b == Backend::Postgres {
             tx.execute_unprepared(&format!(
                 "SET LOCAL lock_timeout = {}; SET LOCAL statement_timeout = {}",
@@ -726,14 +828,38 @@ impl Runner<'_> {
             .await
             .map_err(MigrateError::Driver)?;
         }
-        let (mut tx, r) = super::data::run_step(tx, sql_step(sql, binds)).await;
+        let mut hash = None;
+        let (mut tx, r) = match &u.step {
+            None => {
+                let sql = u.sql.join("\n");
+                super::step::run_step(tx, super::step::Scope::default(), sql_step(sql, binds)).await
+            }
+            Some(sr) => {
+                let found = super::step::registered(k.0, &sr.id);
+                let f = found
+                    .first()
+                    .and_then(|s| if sr.reverse { s.down } else { Some(s.up) })
+                    .ok_or_else(|| {
+                        refused(
+                            Code::Unresolved,
+                            &format!("{}:{}", k.0, k.1),
+                            format!("data step `{}:{}` is not registered here", k.0, sr.id),
+                        )
+                    })?;
+                hash = found.first().map(|s| (sr.id.clone(), s.code_hash()));
+                let scope = super::step::Scope {
+                    app: k.0.to_owned(),
+                    footprint: sr.footprint.clone(),
+                    tables: sr.tables.clone(),
+                };
+                super::step::run_step(tx, scope, rust_step(f)).await
+            }
+        };
         #[cfg(test)]
         let r = match r {
-            Ok(()) if self.opts.crash == Some(Crash::AfterData(self.units_run)) => {
-                Err(super::data::StepError::Exec(crate::sql::ExecError::Driver(
-                    sqlx::Error::Protocol("test crash".into()),
-                )))
-            }
+            Ok(()) if self.opts.crash == Some(Crash::AfterData(self.units_run)) => Err(
+                super::step::UnitError::Step(super::step::StepError::Message("test crash".into())),
+            ),
             other => other,
         };
         if let Err(e) = r {
@@ -750,6 +876,12 @@ impl Runner<'_> {
                 .into());
         }
         tx.commit().await.map_err(MigrateError::Driver)?;
+        if let Some((id, hash)) = hash {
+            let detail = format!("{id} {hash}");
+            self.ledger
+                .event(self.pool, STEP_HASH, k, None, self.run_id, Some(&detail))
+                .await?;
+        }
         Ok(())
     }
 
@@ -1152,7 +1284,10 @@ fn error_class(e: &RunError) -> &'static str {
 }
 
 /// The checkpoint's tables with every FK target before its source.
-fn fk_order<'s>(state: &'s State, at: &str) -> Result<Vec<&'s super::state::TableState>, RunError> {
+pub(crate) fn fk_order<'s>(
+    state: &'s State,
+    at: &str,
+) -> Result<Vec<&'s super::state::TableState>, RunError> {
     let mut out: Vec<&super::state::TableState> = Vec::new();
     let mut left: Vec<&super::state::TableState> = state.tables.values().map(|t| &**t).collect();
     while !left.is_empty() {

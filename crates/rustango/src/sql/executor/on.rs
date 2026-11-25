@@ -98,6 +98,27 @@ impl PoolConn {
         }
     }
 
+    /// [`Self::begin`] that takes SQLite's write lock at `BEGIN`
+    /// (`BEGIN IMMEDIATE`), so a write never fails part way on `SQLITE_BUSY`.
+    ///
+    /// # Errors
+    /// Driver errors from `BEGIN`.
+    pub(crate) async fn begin_write(&mut self) -> Result<PoolTx<'_>, ExecError> {
+        let pool = self.pool.clone();
+        match &mut self.conn {
+            #[cfg(feature = "sqlite")]
+            PooledConn::Sqlite(c) => {
+                use sqlx::Connection as _;
+                let tx = (**c).begin_with("BEGIN IMMEDIATE").await?;
+                Ok(PoolTx::new(super::TxConn::Sqlite(tx), pool))
+            }
+            #[cfg(feature = "postgres")]
+            PooledConn::Postgres(c) => PoolTx::begin_on(&mut **c, &pool).await,
+            #[cfg(feature = "mysql")]
+            PooledConn::Mysql(c) => PoolTx::begin_on(&mut **c, &pool).await,
+        }
+    }
+
     /// Open a transaction on this connection.
     ///
     /// # Errors

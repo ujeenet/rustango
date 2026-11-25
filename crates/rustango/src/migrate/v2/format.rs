@@ -311,7 +311,7 @@ pub(crate) struct ProbeSpec {
 
 /// A data op's footprint: tables it reads, and `table` or `table.column`
 /// it writes (a write is a read too).
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Footprint {
     #[serde(default)]
@@ -379,6 +379,30 @@ impl<'de> Deserialize<'de> for DataDown {
         PerBackend::deserialize(v)
             .map(Self::Sql)
             .map_err(serde::de::Error::custom)
+    }
+}
+
+/// `down` of a `data_rust` op: the step's own `down`, or none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RustDown {
+    Rust,
+    Noop(String),
+    Irreversible(String),
+}
+
+impl<'de> Deserialize<'de> for RustDown {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = Value::deserialize(d)?;
+        if v == "rust" {
+            return Ok(Self::Rust);
+        }
+        match DataDown::deserialize(v).map_err(serde::de::Error::custom)? {
+            DataDown::Noop(r) => Ok(Self::Noop(r)),
+            DataDown::Irreversible(r) => Ok(Self::Irreversible(r)),
+            DataDown::Sql(_) => Err(serde::de::Error::custom(
+                "`down` of data_rust is \"rust\", {\"noop\": ...} or {\"irreversible\": ...}",
+            )),
+        }
     }
 }
 
@@ -535,11 +559,24 @@ pub(crate) enum Op {
         #[serde(default)]
         restores: Vec<String>,
     },
+    /// A Rust data step (5.2), run by its `#[data_step]` registration.
+    DataRust {
+        id: String,
+        tables: Footprint,
+        down: RustDown,
+        #[serde(default)]
+        on_fresh: OnFresh,
+        #[serde(default)]
+        restores: Vec<String>,
+        /// The inverse runs the step's `down`; never in a file.
+        #[serde(skip_deserializing)]
+        reverse: bool,
+    },
 }
 
 /// Ops the format defines that this release does not run yet: each gets
 /// goldens on three backends before it is enabled.
-const NOT_ENABLED: [&str; 10] = [
+const NOT_ENABLED: [&str; 9] = [
     "alter_check",
     "rename_constraint",
     "add_exclusion",
@@ -548,7 +585,6 @@ const NOT_ENABLED: [&str; 10] = [
     "drop_composite_fk",
     "create_m2m",
     "drop_m2m",
-    "data_rust",
     "verify",
 ];
 
@@ -706,7 +742,7 @@ fn decode_op(v: &Value, at: &str) -> Result<OpEnvelope, LoadError> {
             ),
         ));
     }
-    if kind == "data_sql" {
+    if kind == "data_sql" || kind == "data_rust" {
         if let Some(k) = ["batch", "verify", "undo"]
             .iter()
             .find(|k| obj.contains_key(**k))
@@ -892,6 +928,11 @@ fn verified_noops(file: &File, at: &str) -> Result<(), LoadError> {
                 tables: fp,
                 down: DataDown::Noop(_),
                 ..
+            }
+            | Op::DataRust {
+                tables: fp,
+                down: RustDown::Noop(_),
+                ..
             } => {
                 let dropped = |w: &String| match w.split_once('.') {
                     Some((t, c)) => tables.contains(&t) || columns.contains(&(t, c)),
@@ -951,6 +992,7 @@ pub(crate) fn op_name(op: &Op) -> &'static str {
         Op::CreateExtension { .. } => "create_extension",
         Op::ExternTable { .. } => "extern_table",
         Op::DataSql { .. } => "data_sql",
+        Op::DataRust { .. } => "data_rust",
     }
 }
 

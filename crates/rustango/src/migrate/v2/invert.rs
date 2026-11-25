@@ -1,8 +1,8 @@
 //! The inverse of each op (3.8), from the state around it. Rollback
 //! inverts the stored `applied_body`, never the file on disk.
 
-use super::format::DataDown;
 use super::format::{Change, ColumnChanges, Field, InlineFk, Op, TableDef};
+use super::format::{DataDown, RustDown};
 use super::state::{State, TableState};
 use super::{Code, LoadError};
 
@@ -261,6 +261,31 @@ pub(crate) fn invert(op: &Op, after: &State, allow: Allow, at: &str) -> Result<V
                 restores: Vec::new(),
             }],
         },
+        Op::DataRust {
+            id,
+            tables,
+            down,
+            on_fresh,
+            reverse: false,
+            ..
+        } => match down {
+            RustDown::Noop(_) => Vec::new(),
+            RustDown::Irreversible(why) => {
+                return Err(blocked(
+                    at,
+                    format!("data_rust `{id}` is irreversible: {why}"),
+                ))
+            }
+            RustDown::Rust => vec![Op::DataRust {
+                id: id.clone(),
+                tables: tables.clone(),
+                down: RustDown::Noop("the reverse of a reverse".into()),
+                on_fresh: *on_fresh,
+                restores: Vec::new(),
+                reverse: true,
+            }],
+        },
+        Op::DataRust { .. } => Vec::new(),
         Op::RawSql {
             id,
             up,

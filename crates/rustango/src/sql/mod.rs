@@ -99,6 +99,7 @@ pub(crate) use executor::{
 };
 pub(crate) use executor::{caught, in_block, refuse_ddl_in_block, Ddl};
 pub(crate) use executor::{in_migration_step, migration_step};
+pub(crate) use executor::{raw_rows_as_json_strict_tx, select_rows_as_json_strict_tx};
 #[allow(deprecated)]
 pub use executor::{
     AtomicOptions, AtomicTx, CounterPool, DecodeModel, ExistsPool, ExplainFormat, ExplainOptions,

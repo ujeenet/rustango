@@ -45,7 +45,7 @@ impl crate::migrate::chains::ChainFacts for Loaded {
             out.extend(doc.tables.keys().map(|t| Fact::Created(t)));
         }
         for env in &self.file.operations {
-            if let Op::DataSql { tables, .. } = &env.op {
+            if let Op::DataSql { tables, .. } | Op::DataRust { tables, .. } = &env.op {
                 out.extend(tables.write_tables().map(Fact::Written));
                 continue;
             }
@@ -78,7 +78,8 @@ impl crate::migrate::chains::ChainFacts for Loaded {
                 | Op::StateOnly { .. }
                 | Op::CreateExtension { .. }
                 | Op::ExternTable { .. }
-                | Op::DataSql { .. } => continue,
+                | Op::DataSql { .. }
+                | Op::DataRust { .. } => continue,
             };
             out.push(Fact::Written(written));
         }

@@ -79,6 +79,12 @@ impl CellDecode {
         json: json_as_is,
         on_bad: OnBadCell::Null,
     };
+
+    /// A bad cell is an error; JSON cells untouched (engine v2 data steps).
+    const STRICT: Self = Self {
+        json: json_as_is,
+        on_bad: OnBadCell::Fail,
+    };
 }
 
 /// A [`OnBadCell::Null`] decode, which has no error to return.
@@ -460,6 +466,34 @@ async fn rows_as_json_on<'c, E: SqlExecutor<'c>>(
             }
         }
         Ok(json)
+    })
+    .await
+}
+
+/// [`select_rows_as_json_tx`] with strict cells: a bad cell is an error.
+pub(crate) async fn select_rows_as_json_strict_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
+    query: &SelectQuery,
+    fields: &[&'static crate::core::FieldSchema],
+) -> Result<Vec<serde_json::Value>, ExecError> {
+    rows_as_json_on(tx, query, fields, CellDecode::STRICT).await
+}
+
+/// Rows of a raw statement as `fields`, strictly decoded.
+pub(crate) async fn raw_rows_as_json_strict_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
+    sql: &str,
+    binds: Vec<crate::core::SqlValue>,
+    fields: &[&'static crate::core::FieldSchema],
+) -> Result<Vec<serde_json::Value>, ExecError> {
+    let params = crate::sql::BindParams::check(tx.dialect(), binds)?;
+    run_on(tx, sql, params, move |row| match row {
+        #[cfg(feature = "postgres")]
+        RowRef::Postgres(r) => row_to_json_pg_with(r, fields, CellDecode::STRICT),
+        #[cfg(feature = "mysql")]
+        RowRef::Mysql(r) => row_to_json_my_with(r, fields, CellDecode::STRICT),
+        #[cfg(feature = "sqlite")]
+        RowRef::Sqlite(r) => row_to_json_sqlite_with(r, fields, CellDecode::STRICT),
     })
     .await
 }

@@ -243,3 +243,41 @@ fn a_drop_and_an_add_of_one_type_needs_rename_or_no_rename() {
     );
     assert!(make(&dir, &dir, &m, &opts()).unwrap().is_none());
 }
+
+#[test]
+fn make_data_rust_writes_the_op_the_stub_and_the_mod_line() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("src/migrations");
+    make(&dir, &dir, &models(json!({})), &opts())
+        .unwrap()
+        .unwrap();
+    let made = make_data_rust(
+        &dir,
+        &dir,
+        "fill_rank",
+        &["mk_author".to_owned()],
+        &["mk_author.rank".to_owned()],
+    )
+    .unwrap();
+    assert!(
+        made.path.ends_with("0002_fill_rank.json"),
+        "{:?}",
+        made.path
+    );
+    let op = &serde_json::from_str::<Value>(&std::fs::read_to_string(&made.path).unwrap()).unwrap()
+        ["operations"][0];
+    assert_eq!(op["op"], "data_rust");
+    assert_eq!(op["id"], "fill_rank_v1");
+    assert_eq!(op["tables"]["write"], json!(["mk_author.rank"]));
+    let stub = std::fs::read_to_string(tmp.path().join("src/data_steps/fill_rank.rs")).unwrap();
+    assert!(stub.contains("#[rustango::data_step(app = \"project\", id = \"fill_rank_v1\")]"));
+    assert!(stub.contains("impl FillRank"), "{stub}");
+    assert!(stub.contains("testing::at"), "{stub}");
+    let mods = std::fs::read_to_string(tmp.path().join("src/data_steps/mod.rs")).unwrap();
+    assert_eq!(mods, "pub mod fill_rank;\n");
+    super::super::load::load_project(&dir).unwrap();
+    // A footprint table not in state is refused, and nothing is written.
+    let e = make_data_rust(&dir, &dir, "nope", &["ghost".to_owned()], &[]).unwrap_err();
+    assert_eq!(e.code, Code::Footprint, "{e}");
+    assert!(!dir.join("0003_nope.json").exists());
+}

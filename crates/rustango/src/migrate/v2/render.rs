@@ -94,6 +94,26 @@ pub(crate) struct Unit {
     /// A data unit's `{{?}}` values, in text order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) binds: Vec<super::format::Bind>,
+    /// A `data_rust` unit's step and what it may touch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) step: Option<StepRef>,
+}
+
+/// The step a `data_rust` unit runs, frozen with the plan: its id, the
+/// direction, and the footprint tables as state holds them at the op.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct StepRef {
+    pub(crate) id: String,
+    pub(crate) reverse: bool,
+    pub(crate) footprint: super::format::Footprint,
+    pub(crate) tables: std::collections::BTreeMap<String, TableState>,
+}
+
+/// Column types only PostgreSQL has.
+fn pg_only(ty: &str) -> bool {
+    ["array_", "range_", "hstore", "vector", "geometry"]
+        .iter()
+        .any(|p| ty.starts_with(p))
 }
 
 /// Session and transaction statements: refused in a transactional unit.
@@ -344,6 +364,7 @@ fn tx(sql: Vec<String>) -> Vec<Unit> {
         sql,
         probe: None,
         binds: Vec::new(),
+        step: None,
     }]
 }
 
@@ -354,6 +375,7 @@ fn auto(sql: String, probe: Vec<Expect>) -> Unit {
         sql: vec![sql],
         probe: Some(probe),
         binds: Vec::new(),
+        step: None,
     }
 }
 
@@ -377,7 +399,7 @@ pub(crate) fn snapshot(c: &ColumnDef) -> FieldSnapshot {
     }
 }
 
-fn table_snapshot(t: &TableState) -> TableSnapshot {
+pub(crate) fn table_snapshot(t: &TableState) -> TableSnapshot {
     let mut snap: TableSnapshot = serde_json::from_value(serde_json::json!({
         "name": t.name, "model": "", "fields": [],
     }))
@@ -585,6 +607,7 @@ pub(crate) fn rename_unit(b: Backend, r: &super::probe::Rename) -> Option<Unit> 
                 ],
                 probe: None,
                 binds: Vec::new(),
+                step: None,
             })
         }
         (Renamed::Check(k), Backend::Postgres) => (
@@ -636,6 +659,7 @@ pub(crate) fn rename_unit(b: Backend, r: &super::probe::Rename) -> Option<Unit> 
         sql,
         probe: Some(vec![probe]),
         binds: Vec::new(),
+        step: None,
     })
 }
 
@@ -676,6 +700,7 @@ impl Render<'_> {
                 sql: vec![s],
                 probe: (i + 1 == n).then(|| probe.clone()),
                 binds: Vec::new(),
+                step: None,
             })
             .collect()
     }
@@ -729,6 +754,7 @@ impl Render<'_> {
             sql,
             probe: None,
             binds: Vec::new(),
+            step: None,
         }]
     }
 
@@ -1102,6 +1128,7 @@ impl Render<'_> {
                         sql: vec![stmt],
                         probe: self.raw_probe(op, probe.as_ref())?,
                         binds: Vec::new(),
+                        step: None,
                     }]
                 } else {
                     tx(vec![stmt])
@@ -1129,6 +1156,43 @@ impl Render<'_> {
                     sql: vec![self.raw_statement(&sql, false)?],
                     probe: None,
                     binds: binds.clone(),
+                    step: None,
+                }]
+            }
+            Op::DataRust {
+                id,
+                tables,
+                reverse,
+                ..
+            } => {
+                let mut scope = std::collections::BTreeMap::new();
+                for t in tables.tables() {
+                    let Some(ts) = self.before.tables.get(t) else {
+                        continue;
+                    };
+                    if let Some(c) = ts.columns.iter().find(|c| !pg && pg_only(&c.ty)) {
+                        return Err(self.err(
+                            Code::Dialect,
+                            format!(
+                                "data_rust `{id}` touches `{t}.{}` ({}), a PostgreSQL-only type",
+                                c.column, c.ty
+                            ),
+                        ));
+                    }
+                    scope.insert(t.to_owned(), (**ts).clone());
+                }
+                vec![Unit {
+                    op: 0,
+                    kind: UnitKind::Data,
+                    sql: Vec::new(),
+                    probe: None,
+                    binds: Vec::new(),
+                    step: Some(StepRef {
+                        id: id.clone(),
+                        reverse: *reverse,
+                        footprint: tables.clone(),
+                        tables: scope,
+                    }),
                 }]
             }
             Op::StateOnly { .. } | Op::ExternTable { .. } | Op::AdoptTable { .. } => Vec::new(),
@@ -1388,6 +1452,7 @@ impl Render<'_> {
                         sql: vec![format!("UPDATE {t} SET {c} = {f}")],
                         probe: None,
                         binds: Vec::new(),
+                        step: None,
                     },
                     auto(
                         format!("ALTER TABLE {t} MODIFY COLUMN {}", col_def(d, column)),

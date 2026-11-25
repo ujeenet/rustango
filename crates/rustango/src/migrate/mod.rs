@@ -38,7 +38,8 @@ pub mod snapshot;
 #[cfg(feature = "sqlite")]
 pub mod sqlite_datetime;
 /// Engine v2: file format, loader, checksum and state by replay.
-pub(crate) mod v2;
+/// Migrations engine v2: data steps (`#[data_step]`) and their context.
+pub mod v2;
 
 /// Apply `embed_migrations!` entries of an engine v2 folder; returns the
 /// `<app>:<id>` of each migration applied. Engine v1 folders use

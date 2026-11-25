@@ -46,6 +46,7 @@ fn rustango_root() -> TokenStream2 {
     }
 }
 
+mod data_step;
 mod text_enum;
 
 /// Derive `rustango::core::TextEnum` on a fieldless enum: stored as text,
@@ -408,6 +409,16 @@ pub fn Q(input: TokenStream) -> TokenStream {
 /// Pulls `tracing-subscriber` into the rustango crate behind the
 /// `runtime` sub-feature (implied by `tenancy`), so apps that opt
 /// out get plain `#[tokio::main]` ergonomics without the dependency.
+/// Register an engine v2 data step: `#[rustango::data_step(app = "accounts",
+/// id = "move_address_v1")] impl MoveAddressV1 { async fn up(ctx, batch) ... }`.
+/// It declares `pub struct MoveAddressV1;` for you.
+#[proc_macro_attribute]
+pub fn data_step(args: TokenStream, item: TokenStream) -> TokenStream {
+    data_step::expand(args.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
 #[proc_macro_attribute]
 pub fn main(args: TokenStream, item: TokenStream) -> TokenStream {
     expand_main(args.into(), item.into())

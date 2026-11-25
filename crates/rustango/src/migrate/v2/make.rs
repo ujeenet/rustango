@@ -136,6 +136,140 @@ pub(crate) fn make(
     }))
 }
 
+/// `make --data-rust <name>`: a file with one `data_rust` op (footprint
+/// `read`/`write`), the step's `.rs` stub with a test, and its `mod` line.
+///
+/// # Errors
+/// Load errors, a footprint table not in state, or a file that exists.
+pub(crate) fn make_data_rust(
+    dir: &Path,
+    folder: &Path,
+    name: &str,
+    read: &[String],
+    write: &[String],
+) -> Result<Made, LoadError> {
+    let project = super::load::load_project(dir)?;
+    let root = crate::migrate::file::project_root_of(dir);
+    let app = super::adopt::app_label(root, folder);
+    let mine: Vec<&super::load::Loaded> = project
+        .order
+        .get(&Target::Tenant)
+        .map(|idx| {
+            idx.iter()
+                .map(|&i| &project.files[i])
+                .filter(|f| f.file.app == app)
+                .collect()
+        })
+        .unwrap_or_default();
+    let next = mine
+        .iter()
+        .filter_map(|f| crate::migrate::file::extract_index(&f.file.id))
+        .max()
+        .map_or(1, |n| n + 1);
+    let id = format!("{next:04}_{name}");
+    let step = format!("{name}_v1");
+    let path = folder.join(format!("{id}.json"));
+    let body = json!({
+        "engine": 2, "format": 1, "id": id, "app": app, "target": "tenant",
+        "parents": mine.last().map(|f| vec![f.file.id.clone()]).unwrap_or_default(),
+        "operations": [{"op": "data_rust", "v": 1, "id": step,
+            "tables": {"read": read, "write": write}, "down": "rust"}],
+    });
+    let text = format!("{}\n", serde_json::to_string_pretty(&body).expect("json"));
+    // The op must replay: its footprint names tables in state.
+    let loaded = super::load::load_file(&path, &text)?;
+    let mut after = super::load::replay(&project)?
+        .states
+        .remove(&Target::Tenant)
+        .unwrap_or_default();
+    super::replay::apply_file(
+        &mut after,
+        &loaded.file,
+        &loaded.at,
+        &Ctx {
+            target: Target::Tenant,
+            registry: None,
+        },
+    )?;
+    let camel: String = name
+        .split('_')
+        .map(|w| {
+            let mut c = w.chars();
+            c.next()
+                .map(|f| f.to_ascii_uppercase().to_string() + c.as_str())
+                .unwrap_or_default()
+        })
+        .collect();
+    let steps = root.join("data_steps");
+    let rs = steps.join(format!("{name}.rs"));
+    let stub = format!(
+        r#"//! Data step `{app}:{step}`, run by migration `{id}`.
+use rustango::migrate::v2::{{Batch, StepCtx, StepResult}};
+
+#[rustango::data_step(app = "{app}", id = "{step}")]
+impl {camel} {{
+    async fn up(ctx: &mut StepCtx<'_>, batch: Batch) -> StepResult {{
+        // Read and write through `ctx.table("...")`: only the op's `tables`.
+        let _ = ctx;
+        Ok(batch.done())
+    }}
+
+    async fn down(ctx: &mut StepCtx<'_>, batch: Batch) -> StepResult {{
+        let _ = ctx;
+        Ok(batch.done())
+    }}
+}}
+
+#[cfg(test)]
+mod tests {{
+    /// Point `DATABASE_URL` at an empty test database.
+    #[tokio::test]
+    async fn down_restores_what_up_changed() {{
+        let Ok(url) = std::env::var("DATABASE_URL") else {{ return }};
+        let pool = rustango::sql::Pool::connect(&url).await.unwrap();
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("{migrations}");
+        let step = rustango::migrate::v2::testing::at(&pool, &dir, "{app}", "{step}")
+            .await
+            .unwrap();
+        step.assert_prefix_down().await.unwrap();
+    }}
+}}
+"#,
+        migrations = dir
+            .strip_prefix(root.parent().unwrap_or(root))
+            .unwrap_or(dir)
+            .display(),
+    );
+    let at = path.display().to_string();
+    let io = |e: std::io::Error| err(Code::Io, &at, e.to_string());
+    std::fs::create_dir_all(&steps).map_err(io)?;
+    for (p, t) in [(&path, text.as_str()), (&rs, stub.as_str())] {
+        use std::io::Write as _;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(p)
+            .and_then(|mut f| f.write_all(t.as_bytes()))
+            .map_err(io)?;
+    }
+    let mod_rs = steps.join("mod.rs");
+    let line = format!("pub mod {name};\n");
+    let mut mods = std::fs::read_to_string(&mod_rs).unwrap_or_default();
+    if !mods.contains(&line) {
+        mods.push_str(&line);
+        std::fs::write(&mod_rs, mods).map_err(io)?;
+    }
+    Ok(Made {
+        path,
+        lines: vec![
+            format!("+ data_rust {app}:{step}"),
+            format!("wrote {}", rs.display()),
+            format!("added `pub mod {name};` to {}", mod_rs.display()),
+            "add `mod data_steps;` to your crate root once".to_owned(),
+        ],
+    })
+}
+
 /// Tables other apps own, each mapped to `<app>:<leaf>` for `depends_on`.
 fn other_apps(project: &super::load::Project, app: &str) -> BTreeMap<String, String> {
     let Some(idx) = project.order.get(&Target::Tenant) else {

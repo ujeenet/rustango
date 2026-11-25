@@ -319,7 +319,7 @@ pub(crate) fn apply(
                 return Err(fail(at, format!("drop_check `{name}`: `was` differs")));
             }
         }
-        Op::DataSql { .. } => super::data::check_op(s, op, at)?,
+        Op::DataSql { .. } | Op::DataRust { .. } => super::data::check_op(s, op, at)?,
         Op::RawSql { .. } | Op::StateOnly { .. } => {
             for (i, nested) in op.nested(at)?.iter().enumerate() {
                 apply(s, nested, &format!("{at}/state/{i}"), ctx, created_here)?;

@@ -179,6 +179,7 @@ pub(crate) async fn check(
             }
         }
     }
+    out.extend(step_findings(&project, dir, pool).await?);
     if let Some(models) = models {
         let opts = super::make::MakeOptions {
             backends: backends.to_vec(),
@@ -197,6 +198,76 @@ pub(crate) async fn check(
         }
     }
     out.dedup();
+    Ok(out)
+}
+
+/// Data step registrations: a duplicate key and a `data_rust` op with no
+/// step are errors; a step no op names is a warning, as is (online) a
+/// step whose code changed after it ran.
+async fn step_findings(
+    project: &super::load::Project,
+    dir: &Path,
+    pool: Option<&Pool>,
+) -> Result<Vec<Finding>, LoadError> {
+    let at = dir.display().to_string();
+    let mut out = Vec::new();
+    if let Err(e) = super::step::refuse_duplicates() {
+        out.push(Finding {
+            severity: Severity::Error,
+            at: at.clone(),
+            msg: e,
+        });
+    }
+    let b = pool.map_or(Backend::Postgres, super::run::backend_of);
+    let mut named = std::collections::BTreeSet::new();
+    let mut apps = std::collections::BTreeSet::new();
+    for f in &project.files {
+        apps.insert(f.file.app.clone());
+        for env in &f.file.operations {
+            if let Op::DataRust { id, .. } = &env.op {
+                named.insert((f.file.app.clone(), id.clone()));
+            }
+        }
+        for miss in super::data::misses(&f.file, b, false)
+            .into_iter()
+            .filter(|m| m.contains("#[data_step"))
+        {
+            out.push(Finding {
+                severity: Severity::Error,
+                at: f.at.clone(),
+                msg: miss,
+            });
+        }
+    }
+    for s in inventory::iter::<super::step::DataStep> {
+        if apps.contains(s.app) && !named.contains(&(s.app.to_owned(), s.id.to_owned())) {
+            out.push(Finding {
+                severity: Severity::Warning,
+                at: s.type_name.to_owned(),
+                msg: format!(
+                    "data step `{}:{}` is registered but no data_rust op names it",
+                    s.app, s.id
+                ),
+            });
+        }
+    }
+    if let Some(pool) = pool {
+        let recorded = super::ledger::Ledger::default_names()
+            .step_hashes(pool)
+            .await
+            .map_err(|e| LoadError::new(super::Code::Io, &at, e.to_string()))?;
+        for ((app, id), was) in recorded {
+            if let Some(s) = super::step::registered(&app, &id).first() {
+                if s.code_hash() != was {
+                    out.push(Finding {
+                        severity: Severity::Warning,
+                        at: s.type_name.to_owned(),
+                        msg: format!("data step `{app}:{id}` changed after it ran"),
+                    });
+                }
+            }
+        }
+    }
     Ok(out)
 }
 

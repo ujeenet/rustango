@@ -574,6 +574,33 @@ impl Ledger {
     ///
     /// # Errors
     /// Driver failures.
+    /// The last code hash recorded per `(app, step id)`.
+    ///
+    /// # Errors
+    /// Driver failures.
+    pub(crate) async fn step_hashes(
+        &self,
+        pool: &Pool,
+    ) -> Result<std::collections::BTreeMap<(String, String), String>, MigrateError> {
+        let mut out = std::collections::BTreeMap::new();
+        if !crate::migrate::try_table_exists_here(pool, &self.events).await? {
+            return Ok(out);
+        }
+        let sql = format!(
+            "SELECT app, reason FROM {} WHERE kind = {} ORDER BY id",
+            self.qe(pool),
+            p(pool, 1),
+        );
+        let rows: Vec<(String, Option<String>)> =
+            raw_query_pool(&sql, vec![s(super::run::STEP_HASH)], pool).await?;
+        for (app, reason) in rows {
+            if let Some((id, hash)) = reason.as_deref().and_then(|r| r.split_once(' ')) {
+                out.insert((app, id.to_owned()), hash.to_owned());
+            }
+        }
+        Ok(out)
+    }
+
     pub(crate) async fn event_kinds(
         &self,
         pool: &Pool,

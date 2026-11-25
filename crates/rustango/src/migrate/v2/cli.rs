@@ -124,6 +124,27 @@ pub(crate) async fn run<W: Write + Send>(
 }
 
 fn make<W: Write>(pool: &Pool, dir: &Path, args: &[String], w: &mut W) -> Result<(), MigrateError> {
+    if let Some(name) = value(args, "--data-rust")? {
+        let list = |flag: &str| -> Result<Vec<String>, MigrateError> {
+            Ok(value(args, flag)?
+                .map(|v| v.split(',').map(|s| s.trim().to_owned()).collect())
+                .unwrap_or_default())
+        };
+        let folder = match value(args, "--app")? {
+            Some(app) => crate::migrate::file::project_root_of(dir)
+                .join(app)
+                .join("migrations"),
+            None => dir.to_path_buf(),
+        };
+        let made =
+            super::make::make_data_rust(dir, &folder, name, &list("--tables")?, &list("--write")?)
+                .map_err(load)?;
+        writeln!(w, "Wrote {}", made.path.display()).map_err(io)?;
+        for l in &made.lines {
+            writeln!(w, "  {l}").map_err(io)?;
+        }
+        return Ok(());
+    }
     let flags = ["--app", "--backends", "--fill", "--rename"];
     let mut fills = std::collections::BTreeMap::new();
     for f in values(args, "--fill") {
@@ -184,7 +205,16 @@ async fn apply<W: Write>(
     args: &[String],
     w: &mut W,
 ) -> Result<(), MigrateError> {
+    let accept_step_change = match value(args, "--accept-step-change")? {
+        None => None,
+        Some(id) => {
+            let why = value(args, "--reason")?
+                .ok_or_else(|| usage("`--accept-step-change` needs `--reason <why>`"))?;
+            Some((id.to_owned(), why.to_owned()))
+        }
+    };
     let opts = super::run::Options {
+        accept_step_change,
         accept_drift: value(args, "--accept-drift")?.map(str::to_owned),
         dry_run: args.iter().any(|a| a == "--plan" || a == "--dry-run"),
         ..super::run::Options::default()
@@ -194,6 +224,9 @@ async fn apply<W: Write>(
         .map_err(run_err)?;
     for p in &report.planned {
         writeln!(w, "{p}").map_err(io)?;
+    }
+    for warning in &report.warnings {
+        writeln!(w, "warning: {warning}").map_err(io)?;
     }
     for id in &report.applied {
         writeln!(w, "Applied {id}").map_err(io)?;

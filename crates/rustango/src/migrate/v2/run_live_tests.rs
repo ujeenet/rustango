@@ -1125,7 +1125,7 @@ async fn missing_steps_run_nothing(b: B) {
 /// Any statement error rolls the unit back even when the step goes on; a
 /// savepoint is the way to recover on purpose (5.4).
 async fn a_swallowed_error_rolls_the_unit_back(b: B) {
-    use super::super::data::{run_step, StepCtx, StepError};
+    use super::super::step::{run_step, Scope, StepCtx, UnitError};
     use futures_util::future::BoxFuture;
     let Some(db) = fresh(b).await else { return };
     let pool = &db.pool;
@@ -1138,8 +1138,9 @@ async fn a_swallowed_error_rolls_the_unit_back(b: B) {
     .unwrap();
     fn swallow<'t>(
         savepoint: bool,
-    ) -> impl for<'a> FnOnce(&'a mut StepCtx<'t>) -> BoxFuture<'a, Result<(), crate::sql::ExecError>>
-    {
+    ) -> impl for<'a> FnOnce(
+        &'a mut StepCtx<'t>,
+    ) -> BoxFuture<'a, Result<(), super::super::step::StepError>> {
         move |ctx| {
             Box::pin(async move {
                 ctx.execute("INSERT INTO sw_t (id) VALUES (1)", Vec::new())
@@ -1168,15 +1169,15 @@ async fn a_swallowed_error_rolls_the_unit_back(b: B) {
     let mut conn = pool.acquire().await.unwrap();
     conn.close_on_drop();
     let tx = conn.begin().await.unwrap();
-    let (tx, r) = run_step(tx, swallow(false)).await;
-    let poisoned = matches!(r, Err(StepError::Poisoned));
+    let (tx, r) = run_step(tx, Scope::default(), swallow(false)).await;
+    let poisoned = matches!(r, Err(UnitError::Poisoned));
     if r.is_ok() {
         tx.commit().await.unwrap();
     } else {
         tx.rollback().await.unwrap();
     }
     let tx = conn.begin().await.unwrap();
-    let (tx, saved) = run_step(tx, swallow(true)).await;
+    let (tx, saved) = run_step(tx, Scope::default(), swallow(true)).await;
     if saved.is_ok() {
         tx.commit().await.unwrap();
     } else {
@@ -1190,14 +1191,15 @@ async fn a_swallowed_error_rolls_the_unit_back(b: B) {
 
 /// Inside a step the app's pools are out of reach (5.4).
 async fn the_escape_guard_refuses_pools(b: B) {
-    use super::super::data::{run_step, StepCtx};
+    use super::super::step::{run_step, Scope, StepCtx};
     use futures_util::future::BoxFuture;
     let Some(db) = fresh(b).await else { return };
     let pool = db.pool.clone();
     fn escape<'t>(
         pool: Pool,
-    ) -> impl for<'a> FnOnce(&'a mut StepCtx<'t>) -> BoxFuture<'a, Result<(), crate::sql::ExecError>>
-    {
+    ) -> impl for<'a> FnOnce(
+        &'a mut StepCtx<'t>,
+    ) -> BoxFuture<'a, Result<(), super::super::step::StepError>> {
         // No panic inside the step: the unit's transaction is still open.
         move |_ctx| {
             Box::pin(async move {
@@ -1233,7 +1235,8 @@ async fn the_escape_guard_refuses_pools(b: B) {
                     None => Ok(()),
                     Some((what, _)) => Err(crate::sql::ExecError::Driver(sqlx::Error::Protocol(
                         format!("`{what}` reached a pool inside the step"),
-                    ))),
+                    ))
+                    .into()),
                 }
             })
         }
@@ -1241,7 +1244,7 @@ async fn the_escape_guard_refuses_pools(b: B) {
     let mut conn = db.pool.acquire().await.unwrap();
     conn.close_on_drop();
     let tx = conn.begin().await.unwrap();
-    let (tx, r) = run_step(tx, escape(pool.clone())).await;
+    let (tx, r) = run_step(tx, Scope::default(), escape(pool.clone())).await;
     tx.rollback().await.unwrap();
     drop(conn);
     assert!(r.is_ok(), "{r:?}");
@@ -1645,6 +1648,331 @@ async fn a_dropped_run_frees_the_lock(b: B) {
     assert_eq!(rep.applied, ["0003_fill"]);
 }
 
+// ---- data_rust (2b) ----
+
+use super::super::step::{Batch, StepCtx, StepError, StepResult};
+
+/// `st_user` (id, name, greeting) gets "hi" where the greeting is unset;
+/// down unsets it again.
+#[crate::data_step(app = "project", id = "greet_v1")]
+impl GreetV1 {
+    async fn up(ctx: &mut StepCtx<'_>, batch: Batch) -> StepResult {
+        let t = ctx.table("st_user")?;
+        t.query()
+            .filter_is_null("greeting", true)
+            .update(ctx, &[("greeting", "hi".into())])
+            .await?;
+        Ok(batch.done())
+    }
+
+    async fn down(ctx: &mut StepCtx<'_>, batch: Batch) -> StepResult {
+        let t = ctx.table("st_user")?;
+        t.query()
+            .filter_is_null("greeting", false)
+            .update(ctx, &[("greeting", crate::core::SqlValue::Null)])
+            .await?;
+        Ok(batch.done())
+    }
+}
+
+/// Writes, then swallows a failed statement: the unit must roll back.
+#[crate::data_step(app = "project", id = "swallow_v1")]
+impl SwallowV1 {
+    async fn up(ctx: &mut StepCtx<'_>, batch: Batch) -> StepResult {
+        let t = ctx.table("st_user")?;
+        t.query().update(ctx, &[("greeting", "x".into())]).await?;
+        let _ = ctx
+            .raw(
+                "UPDATE {{t:st_user}} SET no_such_column = 1",
+                Vec::new(),
+                None,
+            )
+            .await;
+        Ok(batch.done())
+    }
+}
+
+/// Reaches for the app's default pool inside the step.
+#[crate::data_step(app = "project", id = "escape_v1")]
+impl EscapeV1 {
+    async fn up(_ctx: &mut StepCtx<'_>, batch: Batch) -> StepResult {
+        match crate::databases::default() {
+            None => Err(StepError::Message(
+                "databases::default() is refused in a step".into(),
+            )),
+            Some(_) => Ok(batch.done()),
+        }
+    }
+}
+
+static PANICKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Panics on its first run in this process, then succeeds.
+#[crate::data_step(app = "project", id = "panic_once_v1")]
+impl PanicOnceV1 {
+    async fn up(ctx: &mut StepCtx<'_>, batch: Batch) -> StepResult {
+        let t = ctx.table("st_user")?;
+        t.query().update(ctx, &[("greeting", "p".into())]).await?;
+        assert!(
+            PANICKED.swap(true, std::sync::atomic::Ordering::SeqCst),
+            "first run panics"
+        );
+        Ok(batch.done())
+    }
+}
+
+/// Touches a table outside its op's footprint.
+#[crate::data_step(app = "project", id = "outside_v1")]
+impl OutsideV1 {
+    async fn up(ctx: &mut StepCtx<'_>, batch: Batch) -> StepResult {
+        ctx.table("st_other")?;
+        Ok(batch.done())
+    }
+}
+
+fn st_users() -> Value {
+    json!({"op": "create_table", "v": 1, "table": {"name": "st_user", "scope": "tenant", "fields": [
+        {"column": "id", "ty": "i64", "primary_key": true, "auto": true, "nullable": false},
+        {"column": "name", "ty": "string", "max_length": 20, "nullable": true},
+        {"column": "greeting", "ty": "string", "max_length": 20, "nullable": true}]}})
+}
+
+fn rust_op(id: &str, down: Value) -> Value {
+    json!({"op": "data_rust", "v": 1, "id": id,
+        "tables": {"read": ["st_user"], "write": ["st_user.greeting"]}, "down": down,
+        "allow": [{"code": "MV2-E028", "reason": "test"}]})
+}
+
+/// `0001` creates `st_user`; rows go in; `0002` runs `ops`.
+async fn st_project(pool: &Pool, ops: Value) -> (tempfile::TempDir, PathBuf) {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    put(
+        &dir,
+        "0001_users",
+        &v2("0001_users", &[], json!([st_users()])),
+    );
+    migrate(pool, &dir, &opts()).await.unwrap();
+    for n in ["a", "b"] {
+        raw_execute_pool(
+            pool,
+            &format!("INSERT INTO st_user (name) VALUES ('{n}')"),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    }
+    put(&dir, "0002_step", &v2("0002_step", &["0001_users"], ops));
+    (root, dir)
+}
+
+/// A Rust step applies, rolls back by its `down`, and re-applies; its
+/// code hash goes in the ledger.
+async fn a_rust_step_runs_both_ways(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let (_root, dir) = st_project(pool, json!([rust_op("greet_v1", json!("rust"))])).await;
+    assert_eq!(
+        migrate(pool, &dir, &opts()).await.unwrap().applied,
+        ["0002_step"]
+    );
+    assert_eq!(
+        count(pool, "SELECT COUNT(*) FROM st_user WHERE greeting = 'hi'").await,
+        2
+    );
+    let hashes = Ledger::default_names().step_hashes(pool).await.unwrap();
+    let want = super::super::step::registered("project", "greet_v1")[0].code_hash();
+    assert_eq!(
+        hashes.get(&("project".into(), "greet_v1".into())),
+        Some(&want)
+    );
+    downgrade(pool, &dir, 1, &opts()).await.unwrap();
+    assert_eq!(
+        count(pool, "SELECT COUNT(*) FROM st_user WHERE greeting IS NULL").await,
+        2
+    );
+    migrate(pool, &dir, &opts()).await.unwrap();
+    assert_eq!(
+        count(pool, "SELECT COUNT(*) FROM st_user WHERE greeting = 'hi'").await,
+        2
+    );
+}
+
+/// A swallowed statement error rolls the unit back; the app's pools are
+/// out of reach; a footprint miss fails the unit (5.3, 5.4).
+async fn rust_step_guards(b: B) {
+    for (id, want) in [
+        ("swallow_v1", "rolled back"),
+        ("escape_v1", "databases::default()"),
+        ("outside_v1", "not in the op's `tables`"),
+    ] {
+        let Some(db) = fresh(b).await else { return };
+        let pool = &db.pool;
+        // A registered default pool, so only the guard can refuse it.
+        crate::databases::register("default", pool.clone());
+        let (_root, dir) = st_project(pool, json!([rust_op(id, json!({"noop": "test"}))])).await;
+        let e = migrate(pool, &dir, &opts()).await.expect_err(id);
+        assert!(e.to_string().contains(want), "{id}: {e}");
+        assert_eq!(
+            count(pool, "SELECT COUNT(*) FROM st_user WHERE greeting IS NULL").await,
+            2,
+            "{id}: nothing stayed written"
+        );
+    }
+}
+
+/// A panicking step leaves the row failed and resumable.
+async fn a_panicking_step_is_resumable(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    PANICKED.store(false, std::sync::atomic::Ordering::SeqCst);
+    let (_root, dir) = st_project(
+        pool,
+        json!([rust_op("panic_once_v1", json!({"noop": "t"}))]),
+    )
+    .await;
+    let e = migrate(pool, &dir, &opts()).await.expect_err("panicked");
+    assert!(e.to_string().contains("panicked"), "{e}");
+    assert_eq!(rows(pool).await.last().unwrap().1, RowState::Failed);
+    assert_eq!(
+        count(pool, "SELECT COUNT(*) FROM st_user WHERE greeting IS NULL").await,
+        2
+    );
+    assert_eq!(
+        migrate(pool, &dir, &opts()).await.unwrap().applied,
+        ["0002_step"]
+    );
+    assert_eq!(
+        count(pool, "SELECT COUNT(*) FROM st_user WHERE greeting = 'p'").await,
+        2
+    );
+}
+
+/// A step that is not registered is refused before the first statement,
+/// naming near matches and the binary.
+async fn a_missing_rust_step_runs_nothing(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    put(
+        &dir,
+        "0001_users",
+        &v2(
+            "0001_users",
+            &[],
+            json!([st_users(), rust_op("greet_v2", json!("rust"))]),
+        ),
+    );
+    let e = migrate(pool, &dir, &opts()).await.expect_err("refused");
+    assert_eq!(e.code(), Some(Code::Unresolved), "{e}");
+    let msg = e.to_string();
+    assert!(msg.contains("near: project:greet_v1"), "{msg}");
+    let bin = std::env::current_exe().unwrap();
+    assert!(
+        msg.contains(&*bin.file_name().unwrap().to_string_lossy()),
+        "{msg}"
+    );
+    assert!(columns(pool, "st_user").await.is_empty());
+    assert!(rows(pool).await.is_empty());
+}
+
+/// A changed step: a warning once applied; a refusal for a failed row
+/// until `--accept-step-change` records the new hash.
+async fn a_changed_step_is_warned_or_refused(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let (_root, dir) = st_project(pool, json!([rust_op("greet_v1", json!("rust"))])).await;
+    migrate(pool, &dir, &opts()).await.unwrap();
+    let ledger = Ledger::default_names();
+    let k = ("project", "0002_step");
+    ledger
+        .event(pool, STEP_HASH, k, None, "test", Some("greet_v1 0000"))
+        .await
+        .unwrap();
+    let rep = migrate(pool, &dir, &opts()).await.unwrap();
+    assert!(
+        rep.warnings.iter().any(|w| w.contains("greet_v1")),
+        "{rep:?}"
+    );
+    let found = super::super::check::check(&dir, &[backend_of(pool)], None, Some(pool))
+        .await
+        .unwrap();
+    assert!(
+        found.iter().any(|f| f.msg.contains("changed after it ran")),
+        "{found:#?}"
+    );
+    // A failed row whose step changed.
+    let Some(db2) = fresh(b).await else { return };
+    let pool = &db2.pool;
+    let (_root, dir) = st_project(pool, json!([rust_op("greet_v1", json!("rust"))])).await;
+    let crashing = Options {
+        crash: Some(Crash::AfterData(0)),
+        ..Options::default()
+    };
+    migrate(pool, &dir, &crashing).await.expect_err("crashed");
+    ledger
+        .event(pool, STEP_HASH, k, None, "test", Some("greet_v1 0000"))
+        .await
+        .unwrap();
+    assert_eq!(code(migrate(pool, &dir, &opts()).await), Code::StepChanged);
+    let accept = Options {
+        accept_step_change: Some(("greet_v1".into(), "reviewed".into())),
+        ..Options::default()
+    };
+    assert_eq!(
+        migrate(pool, &dir, &accept).await.unwrap().applied,
+        ["0002_step"]
+    );
+    let kinds = ledger.event_kinds(pool, k).await.unwrap();
+    assert!(
+        kinds.contains(&"step_change_accepted".to_owned()),
+        "{kinds:?}"
+    );
+}
+
+/// `migrate::v2::testing`: a database before the step, then up/down and
+/// the resume check.
+async fn the_testing_helper_runs_a_step(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    put(
+        &dir,
+        "0001_users",
+        &v2("0001_users", &[], json!([st_users()])),
+    );
+    put(
+        &dir,
+        "0002_step",
+        &v2(
+            "0002_step",
+            &["0001_users"],
+            json!([rust_op("greet_v1", json!("rust"))]),
+        ),
+    );
+    let t = super::super::testing::at(&db.pool, &dir, "project", "greet_v1")
+        .await
+        .unwrap();
+    raw_execute_pool(
+        t.pool(),
+        "INSERT INTO st_user (name) VALUES ('a')",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    t.assert_prefix_down().await.unwrap();
+    t.assert_resume_equals_full().await.unwrap();
+    assert_eq!(
+        count(
+            t.pool(),
+            "SELECT COUNT(*) FROM st_user WHERE greeting = 'hi'"
+        )
+        .await,
+        1
+    );
+}
+
 per_backend!(
     apply_rollback_reapply,
     edited_file_and_stored_body,
@@ -1674,6 +2002,12 @@ per_backend!(
     an_invalid_index_left_by_a_drop_is_dropped_again,
     drift_sees_a_constraint_kind,
     a_dropped_run_frees_the_lock,
+    a_rust_step_runs_both_ways,
+    rust_step_guards,
+    a_panicking_step_is_resumable,
+    a_missing_rust_step_runs_nothing,
+    a_changed_step_is_warned_or_refused,
+    the_testing_helper_runs_a_step,
 );
 
 /// Legacy SQLite datetime text is swept before the first data unit, so a

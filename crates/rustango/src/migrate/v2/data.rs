@@ -1,14 +1,11 @@
 //! Data steps (section 5): `data_sql` placeholders and footprint, typed
 //! binds, and the step context with its poisoned-unit rule (5.4).
 
-use futures_util::future::BoxFuture;
-
-use super::format::{Bind, DataDown, Footprint, Op, PerBackend};
+use super::format::{Bind, DataDown, Footprint, Op, PerBackend, RustDown};
 use super::render::dialect;
 use super::state::{Backend, State};
 use super::{Code, LoadError};
 use crate::core::SqlValue;
-use crate::sql::{ExecError, PoolTx};
 
 fn fp_err(at: impl Into<String>, msg: impl Into<String>) -> LoadError {
     LoadError::new(Code::Footprint, at, msg)
@@ -39,16 +36,9 @@ pub(crate) fn bind_values(binds: &[Bind]) -> Result<Vec<SqlValue>, String> {
 /// [`Code::Footprint`] for a name outside the footprint or state,
 /// [`Code::File`] for a bad placeholder or bind.
 pub(crate) fn check_op(state: &State, op: &Op, at: &str) -> Result<(), LoadError> {
-    let Op::DataSql {
-        tables,
-        up,
-        binds,
-        down,
-        down_binds,
-        ..
-    } = op
-    else {
-        return Ok(());
+    let tables = match op {
+        Op::DataSql { tables, .. } | Op::DataRust { tables, .. } => tables,
+        _ => return Ok(()),
     };
     for t in tables.tables() {
         if !state.tables.contains_key(t) && !state.externs.contains_key(t) {
@@ -68,6 +58,16 @@ pub(crate) fn check_op(state: &State, op: &Op, at: &str) -> Result<(), LoadError
             }
         }
     }
+    let Op::DataSql {
+        up,
+        binds,
+        down,
+        down_binds,
+        ..
+    } = op
+    else {
+        return Ok(());
+    };
     for (sql, binds, key) in [(up, binds, "up")].into_iter().chain(match down {
         DataDown::Sql(d) => Some((d, down_binds, "down")),
         _ => None,
@@ -247,14 +247,35 @@ pub(crate) fn resolve(
 
 /// Data steps of `file` with nothing to run on `b`: forward, `up` with no
 /// SQL there; in reverse, an irreversible `down` or one with no SQL there.
-pub(crate) fn misses(file: &super::format::File, b: Backend, reverse: bool) -> Vec<String> {
+pub(crate) fn misses(file: &super::format::File, b: Backend, reverse_plan: bool) -> Vec<String> {
     let mut out = Vec::new();
     for (i, env) in file.operations.iter().enumerate() {
+        if let Op::DataRust {
+            id, down, reverse, ..
+        } = &env.op
+        {
+            let at = format!("{}:{} op {i} (`{id}`)", file.app, file.id);
+            let found = super::step::registered(&file.app, id);
+            let miss = if reverse_plan && !*reverse {
+                match down {
+                    RustDown::Noop(_) => None,
+                    RustDown::Irreversible(why) => Some(format!("{at}: irreversible: {why}")),
+                    RustDown::Rust if found.iter().any(|s| s.down.is_some()) => None,
+                    RustDown::Rust => Some(not_registered(&at, &file.app, id, true)),
+                }
+            } else if found.is_empty() {
+                Some(not_registered(&at, &file.app, id, false))
+            } else {
+                None
+            };
+            out.extend(miss);
+            continue;
+        }
         let Op::DataSql { id, up, down, .. } = &env.op else {
             continue;
         };
         let at = format!("{}:{} op {i} (`{id}`)", file.app, file.id);
-        let miss = if reverse {
+        let miss = if reverse_plan {
             match down {
                 DataDown::Noop(_) => None,
                 DataDown::Irreversible(why) => Some(format!("{at}: irreversible: {why}")),
@@ -270,6 +291,22 @@ pub(crate) fn misses(file: &super::format::File, b: Backend, reverse: bool) -> V
         out.extend(miss);
     }
     out
+}
+
+/// "not registered", with near matches and the binary that looked.
+fn not_registered(at: &str, app: &str, id: &str, down: bool) -> String {
+    let bin = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "this binary".into());
+    let near = super::step::near(app, id);
+    let what = if down { "with a `down`" } else { "" };
+    let hint = if near.is_empty() {
+        String::new()
+    } else {
+        format!(" (near: {})", near.join(", "))
+    };
+    format!("{at}: no `#[data_step(app = \"{app}\", id = \"{id}\")]` {what} is registered in `{bin}`{hint}")
 }
 
 /// One error listing every miss, or `Ok` when there is none.
@@ -300,101 +337,6 @@ fn ambiguous(at: &str, name: &str, owners: &[&str]) -> LoadError {
             owners.join(" and ")
         ),
     )
-}
-
-/// Why a step's unit did not commit.
-#[derive(Debug)]
-pub(crate) enum StepError {
-    Exec(ExecError),
-    /// A statement failed and the step went on: the unit is rolled back.
-    Poisoned,
-}
-
-impl std::fmt::Display for StepError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Exec(e) => e.fmt(f),
-            Self::Poisoned => f.write_str(
-                "a statement in this data step failed, so the unit is rolled back even though \
-                 the step went on; use a savepoint to recover on purpose",
-            ),
-        }
-    }
-}
-
-/// What a data step runs on: the unit's transaction. Any failed statement
-/// poisons the unit (5.4).
-pub(crate) struct StepCtx<'t> {
-    tx: PoolTx<'t>,
-    poisoned: bool,
-}
-
-impl<'t> StepCtx<'t> {
-    /// Run one statement in the unit.
-    ///
-    /// # Errors
-    /// The driver error; the unit is poisoned.
-    pub(crate) async fn execute(
-        &mut self,
-        sql: &str,
-        binds: Vec<SqlValue>,
-    ) -> Result<u64, ExecError> {
-        let r = crate::sql::raw_execute_tx(&mut self.tx, sql, binds).await;
-        if r.is_err() {
-            self.poisoned = true;
-        }
-        r
-    }
-
-    /// Run `f` under a savepoint: an error inside rolls back to it and
-    /// does not poison the unit.
-    ///
-    /// # Errors
-    /// `f`'s error, after the rollback to the savepoint.
-    pub(crate) async fn savepoint<T, F>(&mut self, f: F) -> Result<T, ExecError>
-    where
-        F: for<'a> FnOnce(&'a mut StepCtx<'t>) -> BoxFuture<'a, Result<T, ExecError>>,
-    {
-        let name = self.tx.next_savepoint("rgo_step");
-        let was = self.poisoned;
-        self.tx
-            .execute_unprepared(&format!("SAVEPOINT {name}"))
-            .await
-            .map_err(|e| {
-                self.poisoned = true;
-                ExecError::Driver(e)
-            })?;
-        let r = f(self).await;
-        let end = if r.is_ok() {
-            format!("RELEASE SAVEPOINT {name}")
-        } else {
-            format!("ROLLBACK TO SAVEPOINT {name}")
-        };
-        match self.tx.execute_unprepared(&end).await {
-            Ok(()) => self.poisoned = was || (r.is_ok() && self.poisoned),
-            Err(_) => self.poisoned = true,
-        }
-        r
-    }
-}
-
-/// Run `step` on `tx` with the escape guard set; returns the transaction
-/// to commit, or the reason to roll it back.
-pub(crate) async fn run_step<'t, F>(tx: PoolTx<'t>, step: F) -> (PoolTx<'t>, Result<(), StepError>)
-where
-    F: for<'a> FnOnce(&'a mut StepCtx<'t>) -> BoxFuture<'a, Result<(), ExecError>>,
-{
-    let mut ctx = StepCtx {
-        tx,
-        poisoned: false,
-    };
-    let r = crate::sql::migration_step(step(&mut ctx)).await;
-    let r = match r {
-        Err(e) => Err(StepError::Exec(e)),
-        Ok(()) if ctx.poisoned => Err(StepError::Poisoned),
-        Ok(()) => Ok(()),
-    };
-    (ctx.tx, r)
 }
 
 #[cfg(test)]

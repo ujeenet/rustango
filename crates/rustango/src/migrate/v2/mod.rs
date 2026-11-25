@@ -23,7 +23,13 @@ pub(crate) mod render;
 pub(crate) mod replay;
 pub(crate) mod run;
 pub(crate) mod state;
+pub(crate) mod step;
+pub mod testing;
 
+pub use step::{
+    leaked_bytes, Batch, DataStep, HistError, HistQuery, HistRow, HistTable, Progress, StepCtx,
+    StepError, StepFn, StepFuture, StepResult,
+};
 #[cfg(test)]
 mod fixtures;
 #[cfg(test)]
@@ -103,6 +109,8 @@ pub(crate) enum Code {
     Noop,
     /// A data step the plan needs has nothing to run on this backend.
     Unresolved,
+    /// A partial or failed data step whose code changed since it started.
+    StepChanged,
 }
 
 impl Code {
@@ -137,6 +145,7 @@ impl Code {
             Self::Footprint => "MV2-E027",
             Self::Noop => "MV2-E028",
             Self::Unresolved => "MV2-E029",
+            Self::StepChanged => "MV2-E032",
             Self::CrossTarget => "MV2-E030",
             Self::FkType => "MV2-E3780",
             Self::CheckColumn => "MV2-E3959",
