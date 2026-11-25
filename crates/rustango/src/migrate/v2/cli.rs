@@ -223,6 +223,7 @@ async fn apply<W: Write>(
         .transpose()?;
     let opts = super::run::Options {
         max_duration,
+        per_run_limits: true,
         accept_step_change,
         accept_drift: value(args, "--accept-drift")?.map(str::to_owned),
         dry_run: args.iter().any(|a| a == "--plan" || a == "--dry-run"),

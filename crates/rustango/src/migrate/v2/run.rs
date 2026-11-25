@@ -47,6 +47,9 @@ pub(crate) struct Options {
     pub(crate) data_statement_timeout: Option<std::time::Duration>,
     /// CLI `--max-duration`: stop cleanly between batches once it passes.
     pub(crate) max_duration: Option<std::time::Duration>,
+    /// A CLI run honours `max_batches_per_run`; boot and embedded runs move
+    /// every batch, so `/ready` never opens on a half-done move.
+    pub(crate) per_run_limits: bool,
     /// Row estimate above which a batched op is a long move (`MV2-W011`).
     pub(crate) long_move_rows: Option<u64>,
     /// Test failpoint: stop as if the process died.
@@ -543,18 +546,16 @@ enum Attempt {
 }
 
 fn retry_or_fatal(e: RunError) -> Attempt {
-    match &e {
-        RunError::Db(MigrateError::Driver(d))
-            if super::step::retryable(&crate::sql::ExecError::Driver(clone_db(d))) =>
-        {
-            Attempt::Retry(e.to_string())
-        }
-        _ => Attempt::Fatal(e),
+    let retry = match &e {
+        RunError::Db(MigrateError::Driver(d)) => super::step::retryable_driver(d),
+        RunError::Db(MigrateError::Exec(x)) => super::step::retryable(x),
+        _ => false,
+    };
+    if retry {
+        Attempt::Retry(e.to_string())
+    } else {
+        Attempt::Fatal(e)
     }
-}
-
-fn clone_db(e: &sqlx::Error) -> sqlx::Error {
-    sqlx::Error::Protocol(e.to_string())
 }
 
 /// The key bound of the next batch: the key `size` rows above `lo` (on the
@@ -1014,7 +1015,9 @@ impl Runner<'_> {
                             k.0, k.1
                         )));
                     }
-                    if bp.max_batches_per_run.is_some_and(|m| batches_here >= m) {
+                    if self.opts.per_run_limits
+                        && bp.max_batches_per_run.is_some_and(|m| batches_here >= m)
+                    {
                         return Err(RunError::Stopped(format!(
                             "`{}:{}` ran its {batches_here} batches for this run; the next run \
                              resumes",

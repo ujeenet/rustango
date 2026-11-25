@@ -399,7 +399,12 @@ fn quote_lit(s: &str) -> String {
 
 /// A deadlock, serialization failure or lock timeout: the unit is retried.
 pub(crate) fn retryable(e: &ExecError) -> bool {
-    let ExecError::Driver(sqlx::Error::Database(db)) = e else {
+    matches!(e, ExecError::Driver(d) if retryable_driver(d))
+}
+
+/// [`retryable`] for a bare driver error.
+pub(crate) fn retryable_driver(e: &sqlx::Error) -> bool {
+    let sqlx::Error::Database(db) = e else {
         return false;
     };
     let code = db.code().unwrap_or_default();

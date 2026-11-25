@@ -2324,6 +2324,39 @@ async fn max_duration_stops_between_batches(b: B) {
     assert_eq!(batch_events(pool, "0002_mark").await, 3);
 }
 
+/// `max_batches_per_run` stops a CLI run; boot runs every batch, so it never
+/// serves a half-done move.
+async fn max_batches_per_run_binds_the_cli_only(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let ids: Vec<i64> = (1..=30).collect();
+    let (_root, dir) = ed_project(pool, &ids).await;
+    let mut capped = batched_sql(10);
+    capped["batch"]["max_batches_per_run"] = json!(1);
+    put(
+        &dir,
+        "0002_mark",
+        &vs("0002_mark", &["0001_user"], json!([capped])),
+    );
+    let cli = Options {
+        per_run_limits: true,
+        ..Options::default()
+    };
+    let rep = migrate(pool, &dir, &cli).await.unwrap();
+    assert!(rep.stopped.is_some(), "{rep:?}");
+    assert_eq!(
+        count(pool, "SELECT COUNT(*) FROM ed_user WHERE street = 'moved'").await,
+        10
+    );
+    let boot = migrate(pool, &dir, &Options::default()).await.unwrap();
+    assert!(boot.stopped.is_none(), "{boot:?}");
+    assert_eq!(boot.applied, ["0002_mark"]);
+    assert_eq!(
+        count(pool, "SELECT COUNT(*) FROM ed_user WHERE street = 'moved'").await,
+        30
+    );
+}
+
 /// A shutdown signal stops between batches; the next start resumes at the
 /// stored cursor and moves every row once.
 async fn a_shutdown_stops_between_batches(b: B) {
@@ -2359,44 +2392,50 @@ async fn a_shutdown_stops_between_batches(b: B) {
     assert_eq!(batch_events(pool, "0002_mark").await, 3);
 }
 
-/// A held row lock: the batch times out, is retried, and goes through
-/// once the lock is released.
+/// A lock taken between batches and held past the lock timeout: the next
+/// batch times out, is retried, and goes through once the lock is released.
 async fn a_held_lock_is_retried(b: B) {
     let Some(db) = fresh(b).await else { return };
     let pool = &db.pool;
     let (_root, dir) = ed_project(pool, &[1, 2, 3]).await;
+    let mut slow = batched_sql(1);
+    slow["batch"]["sleep_ms"] = json!(300);
     put(
         &dir,
         "0002_mark",
-        &vs("0002_mark", &["0001_user"], json!([batched_sql(10)])),
+        &vs("0002_mark", &["0001_user"], json!([slow])),
     );
-    // Another session holds a row for 1.5 s, then lets go.
-    let (held_tx, held) = tokio::sync::oneshot::channel();
+    // After the first batch, another session holds the last row (SQLite:
+    // the write lock) for 2.5 s, well past the 1 s lock timeout.
     let url = db.url.clone();
-    let release = tokio::spawn(async move {
-        let holder = Pool::connect(&url).await.unwrap();
-        let mut hconn = holder.acquire().await.unwrap();
+    let holder = tokio::spawn(async move {
+        let hp = Pool::connect(&url).await.unwrap();
+        for _ in 0..500 {
+            if batch_events(&hp, "0002_mark").await >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let mut hconn = hp.acquire().await.unwrap();
         let mut htx = hconn.begin().await.unwrap();
         crate::sql::raw_execute_tx(
             &mut htx,
-            "UPDATE ed_user SET street = 'held' WHERE id = 2",
+            "UPDATE ed_user SET street = 'held' WHERE id = 3",
             Vec::new(),
         )
         .await
         .unwrap();
-        held_tx.send(()).unwrap();
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        tokio::time::sleep(Duration::from_millis(2500)).await;
         htx.rollback().await.unwrap();
         drop(hconn);
-        holder.close().await;
+        hp.close().await;
     });
-    held.await.unwrap();
     let quick = Options {
         data_lock_timeout: Some(Duration::from_secs(1)),
         ..Options::default()
     };
     let rep = migrate(pool, &dir, &quick).await;
-    release.await.unwrap();
+    holder.await.unwrap();
     assert_eq!(rep.unwrap().applied, ["0002_mark"]);
     assert_eq!(
         count(pool, "SELECT COUNT(*) FROM ed_user WHERE street = 'moved'").await,
@@ -2485,6 +2524,7 @@ per_backend!(
     a_batch_must_advance,
     max_duration_stops_between_batches,
     a_shutdown_stops_between_batches,
+    max_batches_per_run_binds_the_cli_only,
     a_held_lock_is_retried,
     a_waiter_finishes_a_killed_move,
 );
