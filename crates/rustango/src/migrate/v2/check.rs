@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use super::format::Op;
-use super::state::{Backend, ColumnDef};
+use super::state::{Backend, CheckBody, ColumnDef};
 use super::LoadError;
 use crate::migrate::snapshot::SchemaSnapshot;
 use crate::sql::Pool;
@@ -53,8 +53,10 @@ pub(crate) async fn check(
         super::render::render_project(&project, b)?;
     }
     let mut out = Vec::new();
-    // Every default and fill the chain writes, with the column it is for.
+    // Every default and fill the chain writes, with the column it is for,
+    // and every hand-written check expression.
     let mut exprs: Vec<(String, ColumnDef, String)> = Vec::new();
+    let mut checks: Vec<(String, String)> = Vec::new();
     for f in &project.files {
         let mut ops: Vec<Op> = f.file.operations.iter().map(|e| e.op.clone()).collect();
         for e in &f.file.operations {
@@ -68,9 +70,24 @@ pub(crate) async fn check(
                 }
             };
             match op {
-                Op::CreateTable { table, .. } | Op::AdoptTable { table, .. } => {
+                Op::CreateTable {
+                    table, checks: ks, ..
+                }
+                | Op::AdoptTable {
+                    table, checks: ks, ..
+                } => {
                     for fd in &table.fields {
                         col(&table.name, &fd.column, &fd.column.default);
+                    }
+                    for k in ks {
+                        if let CheckBody::Sql(e) = &k.body {
+                            checks.push((format!("{}: check `{}`", f.at, k.name), e.clone()));
+                        }
+                    }
+                }
+                Op::AddCheck { check: k, .. } => {
+                    if let CheckBody::Sql(e) = &k.body {
+                        checks.push((format!("{}: check `{}`", f.at, k.name), e.clone()));
                     }
                 }
                 Op::AddColumn {
@@ -112,6 +129,11 @@ pub(crate) async fn check(
         }
         if let Some(doc) = &f.file.state {
             for t in doc.tables.values() {
+                for k in &t.checks {
+                    if let CheckBody::Sql(e) = &k.body {
+                        checks.push((format!("{}: check `{}`", f.at, k.name), e.clone()));
+                    }
+                }
                 for c in &t.columns {
                     if let Some(d) = &c.default {
                         exprs.push((
@@ -123,6 +145,9 @@ pub(crate) async fn check(
                 }
             }
         }
+    }
+    for (at, sql) in &checks {
+        out.extend(reserved_names(sql, backends, at));
     }
     for (at, c, text) in &exprs {
         for &b in backends {
@@ -184,6 +209,97 @@ async fn sqlite_memory(c: &ColumnDef, text: &str) -> Result<(), String> {
     let r = super::probe::default_runs(&pool, c, text).await;
     pool.close().await;
     r
+}
+
+/// Words a check may write bare though some backend reserves them:
+/// operators, literals and the functions SQL calls without parens.
+const EXPR_WORDS: &[&str] = &[
+    "all",
+    "and",
+    "any",
+    "array",
+    "as",
+    "between",
+    "binary",
+    "case",
+    "cast",
+    "collate",
+    "current_catalog",
+    "current_date",
+    "current_role",
+    "current_schema",
+    "current_time",
+    "current_timestamp",
+    "current_user",
+    "distinct",
+    "div",
+    "else",
+    "end",
+    "escape",
+    "exists",
+    "false",
+    "ilike",
+    "in",
+    "interval",
+    "is",
+    "isnull",
+    "like",
+    "localtime",
+    "localtimestamp",
+    "mod",
+    "not",
+    "notnull",
+    "null",
+    "or",
+    "regexp",
+    "rlike",
+    "session_user",
+    "similar",
+    "some",
+    "system_user",
+    "then",
+    "true",
+    "user",
+    "when",
+    "xor",
+];
+
+/// A bare identifier in a hand-written check that a configured backend
+/// reserves: it breaks there unless quoted.
+fn reserved_names(sql: &str, backends: &[Backend], at: &str) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for &b in backends {
+        let kind = super::render::dialect(b).kind();
+        let Ok(toks) = super::norm::tokenize(kind, sql) else {
+            continue;
+        };
+        for (i, t) in toks.iter().enumerate() {
+            let super::norm::Tok::Ident(w) = &t.tok else {
+                continue;
+            };
+            let bare = sql[t.start..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+            let call = matches!(
+                toks.get(i + 1).map(|n| &n.tok),
+                Some(super::norm::Tok::LParen)
+            );
+            let cast = i > 0 && matches!(&toks[i - 1].tok, super::norm::Tok::Op(o) if o == "::");
+            if !bare || call || cast || EXPR_WORDS.contains(&w.as_str()) || !kind.is_reserved(w) {
+                continue;
+            }
+            out.push(Finding {
+                severity: Severity::Error,
+                at: at.to_owned(),
+                msg: format!(
+                    "`{w}` is reserved on {}: quote it, or name the column otherwise",
+                    b.as_str()
+                ),
+            });
+        }
+    }
+    out
 }
 
 /// A string literal: `'…'` with `''` escapes, nothing after it.

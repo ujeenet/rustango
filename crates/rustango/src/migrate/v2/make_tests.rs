@@ -81,7 +81,14 @@ fn min_and_max_lower_to_add_check() {
         .unwrap();
     assert_eq!(ops_of(&made.path), ["add_check"]);
     let text = std::fs::read_to_string(&made.path).unwrap();
-    assert!(text.contains("rank >= 0 AND rank <= 9"), "{text}");
+    let file: Value = serde_json::from_str(&text).unwrap();
+    let op = &file["operations"][0];
+    assert_eq!(
+        (&op["column"], &op["min"], &op["max"]),
+        (&json!("rank"), &json!(0), &json!(9)),
+        "{text}"
+    );
+    assert!(op.get("expr").is_none(), "{text}");
     // Dropping the bound drops the check.
     let made = make(&dir, &dir, &models(json!({"min": 0})), &opts())
         .unwrap()
@@ -188,4 +195,51 @@ fn after_adopt_the_models_match() {
         let made = make(&dir, &dir, &m, &one).unwrap();
         assert!(made.is_none(), "{b:?}: {:?}", made.map(|m| m.lines));
     }
+}
+
+#[test]
+fn a_drop_and_an_add_of_one_type_needs_rename_or_no_rename() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("migrations");
+    make(&dir, &dir, &models(json!({"min": 0, "max": 9})), &opts())
+        .unwrap()
+        .unwrap();
+    // `rank` becomes `level`: same type, with its range check.
+    let mut m = models(json!({"min": 0, "max": 9}));
+    for f in &mut m.tables[0].fields {
+        if f.column == "rank" {
+            f.column = "level".into();
+            f.name = "level".into();
+        }
+    }
+    let e = make(&dir, &dir, &m, &opts()).unwrap_err();
+    assert_eq!(e.code, Code::Rename, "{e}");
+    assert!(e.msg.contains("--rename mk_author.rank:level"), "{e}");
+    let mut o = opts();
+    o.renames = vec![("mk_author".into(), "nope".into(), "level".into())];
+    assert_eq!(make(&dir, &dir, &m, &o).unwrap_err().code, Code::Rename);
+    let dry = MakeOptions {
+        no_rename: true,
+        dry_run: true,
+        ..opts()
+    };
+    let made = make(&dir, &dir, &m, &dry).unwrap().unwrap();
+    assert!(
+        made.lines
+            .iter()
+            .any(|l| l == "- drop_column mk_author.rank")
+            && made
+                .lines
+                .iter()
+                .any(|l| l == "+ add_column mk_author.level"),
+        "{:?}",
+        made.lines
+    );
+    o.renames = vec![("mk_author".into(), "rank".into(), "level".into())];
+    let made = make(&dir, &dir, &m, &o).unwrap().unwrap();
+    assert_eq!(
+        ops_of(&made.path),
+        ["drop_check", "rename_column", "add_check"]
+    );
+    assert!(make(&dir, &dir, &m, &opts()).unwrap().is_none());
 }

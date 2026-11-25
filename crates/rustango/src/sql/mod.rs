@@ -30,6 +30,7 @@ mod mysql;
 mod pool;
 mod postgres;
 mod range;
+mod reserved;
 /// Validated names for tenant database and login DDL.
 pub mod server;
 mod sqlite;

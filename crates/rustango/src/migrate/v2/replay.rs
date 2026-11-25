@@ -310,19 +310,11 @@ pub(crate) fn apply(
                 .ok_or_else(|| fail(at, format!("index `{from}` is not on `{table}`")))?;
             i.name.clone_from(to);
         }
-        Op::AddCheck { table, name, expr } => add_check(
-            s,
-            at,
-            table,
-            &CheckDef {
-                name: name.clone(),
-                expr: expr.clone(),
-            },
-        )?,
+        Op::AddCheck { table, check } => add_check(s, at, table, check)?,
         Op::DropCheck { table, name, was } => {
             let t = get_mut(s, at, table)?;
             let n = t.checks.len();
-            t.checks.retain(|c| !(&c.name == name && &c.expr == was));
+            t.checks.retain(|c| !(&c.name == name && &c.body == was));
             if t.checks.len() == n {
                 return Err(fail(at, format!("drop_check `{name}`: `was` differs")));
             }
@@ -630,14 +622,13 @@ fn alter_column(
 
 /// `col` appears as an identifier token in `expr`.
 fn mentions(expr: &str, col: &str) -> bool {
-    expr.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-        .any(|tok| tok.eq_ignore_ascii_case(col))
+    super::state::CheckBody::Sql(expr.to_owned()).mentions(col)
 }
 
 /// The first thing in or pointing at `t` that uses `col`: checks, generated
 /// columns and predicates (MySQL 3959), and with `!expr_only` indexes and FKs.
 fn first_user(s: &State, t: &TableState, col: &str, expr_only: bool) -> Option<(Code, String)> {
-    if let Some(k) = t.checks.iter().find(|k| mentions(&k.expr, col)) {
+    if let Some(k) = t.checks.iter().find(|k| k.body.mentions(col)) {
         return Some((Code::CheckColumn, format!("check `{}`", k.name)));
     }
     if let Some(c) = t

@@ -9,8 +9,8 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use super::state::{
-    Backend, CheckDef, ColumnDef, ExternColumn, ExternOwner, FkDef, IndexDef, OnDelete, StateDoc,
-    Target,
+    Backend, CheckBody, CheckDef, ColumnDef, ExternColumn, ExternOwner, FkDef, IndexDef, OnDelete,
+    StateDoc, Target,
 };
 use super::{Code, LoadError};
 
@@ -400,15 +400,16 @@ pub(crate) enum Op {
         from: String,
         to: String,
     },
+    /// Flat in the file (`table` and the check keys); decoded by hand.
+    #[serde(skip_deserializing)]
     AddCheck {
         table: String,
-        name: String,
-        expr: String,
+        check: CheckDef,
     },
     DropCheck {
         table: String,
         name: String,
-        was: String,
+        was: CheckBody,
     },
     RawSql {
         id: String,
@@ -631,6 +632,13 @@ fn decode_op(v: &Value, at: &str) -> Result<OpEnvelope, LoadError> {
             concurrently: serde_json::from_value(concurrently.unwrap_or(Value::Null))
                 .map_err(bad)?,
             index: serde_json::from_value(Value::Object(payload)).map_err(bad)?,
+        }
+    } else if kind == "add_check" {
+        payload.remove("op");
+        let table = payload.remove("table");
+        Op::AddCheck {
+            table: serde_json::from_value(table.unwrap_or(Value::Null)).map_err(bad)?,
+            check: serde_json::from_value(Value::Object(payload)).map_err(bad)?,
         }
     } else {
         serde_json::from_value(Value::Object(payload)).map_err(bad)?

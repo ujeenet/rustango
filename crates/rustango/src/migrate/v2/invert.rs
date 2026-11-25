@@ -222,15 +222,17 @@ pub(crate) fn invert(op: &Op, after: &State, allow: Allow, at: &str) -> Result<V
             from: to.clone(),
             to: from.clone(),
         }],
-        Op::AddCheck { table, name, expr } => vec![Op::DropCheck {
+        Op::AddCheck { table, check } => vec![Op::DropCheck {
             table: table.clone(),
-            name: name.clone(),
-            was: expr.clone(),
+            name: check.name.clone(),
+            was: check.body.clone(),
         }],
         Op::DropCheck { table, name, was } => vec![Op::AddCheck {
             table: table.clone(),
-            name: name.clone(),
-            expr: was.clone(),
+            check: super::state::CheckDef {
+                name: name.clone(),
+                body: was.clone(),
+            },
         }],
         Op::RawSql {
             id,

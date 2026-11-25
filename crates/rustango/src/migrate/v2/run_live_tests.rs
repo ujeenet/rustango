@@ -828,6 +828,88 @@ async fn two_apps_two_ledgers(b: B) {
     assert!(migrate(pool, &bdir, &ob).await.unwrap().applied.is_empty());
 }
 
+/// A models snapshot of `rn_t`: `id` plus `cols` as `(name, extra)`.
+fn rn_models(cols: &[(&str, Value)]) -> crate::migrate::snapshot::SchemaSnapshot {
+    let mut fields = vec![v1_field(
+        "id",
+        "i64",
+        json!({"primary_key": true, "auto": true, "nullable": false}),
+    )];
+    for (name, extra) in cols {
+        fields.push(v1_field(name, "i32", extra.clone()));
+    }
+    serde_json::from_value(json!({"tables": [{"name": "rn_t", "model": "RnT", "fields": fields}]}))
+        .unwrap()
+}
+
+fn all_backends() -> super::super::make::MakeOptions {
+    super::super::make::MakeOptions {
+        backends: vec![Backend::Postgres, Backend::Mysql, Backend::Sqlite],
+        ..super::super::make::MakeOptions::default()
+    }
+}
+
+async fn insert(pool: &Pool, col: &str, v: i64) -> Result<(), crate::sql::ExecError> {
+    let d = pool.dialect();
+    let sql = format!("INSERT INTO rn_t ({}) VALUES ({v})", d.quote_ident(col));
+    raw_execute_pool(pool, &sql, Vec::new()).await.map(|_| ())
+}
+
+/// min/max on `rank`, reserved on MySQL, in a three-backend project: the
+/// range renders with each backend's quoting and holds on each.
+async fn a_range_check_on_a_reserved_name(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    let m = rn_models(&[("rank", json!({"min": 0, "max": 9}))]);
+    super::super::make::make(&dir, &dir, &m, &all_backends())
+        .unwrap()
+        .unwrap();
+    migrate(pool, &dir, &opts()).await.unwrap();
+    insert(pool, "rank", 5).await.unwrap();
+    insert(pool, "rank", 10).await.expect_err("out of range");
+}
+
+/// `make --rename` keeps the rows; `--no-rename` writes drop and add.
+async fn a_rename_keeps_the_data(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    let make = super::super::make::make;
+    make(
+        &dir,
+        &dir,
+        &rn_models(&[("score", json!({}))]),
+        &all_backends(),
+    )
+    .unwrap()
+    .unwrap();
+    migrate(pool, &dir, &opts()).await.unwrap();
+    insert(pool, "score", 7).await.unwrap();
+    let renamed = rn_models(&[("points", json!({}))]);
+    let e = make(&dir, &dir, &renamed, &all_backends()).unwrap_err();
+    assert_eq!(e.code, Code::Rename, "{e}");
+    let o = super::super::make::MakeOptions {
+        renames: vec![("rn_t".into(), "score".into(), "points".into())],
+        ..all_backends()
+    };
+    make(&dir, &dir, &renamed, &o).unwrap().unwrap();
+    assert_eq!(
+        migrate(pool, &dir, &opts()).await.unwrap().applied,
+        ["0002_rename_column_rn_t"]
+    );
+    let got: Vec<(i64,)> = crate::sql::raw_query_pool(
+        "SELECT COUNT(*) FROM rn_t WHERE points = 7",
+        Vec::new(),
+        pool,
+    )
+    .await
+    .unwrap();
+    assert_eq!(got, [(1,)]);
+}
+
 per_backend!(
     apply_rollback_reapply,
     edited_file_and_stored_body,
@@ -841,4 +923,6 @@ per_backend!(
     defaults_pass_check_online,
     two_apps_two_ledgers,
     project_owns_a_framework_table,
+    a_range_check_on_a_reserved_name,
+    a_rename_keeps_the_data,
 );

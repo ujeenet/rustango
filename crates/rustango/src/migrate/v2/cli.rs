@@ -124,7 +124,7 @@ pub(crate) async fn run<W: Write + Send>(
 }
 
 fn make<W: Write>(pool: &Pool, dir: &Path, args: &[String], w: &mut W) -> Result<(), MigrateError> {
-    let flags = ["--app", "--backends", "--fill"];
+    let flags = ["--app", "--backends", "--fill", "--rename"];
     let mut fills = std::collections::BTreeMap::new();
     for f in values(args, "--fill") {
         let (k, v) = f
@@ -132,11 +132,22 @@ fn make<W: Write>(pool: &Pool, dir: &Path, args: &[String], w: &mut W) -> Result
             .ok_or_else(|| usage(format!("`--fill {f}`: write `table.column=<sql>`")))?;
         fills.insert(k.to_owned(), v.to_owned());
     }
+    let mut renames = Vec::new();
+    for r in values(args, "--rename") {
+        let parsed = r.split_once('.').and_then(|(t, rest)| {
+            rest.split_once(':')
+                .map(|(from, to)| (t.to_owned(), from.to_owned(), to.to_owned()))
+        });
+        renames
+            .push(parsed.ok_or_else(|| usage(format!("`--rename {r}`: write `table.old:new`")))?);
+    }
     let opts = super::make::MakeOptions {
         backends: backends(args, pool)?,
         name: positional(args, &flags).map(str::to_owned),
         fills,
         dry_run: args.iter().any(|a| a == "--check"),
+        renames,
+        no_rename: args.iter().any(|a| a == "--no-rename"),
     };
     crate::migrate::make::check_models()?;
     let (folder, models): (PathBuf, _) = match value(args, "--app")? {

@@ -11,8 +11,8 @@ use super::format::Kind;
 use super::render::dialect;
 use super::replay::Ctx;
 use super::state::{
-    pg_object_name, Backend, CheckDef, ColumnDef, ExternColumn, ExternOwner, ExternTable, FkDef,
-    IndexDef, OnDelete, State, StateDoc, TableState, Target,
+    pg_object_name, Backend, CheckBody, CheckDef, ColumnDef, ExternColumn, ExternOwner,
+    ExternTable, FkDef, IndexDef, OnDelete, State, StateDoc, TableState, Target,
 };
 use super::{Code, LoadError};
 use crate::migrate::snapshot::{FieldSnapshot, SchemaSnapshot, TableSnapshot};
@@ -35,6 +35,10 @@ pub(crate) struct MakeOptions {
     pub(crate) fills: BTreeMap<String, String>,
     /// Plan only: nothing is written (`make --check`).
     pub(crate) dry_run: bool,
+    /// `--rename table.old:new`: `(table, old, new)`.
+    pub(crate) renames: Vec<(String, String, String)>,
+    /// `--no-rename`: a drop and an add of one type are what they say.
+    pub(crate) no_rename: bool,
 }
 
 /// The file `make` wrote (or would write), with one line per op.
@@ -90,7 +94,7 @@ pub(crate) fn make(
     };
     let new = state_of(models, &backends, &at)?;
     let others = other_apps(&project, &app);
-    let plan = diff(&old, &owned, new, &others, &opts.fills, &at)?;
+    let plan = diff(&old, &owned, new, &others, opts, &at)?;
     if plan.ops.is_empty() {
         return Ok(None);
     }
@@ -324,22 +328,14 @@ pub(super) fn table_of(
             });
         }
         if f.min.is_some() || f.max.is_some() {
-            // One backend: its quoting, as engine v1 wrote it. Several: no
-            // quote works on all, so the bare name.
-            let col = match backends {
-                [b] => dialect(*b).quote_ident(&f.column),
-                _ => f.column.clone(),
-            };
-            let mut parts = Vec::new();
-            if let Some(min) = f.min {
-                parts.push(format!("{col} >= {min}"));
-            }
-            if let Some(max) = f.max {
-                parts.push(format!("{col} <= {max}"));
-            }
+            // A range: each backend quotes the column its own way.
             checks.push(CheckDef {
                 name: pg_object_name(&t.name, Some(&f.column), "check", |_| false),
-                expr: parts.join(" AND "),
+                body: CheckBody::Range {
+                    column: f.column.clone(),
+                    min: f.min,
+                    max: f.max,
+                },
             });
         }
         if let Some(rel) = &f.fk {
@@ -371,7 +367,7 @@ pub(super) fn table_of(
     for c in snap.checks.iter().filter(|c| c.table == t.name) {
         checks.push(CheckDef {
             name: c.name.clone(),
-            expr: c.expr.clone(),
+            body: CheckBody::Sql(c.expr.clone()),
         });
     }
     let has_pk = t.fields.iter().any(|f| f.primary_key);
@@ -511,9 +507,10 @@ fn diff(
     owned: &BTreeSet<String>,
     mut new: StateDoc,
     others: &BTreeMap<String, String>,
-    fills: &BTreeMap<String, String>,
+    opts: &MakeOptions,
     at: &str,
 ) -> Result<Plan, LoadError> {
+    let fills = &opts.fills;
     let empty = TableState {
         name: String::new(),
         scope: Target::Tenant,
@@ -577,6 +574,7 @@ fn diff(
     let mut drop_indexes = Vec::new();
     let mut drop_columns = Vec::new();
     let mut drop_tables = Vec::new();
+    let mut rename_columns = Vec::new();
     let mut creates = Vec::new();
     let mut add_columns = Vec::new();
     let mut alters = Vec::new();
@@ -708,17 +706,70 @@ fn diff(
     // Tables in both.
     for (name, t) in &new.tables {
         let Some(b) = old_of(name) else { continue };
-        for c in &b.columns {
-            if t.column(&c.column).is_none() {
-                drop_columns.push(op(
-                    "drop_column",
-                    json!({"table": name, "column": c.column, "was": field_json(c, None)}),
+        // `new column -> old column` of each rename asked for on this table.
+        let mut renamed: BTreeMap<&str, &str> = BTreeMap::new();
+        for (table, from, to) in opts.renames.iter().filter(|r| &r.0 == name) {
+            if b.column(from).is_none() || t.column(to).is_none() || b.column(to).is_some() {
+                return Err(err(
+                    Code::Rename,
+                    at,
+                    format!(
+                        "`--rename {table}.{from}:{to}`: `{from}` must be in the chain and `{to}` \
+                         only in the models"
+                    ),
                 ));
-                lines.push((3, format!("- drop_column {name}.{}", c.column)));
+            }
+            renamed.insert(to, from);
+        }
+        let dropped: Vec<&ColumnDef> = b
+            .columns
+            .iter()
+            .filter(|c| t.column(&c.column).is_none() && !renamed.values().any(|f| *f == c.column))
+            .collect();
+        let added: Vec<&ColumnDef> = t
+            .columns
+            .iter()
+            .filter(|c| b.column(&c.column).is_none() && !renamed.contains_key(c.column.as_str()))
+            .collect();
+        if !opts.no_rename {
+            if let Some((d, a)) = dropped
+                .iter()
+                .find_map(|d| added.iter().find(|a| a.ty == d.ty).map(|a| (d, a)))
+            {
+                return Err(err(
+                    Code::Rename,
+                    at,
+                    format!(
+                        "`{name}`: `{}` goes and `{}` comes, both `{}`. A rename keeps the data: \
+                         give `--rename {name}.{}:{}`, or `--no-rename` to drop and add",
+                        d.column, a.column, a.ty, d.column, a.column
+                    ),
+                ));
             }
         }
+        for c in dropped {
+            drop_columns.push(op(
+                "drop_column",
+                json!({"table": name, "column": c.column, "was": field_json(c, None)}),
+            ));
+            lines.push((3, format!("- drop_column {name}.{}", c.column)));
+        }
+        for (to, from) in &renamed {
+            rename_columns.push(op(
+                "rename_column",
+                json!({"table": name, "from": from, "to": to}),
+            ));
+            lines.push((3, format!("-> rename_column {name}.{from} -> {to}")));
+        }
         for c in &t.columns {
-            match b.column(&c.column) {
+            let before = match renamed.get(c.column.as_str()) {
+                Some(from) => b.column(from).map(|o| ColumnDef {
+                    column: c.column.clone(),
+                    ..o.clone()
+                }),
+                None => b.column(&c.column).cloned(),
+            };
+            match before {
                 None => {
                     let key = format!("{name}.{}", c.column);
                     let mut payload = json!({"table": name, "column": field_json(c, None)});
@@ -737,10 +788,10 @@ fn diff(
                     add_columns.push(op("add_column", payload));
                     lines.push((6, format!("+ add_column {key}")));
                 }
-                Some(o) if o != c => {
+                Some(o) if &o != c => {
                     alters.push(op(
                         "alter_column",
-                        json!({"table": name, "column": c.column, "changes": changes(o, c)}),
+                        json!({"table": name, "column": c.column, "changes": changes(&o, c)}),
                     ));
                     lines.push((7, format!("~ alter_column {name}.{}", c.column)));
                 }
@@ -775,17 +826,16 @@ fn diff(
             if !t.checks.contains(c) {
                 drop_checks.push(op(
                     "drop_check",
-                    json!({"table": name, "name": c.name, "was": c.expr}),
+                    json!({"table": name, "name": c.name, "was": c.body}),
                 ));
                 lines.push((1, format!("- drop_check {name}.{}", c.name)));
             }
         }
         for c in &t.checks {
             if !b.checks.contains(c) {
-                add_checks.push(op(
-                    "add_check",
-                    json!({"table": name, "name": c.name, "expr": c.expr}),
-                ));
+                let mut payload = serde_json::to_value(c).expect("check");
+                payload["table"] = json!(name);
+                add_checks.push(op("add_check", payload));
                 lines.push((10, format!("+ add_check {name}.{}", c.name)));
             }
         }
@@ -813,6 +863,7 @@ fn diff(
         drop_indexes,
         drop_columns,
         drop_tables,
+        rename_columns,
         creates,
         add_columns,
         alters,

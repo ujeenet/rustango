@@ -94,6 +94,8 @@ pub(crate) enum Code {
     Unowned,
     /// A folder or file could not be read.
     Io,
+    /// makemigrations: a drop and an add of one type need `--rename` or `--no-rename`.
+    Rename,
 }
 
 impl Code {
@@ -124,6 +126,7 @@ impl Code {
             Self::Drift => "MV2-E023",
             Self::Behind => "MV2-E024",
             Self::Unowned => "MV2-E025",
+            Self::Rename => "MV2-E026",
             Self::CrossTarget => "MV2-E030",
             Self::FkType => "MV2-E3780",
             Self::CheckColumn => "MV2-E3959",

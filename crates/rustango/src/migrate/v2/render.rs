@@ -367,7 +367,11 @@ fn create_table_sql(d: &dyn Dialect, t: &TableState, name: &str, inline: &[&Inde
         parts.push(format!("PRIMARY KEY ({})", list(d, &pk)));
     }
     for k in &t.checks {
-        parts.push(format!("CONSTRAINT {} CHECK ({})", q(d, &k.name), k.expr));
+        parts.push(format!(
+            "CONSTRAINT {} CHECK ({})",
+            q(d, &k.name),
+            k.body.sql(d)
+        ));
     }
     for f in &t.fks {
         parts.push(fk_clause(d, f));
@@ -484,7 +488,7 @@ pub(crate) fn rename_unit(b: Backend, r: &super::probe::Rename) -> Option<Unit> 
             vec![format!(
                 "ALTER TABLE {t} DROP CHECK {old}, ADD CONSTRAINT {} CHECK ({})",
                 q(d, &k.name),
-                k.expr
+                k.body.sql(d)
             )],
             Expect::Check {
                 table: r.table.clone(),
@@ -869,26 +873,24 @@ impl Render<'_> {
                     ]),
                 }
             }
-            Op::AddCheck { table, name, expr } => {
+            Op::AddCheck { table, check } => {
                 if lite {
                     return Ok(self.rebuild(&*self.table(self.after, table)?, &[]));
                 }
                 let add = format!(
-                    "ALTER TABLE {} ADD CONSTRAINT {} CHECK ({expr})",
+                    "ALTER TABLE {} ADD CONSTRAINT {} CHECK ({})",
                     q(d, table),
-                    q(d, name)
+                    q(d, &check.name),
+                    check.body.sql(d)
                 );
                 if pg && self.existed(table) {
-                    self.validate_later(table, name, add)
+                    self.validate_later(table, &check.name, add)
                 } else {
                     self.ddl(
                         vec![add],
                         vec![Expect::Check {
                             table: table.clone(),
-                            check: CheckDef {
-                                name: name.clone(),
-                                expr: expr.clone(),
-                            },
+                            check: check.clone(),
                         }],
                     )
                 }
@@ -1077,12 +1079,9 @@ impl Render<'_> {
                     table: table.clone(),
                     column: column.clone(),
                 }),
-                Op::AddCheck { table, name, expr } => out.push(Expect::Check {
+                Op::AddCheck { table, check } => out.push(Expect::Check {
                     table: table.clone(),
-                    check: CheckDef {
-                        name: name.clone(),
-                        expr: expr.clone(),
-                    },
+                    check: check.clone(),
                 }),
                 Op::DropCheck { table, name, .. } => out.push(Expect::NoCheck {
                     table: table.clone(),

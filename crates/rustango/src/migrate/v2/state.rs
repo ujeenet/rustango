@@ -128,11 +128,172 @@ fn is_btree(m: &String) -> bool {
     m == "btree"
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// A CHECK: `{name, expr}` with SQL as written, or `{name, column, min,
+/// max}`, a range each backend renders with its own quoting.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct CheckDef {
     pub(crate) name: String,
-    pub(crate) expr: String,
+    pub(crate) body: CheckBody,
+}
+
+/// What a CHECK tests.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum CheckBody {
+    /// SQL text, run as written on every backend.
+    Sql(String),
+    /// `column >= min AND column <= max`, at least one bound.
+    Range {
+        column: String,
+        min: Option<i64>,
+        max: Option<i64>,
+    },
+}
+
+impl CheckBody {
+    /// The SQL inside `CHECK (…)` on `d`.
+    pub(crate) fn sql(&self, d: &dyn crate::sql::Dialect) -> String {
+        match self {
+            Self::Sql(s) => s.clone(),
+            Self::Range { column, min, max } => {
+                let q = d.quote_ident(column);
+                let mut parts = Vec::new();
+                if let Some(min) = min {
+                    parts.push(format!("{q} >= {min}"));
+                }
+                if let Some(max) = max {
+                    parts.push(format!("{q} <= {max}"));
+                }
+                parts.join(" AND ")
+            }
+        }
+    }
+
+    /// Whether the check reads `col`.
+    pub(crate) fn mentions(&self, col: &str) -> bool {
+        match self {
+            Self::Sql(s) => s
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .any(|tok| tok.eq_ignore_ascii_case(col)),
+            Self::Range { column, .. } => column == col,
+        }
+    }
+}
+
+/// The flat file form of a check body: `expr`, or `column` with bounds.
+#[derive(Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawCheckBody {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) expr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) column: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) min: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) max: Option<i64>,
+}
+
+impl RawCheckBody {
+    pub(crate) fn of(b: &CheckBody) -> Self {
+        match b {
+            CheckBody::Sql(s) => Self {
+                expr: Some(s.clone()),
+                ..Self::default()
+            },
+            CheckBody::Range { column, min, max } => Self {
+                column: Some(column.clone()),
+                min: *min,
+                max: *max,
+                ..Self::default()
+            },
+        }
+    }
+
+    /// # Errors
+    /// Both forms, neither, or a range with no bound.
+    pub(crate) fn body(self) -> Result<CheckBody, String> {
+        match (self.expr, self.column) {
+            (Some(e), None) if self.min.is_none() && self.max.is_none() => Ok(CheckBody::Sql(e)),
+            (None, Some(column)) if self.min.is_some() || self.max.is_some() => {
+                Ok(CheckBody::Range {
+                    column,
+                    min: self.min,
+                    max: self.max,
+                })
+            }
+            _ => Err("a check is `expr`, or `column` with `min` and/or `max`".to_owned()),
+        }
+    }
+}
+
+impl Serialize for CheckBody {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        RawCheckBody::of(self).serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for CheckBody {
+    /// `was` of `drop_check`: the SQL string, or the range object.
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Was {
+            Sql(String),
+            Range(RawCheckBody),
+        }
+        match Was::deserialize(d)? {
+            Was::Sql(s) => Ok(Self::Sql(s)),
+            Was::Range(r) if r.expr.is_none() => r.body().map_err(serde::de::Error::custom),
+            Was::Range(_) => Err(serde::de::Error::custom(
+                "`was` is the SQL string or a range",
+            )),
+        }
+    }
+}
+
+/// `{name, ...RawCheckBody}`, spelled out: `flatten` drops `deny_unknown_fields`.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCheck {
+    name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    column: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    min: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max: Option<i64>,
+}
+
+impl Serialize for CheckDef {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let b = RawCheckBody::of(&self.body);
+        RawCheck {
+            name: self.name.clone(),
+            expr: b.expr,
+            column: b.column,
+            min: b.min,
+            max: b.max,
+        }
+        .serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for CheckDef {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = RawCheck::deserialize(d)?;
+        let body = RawCheckBody {
+            expr: raw.expr,
+            column: raw.column,
+            min: raw.min,
+            max: raw.max,
+        };
+        Ok(Self {
+            name: raw.name,
+            body: body.body().map_err(serde::de::Error::custom)?,
+        })
+    }
 }
 
 /// FK delete action. RESTRICT and NO ACTION stay apart: PG treats them
@@ -562,11 +723,11 @@ mod tests {
         a.checks = vec![
             CheckDef {
                 name: "b".into(),
-                expr: "x".into(),
+                body: CheckBody::Sql("x".into()),
             },
             CheckDef {
                 name: "a".into(),
-                expr: "y".into(),
+                body: CheckBody::Sql("y".into()),
             },
         ];
         let mut b = a.clone();

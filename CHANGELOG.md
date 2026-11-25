@@ -7,7 +7,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Added
 
 - Migration files written for engine v2 are recognised: every v1 verb, boot path, and runner refuses them with a clear error instead of a parse failure, and a v1 migrate refuses a database switched to engine v2 (boot warns and serves).
-- `manage dbmigrate` (`make`, `apply`, `down`, `status`, `check`, `sql`, `adopt`) runs projects on migrations engine v2. Boot migrate of a v2 project binds first and answers 503 until the run ends.
+- `manage dbmigrate` (`make`, `apply`, `down`, `status`, `check`, `sql`, `adopt`) runs projects on migrations engine v2. `make` refuses a drop and an add of one type until `--rename table.old:new` or `--no-rename`; min/max become range checks each backend quotes, and `check` refuses a bare name a configured backend reserves. Boot migrate of a v2 project binds first and answers 503 until the run ends.
 - `embed_migrations!` embeds a folder of engine v2 files (a mixed folder fails to compile); `migrate::migrate_embedded_v2` applies it.
 
 ### Fixed

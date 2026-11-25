@@ -278,7 +278,8 @@ pub(crate) async fn renames(pool: &Pool, state: &State) -> Result<Vec<Rename>, C
             }
             for l in &live.checks {
                 let Some(name) = &l.name else { continue };
-                if c.expr_eq(&live, ExprKind::Check, &k.expr, &l.expr).await? {
+                let sql = k.body.sql(pool.dialect());
+                if c.expr_eq(&live, ExprKind::Check, &sql, &l.expr).await? {
                     out.push(Rename {
                         table: t.name.clone(),
                         old: name.clone(),
@@ -575,6 +576,7 @@ impl Cmp<'_> {
     }
 
     async fn check(&self, live: &LiveTable, k: &CheckDef) -> Result<Vec<Mismatch>, CatalogError> {
+        let sql = k.body.sql(self.pool.dialect());
         let by_name = live
             .checks
             .iter()
@@ -584,10 +586,7 @@ impl Cmp<'_> {
             None if self.names == Names::Shape => {
                 let mut found = None;
                 for l in &live.checks {
-                    if self
-                        .expr_eq(live, ExprKind::Check, &k.expr, &l.expr)
-                        .await?
-                    {
+                    if self.expr_eq(live, ExprKind::Check, &sql, &l.expr).await? {
                         found = Some(l);
                         break;
                     }
@@ -600,11 +599,8 @@ impl Cmp<'_> {
             None => return Ok(vec![mm(&k.name, "check", "present", "absent")]),
         };
         let mut out = Vec::new();
-        if !self
-            .expr_eq(live, ExprKind::Check, &k.expr, &l.expr)
-            .await?
-        {
-            out.push(mm(&k.name, "check expr", k.expr.clone(), l.expr.clone()));
+        if !self.expr_eq(live, ExprKind::Check, &sql, &l.expr).await? {
+            out.push(mm(&k.name, "check expr", sql, l.expr.clone()));
         }
         if self.d == DialectKind::Postgres && !l.validated {
             out.push(mm(&k.name, "check", "validated", "NOT VALID"));

@@ -161,3 +161,30 @@ async fn models_ahead_of_the_chain_is_a_finding() {
         "{errs:#?}"
     );
 }
+
+#[tokio::test]
+async fn a_bare_reserved_name_in_a_check_fails_naming_the_backend() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("migrations");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = json!({"engine": 2, "format": 1, "id": "0001_initial", "app": "project",
+        "parents": [], "target": "tenant", "operations": [{"op": "create_table", "v": 1,
+        "table": {"name": "ck_r", "scope": "tenant", "fields": [
+            {"column": "id", "ty": "i64", "primary_key": true, "nullable": false},
+            {"column": "rank", "ty": "i32", "nullable": true},
+            {"column": "d", "ty": "date", "nullable": true}]},
+        "checks": [{"name": "ck_r_rank", "expr": "rank >= 0 AND d <= CURRENT_DATE"}]}]});
+    std::fs::write(dir.join("0001_initial.json"), file.to_string()).unwrap();
+    let found = check(&dir, &[Backend::Postgres, Backend::Mysql], None, None)
+        .await
+        .unwrap();
+    let errs = errors(&found);
+    assert_eq!(errs.len(), 1, "{found:#?}");
+    assert!(
+        errs[0].msg.contains("`rank` is reserved on mysql"),
+        "{errs:#?}"
+    );
+    // PostgreSQL alone takes `rank` bare.
+    let found = check(&dir, &[Backend::Postgres], None, None).await.unwrap();
+    assert!(errors(&found).is_empty(), "{found:#?}");
+}
