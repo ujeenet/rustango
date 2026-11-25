@@ -188,3 +188,34 @@ async fn a_bare_reserved_name_in_a_check_fails_naming_the_backend() {
     let found = check(&dir, &[Backend::Postgres], None, None).await.unwrap();
     assert!(errors(&found).is_empty(), "{found:#?}");
 }
+
+/// Every batched op warns that it runs inline, unless allowed.
+#[tokio::test]
+async fn a_batched_op_warns_w010_unless_allowed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("migrations");
+    project_with(&dir, &[("string", Some(10), "'a'".into())]);
+    let data = |allow: Value| {
+        json!({"engine": 2, "format": 1, "id": "0002_mark", "app": "project",
+            "parents": ["0001_initial"], "target": "tenant", "operations": [{
+            "op": "data_sql", "v": 1, "id": "mark_v1",
+            "tables": {"read": ["ck_defaults"], "write": ["ck_defaults.c0"]},
+            "up": {"any": "UPDATE {{t:ck_defaults}} SET {{c:c0}} = 'b' WHERE {{batch_range}}"},
+            "batch": {"table": "ck_defaults", "key": "id", "size": 100},
+            "down": {"noop": "test"}, "allow": allow}]})
+    };
+    let w010 = |found: &[Finding]| found.iter().filter(|f| f.msg.contains("MV2-W010")).count();
+    let noop = json!([{"code": "MV2-E028", "reason": "test"}]);
+    std::fs::write(dir.join("0002_mark.json"), data(noop.clone()).to_string()).unwrap();
+    let found = check(&dir, &[Backend::Postgres], None, None).await.unwrap();
+    assert!(errors(&found).is_empty(), "{found:#?}");
+    assert_eq!(w010(&found), 1, "{found:#?}");
+    let mut allowed = noop;
+    allowed
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"code": "MV2-W010", "reason": "short"}));
+    std::fs::write(dir.join("0002_mark.json"), data(allowed).to_string()).unwrap();
+    let found = check(&dir, &[Backend::Postgres], None, None).await.unwrap();
+    assert_eq!(w010(&found), 0, "{found:#?}");
+}

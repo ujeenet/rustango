@@ -97,6 +97,38 @@ pub(crate) struct Unit {
     /// A `data_rust` unit's step and what it may touch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) step: Option<StepRef>,
+    /// A batched data unit: it runs once per batch, each batch its own tx.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) batch: Option<BatchPlan>,
+}
+
+/// How a batched unit walks its table, frozen with the plan.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct BatchPlan {
+    pub(crate) table: String,
+    pub(crate) key: String,
+    /// The key column's type: the cursor is stored and decoded as it.
+    pub(crate) key_ty: String,
+    pub(crate) size: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sleep_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) max_batches_per_run: Option<u64>,
+}
+
+impl BatchPlan {
+    fn of(spec: &super::format::BatchSpec, state: &State) -> Option<Self> {
+        let t = state.tables.get(spec.table.as_str())?;
+        let c = t.column(&spec.key.0)?;
+        Some(Self {
+            table: spec.table.clone(),
+            key: spec.key.0.clone(),
+            key_ty: c.ty.clone(),
+            size: spec.size,
+            sleep_ms: spec.sleep_ms,
+            max_batches_per_run: spec.max_batches_per_run,
+        })
+    }
 }
 
 /// The step a `data_rust` unit runs, frozen with the plan: its id, the
@@ -365,6 +397,7 @@ fn tx(sql: Vec<String>) -> Vec<Unit> {
         probe: None,
         binds: Vec::new(),
         step: None,
+        batch: None,
     }]
 }
 
@@ -376,6 +409,7 @@ fn auto(sql: String, probe: Vec<Expect>) -> Unit {
         probe: Some(probe),
         binds: Vec::new(),
         step: None,
+        batch: None,
     }
 }
 
@@ -608,6 +642,7 @@ pub(crate) fn rename_unit(b: Backend, r: &super::probe::Rename) -> Option<Unit> 
                 probe: None,
                 binds: Vec::new(),
                 step: None,
+                batch: None,
             })
         }
         (Renamed::Check(k), Backend::Postgres) => (
@@ -660,6 +695,7 @@ pub(crate) fn rename_unit(b: Backend, r: &super::probe::Rename) -> Option<Unit> 
         probe: Some(vec![probe]),
         binds: Vec::new(),
         step: None,
+        batch: None,
     })
 }
 
@@ -701,6 +737,7 @@ impl Render<'_> {
                 probe: (i + 1 == n).then(|| probe.clone()),
                 binds: Vec::new(),
                 step: None,
+                batch: None,
             })
             .collect()
     }
@@ -755,6 +792,7 @@ impl Render<'_> {
             probe: None,
             binds: Vec::new(),
             step: None,
+            batch: None,
         }]
     }
 
@@ -1129,6 +1167,7 @@ impl Render<'_> {
                         probe: self.raw_probe(op, probe.as_ref())?,
                         binds: Vec::new(),
                         step: None,
+                        batch: None,
                     }]
                 } else {
                     tx(vec![stmt])
@@ -1145,24 +1184,34 @@ impl Render<'_> {
                     Some(None) => return Ok(Vec::new()),
                     Some(Some(t)) => t,
                 };
-                let Op::DataSql { tables, .. } = op else {
+                let Op::DataSql { tables, batch, .. } = op else {
                     unreachable!()
                 };
-                let sql =
-                    super::data::resolve(text, self.b, self.before, tables, binds.len(), self.at)?;
+                let key = batch.as_ref().map(|b| b.key.0.as_str());
+                let sql = super::data::resolve_with(
+                    text,
+                    self.b,
+                    self.before,
+                    tables,
+                    binds.len(),
+                    key,
+                    self.at,
+                )?;
                 vec![Unit {
                     op: 0,
                     kind: UnitKind::Data,
-                    sql: vec![self.raw_statement(&sql, false)?],
+                    sql: vec![self.statement_checks(sql, false)?],
                     probe: None,
                     binds: binds.clone(),
                     step: None,
+                    batch: batch.as_ref().and_then(|b| BatchPlan::of(b, self.before)),
                 }]
             }
             Op::DataRust {
                 id,
                 tables,
                 reverse,
+                batch,
                 ..
             } => {
                 let mut scope = std::collections::BTreeMap::new();
@@ -1193,6 +1242,11 @@ impl Render<'_> {
                         footprint: tables.clone(),
                         tables: scope,
                     }),
+                    // The reverse of a batched step runs unbatched in this release.
+                    batch: batch
+                        .as_ref()
+                        .filter(|_| !*reverse)
+                        .and_then(|b| BatchPlan::of(b, self.before)),
                 }]
             }
             Op::StateOnly { .. } | Op::ExternTable { .. } | Op::AdoptTable { .. } => Vec::new(),
@@ -1243,6 +1297,12 @@ impl Render<'_> {
     /// unless the op is `tx: "autocommit"` (MySQL commits it anyway).
     fn raw_statement(&self, text: &str, autocommit: bool) -> Result<String, LoadError> {
         let s = self.expand(text.trim())?;
+        self.statement_checks(s, autocommit)
+    }
+
+    /// The one-statement, comment-aware checks of a raw statement whose
+    /// placeholders are already resolved (a data op's).
+    fn statement_checks(&self, s: String, autocommit: bool) -> Result<String, LoadError> {
         let (code, stmts) = strip_comments(&s, self.b == Backend::Mysql);
         if stmts > 1 {
             return Err(self.err(
@@ -1453,6 +1513,7 @@ impl Render<'_> {
                         probe: None,
                         binds: Vec::new(),
                         step: None,
+                        batch: None,
                     },
                     auto(
                         format!("ALTER TABLE {t} MODIFY COLUMN {}", col_def(d, column)),

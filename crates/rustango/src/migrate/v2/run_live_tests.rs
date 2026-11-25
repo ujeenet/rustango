@@ -1172,7 +1172,7 @@ async fn a_swallowed_error_rolls_the_unit_back(b: B) {
     conn.close_on_drop();
     let tx = conn.begin().await.unwrap();
     let (tx, r) = run_step(tx, Scope::default(), swallow(false)).await;
-    let poisoned = matches!(r, Err(UnitError::Poisoned));
+    let poisoned = matches!(r, Err(UnitError::Poisoned { .. }));
     if r.is_ok() {
         tx.commit().await.unwrap();
     } else {
@@ -2072,6 +2072,377 @@ async fn leaked_bytes_are_logged_once_per_run() {
     assert!(lines[0].contains("leaked_bytes="), "{}", lines[0]);
 }
 
+// ---- batching (3a) ----
+
+/// Example D's backfill: users above the cursor, `size` at a time, copied
+/// into `ed_address`; the cursor is the last user id copied.
+#[crate::data_step(app = "steps", id = "move_address_v1")]
+impl MoveAddressV1 {
+    async fn up(ctx: &mut StepCtx<'_>, batch: Batch) -> StepResult {
+        let users = ctx.table("ed_user")?;
+        let mut q = users.query().order_by("id", false);
+        if let Some(lo) = batch.lo() {
+            q = q.filter_gt("id", lo.clone());
+        }
+        let rows = q
+            .limit(i64::try_from(batch.size()).unwrap_or(i64::MAX))
+            .fetch(ctx)
+            .await?;
+        let address = ctx.table("ed_address")?;
+        let copies: Vec<Vec<(&str, crate::core::SqlValue)>> = rows
+            .iter()
+            .map(|r| {
+                vec![
+                    ("user_id", r.key("id").unwrap()),
+                    ("street", r.key("street").unwrap()),
+                ]
+            })
+            .collect();
+        address.insert_many(ctx, &copies).await?;
+        Ok(batch.advance_to(rows.last().and_then(|r| r.key("id"))))
+    }
+}
+
+/// Never moves its cursor: the runner must refuse the second batch.
+#[crate::data_step(app = "steps", id = "stall_v1")]
+impl StallV1 {
+    async fn up(_ctx: &mut StepCtx<'_>, batch: Batch) -> StepResult {
+        Ok(batch.advance_to(Some(crate::core::SqlValue::I64(1))))
+    }
+}
+
+fn ed_user() -> Value {
+    json!({"op": "create_table", "v": 1, "table": {"name": "ed_user", "scope": "tenant", "fields": [
+        {"column": "id", "ty": "i64", "primary_key": true, "nullable": false},
+        {"column": "street", "ty": "string", "max_length": 40, "nullable": true}]}})
+}
+
+/// `0001` creates `ed_user` and `n` rows go in, ids `1..=n` (or `ids`).
+async fn ed_project(pool: &Pool, ids: &[i64]) -> (tempfile::TempDir, PathBuf) {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    put(&dir, "0001_user", &vs("0001_user", &[], json!([ed_user()])));
+    migrate(pool, &dir, &opts()).await.unwrap();
+    for chunk in ids.chunks(500) {
+        let values: Vec<String> = chunk.iter().map(|i| format!("({i}, 's{i}')")).collect();
+        raw_execute_pool(
+            pool,
+            &format!(
+                "INSERT INTO ed_user (id, street) VALUES {}",
+                values.join(", ")
+            ),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    }
+    (root, dir)
+}
+
+/// Example D's expand, backfill and contract files (2.5).
+fn example_d(dir: &Path, size: u64) {
+    let address = json!({"op": "create_table", "v": 1, "table": {"name": "ed_address",
+        "scope": "tenant", "fields": [
+            {"column": "id", "ty": "i64", "primary_key": true, "auto": true, "nullable": false},
+            {"column": "user_id", "ty": "i64", "nullable": false},
+            {"column": "street", "ty": "string", "max_length": 40, "nullable": true}]},
+        "indexes": [{"name": "ed_address_user_key", "columns": ["user_id"], "unique": true}]});
+    put(
+        dir,
+        "0002_address",
+        &vs("0002_address", &["0001_user"], json!([address])),
+    );
+    let backfill = json!({"op": "data_rust", "v": 1, "id": "move_address_v1",
+        "tables": {"read": ["ed_user"], "write": ["ed_address"]},
+        "batch": {"table": "ed_user", "key": "id", "size": size},
+        "down": {"noop": "the reverse of 0002 drops the table"},
+        "allow": [{"code": "MV2-E028", "reason": "test"}]});
+    put(
+        dir,
+        "0003_backfill",
+        &vs("0003_backfill", &["0002_address"], json!([backfill])),
+    );
+    let drop = json!({"op": "drop_column", "v": 1, "table": "ed_user", "column": "street",
+        "was": {"column": "street", "ty": "string", "max_length": 40, "nullable": true}});
+    put(
+        dir,
+        "0004_contract",
+        &vs("0004_contract", &["0003_backfill"], json!([drop])),
+    );
+}
+
+const ED_ROWS: i64 = 50_000;
+
+/// Example D with 50k rows, killed at `crash`, then resumed: `applied`,
+/// every row moved exactly once.
+async fn example_d_with(b: B, crash: Crash, dies: bool) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let ids: Vec<i64> = (1..=ED_ROWS).collect();
+    let (_root, dir) = ed_project(pool, &ids).await;
+    example_d(&dir, 2000);
+    let crashing = Options {
+        crash: Some(crash),
+        ..Options::default()
+    };
+    let first = migrate(pool, &dir, &crashing).await;
+    assert_eq!(first.is_err(), dies, "{crash:?}: {first:?}");
+    if dies {
+        migrate(pool, &dir, &opts())
+            .await
+            .unwrap_or_else(|e| panic!("{crash:?}: resume: {e}"));
+    }
+    let states: Vec<RowState> = rows(pool).await.into_iter().map(|r| r.1).collect();
+    assert!(
+        states.iter().all(|s| *s == RowState::Applied),
+        "{crash:?}: {states:?}"
+    );
+    assert_eq!(
+        count(pool, "SELECT COUNT(*) FROM ed_address").await,
+        ED_ROWS,
+        "{crash:?}"
+    );
+    assert_eq!(
+        count(pool, "SELECT COUNT(DISTINCT user_id) FROM ed_address").await,
+        ED_ROWS,
+        "{crash:?}"
+    );
+    assert_eq!(
+        columns(pool, "ed_user").await,
+        ["id"],
+        "{crash:?}: contract ran"
+    );
+}
+
+/// Killed before each unit of Example D.
+async fn example_d_unit_kills(b: B) {
+    for n in 0..3 {
+        example_d_with(b, Crash::BeforeUnit(n), true).await;
+    }
+}
+
+/// Killed in the middle of a batch: first, middle and last.
+async fn example_d_mid_batch_kills(b: B) {
+    for n in [0, 12, 24] {
+        example_d_with(b, Crash::MidBatch(n), true).await;
+    }
+}
+
+/// The commit of a batch lands but its answer is lost: the run reads the
+/// progress and goes on without redoing it.
+async fn example_d_lost_acks(b: B) {
+    for n in [0, 12, 24] {
+        example_d_with(b, Crash::LostAck(n), false).await;
+    }
+}
+
+fn batched_sql(size: u64) -> Value {
+    json!({"op": "data_sql", "v": 1, "id": "mark_v1",
+        "tables": {"read": ["ed_user"], "write": ["ed_user.street"]},
+        "up": {"any": "UPDATE {{t:ed_user}} SET {{c:street}} = {{?}} WHERE {{batch_range}}"},
+        "binds": [{"ty": "string", "value": "moved"}],
+        "batch": {"table": "ed_user", "key": "id", "size": size},
+        "down": {"noop": "test"}, "allow": [{"code": "MV2-E028", "reason": "test"}]})
+}
+
+async fn batch_events(pool: &Pool, mig: &str) -> usize {
+    Ledger::default_names()
+        .event_kinds(pool, ("steps", mig))
+        .await
+        .unwrap()
+        .iter()
+        .filter(|k| *k == "batch")
+        .count()
+}
+
+/// Keys 1 and 1e9 take 2 batches: boundaries come from the keys, not a
+/// MIN..MAX range.
+async fn sparse_keys_take_two_batches(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let (_root, dir) = ed_project(pool, &[1, 1_000_000_000]).await;
+    put(
+        &dir,
+        "0002_mark",
+        &vs("0002_mark", &["0001_user"], json!([batched_sql(1)])),
+    );
+    migrate(pool, &dir, &opts()).await.unwrap();
+    assert_eq!(batch_events(pool, "0002_mark").await, 2);
+    assert_eq!(
+        count(pool, "SELECT COUNT(*) FROM ed_user WHERE street = 'moved'").await,
+        2
+    );
+}
+
+/// A step whose cursor does not advance is refused.
+async fn a_batch_must_advance(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let (_root, dir) = ed_project(pool, &[1, 2, 3]).await;
+    let stall = json!({"op": "data_rust", "v": 1, "id": "stall_v1",
+        "tables": {"read": ["ed_user"]}, "batch": {"table": "ed_user", "key": "id", "size": 1},
+        "down": {"noop": "test"}});
+    put(
+        &dir,
+        "0002_stall",
+        &vs("0002_stall", &["0001_user"], json!([stall])),
+    );
+    let e = migrate(pool, &dir, &opts()).await.expect_err("refused");
+    assert!(e.to_string().contains("must advance"), "{e}");
+}
+
+/// `--max-duration` stops cleanly between batches; the next run resumes.
+async fn max_duration_stops_between_batches(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let ids: Vec<i64> = (1..=30).collect();
+    let (_root, dir) = ed_project(pool, &ids).await;
+    put(
+        &dir,
+        "0002_mark",
+        &vs("0002_mark", &["0001_user"], json!([batched_sql(10)])),
+    );
+    let brief = Options {
+        max_duration: Some(Duration::ZERO),
+        ..Options::default()
+    };
+    let rep = migrate(pool, &dir, &brief).await.unwrap();
+    assert!(rep.stopped.is_some(), "{rep:?}");
+    assert_eq!(
+        count(pool, "SELECT COUNT(*) FROM ed_user WHERE street = 'moved'").await,
+        10
+    );
+    assert_eq!(rows(pool).await.last().unwrap().1, RowState::Running);
+    assert_eq!(
+        migrate(pool, &dir, &opts()).await.unwrap().applied,
+        ["0002_mark"]
+    );
+    assert_eq!(
+        count(pool, "SELECT COUNT(*) FROM ed_user WHERE street = 'moved'").await,
+        30
+    );
+    assert_eq!(batch_events(pool, "0002_mark").await, 3);
+}
+
+/// A shutdown signal stops between batches; the next start resumes at the
+/// stored cursor and moves every row once.
+async fn a_shutdown_stops_between_batches(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let ids: Vec<i64> = (1..=30).collect();
+    let (_root, dir) = ed_project(pool, &ids).await;
+    put(
+        &dir,
+        "0002_mark",
+        &vs("0002_mark", &["0001_user"], json!([batched_sql(10)])),
+    );
+    let stopping = Options {
+        stop: Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            true,
+        ))),
+        ..Options::default()
+    };
+    let e = migrate(pool, &dir, &stopping).await.expect_err("stopped");
+    assert!(e.to_string().contains("between batches"), "{e}");
+    assert_eq!(
+        count(pool, "SELECT COUNT(*) FROM ed_user WHERE street = 'moved'").await,
+        10
+    );
+    assert_eq!(
+        migrate(pool, &dir, &opts()).await.unwrap().applied,
+        ["0002_mark"]
+    );
+    assert_eq!(
+        count(pool, "SELECT COUNT(*) FROM ed_user WHERE street = 'moved'").await,
+        30
+    );
+    assert_eq!(batch_events(pool, "0002_mark").await, 3);
+}
+
+/// A held row lock: the batch times out, is retried, and goes through
+/// once the lock is released.
+async fn a_held_lock_is_retried(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let (_root, dir) = ed_project(pool, &[1, 2, 3]).await;
+    put(
+        &dir,
+        "0002_mark",
+        &vs("0002_mark", &["0001_user"], json!([batched_sql(10)])),
+    );
+    // Another session holds a row for 1.5 s, then lets go.
+    let (held_tx, held) = tokio::sync::oneshot::channel();
+    let url = db.url.clone();
+    let release = tokio::spawn(async move {
+        let holder = Pool::connect(&url).await.unwrap();
+        let mut hconn = holder.acquire().await.unwrap();
+        let mut htx = hconn.begin().await.unwrap();
+        crate::sql::raw_execute_tx(
+            &mut htx,
+            "UPDATE ed_user SET street = 'held' WHERE id = 2",
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        held_tx.send(()).unwrap();
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        htx.rollback().await.unwrap();
+        drop(hconn);
+        holder.close().await;
+    });
+    held.await.unwrap();
+    let quick = Options {
+        data_lock_timeout: Some(Duration::from_secs(1)),
+        ..Options::default()
+    };
+    let rep = migrate(pool, &dir, &quick).await;
+    release.await.unwrap();
+    assert_eq!(rep.unwrap().applied, ["0002_mark"]);
+    assert_eq!(
+        count(pool, "SELECT COUNT(*) FROM ed_user WHERE street = 'moved'").await,
+        3
+    );
+}
+
+/// Two replicas: the one migrating dies mid-move, the waiter takes the
+/// lock and finishes it, every row once.
+async fn a_waiter_finishes_a_killed_move(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let ids: Vec<i64> = (1..=40).collect();
+    let (_root, dir) = ed_project(&db.pool, &ids).await;
+    let mut slow = batched_sql(5);
+    slow["batch"]["sleep_ms"] = json!(150);
+    put(
+        &dir,
+        "0002_mark",
+        &vs("0002_mark", &["0001_user"], json!([slow])),
+    );
+    let a_pool = Pool::connect(&db.url).await.unwrap();
+    let b_pool = Pool::connect(&db.url).await.unwrap();
+    let (da, dbb) = (dir.clone(), dir.clone());
+    let a = tokio::spawn(async move { migrate(&a_pool, &da, &Options::default()).await });
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let waiter = tokio::spawn(async move { migrate(&b_pool, &dbb, &Options::default()).await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    a.abort();
+    let _ = a.await;
+    let rep = waiter.await.unwrap().unwrap();
+    assert_eq!(rep.applied, ["0002_mark"]);
+    assert_eq!(
+        count(
+            &db.pool,
+            "SELECT COUNT(*) FROM ed_user WHERE street = 'moved'"
+        )
+        .await,
+        40
+    );
+    assert_eq!(
+        batch_events(&db.pool, "0002_mark").await,
+        8,
+        "each batch once"
+    );
+}
+
 per_backend!(
     apply_rollback_reapply,
     edited_file_and_stored_body,
@@ -2107,6 +2478,15 @@ per_backend!(
     a_missing_rust_step_runs_nothing,
     a_changed_step_is_warned_or_refused,
     the_testing_helper_runs_a_step,
+    example_d_unit_kills,
+    example_d_mid_batch_kills,
+    example_d_lost_acks,
+    sparse_keys_take_two_batches,
+    a_batch_must_advance,
+    max_duration_stops_between_batches,
+    a_shutdown_stops_between_batches,
+    a_held_lock_is_retried,
+    a_waiter_finishes_a_killed_move,
 );
 
 /// Legacy SQLite datetime text is swept before the first data unit, so a

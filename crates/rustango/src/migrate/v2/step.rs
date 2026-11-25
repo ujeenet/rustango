@@ -29,14 +29,37 @@ pub type StepFuture<'a> = BoxFuture<'a, StepResult>;
 /// The shim `#[data_step]` registers for `up` and `down`.
 pub type StepFn = for<'a, 'b> fn(&'a mut StepCtx<'b>, Batch) -> StepFuture<'a>;
 
-/// The rows a step call covers. Unbatched steps get the whole table.
+/// The rows a step call covers: keys above [`Batch::lo`], at most
+/// [`Batch::size`] of them. Unbatched steps get the whole table.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct Batch {}
+pub struct Batch {
+    lo: Option<SqlValue>,
+    size: u64,
+}
 
 impl Batch {
     pub(crate) fn whole() -> Self {
-        Self {}
+        Self {
+            lo: None,
+            size: u64::MAX,
+        }
+    }
+
+    pub(crate) fn range(lo: Option<SqlValue>, size: u64) -> Self {
+        Self { lo, size }
+    }
+
+    /// The last key the previous batch covered; `None` on the first.
+    #[must_use]
+    pub fn lo(&self) -> Option<&SqlValue> {
+        self.lo.as_ref()
+    }
+
+    /// Rows this batch may cover.
+    #[must_use]
+    pub fn size(&self) -> u64 {
+        self.size
     }
 
     /// The step is done.
@@ -44,13 +67,22 @@ impl Batch {
     pub fn done(&self) -> Progress {
         Progress::Done
     }
+
+    /// Next batch starts above `last`, the last key this one covered; `None`
+    /// (no row) means done. The runner refuses a key that does not advance.
+    #[must_use]
+    pub fn advance_to(&self, last: Option<SqlValue>) -> Progress {
+        last.map_or(Progress::Done, Progress::Next)
+    }
 }
 
 /// How far a step got.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Progress {
     Done,
+    /// The last key covered; the next batch starts above it.
+    Next(SqlValue),
 }
 
 /// Why a step failed.
@@ -174,6 +206,8 @@ pub(crate) struct Scope {
 pub struct StepCtx<'t> {
     pub(crate) tx: PoolTx<'t>,
     pub(crate) poisoned: bool,
+    /// The statement that poisoned the unit was a deadlock or lock timeout.
+    pub(crate) retryable: bool,
     pub(crate) scope: Scope,
     /// PG tables whose auto pk sequence is reset at the end of the unit.
     pub(crate) resets: BTreeSet<(String, &'static str)>,
@@ -184,6 +218,7 @@ impl<'t> StepCtx<'t> {
         Self {
             tx,
             poisoned: false,
+            retryable: false,
             scope,
             resets: BTreeSet::new(),
         }
@@ -247,7 +282,10 @@ impl<'t> StepCtx<'t> {
         binds: Vec<SqlValue>,
     ) -> Result<u64, ExecError> {
         let r = crate::sql::raw_execute_tx(&mut self.tx, sql, binds).await;
-        if r.is_err() {
+        if let Err(e) = &r {
+            if !self.poisoned {
+                self.retryable = retryable(e);
+            }
             self.poisoned = true;
         }
         r
@@ -359,12 +397,43 @@ fn quote_lit(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
+/// A deadlock, serialization failure or lock timeout: the unit is retried.
+pub(crate) fn retryable(e: &ExecError) -> bool {
+    let ExecError::Driver(sqlx::Error::Database(db)) = e else {
+        return false;
+    };
+    let code = db.code().unwrap_or_default();
+    let msg = db.message().to_ascii_lowercase();
+    // PG: deadlock, serialization, lock_timeout. MySQL: 1213 deadlock
+    // (SQLSTATE 40001), 1205 lock wait timeout. SQLite: BUSY, LOCKED.
+    matches!(
+        &*code,
+        "40P01" | "40001" | "55P03" | "5" | "6" | "517" | "262"
+    ) || msg.contains("lock wait timeout")
+        || msg.contains("deadlock")
+        || msg.contains("database is locked")
+}
+
+impl UnitError {
+    /// Whether running the unit again may succeed.
+    pub(crate) fn retryable(&self) -> bool {
+        match self {
+            Self::Poisoned { retryable } => *retryable,
+            Self::Step(StepError::Exec(e) | StepError::Hist(HistError::Exec(e))) => retryable(e),
+            _ => false,
+        }
+    }
+}
+
 /// Why a unit did not commit.
 #[derive(Debug)]
 pub(crate) enum UnitError {
     Step(StepError),
     /// A statement failed and the step went on: the unit is rolled back.
-    Poisoned,
+    /// `retryable` when that failure was a deadlock or lock timeout.
+    Poisoned {
+        retryable: bool,
+    },
     /// The step panicked: the unit is rolled back, and the row resumable.
     Panicked(String),
 }
@@ -373,7 +442,7 @@ impl std::fmt::Display for UnitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Step(e) => e.fmt(f),
-            Self::Poisoned => f.write_str(
+            Self::Poisoned { .. } => f.write_str(
                 "a statement in this data step failed, so the unit is rolled back even though \
                  the step went on; use a savepoint to recover on purpose",
             ),
@@ -384,13 +453,13 @@ impl std::fmt::Display for UnitError {
 
 /// Run `step` on `tx` with the escape guard set; a panic is caught. Returns
 /// the transaction to commit, or the reason to roll it back.
-pub(crate) async fn run_step<'t, F>(
+pub(crate) async fn run_step<'t, T, F>(
     tx: PoolTx<'t>,
     scope: Scope,
     step: F,
-) -> (PoolTx<'t>, Result<(), UnitError>)
+) -> (PoolTx<'t>, Result<T, UnitError>)
 where
-    F: for<'a> FnOnce(&'a mut StepCtx<'t>) -> BoxFuture<'a, Result<(), StepError>>,
+    F: for<'a> FnOnce(&'a mut StepCtx<'t>) -> BoxFuture<'a, Result<T, StepError>>,
 {
     use futures_util::FutureExt as _;
     let mut ctx = StepCtx::new(tx, scope);
@@ -405,10 +474,13 @@ where
                 .unwrap_or_default(),
         )),
         Ok(Err(e)) => Err(UnitError::Step(e)),
-        Ok(Ok(())) if ctx.poisoned => Err(UnitError::Poisoned),
-        Ok(Ok(())) => ctx
+        Ok(Ok(_)) if ctx.poisoned => Err(UnitError::Poisoned {
+            retryable: ctx.retryable,
+        }),
+        Ok(Ok(v)) => ctx
             .reset_sequences()
             .await
+            .map(|()| v)
             .map_err(|e| UnitError::Step(e.into())),
     };
     (ctx.tx, r)
@@ -832,6 +904,12 @@ impl HistRow {
     #[must_use]
     pub fn get(&self, column: &str) -> Option<&SqlValue> {
         self.0.iter().find(|(c, _)| *c == column).map(|(_, v)| v)
+    }
+
+    /// `column`'s value, for [`Batch::advance_to`].
+    #[must_use]
+    pub fn key(&self, column: &str) -> Option<SqlValue> {
+        self.get(column).cloned()
     }
 }
 

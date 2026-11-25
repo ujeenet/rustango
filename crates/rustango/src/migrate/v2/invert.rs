@@ -259,6 +259,7 @@ pub(crate) fn invert(op: &Op, after: &State, allow: Allow, at: &str) -> Result<V
                 down_binds: Vec::new(),
                 on_fresh: *on_fresh,
                 restores: Vec::new(),
+                batch: None,
             }],
         },
         Op::DataRust {
@@ -282,6 +283,7 @@ pub(crate) fn invert(op: &Op, after: &State, allow: Allow, at: &str) -> Result<V
                 down: RustDown::Noop("the reverse of a reverse".into()),
                 on_fresh: *on_fresh,
                 restores: Vec::new(),
+                batch: None,
                 reverse: true,
             }],
         },

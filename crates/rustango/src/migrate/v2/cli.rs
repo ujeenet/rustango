@@ -213,7 +213,16 @@ async fn apply<W: Write>(
             Some((id.to_owned(), why.to_owned()))
         }
     };
+    let max_duration = value(args, "--max-duration")?
+        .map(|v| {
+            v.trim_end_matches('s')
+                .parse::<u64>()
+                .map(std::time::Duration::from_secs)
+                .map_err(|_| usage(format!("`--max-duration {v}`: seconds, e.g. 300")))
+        })
+        .transpose()?;
     let opts = super::run::Options {
+        max_duration,
         accept_step_change,
         accept_drift: value(args, "--accept-drift")?.map(str::to_owned),
         dry_run: args.iter().any(|a| a == "--plan" || a == "--dry-run"),
@@ -231,7 +240,9 @@ async fn apply<W: Write>(
     for id in &report.applied {
         writeln!(w, "Applied {id}").map_err(io)?;
     }
-    if !opts.dry_run && report.applied.is_empty() {
+    if let Some(why) = &report.stopped {
+        writeln!(w, "Stopped: {why}").map_err(io)?;
+    } else if !opts.dry_run && report.applied.is_empty() {
         writeln!(w, "Nothing to apply.").map_err(io)?;
     }
     Ok(())

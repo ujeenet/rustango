@@ -36,10 +36,15 @@ pub(crate) fn bind_values(binds: &[Bind]) -> Result<Vec<SqlValue>, String> {
 /// [`Code::Footprint`] for a name outside the footprint or state,
 /// [`Code::File`] for a bad placeholder or bind.
 pub(crate) fn check_op(state: &State, op: &Op, at: &str) -> Result<(), LoadError> {
-    let tables = match op {
-        Op::DataSql { tables, .. } | Op::DataRust { tables, .. } => tables,
+    let (tables, batch) = match op {
+        Op::DataSql { tables, batch, .. } | Op::DataRust { tables, batch, .. } => {
+            (tables, batch.as_ref())
+        }
         _ => return Ok(()),
     };
+    if let Some(spec) = batch {
+        check_batch(state, tables, spec, &format!("{at}/batch"))?;
+    }
     for t in tables.tables() {
         if !state.tables.contains_key(t) && !state.externs.contains_key(t) {
             return Err(fp_err(
@@ -68,6 +73,7 @@ pub(crate) fn check_op(state: &State, op: &Op, at: &str) -> Result<(), LoadError
     else {
         return Ok(());
     };
+    let key_col = batch.map(|b| b.key.0.as_str());
     for (sql, binds, key) in [(up, binds, "up")].into_iter().chain(match down {
         DataDown::Sql(d) => Some((d, down_binds, "down")),
         _ => None,
@@ -79,18 +85,75 @@ pub(crate) fn check_op(state: &State, op: &Op, at: &str) -> Result<(), LoadError
                 e,
             )
         })?;
+        // The down of a batched op runs unbatched in this release.
+        let range = if key == "up" { key_col } else { None };
         for b in Backend::ALL {
             if let Some(text) = sql.get(b) {
-                resolve(
+                resolve_with(
                     &text.0,
                     b,
                     state,
                     tables,
                     binds.len(),
+                    range,
                     &format!("{at}/{key}"),
                 )?;
             }
         }
+    }
+    Ok(())
+}
+
+/// The column types a batch can walk: integers, strings (compared by the
+/// database) and uuids.
+pub(crate) const BATCH_KEY_TYPES: [&str; 5] = ["i16", "i32", "i64", "string", "uuid"];
+
+/// A batch walks one unique, ordered, NOT NULL column of a footprint table.
+fn check_batch(
+    state: &State,
+    fp: &Footprint,
+    spec: &super::format::BatchSpec,
+    at: &str,
+) -> Result<(), LoadError> {
+    let file = |msg: String| LoadError::new(Code::File, at, msg);
+    if !fp.tables().any(|t| t == spec.table) {
+        return Err(fp_err(
+            at,
+            format!("batch table `{}` is not in `tables`", spec.table),
+        ));
+    }
+    let t = state
+        .tables
+        .get(spec.table.as_str())
+        .ok_or_else(|| fp_err(at, format!("batch table `{}` is not in state", spec.table)))?;
+    let key = &spec.key.0;
+    let c = t
+        .column(key)
+        .ok_or_else(|| file(format!("batch key `{}.{key}` is not a column", t.name)))?;
+    if c.nullable {
+        return Err(file(format!("batch key `{}.{key}` is nullable", t.name)));
+    }
+    if !BATCH_KEY_TYPES.contains(&c.ty.as_str()) {
+        return Err(file(format!(
+            "batch key `{}.{key}` is {}; a batch walks {}",
+            t.name,
+            c.ty,
+            BATCH_KEY_TYPES.join(", ")
+        )));
+    }
+    let pk: Vec<&str> = t.primary_key().collect();
+    let unique = pk == [key.as_str()]
+        || t.indexes
+            .iter()
+            .any(|i| i.unique && i.predicate.is_none() && i.columns == [key.clone()]);
+    if !unique {
+        return Err(file(format!(
+            "batch key `{}.{key}` is not unique on its own",
+            t.name
+        )));
+    }
+    if spec.size == 0 {
+        return Err(file("`size` is at least 1".into()));
     }
     Ok(())
 }
@@ -124,7 +187,29 @@ pub(crate) fn resolve(
     binds: usize,
     at: &str,
 ) -> Result<String, LoadError> {
+    resolve_with(sql, b, state, fp, binds, None, at)
+}
+
+/// The column a batched op ranges over, quoted for `b`.
+pub(crate) type RangeKey<'a> = Option<&'a str>;
+
+/// [`resolve`]; with `range` (a batched op's key) `{{?}}` and
+/// `{{batch_range}}` stay as markers, numbered per batch by [`expand`].
+///
+/// # Errors
+/// As [`resolve`]; `{{batch_range}}` missing from a batched op, or written
+/// in an op that is not batched.
+pub(crate) fn resolve_with(
+    sql: &str,
+    b: Backend,
+    state: &State,
+    fp: &Footprint,
+    binds: usize,
+    range: RangeKey<'_>,
+    at: &str,
+) -> Result<String, LoadError> {
     let d = dialect(b);
+    let mut ranged = false;
     let in_fp = |t: &str| fp.tables().any(|x| x == t);
     let mut out = String::with_capacity(sql.len());
     let mut rest = sql;
@@ -139,7 +224,11 @@ pub(crate) fn resolve(
         match inner.split_once(':') {
             _ if inner == "?" => {
                 n += 1;
-                d.push_placeholder(&mut out, n);
+                if range.is_some() {
+                    out.push_str("{{?}}");
+                } else {
+                    d.push_placeholder(&mut out, n);
+                }
             }
             Some(("t", name)) => {
                 if !in_fp(name) {
@@ -200,11 +289,15 @@ pub(crate) fn resolve(
                 out.push_str(&d.quote_ident(col));
             }
             _ if inner == "batch_range" => {
-                return Err(LoadError::new(
-                    Code::NotEnabled,
-                    at,
-                    "`{{batch_range}}` belongs to batched data ops, which come in a later release",
-                ));
+                if range.is_none() {
+                    return Err(LoadError::new(
+                        Code::File,
+                        at,
+                        "`{{batch_range}}` belongs to a batched op: give `batch`",
+                    ));
+                }
+                ranged = true;
+                out.push_str("{{batch_range}}");
             }
             _ => {
                 return Err(LoadError::new(
@@ -217,6 +310,13 @@ pub(crate) fn resolve(
         rest = &after[j + 2..];
     }
     out.push_str(rest);
+    if range.is_some() && !ranged {
+        return Err(LoadError::new(
+            Code::File,
+            at,
+            "a batched data_sql needs `{{batch_range}}` where its rows are chosen",
+        ));
+    }
     if n != binds {
         return Err(LoadError::new(
             Code::File,
@@ -225,12 +325,15 @@ pub(crate) fn resolve(
         ));
     }
     // A table named bare, outside the footprint, found statically.
-    if let Ok(toks) = super::norm::tokenize(d.kind(), &out) {
+    let scan = out
+        .replace("{{?}}", "?")
+        .replace("{{batch_range}}", "1 = 1");
+    if let Ok(toks) = super::norm::tokenize(d.kind(), &scan) {
         for t in &toks {
             let super::norm::Tok::Ident(w) = &t.tok else {
                 continue;
             };
-            let bare = out[t.start..]
+            let bare = scan[t.start..]
                 .chars()
                 .next()
                 .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
@@ -291,6 +394,61 @@ pub(crate) fn misses(file: &super::format::File, b: Backend, reverse_plan: bool)
         out.extend(miss);
     }
     out
+}
+
+/// A batched SQL step's markers for one batch: `{{?}}` takes the next bind,
+/// `{{batch_range}}` the range `key > lo AND key <= hi` (a side left out
+/// when the batch has no bound there), all numbered in text order.
+pub(crate) fn expand(
+    sql: &str,
+    d: &dyn crate::sql::Dialect,
+    binds: Vec<SqlValue>,
+    key: &str,
+    lo: Option<&SqlValue>,
+    hi: Option<&SqlValue>,
+) -> (String, Vec<SqlValue>) {
+    let mut out = String::with_capacity(sql.len() + 32);
+    let mut params = Vec::with_capacity(binds.len() + 2);
+    let mut binds = binds.into_iter();
+    let mut rest = sql;
+    while let Some(i) = rest.find("{{") {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 2..];
+        let j = after.find("}}").unwrap_or(after.len());
+        match &after[..j] {
+            "?" => {
+                params.push(binds.next().unwrap_or(SqlValue::Null));
+                d.push_placeholder(&mut out, params.len());
+            }
+            "batch_range" => {
+                let k = d.quote_ident(key);
+                let mut sides = Vec::new();
+                for (v, op) in [(lo, ">"), (hi, "<=")] {
+                    if let Some(v) = v {
+                        params.push(v.clone());
+                        let mut s = format!("{k} {op} ");
+                        d.push_placeholder(&mut s, params.len());
+                        sides.push(s);
+                    }
+                }
+                if sides.is_empty() {
+                    out.push_str("(1 = 1)");
+                } else {
+                    out.push('(');
+                    out.push_str(&sides.join(" AND "));
+                    out.push(')');
+                }
+            }
+            other => {
+                out.push_str("{{");
+                out.push_str(other);
+                out.push_str("}}");
+            }
+        }
+        rest = after.get(j + 2..).unwrap_or("");
+    }
+    out.push_str(rest);
+    (out, params)
 }
 
 /// "not registered", with near matches and the binary that looked.

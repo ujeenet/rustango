@@ -108,11 +108,12 @@ fn bad_placeholders_binds_and_batches_are_load_errors() {
     assert_eq!(code(json!([users(), data(count)])), Code::File);
     let ty = json!({"binds": [{"ty": "nope", "value": 1}]});
     assert_eq!(code(json!([users(), data(ty)])), Code::File);
+    // A batched op without `{{batch_range}}`, and the marker without `batch`.
     let batch = json!({"batch": {"table": "user", "key": "id", "size": 10}});
-    assert_eq!(code(json!([users(), data(batch)])), Code::NotEnabled);
+    assert_eq!(code(json!([users(), data(batch)])), Code::File);
     let range = json!({"up": {"any": "UPDATE {{t:user}} SET {{c:locale}} = 'x' WHERE {{batch_range}}"},
         "binds": []});
-    assert_eq!(code(json!([users(), data(range)])), Code::NotEnabled);
+    assert_eq!(code(json!([users(), data(range)])), Code::File);
     let auto = json!({"tx": "autocommit"});
     assert_eq!(code(json!([users(), data(auto)])), Code::File);
 }
@@ -155,4 +156,61 @@ fn misses_name_every_unresolved_step() {
     assert!(back[0].contains("irreversible"), "{back:?}");
     let e = refuse_misses(&misses(f, Backend::Mysql, false), "plan").unwrap_err();
     assert_eq!(e.code, Code::Unresolved);
+}
+
+#[test]
+fn a_batch_walks_one_unique_ordered_column() {
+    let up = json!({"any": "UPDATE {{t:user}} SET {{c:locale}} = 'x' WHERE {{batch_range}}"});
+    let ok = json!({"up": up.clone(), "binds": [],
+        "batch": {"table": "user", "key": "id", "size": 10}});
+    let p = load(json!([users(), data(ok)])).unwrap();
+    let units = super::super::render::render_project(&p, Backend::Postgres).unwrap();
+    let u = units[0].1.iter().find(|u| u.batch.is_some()).unwrap();
+    assert!(u.sql[0].contains("{{batch_range}}"), "{:?}", u.sql);
+    let bad = |batch: Value| json!({"up": up.clone(), "binds": [], "batch": batch});
+    // A composite key, a nullable or non-unique column, a table outside the footprint.
+    for b in [
+        json!({"table": "user", "key": ["id", "locale"], "size": 10}),
+        json!({"table": "user", "key": "locale", "size": 10}),
+        json!({"table": "user", "key": "id", "size": 0}),
+    ] {
+        assert_eq!(
+            code(json!([users(), data(bad(b.clone()))])),
+            Code::File,
+            "{b}"
+        );
+    }
+    let outside = json!({"table": "other", "key": "id", "size": 1});
+    assert_eq!(
+        code(json!([users(), other(), data(bad(outside))])),
+        Code::Footprint
+    );
+}
+
+#[test]
+fn batch_markers_expand_in_text_order() {
+    let d: &dyn crate::sql::Dialect = &crate::sql::Postgres;
+    let (sql, params) = expand(
+        "UPDATE t SET a = {{?}} WHERE {{batch_range}} AND b = {{?}}",
+        d,
+        vec![SqlValue::from("x"), SqlValue::from("y")],
+        "id",
+        Some(&SqlValue::I64(5)),
+        Some(&SqlValue::I64(9)),
+    );
+    assert_eq!(
+        sql,
+        "UPDATE t SET a = $1 WHERE (\"id\" > $2 AND \"id\" <= $3) AND b = $4"
+    );
+    assert_eq!(
+        params,
+        [
+            SqlValue::from("x"),
+            SqlValue::I64(5),
+            SqlValue::I64(9),
+            SqlValue::from("y")
+        ]
+    );
+    let (sql, _) = expand("{{batch_range}}", d, Vec::new(), "id", None, None);
+    assert_eq!(sql, "(1 = 1)");
 }

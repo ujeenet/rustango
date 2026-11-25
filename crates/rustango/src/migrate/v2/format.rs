@@ -406,6 +406,38 @@ impl<'de> Deserialize<'de> for RustDown {
     }
 }
 
+/// A batched data op's range: the key it walks, rows per batch, and the
+/// knobs that change no outcome (hashed as absent).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BatchSpec {
+    pub(crate) table: String,
+    /// One column: a composite key is refused at load.
+    pub(crate) key: BatchKey,
+    pub(crate) size: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sleep_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) max_batches_per_run: Option<u64>,
+}
+
+/// The key column of a batch; a list (composite key) does not decode.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(transparent)]
+pub(crate) struct BatchKey(pub(crate) String);
+
+impl<'de> Deserialize<'de> for BatchKey {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        match Value::deserialize(d)? {
+            Value::String(s) => Ok(Self(s)),
+            Value::Array(_) => Err(serde::de::Error::custom(
+                "a composite batch key is refused: batch on one unique, ordered column",
+            )),
+            _ => Err(serde::de::Error::custom("`key` is a column name")),
+        }
+    }
+}
+
 /// Whether a data op runs on a fresh install.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -558,6 +590,8 @@ pub(crate) enum Op {
         on_fresh: OnFresh,
         #[serde(default)]
         restores: Vec<String>,
+        #[serde(default)]
+        batch: Option<BatchSpec>,
     },
     /// A Rust data step (5.2), run by its `#[data_step]` registration.
     DataRust {
@@ -568,6 +602,8 @@ pub(crate) enum Op {
         on_fresh: OnFresh,
         #[serde(default)]
         restores: Vec<String>,
+        #[serde(default)]
+        batch: Option<BatchSpec>,
         /// The inverse runs the step's `down`; never in a file.
         #[serde(skip_deserializing)]
         reverse: bool,
@@ -743,10 +779,7 @@ fn decode_op(v: &Value, at: &str) -> Result<OpEnvelope, LoadError> {
         ));
     }
     if kind == "data_sql" || kind == "data_rust" {
-        if let Some(k) = ["batch", "verify", "undo"]
-            .iter()
-            .find(|k| obj.contains_key(**k))
-        {
+        if let Some(k) = ["verify", "undo"].iter().find(|k| obj.contains_key(**k)) {
             return Err(LoadError::new(
                 Code::NotEnabled,
                 format!("{at}/{k}"),
@@ -1021,6 +1054,20 @@ mod tests {
         let f = decode(&v, "f.json").unwrap();
         assert_eq!(f.operations.len(), 2);
         assert!(matches!(f.operations[1].op, Op::AlterColumn { .. }));
+    }
+
+    #[test]
+    fn a_composite_batch_key_is_refused_at_load() {
+        let op = |key: Value| {
+            file(json!([{"op": "data_sql", "v": 1, "id": "m_v1",
+                "tables": {"read": ["t"], "write": ["t.c"]},
+                "up": {"any": "UPDATE {{t:t}} SET {{c:c}} = 1 WHERE {{batch_range}}"},
+                "batch": {"table": "t", "key": key, "size": 10},
+                "down": {"noop": "x"}, "allow": [{"code": "MV2-E028", "reason": "x"}]}]))
+        };
+        let e = decode(&op(json!(["a", "b"])), "f.json").unwrap_err();
+        assert!(e.to_string().contains("composite batch key"), "{e}");
+        decode(&op(json!("a")), "f.json").unwrap();
     }
 
     #[test]

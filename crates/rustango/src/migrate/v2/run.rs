@@ -45,6 +45,10 @@ pub(crate) struct Options {
     pub(crate) accept_step_change: Option<(String, String)>,
     /// A data unit's statement runs at most this long; `None` = 5 min.
     pub(crate) data_statement_timeout: Option<std::time::Duration>,
+    /// CLI `--max-duration`: stop cleanly between batches once it passes.
+    pub(crate) max_duration: Option<std::time::Duration>,
+    /// Row estimate above which a batched op is a long move (`MV2-W011`).
+    pub(crate) long_move_rows: Option<u64>,
     /// Test failpoint: stop as if the process died.
     #[cfg(test)]
     pub(crate) crash: Option<Crash>,
@@ -55,6 +59,10 @@ pub(crate) struct Options {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Crash {
     BeforeUnit(usize),
+    /// After a batch's statement, before its commit (counted in batches).
+    MidBatch(usize),
+    /// The batch committed and its answer was lost (counted in batches).
+    LostAck(usize),
     /// After a data unit's statement, before its commit.
     AfterData(usize),
     /// After an autocommit unit's started mark, before its statement.
@@ -70,8 +78,10 @@ pub(crate) struct Report {
     pub(crate) system: Vec<String>,
     pub(crate) applied: Vec<String>,
     pub(crate) rolled_back: Vec<String>,
-    /// Data steps whose code changed after they ran.
+    /// Data steps whose code changed after they ran, and long moves.
     pub(crate) warnings: Vec<String>,
+    /// Why a clean stop ended the run early; the next run resumes.
+    pub(crate) stopped: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -80,6 +90,10 @@ pub(crate) enum RunError {
     Load(#[from] LoadError),
     #[error(transparent)]
     Db(#[from] MigrateError),
+    /// A clean stop between batches (`--max-duration`, a batch budget): the
+    /// row stays `running` and the next run resumes it.
+    #[error("{0}")]
+    Stopped(String),
 }
 
 impl From<crate::sql::ExecError> for RunError {
@@ -105,6 +119,7 @@ impl From<RunError> for MigrateError {
         match e {
             RunError::Load(e) => Self::Validation(e.to_string()),
             RunError::Db(e) => e,
+            RunError::Stopped(why) => Self::Validation(why),
         }
     }
 }
@@ -113,7 +128,7 @@ impl RunError {
     pub(crate) fn code(&self) -> Option<Code> {
         match self {
             Self::Load(e) => Some(e.code),
-            Self::Db(_) => None,
+            Self::Db(_) | Self::Stopped(_) => None,
         }
     }
 }
@@ -267,7 +282,7 @@ async fn migrate_project(
     let sweep = sweep_targets(project)?;
     let run_id = new_run_id();
     // A dry run writes nothing: no system chain, no ledger table.
-    let ((applied, planned), system) =
+    let ((applied, planned, stopped, long_moves), system) =
         locked(pool, dir, project, &ledger, !opts.dry_run, || async {
             if !opts.dry_run {
                 ledger.ensure(pool).await?;
@@ -279,13 +294,22 @@ async fn migrate_project(
                 b: backend_of(pool),
                 opts,
                 units_run: 0,
+                batches_run: 0,
+                warnings: Vec::new(),
+                started: std::time::Instant::now(),
                 planned: Vec::new(),
                 sweep: Some(sweep),
             };
-            let applied = runner.apply_project(project).await?;
-            Ok((applied, runner.planned))
+            let (applied, stopped) = match runner.apply_project(project).await {
+                Ok(applied) => (applied, None),
+                Err(RunError::Stopped(why)) => (Vec::new(), Some(why)),
+                Err(e) => return Err(e),
+            };
+            Ok((applied, runner.planned, stopped, runner.warnings))
         })
         .await?;
+    let mut warnings = warnings;
+    warnings.extend(long_moves);
     let leaked = super::step::leaked_bytes() - leaked_before;
     if leaked > 0 {
         tracing::info!(
@@ -301,6 +325,7 @@ async fn migrate_project(
         applied,
         rolled_back: Vec::new(),
         warnings,
+        stopped,
     })
 }
 
@@ -358,6 +383,9 @@ async fn rollback(
             b: backend_of(pool),
             opts,
             units_run: 0,
+            batches_run: 0,
+            warnings: Vec::new(),
+            started: std::time::Instant::now(),
             planned: Vec::new(),
             sweep: None,
         };
@@ -370,6 +398,7 @@ async fn rollback(
         applied: Vec::new(),
         rolled_back,
         warnings: Vec::new(),
+        stopped: None,
     })
 }
 
@@ -477,17 +506,143 @@ fn sql_step<'t>(
     binds: Vec<crate::core::SqlValue>,
 ) -> impl for<'a> FnOnce(
     &'a mut super::step::StepCtx<'t>,
-) -> futures_util::future::BoxFuture<'a, Result<(), super::step::StepError>> {
-    move |ctx| Box::pin(async move { Ok(ctx.execute(&sql, binds).await.map(drop)?) })
+) -> futures_util::future::BoxFuture<'a, Result<u64, super::step::StepError>> {
+    move |ctx| Box::pin(async move { Ok(ctx.execute(&sql, binds).await?) })
 }
 
-/// A `data_rust` unit: the registered `up` or `down`, unbatched.
+/// A `data_rust` unit or batch: the registered `up` or `down`.
 fn rust_step<'t>(
     f: super::step::StepFn,
+    batch: super::step::Batch,
 ) -> impl for<'a> FnOnce(
     &'a mut super::step::StepCtx<'t>,
-) -> futures_util::future::BoxFuture<'a, Result<(), super::step::StepError>> {
-    move |ctx| Box::pin(async move { f(ctx, super::step::Batch::whole()).await.map(drop) })
+) -> futures_util::future::BoxFuture<
+    'a,
+    Result<super::step::Progress, super::step::StepError>,
+> {
+    move |ctx| Box::pin(async move { f(ctx, batch).await })
+}
+
+/// How often a data unit that hit a deadlock or lock timeout runs again.
+const DATA_RETRIES: u32 = 5;
+
+/// Jittered backoff: about 100 ms doubled per try, at most 5 s.
+fn backoff(tries: u32) -> std::time::Duration {
+    use std::hash::{BuildHasher as _, Hasher as _};
+    let base = 100_u64.saturating_mul(1 << tries.min(6)).min(5_000);
+    let rand = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
+    std::time::Duration::from_millis(base / 2 + rand % (base / 2 + 1))
+}
+
+/// One attempt of a data unit failed: run it again, or give up.
+enum Attempt {
+    Retry(String),
+    Fatal(RunError),
+}
+
+fn retry_or_fatal(e: RunError) -> Attempt {
+    match &e {
+        RunError::Db(MigrateError::Driver(d))
+            if super::step::retryable(&crate::sql::ExecError::Driver(clone_db(d))) =>
+        {
+            Attempt::Retry(e.to_string())
+        }
+        _ => Attempt::Fatal(e),
+    }
+}
+
+fn clone_db(e: &sqlx::Error) -> sqlx::Error {
+    sqlx::Error::Protocol(e.to_string())
+}
+
+/// The key bound of the next batch: the key `size` rows above `lo` (on the
+/// database, so a string key follows its collation), and whether rows lie
+/// beyond it. No row there: this is the last batch.
+async fn keyset(
+    tx: &mut crate::sql::PoolTx<'_>,
+    bp: &super::render::BatchPlan,
+    lo: Option<&crate::core::SqlValue>,
+) -> Result<(Option<crate::core::SqlValue>, bool), RunError> {
+    use crate::core::SqlValue;
+    let d = tx.dialect();
+    let k = d.quote_ident(&bp.key);
+    let t = d.quote_ident(&bp.table);
+    let kind = d.kind();
+    let as_text = match (kind, bp.key_ty.as_str()) {
+        (crate::sql::DialectKind::Postgres, "uuid") => format!("CAST({k} AS TEXT)"),
+        (crate::sql::DialectKind::Postgres, "i16" | "i32") => format!("CAST({k} AS BIGINT)"),
+        (crate::sql::DialectKind::Mysql, "uuid") => format!("CAST({k} AS CHAR)"),
+        (crate::sql::DialectKind::Mysql, "i16" | "i32") => format!("CAST({k} AS SIGNED)"),
+        _ => k.clone(),
+    };
+    let mut binds = Vec::new();
+    let mut sql = format!("SELECT {as_text} FROM {t}");
+    if let Some(lo) = lo {
+        binds.push(lo.clone());
+        sql.push_str(&format!(" WHERE {k} > "));
+        d.push_placeholder(&mut sql, 1);
+    }
+    let offset = bp.size.saturating_sub(1);
+    sql.push_str(&format!(" ORDER BY {k} LIMIT 2 OFFSET {offset}"));
+    let keys: Vec<SqlValue> = if super::data::BATCH_KEY_TYPES[..3].contains(&bp.key_ty.as_str()) {
+        let rows: Vec<(i64,)> = crate::sql::raw_query_tx(tx, &sql, binds).await?;
+        rows.into_iter().map(|r| SqlValue::I64(r.0)).collect()
+    } else {
+        let rows: Vec<(String,)> = crate::sql::raw_query_tx(tx, &sql, binds).await?;
+        rows.into_iter()
+            .map(|r| cursor_value(&serde_json::Value::String(r.0).to_string(), &bp.key_ty))
+            .collect::<Result<_, _>>()
+            .map_err(MigrateError::Validation)?
+    };
+    let mut keys = keys.into_iter();
+    let hi = keys.next();
+    let more = keys.next().is_some();
+    Ok((hi.clone(), hi.is_none() || !more))
+}
+
+/// A cursor as stored in the progress row: JSON typed by the key.
+fn cursor_json(v: &crate::core::SqlValue) -> Result<String, String> {
+    use crate::core::SqlValue as V;
+    let j = match v {
+        V::I16(n) => serde_json::json!(n),
+        V::I32(n) => serde_json::json!(n),
+        V::I64(n) => serde_json::json!(n),
+        V::String(s) => serde_json::json!(s),
+        V::Uuid(u) => serde_json::json!(u.to_string()),
+        other => return Err(format!("{other:?} cannot be a batch cursor")),
+    };
+    Ok(j.to_string())
+}
+
+/// A stored cursor back as the key's type.
+fn cursor_value(json: &str, ty: &str) -> Result<crate::core::SqlValue, String> {
+    let v: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    let ty = match ty {
+        "i16" | "i32" | "i64" => crate::core::FieldType::I64,
+        other => crate::migrate::snapshot::field_type_from_name(other)
+            .ok_or_else(|| format!("unknown key type `{other}`"))?,
+    };
+    crate::migrate::manage::fixtures::json_to_sql_value_of(&v, ty)
+}
+
+/// `next` is above `prev` for a key of `ty`. Strings compare as Rust
+/// strings here; the database's collation decides the batches themselves.
+fn advances(prev: &crate::core::SqlValue, next: &crate::core::SqlValue, ty: &str) -> bool {
+    use crate::core::SqlValue as V;
+    let int = |v: &V| match v {
+        V::I16(n) => Some(i64::from(*n)),
+        V::I32(n) => Some(i64::from(*n)),
+        V::I64(n) => Some(*n),
+        _ => None,
+    };
+    match (prev, next) {
+        (V::String(a), V::String(b)) => b > a,
+        (V::Uuid(a), V::Uuid(b)) => b > a,
+        _ if ty.starts_with('i') => int(prev).zip(int(next)).is_some_and(|(a, b)| b > a),
+        _ => false,
+    }
 }
 
 /// Session timeouts of the runner's data connection (5.4); PG sets its own
@@ -542,6 +697,11 @@ struct Runner<'a> {
     opts: &'a Options,
     /// Units run so far in this run, for the test failpoints.
     units_run: usize,
+    /// Batches committed in this run, for the test failpoints and stops.
+    batches_run: usize,
+    /// Long moves found while applying.
+    warnings: Vec<String>,
+    started: std::time::Instant,
     /// What a dry run would execute.
     planned: Vec<String>,
     /// SQLite datetime columns to sweep before the first data unit; taken then.
@@ -641,9 +801,15 @@ impl Runner<'_> {
         memo: &mut HashMemo,
     ) -> Result<State, RunError> {
         let (units, after) = render_file(&state, &f.file, &f.at, &CTX, self.b)?;
+        let moves = self.long_moves(&units).await?;
         if self.opts.dry_run {
             self.plan(&f.file.id, &units);
+            self.planned.extend(moves);
             return Ok(after);
+        }
+        for m in moves.into_iter().filter(|m| m.contains("MV2-W011")) {
+            tracing::warn!(target: "rustango::migrate", "{m}");
+            self.warnings.push(m);
         }
         let hashes = (state.hash(memo), after.hash(memo));
         self.ledger
@@ -676,6 +842,9 @@ impl Runner<'_> {
     async fn finish(&mut self, f: &Loaded, units: &[Unit], from: usize) -> Result<(), RunError> {
         let k = key(&f.file);
         if let Err(e) = self.run_units(k, units, from).await {
+            if matches!(e, RunError::Stopped(_)) {
+                return Err(e);
+            }
             // Best effort: the row stays resumable; the class only, never driver text.
             let _ = self
                 .ledger
@@ -825,6 +994,112 @@ impl Runner<'_> {
             crate::migrate::sqlite_datetime::normalise_sqlite_datetimes_in(self.pool, targets)
                 .await?;
         }
+        let ui = usize::try_from(n).unwrap_or(0);
+        let mut batches_here = 0_u64;
+        loop {
+            if let Some(bp) = &u.batch {
+                if batches_here > 0 || self.batches_run > 0 {
+                    if self.stopping() {
+                        return Err(MigrateError::Validation(format!(
+                            "stopped by a shutdown signal between batches of `{}:{}`; the next \
+                             start resumes",
+                            k.0, k.1
+                        ))
+                        .into());
+                    }
+                    if self.out_of_time() {
+                        return Err(RunError::Stopped(format!(
+                            "--max-duration reached between batches of `{}:{}`; the next run \
+                             resumes",
+                            k.0, k.1
+                        )));
+                    }
+                    if bp.max_batches_per_run.is_some_and(|m| batches_here >= m) {
+                        return Err(RunError::Stopped(format!(
+                            "`{}:{}` ran its {batches_here} batches for this run; the next run \
+                             resumes",
+                            k.0, k.1
+                        )));
+                    }
+                }
+            }
+            let mut tries = 0_u32;
+            let done = loop {
+                match self.data_attempt(k, u, n, ui).await {
+                    Ok(done) => break done,
+                    Err(Attempt::Retry(why)) if tries < DATA_RETRIES => {
+                        tries += 1;
+                        let pause = backoff(tries);
+                        tracing::warn!(
+                            target: "rustango::migrate",
+                            "`{}:{}` unit {n}: {why}; retry {tries} of {DATA_RETRIES} in {pause:?}",
+                            k.0,
+                            k.1
+                        );
+                        tokio::time::sleep(pause).await;
+                    }
+                    Err(Attempt::Retry(why)) => {
+                        return Err(MigrateError::Validation(format!(
+                            "data step in `{}:{}`: {why} ({DATA_RETRIES} retries)",
+                            k.0, k.1
+                        ))
+                        .into())
+                    }
+                    Err(Attempt::Fatal(e)) => return Err(e),
+                }
+            };
+            if u.batch.is_none() || done {
+                return Ok(());
+            }
+            batches_here += 1;
+            self.batches_run += 1;
+            if let Some(ms) = u.batch.as_ref().and_then(|b| b.sleep_ms) {
+                tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            }
+        }
+    }
+
+    /// Each batched unit's row estimate, as `--plan` prints it, marked
+    /// `MV2-W011` above `long_move_rows`.
+    async fn long_moves(&self, units: &[Unit]) -> Result<Vec<String>, RunError> {
+        let limit = self.opts.long_move_rows.unwrap_or(1_000_000);
+        let mut out = Vec::new();
+        for bp in units.iter().filter_map(|u| u.batch.as_ref()) {
+            let est = super::catalog::estimate_rows(self.pool, &bp.table).await?;
+            let rows = est.map_or_else(|| "unknown".to_owned(), |n| n.to_string());
+            let long = est.is_some_and(|n| u64::try_from(n).unwrap_or(0) > limit);
+            out.push(format!(
+                "-- batched move over `{}` by `{}`, {} per batch, ~{rows} rows{}",
+                bp.table,
+                bp.key,
+                bp.size,
+                if long {
+                    format!(" [MV2-W011: above {limit}; the app waits until it finishes]")
+                } else {
+                    String::new()
+                }
+            ));
+        }
+        Ok(out)
+    }
+
+    fn out_of_time(&self) -> bool {
+        self.opts
+            .max_duration
+            .is_some_and(|d| self.started.elapsed() >= d)
+    }
+
+    /// One transaction of a data unit: the whole unit, or one batch. `Ok(true)`
+    /// when the unit is done (its position moved).
+    #[allow(clippy::too_many_lines)]
+    async fn data_attempt(
+        &mut self,
+        k: (&str, &str),
+        u: &Unit,
+        n: i64,
+        ui: usize,
+    ) -> Result<bool, Attempt> {
+        let fatal = |e: RunError| Attempt::Fatal(e);
         let lock = self
             .opts
             .data_lock_timeout
@@ -833,16 +1108,20 @@ impl Runner<'_> {
             .opts
             .data_statement_timeout
             .unwrap_or(std::time::Duration::from_secs(300));
-        // The runner's own connection, closed after the unit: its session
-        // settings never reach the app's pool, and an in-memory SQLite
-        // pool of one is free again for the next unit.
-        let mut conn = self.pool.acquire().await?;
+        // The runner's own connection, closed after the attempt: its session
+        // settings never reach the app's pool, and an in-memory SQLite pool
+        // of one is free again for the next unit.
+        let mut conn = self.pool.acquire().await.map_err(|e| fatal(e.into()))?;
         conn.close_on_drop();
-        session_timeouts(&mut conn, self.b, lock, stmt).await?;
+        session_timeouts(&mut conn, self.b, lock, stmt)
+            .await
+            .map_err(fatal)?;
         let binds = super::data::bind_values(&u.binds)
-            .map_err(|e| refused(Code::File, &format!("{}:{}", k.0, k.1), e))?;
-        let (ledger_sql, ledger_binds) = self.ledger.advance(self.pool, k, self.run_id, n - 1, n);
-        let mut tx = conn.begin_write().await?;
+            .map_err(|e| fatal(refused(Code::File, &format!("{}:{}", k.0, k.1), e)))?;
+        let mut tx = conn
+            .begin_write()
+            .await
+            .map_err(|e| retry_or_fatal(e.into()))?;
         if self.b == Backend::Postgres {
             tx.execute_unprepared(&format!(
                 "SET LOCAL lock_timeout = {}; SET LOCAL statement_timeout = {}",
@@ -850,25 +1129,65 @@ impl Runner<'_> {
                 stmt.as_millis()
             ))
             .await
-            .map_err(MigrateError::Driver)?;
+            .map_err(|e| fatal(MigrateError::Driver(e).into()))?;
         }
-        let mut hash = None;
-        let (mut tx, r) = match &u.step {
-            None => {
-                let sql = u.sql.join("\n");
-                super::step::run_step(tx, super::step::Scope::default(), sql_step(sql, binds)).await
+        // A batched unit continues from its cursor, read in this transaction.
+        let (lo, rows_done, batches) = match &u.batch {
+            None => (None, 0, 0),
+            Some(bp) => {
+                let got = self
+                    .ledger
+                    .progress_tx(&mut tx, k, ui)
+                    .await
+                    .map_err(|e| fatal(e.into()))?;
+                let (hi, rows, batches) = got.unwrap_or((None, 0, 0));
+                let lo = hi
+                    .map(|j| cursor_value(&j, &bp.key_ty))
+                    .transpose()
+                    .map_err(|e| fatal(refused(Code::State, &format!("{}:{}", k.0, k.1), e)))?;
+                (lo, rows, batches)
             }
-            Some(sr) => {
+        };
+        let mut hash = None;
+        // (rows changed, the cursor after this batch, unit done)
+        let (mut tx, r) = match (&u.step, &u.batch) {
+            (None, None) => {
+                let sql = u.sql.join("\n");
+                let (tx, r) =
+                    super::step::run_step(tx, super::step::Scope::default(), sql_step(sql, binds))
+                        .await;
+                (tx, r.map(|rows| (rows, None, true)))
+            }
+            (None, Some(bp)) => {
+                let (hi, last) = keyset(&mut tx, bp, lo.as_ref())
+                    .await
+                    .map_err(retry_or_fatal)?;
+                let upper = if last { None } else { hi.clone() };
+                let (sql, params) = super::data::expand(
+                    &u.sql.join("\n"),
+                    tx.dialect(),
+                    binds,
+                    &bp.key,
+                    lo.as_ref(),
+                    upper.as_ref(),
+                );
+                let (tx, r) =
+                    super::step::run_step(tx, super::step::Scope::default(), sql_step(sql, params))
+                        .await;
+                let cursor = if last { hi.or_else(|| lo.clone()) } else { hi };
+                (tx, r.map(|rows| (rows, cursor, last)))
+            }
+            (Some(sr), _) => {
                 let found = super::step::registered(k.0, &sr.id);
                 let f = found
                     .first()
                     .and_then(|s| if sr.reverse { s.down } else { Some(s.up) })
                     .ok_or_else(|| {
-                        refused(
+                        fatal(refused(
                             Code::Unresolved,
                             &format!("{}:{}", k.0, k.1),
                             format!("data step `{}:{}` is not registered here", k.0, sr.id),
-                        )
+                        ))
                     })?;
                 hash = found.first().map(|s| (sr.id.clone(), s.code_hash()));
                 let scope = super::step::Scope {
@@ -876,37 +1195,157 @@ impl Runner<'_> {
                     footprint: sr.footprint.clone(),
                     tables: sr.tables.clone(),
                 };
-                super::step::run_step(tx, scope, rust_step(f)).await
+                let batch = match &u.batch {
+                    Some(bp) => super::step::Batch::range(lo.clone(), bp.size),
+                    None => super::step::Batch::whole(),
+                };
+                let (tx, r) = super::step::run_step(tx, scope, rust_step(f, batch)).await;
+                let r = match (r, &u.batch) {
+                    (Ok(super::step::Progress::Next(v)), Some(bp)) => {
+                        // Strict progress: the cursor moves up, or the step is wrong.
+                        match &lo {
+                            Some(prev) if !advances(prev, &v, &bp.key_ty) => {
+                                Err(super::step::UnitError::Step(
+                                    super::step::StepError::Message(format!(
+                                        "the batch ended at {v:?}, not above the last cursor \
+                                         {prev:?}: a batch must advance"
+                                    )),
+                                ))
+                            }
+                            _ => Ok((0, Some(v), false)),
+                        }
+                    }
+                    (Ok(_), Some(_)) => Ok((0, lo.clone(), true)),
+                    (Ok(_), None) => Ok((0, None, true)),
+                    (Err(e), _) => Err(e),
+                };
+                (tx, r)
             }
         };
         #[cfg(test)]
         let r = match r {
-            Ok(()) if self.opts.crash == Some(Crash::AfterData(self.units_run)) => Err(
-                super::step::UnitError::Step(super::step::StepError::Message("test crash".into())),
-            ),
+            Ok(v)
+                if self.opts.crash == Some(Crash::AfterData(self.units_run))
+                    || (u.batch.is_some()
+                        && self.opts.crash == Some(Crash::MidBatch(self.batches_run))) =>
+            {
+                let _ = v;
+                Err(super::step::UnitError::Step(
+                    super::step::StepError::Message("test crash".into()),
+                ))
+            }
             other => other,
         };
-        if let Err(e) = r {
-            let _ = tx.rollback().await;
-            return Err(
-                MigrateError::Validation(format!("data step in `{}:{}`: {e}", k.0, k.1)).into(),
+        let (rows, cursor, done) = match r {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = tx.rollback().await;
+                let why = format!("data step in `{}:{}`: {e}", k.0, k.1);
+                return Err(if e.retryable() {
+                    Attempt::Retry(why)
+                } else {
+                    fatal(MigrateError::Validation(why).into())
+                });
+            }
+        };
+        let batches = batches + 1;
+        if u.batch.is_some() {
+            let rows_done = rows_done + i64::try_from(rows).unwrap_or(i64::MAX);
+            let json = cursor
+                .as_ref()
+                .map(cursor_json)
+                .transpose()
+                .map_err(|e| fatal(refused(Code::State, &format!("{}:{}", k.0, k.1), e)))?;
+            self.ledger
+                .put_progress_tx(&mut tx, k, ui, json.as_deref(), rows_done, batches)
+                .await
+                .map_err(|e| fatal(e.into()))?;
+            let detail = format!(
+                "op {} batch {batches} up to {} ({rows} rows{})",
+                u.op,
+                json.as_deref().unwrap_or("the end"),
+                if done { ", last" } else { "" }
             );
+            let (sql, ev) =
+                self.ledger
+                    .event_stmt(tx.dialect(), "batch", k, None, self.run_id, Some(&detail));
+            raw_execute_tx(&mut tx, &sql, ev)
+                .await
+                .map_err(|e| fatal(e.into()))?;
         }
-        let moved = raw_execute_tx(&mut tx, &ledger_sql, ledger_binds).await?;
+        // Fenced: the unit's position when done, else a heartbeat at `pos`.
+        let (sql, fb) = if done {
+            self.ledger.advance(self.pool, k, self.run_id, n - 1, n)
+        } else {
+            self.ledger.heartbeat(self.pool, k, self.run_id, n - 1)
+        };
+        let moved = raw_execute_tx(&mut tx, &sql, fb)
+            .await
+            .map_err(|e| fatal(e.into()))?;
         if moved != 1 {
             let _ = tx.rollback().await;
-            return Err(super::ledger::fenced(moved)
-                .expect_err("not one row")
-                .into());
+            return Err(fatal(
+                super::ledger::fenced(moved)
+                    .expect_err("not one row")
+                    .into(),
+            ));
         }
-        tx.commit().await.map_err(MigrateError::Driver)?;
+        let committed = tx.commit().await;
+        #[cfg(test)]
+        let committed = match committed {
+            Ok(())
+                if u.batch.is_some()
+                    && self.opts.crash == Some(Crash::LostAck(self.batches_run)) =>
+            {
+                Err(sqlx::Error::Protocol(
+                    "test: the commit's answer was lost".into(),
+                ))
+            }
+            other => other,
+        };
+        if let Err(e) = committed {
+            // An unknown outcome (6.3): read what the database holds.
+            if u.batch.is_some() && self.batch_committed(k, ui, batches).await? {
+                tracing::warn!(
+                    target: "rustango::migrate",
+                    "`{}:{}` batch {batches}: the commit's answer was lost ({e}); it committed",
+                    k.0,
+                    k.1
+                );
+            } else {
+                return Err(Attempt::Retry(format!("commit failed: {e}")));
+            }
+        }
         if let Some((id, hash)) = hash {
             let detail = format!("{id} {hash}");
             self.ledger
                 .event(self.pool, STEP_HASH, k, None, self.run_id, Some(&detail))
-                .await?;
+                .await
+                .map_err(|e| fatal(e.into()))?;
         }
-        Ok(())
+        Ok(done)
+    }
+
+    /// After a lost commit answer: did batch `batches` of unit `ui` commit?
+    async fn batch_committed(
+        &self,
+        k: (&str, &str),
+        ui: usize,
+        batches: i64,
+    ) -> Result<bool, Attempt> {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| Attempt::Fatal(e.into()))?;
+        let mut tx = conn.begin().await.map_err(|e| Attempt::Fatal(e.into()))?;
+        let got = self
+            .ledger
+            .progress_tx(&mut tx, k, ui)
+            .await
+            .map_err(|e| Attempt::Fatal(e.into()))?;
+        let _ = tx.rollback().await;
+        Ok(got.is_some_and(|(_, _, b)| b >= batches))
     }
 
     /// The statements and the fenced position update in one transaction.
@@ -1304,6 +1743,7 @@ fn error_class(e: &RunError) -> &'static str {
         RunError::Db(MigrateError::Driver(_) | MigrateError::Exec(_)) => "driver",
         RunError::Db(MigrateError::Validation(_)) => "refused",
         RunError::Db(_) => "other",
+        RunError::Stopped(_) => "stopped",
     }
 }
 

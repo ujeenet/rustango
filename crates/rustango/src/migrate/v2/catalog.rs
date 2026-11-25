@@ -1034,3 +1034,41 @@ mod tests {
         assert_eq!(ix.predicate.as_deref(), Some("i > 5 AND (g < 2)"));
     }
 }
+
+/// Rows in `table` as the catalog estimates them (PG `reltuples`, MySQL
+/// `TABLE_ROWS`, SQLite `COUNT(*)`), for row estimates and long-move
+/// warnings. `None` when the catalog does not know.
+///
+/// # Errors
+/// Driver failures.
+pub(crate) async fn estimate_rows(pool: &Pool, table: &str) -> Result<Option<i64>, CatalogError> {
+    Ok(match pool.dialect().kind() {
+        DialectKind::Postgres => {
+            let rows: Vec<(Option<i64>,)> = raw_query_pool(
+                "SELECT CAST(reltuples AS BIGINT) FROM pg_class WHERE oid = to_regclass($1)",
+                vec![SqlValue::from(table.to_owned())],
+                pool,
+            )
+            .await?;
+            rows.into_iter()
+                .next()
+                .and_then(|r| r.0)
+                .filter(|n| *n >= 0)
+        }
+        DialectKind::Mysql => {
+            let rows: Vec<(Option<i64>,)> = raw_query_pool(
+                "SELECT CAST(TABLE_ROWS AS SIGNED) FROM information_schema.TABLES \
+                 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?",
+                vec![SqlValue::from(table.to_owned())],
+                pool,
+            )
+            .await?;
+            rows.into_iter().next().and_then(|r| r.0)
+        }
+        DialectKind::Sqlite => {
+            let sql = format!("SELECT COUNT(*) FROM {}", pool.dialect().quote_ident(table));
+            let rows: Vec<(i64,)> = raw_query_pool(&sql, Vec::new(), pool).await?;
+            rows.into_iter().next().map(|r| r.0)
+        }
+    })
+}

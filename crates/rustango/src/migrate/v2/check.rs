@@ -180,6 +180,7 @@ pub(crate) async fn check(
         }
     }
     out.extend(step_findings(&project, dir, pool).await?);
+    out.extend(batch_findings(&project, pool).await?);
     if let Some(models) = models {
         let opts = super::make::MakeOptions {
             backends: backends.to_vec(),
@@ -263,6 +264,53 @@ async fn step_findings(
                         severity: Severity::Warning,
                         at: s.type_name.to_owned(),
                         msg: format!("data step `{app}:{id}` changed after it ran"),
+                    });
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Every batched op: `MV2-W010` (it runs inline; the app waits), unless
+/// allowed; online, `MV2-W011` above the long-move row threshold.
+async fn batch_findings(
+    project: &super::load::Project,
+    pool: Option<&Pool>,
+) -> Result<Vec<Finding>, LoadError> {
+    const LONG_MOVE_ROWS: i64 = 1_000_000;
+    let mut out = Vec::new();
+    for f in &project.files {
+        for (i, env) in f.file.operations.iter().enumerate() {
+            let (Op::DataSql { batch: Some(b), .. } | Op::DataRust { batch: Some(b), .. }) =
+                &env.op
+            else {
+                continue;
+            };
+            let at = format!("{}#/operations/{i}", f.at);
+            if !env.allow.iter().any(|a| a.code == "MV2-W010") {
+                out.push(Finding {
+                    severity: Severity::Warning,
+                    at: at.clone(),
+                    msg: format!(
+                        "a batched move over `{}` runs inline: the app waits until it finishes \
+                         [MV2-W010]",
+                        b.table
+                    ),
+                });
+            }
+            if let Some(pool) = pool {
+                let est = super::catalog::estimate_rows(pool, &b.table)
+                    .await
+                    .map_err(|e| LoadError::new(super::Code::Io, &at, e.to_string()))?;
+                if let Some(n) = est.filter(|n| *n > LONG_MOVE_ROWS) {
+                    out.push(Finding {
+                        severity: Severity::Warning,
+                        at,
+                        msg: format!(
+                            "`{}` holds ~{n} rows, above {LONG_MOVE_ROWS}: a long move [MV2-W011]",
+                            b.table
+                        ),
                     });
                 }
             }

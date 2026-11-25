@@ -61,6 +61,8 @@ pub(crate) struct Row {
 pub(crate) struct Ledger {
     pub(crate) table: String,
     pub(crate) events: String,
+    /// Batch progress per `(app, id, op_index)` (6.2).
+    pub(crate) progress: String,
 }
 
 impl Ledger {
@@ -74,6 +76,7 @@ impl Ledger {
         let table = crate::migrate::v2_ledger(base);
         Self {
             events: format!("{table}_events"),
+            progress: format!("{table}_progress"),
             table,
         }
     }
@@ -153,6 +156,31 @@ fn ledger_table(name: &str) -> TableState {
     )
 }
 
+fn progress_table(name: &str) -> TableState {
+    let mut app = col("app", "string", false, Some(100));
+    app.primary_key = true;
+    let mut id = col("id", "string", false, Some(200));
+    id.primary_key = true;
+    let mut op = col("op_index", "i32", false, None);
+    op.primary_key = true;
+    table(
+        name,
+        vec![
+            app,
+            id,
+            op,
+            // The cursor as JSON, typed by the key's `ty`.
+            col("effect_hi", "string", true, None),
+            col("done_hi", "string", true, None),
+            col("rows_done", "i64", false, None),
+            col("batches", "i64", false, None),
+            col("direction", "string", false, Some(8)),
+            col("overrides", "string", true, None),
+            col("updated_at", "datetime", true, None),
+        ],
+    )
+}
+
 fn events_table(name: &str) -> TableState {
     let mut id = col("id", "i64", false, None);
     id.primary_key = true;
@@ -200,7 +228,11 @@ impl Ledger {
     /// Driver failures.
     pub(crate) async fn ensure(&self, pool: &Pool) -> Result<(), MigrateError> {
         let d = pool.dialect();
-        for t in [ledger_table(&self.table), events_table(&self.events)] {
+        for t in [
+            ledger_table(&self.table),
+            events_table(&self.events),
+            progress_table(&self.progress),
+        ] {
             if !crate::migrate::try_table_exists_here(pool, &t.name).await? {
                 raw_execute_pool(pool, &create_table_sql_for(d, &t), Vec::new()).await?;
             }
@@ -519,7 +551,121 @@ impl Ledger {
             p(pool, 3),
         );
         let n = raw_execute_pool(pool, &sql, vec![s(key.0), s(key.1), s(run_id)]).await?;
-        fenced(n)
+        fenced(n)?;
+        if crate::migrate::try_table_exists_here(pool, &self.progress).await? {
+            let del = format!(
+                "DELETE FROM {} WHERE app = {} AND id = {}",
+                self.qp(pool),
+                p(pool, 1),
+                p(pool, 2),
+            );
+            raw_execute_pool(pool, &del, vec![s(key.0), s(key.1)]).await?;
+        }
+        Ok(())
+    }
+
+    fn qp(&self, pool: &Pool) -> String {
+        pool.dialect().quote_ident(&self.progress)
+    }
+
+    /// A batched op's progress: `(effect_hi as JSON, rows_done, batches)`.
+    ///
+    /// # Errors
+    /// Driver failures.
+    pub(crate) async fn progress_tx(
+        &self,
+        tx: &mut crate::sql::PoolTx<'_>,
+        key: (&str, &str),
+        op: usize,
+    ) -> Result<Option<(Option<String>, i64, i64)>, MigrateError> {
+        let d = tx.dialect();
+        let sql = format!(
+            "SELECT effect_hi, rows_done, batches FROM {} WHERE app = {} AND id = {} AND op_index = {}",
+            d.quote_ident(&self.progress),
+            d.placeholder(1),
+            d.placeholder(2),
+            d.placeholder(3),
+        );
+        let op = i32::try_from(op).unwrap_or(i32::MAX);
+        let rows: Vec<(Option<String>, i64, i64)> =
+            crate::sql::raw_query_tx(tx, &sql, vec![s(key.0), s(key.1), SqlValue::I32(op)]).await?;
+        Ok(rows.into_iter().next())
+    }
+
+    /// Replace a batched op's progress inside the batch's transaction.
+    ///
+    /// # Errors
+    /// Driver failures.
+    pub(crate) async fn put_progress_tx(
+        &self,
+        tx: &mut crate::sql::PoolTx<'_>,
+        key: (&str, &str),
+        op: usize,
+        effect_hi: Option<&str>,
+        rows_done: i64,
+        batches: i64,
+    ) -> Result<(), MigrateError> {
+        let d = tx.dialect();
+        let op = i32::try_from(op).unwrap_or(i32::MAX);
+        let del = format!(
+            "DELETE FROM {} WHERE app = {} AND id = {} AND op_index = {}",
+            d.quote_ident(&self.progress),
+            d.placeholder(1),
+            d.placeholder(2),
+            d.placeholder(3),
+        );
+        crate::sql::raw_execute_tx(tx, &del, vec![s(key.0), s(key.1), SqlValue::I32(op)]).await?;
+        let ins = format!(
+            "INSERT INTO {} (app, id, op_index, effect_hi, done_hi, rows_done, batches, direction, updated_at) \
+             VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {})",
+            d.quote_ident(&self.progress),
+            d.placeholder(1),
+            d.placeholder(2),
+            d.placeholder(3),
+            d.placeholder(4),
+            d.placeholder(5),
+            d.placeholder(6),
+            d.placeholder(7),
+            d.placeholder(8),
+            d.utc_now_sql(),
+        );
+        let hi = effect_hi.map_or(SqlValue::Null, s);
+        crate::sql::raw_execute_tx(
+            tx,
+            &ins,
+            vec![
+                s(key.0),
+                s(key.1),
+                SqlValue::I32(op),
+                hi.clone(),
+                hi,
+                SqlValue::I64(rows_done),
+                SqlValue::I64(batches),
+                s("up"),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// The fenced heartbeat of a batch that does not finish its unit.
+    pub(crate) fn heartbeat(
+        &self,
+        pool: &Pool,
+        key: (&str, &str),
+        run_id: &str,
+        pos: i64,
+    ) -> (String, Vec<SqlValue>) {
+        let sql = format!(
+            "UPDATE {} SET heartbeat_at = {} WHERE app = {} AND id = {} AND run_id = {} AND pos = {}",
+            self.qt(pool),
+            pool.dialect().utc_now_sql(),
+            p(pool, 1),
+            p(pool, 2),
+            p(pool, 3),
+            p(pool, 4),
+        );
+        (sql, vec![s(key.0), s(key.1), s(run_id), SqlValue::I64(pos)])
     }
 
     /// Append an event (the history; rows are deleted on rollback).
@@ -535,25 +681,40 @@ impl Ledger {
         run_id: &str,
         reason: Option<&str>,
     ) -> Result<(), MigrateError> {
+        let (sql, binds) = self.event_stmt(pool.dialect(), kind, key, checksum, run_id, reason);
+        raw_execute_pool(pool, &sql, binds).await?;
+        Ok(())
+    }
+
+    /// [`Self::event`] as a statement, to run in a batch's transaction.
+    pub(crate) fn event_stmt(
+        &self,
+        d: &dyn crate::sql::Dialect,
+        kind: &str,
+        key: (&str, &str),
+        checksum: Option<&str>,
+        run_id: &str,
+        reason: Option<&str>,
+    ) -> (String, Vec<SqlValue>) {
+        let ph = |n| d.placeholder(n);
         let sql = format!(
             "INSERT INTO {} (kind, app, mig, checksum, run_id, os_user, host, app_version, reason, at) \
              VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
-            self.qe(pool),
-            p(pool, 1),
-            p(pool, 2),
-            p(pool, 3),
-            p(pool, 4),
-            p(pool, 5),
-            p(pool, 6),
-            p(pool, 7),
-            p(pool, 8),
-            p(pool, 9),
-            pool.dialect().utc_now_sql(),
+            d.quote_ident(&self.events),
+            ph(1),
+            ph(2),
+            ph(3),
+            ph(4),
+            ph(5),
+            ph(6),
+            ph(7),
+            ph(8),
+            ph(9),
+            d.utc_now_sql(),
         );
         let env = |k: &str| std::env::var(k).ok().map_or(SqlValue::Null, s);
-        raw_execute_pool(
-            pool,
-            &sql,
+        (
+            sql,
             vec![
                 s(kind),
                 s(key.0),
@@ -566,14 +727,8 @@ impl Ledger {
                 reason.map_or(SqlValue::Null, s),
             ],
         )
-        .await?;
-        Ok(())
     }
 
-    /// The kinds of events written for `key`, oldest first (tests and status).
-    ///
-    /// # Errors
-    /// Driver failures.
     /// The last code hash recorded per `(app, step id)`.
     ///
     /// # Errors
@@ -601,6 +756,10 @@ impl Ledger {
         Ok(out)
     }
 
+    /// The kinds of events written for `key`, oldest first (tests and status).
+    ///
+    /// # Errors
+    /// Driver failures.
     pub(crate) async fn event_kinds(
         &self,
         pool: &Pool,
