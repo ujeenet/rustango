@@ -1,0 +1,191 @@
+use super::*;
+use serde_json::json;
+
+fn field(name: &str, ty: &str, extra: Value) -> Value {
+    let mut f =
+        json!({"name": name, "column": name, "ty": ty, "nullable": true, "primary_key": false});
+    if let Value::Object(m) = extra {
+        for (k, v) in m {
+            f[k] = v;
+        }
+    }
+    f
+}
+
+fn id() -> Value {
+    field(
+        "id",
+        "i64",
+        json!({"primary_key": true, "auto": true, "nullable": false}),
+    )
+}
+
+/// `mk_author` (unique email, a default, min/max) and `mk_book` (FK, no index).
+fn models(rank: Value) -> SchemaSnapshot {
+    serde_json::from_value(json!({"tables": [
+        {"name": "mk_author", "model": "MkAuthor", "fields": [id(),
+            field("name", "string", json!({"max_length": 50, "nullable": false, "default": "'x'"})),
+            field("email", "string", json!({"max_length": 100, "unique": true})),
+            field("rank", "i32", rank)]},
+        {"name": "mk_book", "model": "MkBook", "fields": [id(),
+            field("author_id", "i64", json!({"nullable": false,
+                "fk": {"kind": "fk", "to": "mk_author", "on": "id", "on_delete": "CASCADE"}}))]},
+    ]}))
+    .unwrap()
+}
+
+fn opts() -> MakeOptions {
+    MakeOptions {
+        backends: vec![Backend::Postgres, Backend::Mysql, Backend::Sqlite],
+        ..MakeOptions::default()
+    }
+}
+
+fn ops_of(path: &Path) -> Vec<String> {
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    v["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["op"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn generating_twice_gives_identical_bytes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("migrations");
+    let m = models(json!({"min": 0, "max": 9}));
+    let made = make(&dir, &dir, &m, &opts()).unwrap().unwrap();
+    assert!(made.path.ends_with("0001_initial.json"), "{:?}", made.path);
+    let first = std::fs::read(&made.path).unwrap();
+    // The chain now matches the models.
+    assert!(make(&dir, &dir, &m, &opts()).unwrap().is_none());
+    std::fs::remove_file(&made.path).unwrap();
+    let again = make(&dir, &dir, &m, &opts()).unwrap().unwrap();
+    assert_eq!(std::fs::read(&again.path).unwrap(), first);
+    // The uncovered FK got its index inside create_table, so it replays.
+    let text = String::from_utf8(first).unwrap();
+    assert!(text.contains("\"mk_book_author_id_idx\""), "{text}");
+}
+
+#[test]
+fn min_and_max_lower_to_add_check() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("migrations");
+    make(&dir, &dir, &models(json!({})), &opts())
+        .unwrap()
+        .unwrap();
+    let made = make(&dir, &dir, &models(json!({"min": 0, "max": 9})), &opts())
+        .unwrap()
+        .unwrap();
+    assert_eq!(ops_of(&made.path), ["add_check"]);
+    let text = std::fs::read_to_string(&made.path).unwrap();
+    assert!(text.contains("rank >= 0 AND rank <= 9"), "{text}");
+    // Dropping the bound drops the check.
+    let made = make(&dir, &dir, &models(json!({"min": 0})), &opts())
+        .unwrap()
+        .unwrap();
+    assert_eq!(ops_of(&made.path), ["drop_check", "add_check"]);
+}
+
+#[test]
+fn a_not_null_column_on_an_existing_table_needs_a_fill() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("migrations");
+    make(&dir, &dir, &models(json!({})), &opts())
+        .unwrap()
+        .unwrap();
+    let mut m = models(json!({}));
+    let extra: FieldSnapshot =
+        serde_json::from_value(field("pages", "i32", json!({"nullable": false}))).unwrap();
+    m.tables[1].fields.push(extra);
+    let e = make(&dir, &dir, &m, &opts()).unwrap_err();
+    assert_eq!(e.code, Code::Fill, "{e}");
+    let mut o = opts();
+    o.fills.insert("mk_book.pages".into(), "0".into());
+    let made = make(&dir, &dir, &m, &o).unwrap().unwrap();
+    assert_eq!(ops_of(&made.path), ["add_column"]);
+}
+
+#[test]
+fn a_default_with_two_spellings_is_refused_naming_the_backends() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("migrations");
+    let mut m = models(json!({}));
+    let at: FieldSnapshot =
+        serde_json::from_value(field("at", "datetime", json!({"default": "now()"}))).unwrap();
+    m.tables[0].fields.push(at);
+    let e = make(&dir, &dir, &m, &opts()).unwrap_err();
+    assert_eq!(e.code, Code::Dialect, "{e}");
+    assert!(e.msg.contains("postgres") && e.msg.contains("mysql"), "{e}");
+    // One backend: its own spelling.
+    let one = MakeOptions {
+        backends: vec![Backend::Sqlite],
+        ..MakeOptions::default()
+    };
+    let made = make(&dir, &dir, &m, &one).unwrap().unwrap();
+    let text = std::fs::read_to_string(&made.path).unwrap();
+    assert!(text.contains("strftime"), "{text}");
+}
+
+#[test]
+fn drops_retypes_and_fks_replay() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("migrations");
+    make(&dir, &dir, &models(json!({})), &opts())
+        .unwrap()
+        .unwrap();
+    let mut m = models(json!({}));
+    // Drop `email` (and its unique index), retype `mk_author.id` (the FK
+    // into it is dropped and re-added), drop the FK's table comment no-op.
+    m.tables[0].fields.retain(|f| f.column != "email");
+    m.tables[0].fields[0].ty = "i32".into();
+    m.tables[1].fields[1].ty = "i32".into();
+    let made = make(&dir, &dir, &m, &opts()).unwrap().unwrap();
+    assert_eq!(
+        ops_of(&made.path),
+        [
+            "drop_fk",
+            "drop_index",
+            "drop_column",
+            "alter_column",
+            "alter_column",
+            "add_fk"
+        ]
+    );
+    // Dropping a table.
+    m.tables.remove(1);
+    let made = make(&dir, &dir, &m, &opts()).unwrap().unwrap();
+    assert_eq!(ops_of(&made.path), ["drop_table"]);
+    assert!(make(&dir, &dir, &m, &opts()).unwrap().is_none());
+}
+
+#[test]
+fn a_v1_project_is_refused_with_the_adopt_pointer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("migrations");
+    let m = models(json!({}));
+    crate::migrate::make::make_migrations_from(&dir, &m, None).unwrap();
+    let e = make(&dir, &dir, &m, &opts()).unwrap_err();
+    assert_eq!(e.code, Code::Engine, "{e}");
+    assert!(e.msg.contains("manage dbmigrate adopt"), "{e}");
+}
+
+/// After `adopt` the chain matches the models it came from, on each backend.
+#[test]
+fn after_adopt_the_models_match() {
+    for b in [Backend::Postgres, Backend::Mysql, Backend::Sqlite] {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("migrations");
+        let m = models(json!({"min": 0, "max": 9}));
+        crate::migrate::make::make_migrations_from(&dir, &m, None).unwrap();
+        super::super::adopt::adopt(&dir, b).unwrap();
+        let one = MakeOptions {
+            backends: vec![b],
+            ..MakeOptions::default()
+        };
+        let made = make(&dir, &dir, &m, &one).unwrap();
+        assert!(made.is_none(), "{b:?}: {:?}", made.map(|m| m.lines));
+    }
+}

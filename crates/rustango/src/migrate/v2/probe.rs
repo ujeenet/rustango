@@ -694,6 +694,37 @@ fn backend(d: DialectKind) -> super::state::Backend {
     }
 }
 
+/// Whether `declared` works as `c`'s DEFAULT here (2.6): a scratch temp
+/// table and one default row, in a transaction rolled back on a pinned
+/// connection closed afterwards. `Err` carries the server's message.
+pub(crate) async fn default_runs(pool: &Pool, c: &ColumnDef, declared: &str) -> Result<(), String> {
+    use crate::sql::raw_execute_tx;
+    let d = pool.dialect();
+    let name = d.quote_ident("_rgo_v2_default");
+    let ty = crate::migrate::diff::sql_type_with_dialect(&snapshot(c), d);
+    let not_null = if c.nullable { "" } else { " NOT NULL" };
+    let (temp, tail) = match d.kind() {
+        DialectKind::Postgres => ("TEMP", " ON COMMIT DROP"),
+        DialectKind::Mysql => ("TEMPORARY", ""),
+        _ => ("TEMP", ""),
+    };
+    let create = format!(
+        "CREATE {temp} TABLE {name} ({} {ty} DEFAULT {declared}{not_null}){tail}",
+        d.quote_ident(&c.column)
+    );
+    let insert = format!("INSERT INTO {name}{}", d.default_values_clause());
+    let mut conn = pool.acquire().await.map_err(|e| e.to_string())?;
+    conn.close_on_drop();
+    let mut tx = conn.begin().await.map_err(|e| e.to_string())?;
+    raw_execute_tx(&mut tx, &create, Vec::new())
+        .await
+        .map_err(|e| e.to_string())?;
+    raw_execute_tx(&mut tx, &insert, Vec::new())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// The server's own spelling of `declared`, read back from a scratch temp
 /// table on one pinned connection that is closed afterwards (MySQL temp
 /// tables are session state and survive ROLLBACK). `None` on SQLite, which

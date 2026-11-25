@@ -853,7 +853,7 @@ pub(crate) fn models_ahead_of(prior: &[Migration], scoped: bool) -> Result<bool,
 
 /// The registry checks every `makemigrations` runs: `--squash` runs them
 /// before it deletes the files it regenerates.
-fn check_models() -> Result<(), MigrateError> {
+pub(crate) fn check_models() -> Result<(), MigrateError> {
     super::snapshot::check_registry_junctions()?;
     super::snapshot::check_relation_targets()
 }

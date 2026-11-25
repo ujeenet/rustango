@@ -104,27 +104,95 @@ pub(crate) async fn migrate_chains_to(
     with_signals(run, pool, signals).await
 }
 
-/// The system chain for engine v2, under the v2 runner's lock. A v2
-/// project's tables are not read here: the chain sees only its own.
+/// The system chain for engine v2 around the v2 `project` body, under the
+/// v2 runner's lock: a pass before, the body, a pass after, as v1 does. The
+/// chain sees the v2 files through [`ChainFacts`]; `applied` holds the
+/// [`ChainFacts::key`]s the v2 ledger has.
 ///
 /// # Errors
-/// As [`runner::migrate_system_chain`].
-pub(crate) async fn system_chain_for_v2(
+/// As [`runner::migrate_system_chain`], and the body's own error.
+pub(crate) async fn system_chain_for_v2<M, F, Fut, R, E>(
     held: LockHeld,
     pool: &Pool,
     chain: &SystemChain,
     scope: MigrationScope,
-) -> Result<Vec<Migration>, MigrateError> {
-    let owned = BTreeSet::new();
+    files: &[M],
+    applied: &std::collections::HashSet<String>,
+    project: F,
+) -> Result<(Vec<Migration>, R), E>
+where
+    M: ChainFacts,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<R, E>>,
+    E: From<MigrateError>,
+{
+    let tables = ProjectTables::of(files, applied);
     let run = Run {
         held,
         pool,
         chain,
         scope,
-        owned: &owned,
+        owned: &tables.owned,
         observer: None,
     };
-    Ok(Box::pin(run.system_pass(&BTreeSet::new())).await?.applied)
+    let first = Box::pin(run.system_pass(&tables.pending)).await?;
+    let out = project().await?;
+    let second = Box::pin(run.system_pass(&BTreeSet::new())).await?;
+    if let Some(table) = second.waiting {
+        return Err(MigrateError::Validation(format!(
+            "a system migration needs `{table}`, which the project's migrations \
+             claim but did not create"
+        ))
+        .into());
+    }
+    Box::pin(run.finish(&tables.claimed)).await?;
+    let mut system = first.applied;
+    system.extend(second.applied);
+    Ok((system, out))
+}
+
+/// What one project migration does to tables (4.9): engine v1 and v2 files
+/// both answer it, so the system chain reads either the same way.
+pub(crate) trait ChainFacts {
+    /// The ledger key the `applied` set holds.
+    fn key(&self) -> String;
+    fn facts(&self) -> Vec<Fact<'_>>;
+}
+
+/// One table effect of a migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Fact<'a> {
+    Created(&'a str),
+    Dropped(&'a str),
+    Renamed { from: &'a str, to: &'a str },
+    Written(&'a str),
+}
+
+impl ChainFacts for Migration {
+    fn key(&self) -> String {
+        self.name.clone()
+    }
+
+    fn facts(&self) -> Vec<Fact<'_>> {
+        let mut out = Vec::new();
+        for c in schema_ops(self) {
+            match c {
+                SchemaChange::CreateTable(t) | SchemaChange::CreateM2MTable { through: t, .. } => {
+                    out.push(Fact::Created(t));
+                }
+                SchemaChange::DropTable(t) | SchemaChange::DropM2MTable { through: t } => {
+                    out.push(Fact::Dropped(t));
+                }
+                SchemaChange::RenameTable { old_name, new_name } => out.push(Fact::Renamed {
+                    from: old_name,
+                    to: new_name,
+                }),
+                _ => {}
+            }
+            out.push(Fact::Written(c.table()));
+        }
+        out
+    }
 }
 
 async fn with_signals(
@@ -244,36 +312,35 @@ impl ProjectTables {
         Ok(Self::of(&migs, applied))
     }
 
-    fn of(migs: &[Migration], applied: &std::collections::HashSet<String>) -> Self {
+    fn of<M: ChainFacts>(migs: &[M], applied: &std::collections::HashSet<String>) -> Self {
         let mut out = Self {
             owned: BTreeSet::new(),
             claimed: BTreeSet::new(),
             pending: BTreeSet::new(),
         };
         for m in migs {
-            let is_pending = !applied.contains(&m.name);
-            for c in schema_ops(m) {
-                match c {
-                    SchemaChange::CreateTable(t)
-                    | SchemaChange::CreateM2MTable { through: t, .. } => {
-                        out.owned.insert(t.clone());
-                        out.claimed.insert(t.clone());
+            let is_pending = !applied.contains(&m.key());
+            for f in m.facts() {
+                match f {
+                    Fact::Created(t) => {
+                        out.owned.insert(t.to_owned());
+                        out.claimed.insert(t.to_owned());
                     }
-                    SchemaChange::DropTable(t) | SchemaChange::DropM2MTable { through: t } => {
+                    Fact::Dropped(t) => {
                         out.owned.remove(t);
                     }
-                    SchemaChange::RenameTable { old_name, new_name } => {
-                        if out.owned.remove(old_name) {
-                            out.owned.insert(new_name.clone());
+                    Fact::Renamed { from, to } => {
+                        if out.owned.remove(from) {
+                            out.owned.insert(to.to_owned());
                         }
                         if is_pending {
-                            out.pending.insert(new_name.clone());
+                            out.pending.insert(to.to_owned());
                         }
                     }
-                    _ => {}
-                }
-                if is_pending {
-                    out.pending.insert(c.table().to_owned());
+                    Fact::Written(t) if is_pending => {
+                        out.pending.insert(t.to_owned());
+                    }
+                    Fact::Written(_) => {}
                 }
             }
         }

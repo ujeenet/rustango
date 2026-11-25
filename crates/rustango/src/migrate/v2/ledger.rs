@@ -66,11 +66,23 @@ pub(crate) struct Ledger {
 impl Ledger {
     /// The default ledger: `__rustango_migrations_v2` and `_v2_events`.
     pub(crate) fn default_names() -> Self {
-        let table = crate::migrate::v2_ledger(crate::migrate::LEDGER_TABLE);
+        Self::for_base(crate::migrate::LEDGER_TABLE)
+    }
+
+    /// The v2 ledger of the v1 ledger name `base`: one per app sharing a database.
+    pub(crate) fn for_base(base: &str) -> Self {
+        let table = crate::migrate::v2_ledger(base);
         Self {
             events: format!("{table}_events"),
             table,
         }
+    }
+
+    /// The ledger `opts` names, else the default.
+    pub(crate) fn of(opts: &super::run::Options) -> Self {
+        opts.ledger
+            .as_deref()
+            .map_or_else(Self::default_names, Self::for_base)
     }
 }
 

@@ -1,0 +1,296 @@
+//! `dbmigrate check` (11.2): load, replay and render for every configured
+//! backend, the defaults rules of 2.6, and models vs the chain.
+
+use std::path::Path;
+
+use super::format::Op;
+use super::state::{Backend, ColumnDef};
+use super::LoadError;
+use crate::migrate::snapshot::SchemaSnapshot;
+use crate::sql::Pool;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Severity {
+    Error,
+    Warning,
+}
+
+/// One finding: errors fail `check`, warnings print.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Finding {
+    pub(crate) severity: Severity,
+    pub(crate) at: String,
+    pub(crate) msg: String,
+}
+
+impl std::fmt::Display for Finding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let tag = match self.severity {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+        };
+        write!(f, "{tag}: {}: {}", self.at, self.msg)
+    }
+}
+
+const DOCS: &str = "see the defaults table in the migrations docs";
+
+/// Check the v2 project around `dir` for `backends`. `models` adds the
+/// "models match the chain" check; `pool` adds the defaults probe on the
+/// connected backend.
+///
+/// # Errors
+/// The first load, replay or render error.
+pub(crate) async fn check(
+    dir: &Path,
+    backends: &[Backend],
+    models: Option<&SchemaSnapshot>,
+    pool: Option<&Pool>,
+) -> Result<Vec<Finding>, LoadError> {
+    let project = super::load::load_project(dir)?;
+    super::load::replay(&project)?;
+    for &b in backends {
+        super::render::render_project(&project, b)?;
+    }
+    let mut out = Vec::new();
+    // Every default and fill the chain writes, with the column it is for.
+    let mut exprs: Vec<(String, ColumnDef, String)> = Vec::new();
+    for f in &project.files {
+        let mut ops: Vec<Op> = f.file.operations.iter().map(|e| e.op.clone()).collect();
+        for e in &f.file.operations {
+            ops.extend(e.op.nested(&f.at)?);
+        }
+        for op in &ops {
+            let mut col = |table: &str, c: &ColumnDef, text: &Option<String>| {
+                if let Some(t) = text {
+                    let at = format!("{}: {table}.{}", f.at, c.column);
+                    exprs.push((at, c.clone(), t.clone()));
+                }
+            };
+            match op {
+                Op::CreateTable { table, .. } | Op::AdoptTable { table, .. } => {
+                    for fd in &table.fields {
+                        col(&table.name, &fd.column, &fd.column.default);
+                    }
+                }
+                Op::AddColumn {
+                    table,
+                    column,
+                    fill,
+                } => {
+                    col(table, &column.column, &column.column.default);
+                    col(table, &column.column, fill);
+                }
+                Op::AlterColumn {
+                    table,
+                    column,
+                    changes,
+                    ..
+                } => {
+                    if let Some(ch) = &changes.default {
+                        let c = ColumnDef {
+                            column: column.clone(),
+                            ty: changes
+                                .ty
+                                .as_ref()
+                                .map_or_else(|| "string".to_owned(), |t| t.to.clone()),
+                            nullable: true,
+                            max_length: None,
+                            primary_key: false,
+                            auto: false,
+                            default: None,
+                            generated_as: None,
+                            comment: None,
+                            case_insensitive: false,
+                            sealed: false,
+                        };
+                        col(table, &c, &ch.to);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(doc) = &f.file.state {
+            for t in doc.tables.values() {
+                for c in &t.columns {
+                    if let Some(d) = &c.default {
+                        exprs.push((
+                            format!("{}: {}.{}", f.at, t.name, c.column),
+                            c.clone(),
+                            d.clone(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    for (at, c, text) in &exprs {
+        for &b in backends {
+            if let Some(f) = classify(b, backends, c, text, at) {
+                out.push(f);
+            }
+        }
+        #[cfg(feature = "sqlite")]
+        if backends.contains(&Backend::Sqlite) {
+            if let Err(e) = sqlite_memory(c, text).await {
+                out.push(Finding {
+                    severity: Severity::Error,
+                    at: at.clone(),
+                    msg: format!("`{text}` does not run as a default on sqlite: {e} ({DOCS})"),
+                });
+            }
+        }
+        if let Some(pool) = pool {
+            let b = super::run::backend_of(pool);
+            if let Err(e) = super::probe::default_runs(pool, c, text).await {
+                out.push(Finding {
+                    severity: Severity::Error,
+                    at: at.clone(),
+                    msg: format!(
+                        "`{text}` does not run as a default on {}: {e} ({DOCS})",
+                        b.as_str()
+                    ),
+                });
+            }
+        }
+    }
+    if let Some(models) = models {
+        let opts = super::make::MakeOptions {
+            backends: backends.to_vec(),
+            dry_run: true,
+            ..super::make::MakeOptions::default()
+        };
+        if let Some(made) = super::make::make(dir, dir, models, &opts)? {
+            out.push(Finding {
+                severity: Severity::Error,
+                at: dir.display().to_string(),
+                msg: format!(
+                    "the models have changes no migration has ({}): run `manage dbmigrate make`",
+                    made.lines.join("; ")
+                ),
+            });
+        }
+    }
+    out.dedup();
+    Ok(out)
+}
+
+/// The real SQLite check: the default in an in-memory database.
+#[cfg(feature = "sqlite")]
+async fn sqlite_memory(c: &ColumnDef, text: &str) -> Result<(), String> {
+    let pool = Pool::connect("sqlite::memory:")
+        .await
+        .map_err(|e| e.to_string())?;
+    let r = super::probe::default_runs(&pool, c, text).await;
+    pool.close().await;
+    r
+}
+
+/// A string literal: `'…'` with `''` escapes, nothing after it.
+fn string_literal(t: &str) -> Option<&str> {
+    let inner = t.strip_prefix('\'')?.strip_suffix('\'')?;
+    let mut rest = inner;
+    while let Some(i) = rest.find('\'') {
+        if rest[i + 1..].starts_with('\'') {
+            rest = &rest[i + 2..];
+        } else {
+            return None;
+        }
+    }
+    Some(inner)
+}
+
+fn number(t: &str) -> bool {
+    let t = t.strip_prefix('-').unwrap_or(t);
+    let (a, b) = t.split_once('.').unwrap_or((t, "0"));
+    !a.is_empty() && a.bytes().all(|c| c.is_ascii_digit()) && b.bytes().all(|c| c.is_ascii_digit())
+}
+
+/// Outer parens off, repeatedly.
+fn bare(t: &str) -> &str {
+    let mut t = t.trim();
+    while let Some(inner) = t.strip_prefix('(').and_then(|x| x.strip_suffix(')')) {
+        t = inner.trim();
+    }
+    t
+}
+
+/// The expressions of the 2.6 table, per backend.
+fn known(b: Backend, t: &str) -> bool {
+    let n: String = t.split_whitespace().collect::<Vec<_>>().join(" ");
+    let n = n.as_str();
+    match b {
+        Backend::Postgres => {
+            matches!(
+                n,
+                "now()" | "gen_random_uuid()" | "'{}'::jsonb" | "'[]'::jsonb"
+            )
+        }
+        Backend::Mysql => matches!(n, "(UTC_TIMESTAMP(6))" | "(UUID())" | "('{}')" | "('[]')"),
+        Backend::Sqlite => {
+            n == format!("(strftime('{}','now'))", crate::sql::SQLITE_DATETIME_FORMAT)
+                || n == crate::sql::SQLITE_UUID_V4
+        }
+    }
+}
+
+/// The offline rules for one default on one backend.
+fn classify(b: Backend, all: &[Backend], c: &ColumnDef, text: &str, at: &str) -> Option<Finding> {
+    let error = |msg: String| {
+        Some(Finding {
+            severity: Severity::Error,
+            at: at.to_owned(),
+            msg: format!("{msg} ({DOCS})"),
+        })
+    };
+    let raw = text.trim();
+    let lit = bare(raw);
+    let string = string_literal(lit);
+    if b == Backend::Sqlite && raw.to_ascii_uppercase().contains("CURRENT_TIMESTAMP") {
+        return error(format!(
+            "policy: `{text}` on sqlite does not sort against the values rustango writes; write \
+             the strftime expression"
+        ));
+    }
+    if b == Backend::Sqlite && raw.contains("::") {
+        return error(format!(
+            "`{text}` does not run on sqlite: it has no `::` casts"
+        ));
+    }
+    if b == Backend::Mysql && all.len() > 1 && string.is_some_and(|s| s.contains('\\')) {
+        return error(format!(
+            "`{text}`: a backslash in a string reads as an escape on mysql only; the same text \
+             stores a different value there"
+        ));
+    }
+    let unbounded =
+        matches!(c.ty.as_str(), "json" | "binary") || (c.ty == "string" && c.max_length.is_none());
+    if b == Backend::Mysql && unbounded && string.is_some() && !raw.starts_with('(') {
+        return error(format!(
+            "`{text}` does not run on mysql: a TEXT, JSON or BLOB column takes only the \
+             parenthesised form `({raw})`"
+        ));
+    }
+    let literal = string.is_some()
+        || number(lit)
+        || matches!(lit.to_ascii_uppercase().as_str(), "TRUE" | "FALSE" | "NULL");
+    if literal || known(b, raw) {
+        return None;
+    }
+    // SQLite gets the real check in memory.
+    if b == Backend::Sqlite && cfg!(feature = "sqlite") {
+        return None;
+    }
+    Some(Finding {
+        severity: Severity::Warning,
+        at: at.to_owned(),
+        msg: format!(
+            "`{text}` is not verified offline on {} [MV2-W020]; `check` on that backend probes it",
+            b.as_str()
+        ),
+    })
+}
+
+#[cfg(test)]
+#[path = "check_tests.rs"]
+pub(super) mod tests;

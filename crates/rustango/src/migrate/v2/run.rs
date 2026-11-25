@@ -33,6 +33,11 @@ pub(crate) struct Options {
     pub(crate) accept_data_loss: bool,
     /// Plan only: list the SQL each pending migration would run.
     pub(crate) dry_run: bool,
+    /// Set by a shutdown signal: the run stops after the unit in flight and
+    /// the next start resumes (6.11).
+    pub(crate) stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// The engine v1 ledger name whose v2 ledger this app uses; `None` = default.
+    pub(crate) ledger: Option<String>,
     /// Test failpoint: stop as if the process died.
     #[cfg(test)]
     pub(crate) crash: Option<Crash>,
@@ -81,6 +86,15 @@ impl From<super::catalog::CatalogError> for RunError {
 impl From<crate::sql::sqlx::Error> for RunError {
     fn from(e: crate::sql::sqlx::Error) -> Self {
         Self::Db(e.into())
+    }
+}
+
+impl From<RunError> for MigrateError {
+    fn from(e: RunError) -> Self {
+        match e {
+            RunError::Load(e) => Self::Validation(e.to_string()),
+            RunError::Db(e) => e,
+        }
     }
 }
 
@@ -138,12 +152,14 @@ fn refuse_registry(project: &Project) -> Result<(), RunError> {
     Ok(())
 }
 
-/// The lock, the v1 system chain first, then `body`, then the framework's
-/// bootstrap tables. One lock for all of it. Without `write` (a dry run)
-/// only `body` runs.
+/// The lock, the v1 system chain around `body` (it sees `project` through
+/// `ChainFacts`), then the framework's bootstrap tables. One lock for all
+/// of it. Without `write` (a dry run) only `body` runs.
 async fn locked<F, Fut, R>(
     pool: &Pool,
-    dir: &Path,
+    dir: Option<&Path>,
+    project: &Project,
+    ledger: &Ledger,
     write: bool,
     body: F,
 ) -> Result<(R, Vec<String>), RunError>
@@ -152,35 +168,40 @@ where
     Fut: std::future::Future<Output = Result<R, RunError>>,
 {
     use crate::core::ModelScope;
-    let chain = crate::migrate::make::SystemChain::for_migrations_dir(
-        dir,
-        &[ModelScope::Registry, ModelScope::Tenant],
-    )?;
-    let out = crate::migrate::with_migrate_lock_held_v2(V2Token(()), pool, |held| async move {
-        let system = if write {
-            crate::migrate::chains::system_chain_for_v2(
-                held,
-                pool,
-                &chain,
-                crate::migrate::MigrationScope::Tenant,
-            )
-            .await?
-        } else {
-            Vec::new()
+    let chain = match dir {
+        Some(dir) => Some(crate::migrate::make::SystemChain::for_migrations_dir(
+            dir,
+            &[ModelScope::Registry, ModelScope::Tenant],
+        )?),
+        None => None,
+    };
+    crate::migrate::with_migrate_lock_held_v2(V2Token(()), pool, |held| async move {
+        let Some(chain) = chain.filter(|_| write) else {
+            return Ok(body().await.map(|r| (r, Vec::new())));
         };
-        let result = body().await;
-        if result.is_ok() && write {
+        let applied: std::collections::HashSet<String> = ledger
+            .rows(pool)
+            .await?
+            .into_iter()
+            .map(|r| format!("{}:{}", r.app, r.id))
+            .collect();
+        let result = crate::migrate::chains::system_chain_for_v2(
+            held,
+            pool,
+            &chain,
+            crate::migrate::MigrationScope::Tenant,
+            &project.files,
+            &applied,
+            body,
+        )
+        .await;
+        if result.is_ok() {
             crate::migrate::manage::ensure_bootstrap_tables(pool).await?;
             crate::migrate::manage::ensure_tenant_bootstrap_tables(pool).await?;
         }
-        Ok((
-            result,
-            system.into_iter().map(|m| m.name).collect::<Vec<_>>(),
-        ))
+        Ok(result.map(|(system, r)| (r, system.into_iter().map(|m| m.name).collect())))
     })
-    .await?;
-    let (result, system) = out;
-    Ok((result?, system))
+    .await?
 }
 
 /// Apply every pending migration of the engine v2 project around `dir`,
@@ -191,27 +212,51 @@ where
 /// head, unowned tables), a failed unit, or a lost lock.
 pub(crate) async fn migrate(pool: &Pool, dir: &Path, opts: &Options) -> Result<Report, RunError> {
     let project = load_project(dir)?;
-    refuse_registry(&project)?;
-    let ledger = Ledger::default_names();
+    migrate_project(pool, Some(dir), &project, opts).await
+}
+
+/// [`migrate`] for `embed_migrations!` entries: no system chain, as engine
+/// v1's embedded runner.
+///
+/// # Errors
+/// As [`migrate`], and an engine v1 entry.
+pub(crate) async fn migrate_embedded(
+    pool: &Pool,
+    entries: &[(&str, &str)],
+    opts: &Options,
+) -> Result<Report, RunError> {
+    let project = super::load::load_embedded(entries)?;
+    migrate_project(pool, None, &project, opts).await
+}
+
+async fn migrate_project(
+    pool: &Pool,
+    dir: Option<&Path>,
+    project: &Project,
+    opts: &Options,
+) -> Result<Report, RunError> {
+    refuse_registry(project)?;
+    let ledger = Ledger::of(opts);
     let run_id = new_run_id();
     // A dry run writes nothing: no system chain, no ledger table.
-    let ((applied, planned), system) = locked(pool, dir, !opts.dry_run, || async {
-        if !opts.dry_run {
-            ledger.ensure(pool).await?;
-        }
-        let mut runner = Runner {
-            pool,
-            ledger: &ledger,
-            run_id: &run_id,
-            b: backend_of(pool),
-            opts,
-            units_run: 0,
-            planned: Vec::new(),
-        };
-        let applied = runner.apply_project(&project).await?;
-        Ok((applied, runner.planned))
-    })
-    .await?;
+    let ((applied, planned), system) =
+        locked(pool, dir, project, &ledger, !opts.dry_run, || async {
+            if !opts.dry_run {
+                ledger.ensure(pool).await?;
+            }
+            let mut runner = Runner {
+                pool,
+                ledger: &ledger,
+                run_id: &run_id,
+                b: backend_of(pool),
+                opts,
+                units_run: 0,
+                planned: Vec::new(),
+            };
+            let applied = runner.apply_project(project).await?;
+            Ok((applied, runner.planned))
+        })
+        .await?;
     Ok(Report {
         planned,
         system,
@@ -232,10 +277,10 @@ pub(crate) async fn downgrade(
     steps: usize,
     opts: &Options,
 ) -> Result<Report, RunError> {
-    load_project(dir)?;
-    let ledger = Ledger::default_names();
+    let project = load_project(dir)?;
+    let ledger = Ledger::of(opts);
     let run_id = new_run_id();
-    let (rolled_back, system) = locked(pool, dir, true, || async {
+    let (rolled_back, system) = locked(pool, Some(dir), &project, &ledger, true, || async {
         ledger.ensure(pool).await?;
         let mut runner = Runner {
             pool,
@@ -282,6 +327,13 @@ fn key(f: &File) -> (&str, &str) {
 }
 
 impl Runner<'_> {
+    fn stopping(&self) -> bool {
+        self.opts
+            .stop
+            .as_ref()
+            .is_some_and(|s| s.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
     async fn apply_project(&mut self, project: &Project) -> Result<Vec<String>, RunError> {
         let rows: HashMap<(String, String), Row> = self
             .ledger
@@ -476,6 +528,13 @@ impl Runner<'_> {
         from: usize,
     ) -> Result<(), RunError> {
         for (n, u) in units.iter().enumerate().skip(from) {
+            if self.units_run > 0 && self.stopping() {
+                return Err(MigrateError::Validation(format!(
+                    "stopped by a shutdown signal after {} unit(s); the next start resumes",
+                    self.units_run
+                ))
+                .into());
+            }
             #[cfg(test)]
             if self.opts.crash == Some(Crash::BeforeUnit(self.units_run)) {
                 return Err(MigrateError::Validation("test crash".into()).into());

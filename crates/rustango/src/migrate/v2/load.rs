@@ -31,6 +31,56 @@ pub(crate) struct Loaded {
     pub(crate) file: File,
 }
 
+impl crate::migrate::chains::ChainFacts for Loaded {
+    fn key(&self) -> String {
+        format!("{}:{}", self.file.app, self.file.id)
+    }
+
+    /// Schema ops only: raw SQL is opaque, as in engine v1.
+    fn facts(&self) -> Vec<crate::migrate::chains::Fact<'_>> {
+        use super::format::Op;
+        use crate::migrate::chains::Fact;
+        let mut out = Vec::new();
+        if let Some(doc) = &self.file.state {
+            out.extend(doc.tables.keys().map(|t| Fact::Created(t)));
+        }
+        for env in &self.file.operations {
+            let written = match &env.op {
+                Op::CreateTable { table, .. } | Op::AdoptTable { table, .. } => {
+                    out.push(Fact::Created(&table.name));
+                    &table.name
+                }
+                Op::DropTable { table, .. } => {
+                    out.push(Fact::Dropped(table));
+                    table
+                }
+                Op::RenameTable { from, to } => {
+                    out.push(Fact::Renamed { from, to });
+                    to
+                }
+                Op::AlterTableComment { table, .. }
+                | Op::AddColumn { table, .. }
+                | Op::DropColumn { table, .. }
+                | Op::RenameColumn { table, .. }
+                | Op::AlterColumn { table, .. }
+                | Op::AddFk { table, .. }
+                | Op::DropFk { table, .. }
+                | Op::AddIndex { table, .. }
+                | Op::DropIndex { table, .. }
+                | Op::RenameIndex { table, .. }
+                | Op::AddCheck { table, .. }
+                | Op::DropCheck { table, .. } => table,
+                Op::RawSql { .. }
+                | Op::StateOnly { .. }
+                | Op::CreateExtension { .. }
+                | Op::ExternTable { .. } => continue,
+            };
+            out.push(Fact::Written(written));
+        }
+        out
+    }
+}
+
 /// A loaded project: its files and the canonical order of each target.
 #[derive(Debug, Default)]
 pub(crate) struct Project {
@@ -76,8 +126,8 @@ pub(crate) fn load_project(dir: &Path) -> Result<Project, LoadError> {
             return Err(LoadError::new(
                 Code::Engine,
                 dir.display().to_string(),
-                "this project is on engine v1: run `manage dbmigrate adopt` to switch it to \
-                 engine v2",
+                "this project is on engine v1: use `manage migrate` and the other v1 commands, \
+                 or run `manage dbmigrate adopt` to switch it to engine v2",
             ))
         }
         ProjectEngine::Mixed { v1, .. } => {
@@ -95,6 +145,37 @@ pub(crate) fn load_project(dir: &Path) -> Result<Project, LoadError> {
         _ => {}
     }
     load_folders(raw)
+}
+
+/// Load `embed_migrations!` entries (`(stem, text)`) as one v2 folder.
+///
+/// # Errors
+/// [`Code::Engine`] when an entry is not engine v2, and every file and
+/// graph error.
+pub(crate) fn load_embedded(entries: &[(&str, &str)]) -> Result<Project, LoadError> {
+    let folder = PathBuf::from("embedded");
+    let mut files = Vec::with_capacity(entries.len());
+    for (stem, text) in entries {
+        let path = folder.join(format!("{stem}.json"));
+        let engine = FileEngine::of(text);
+        if engine != FileEngine::V2 {
+            if engine == FileEngine::Unparsable {
+                load_file(&path, text)?;
+            }
+            return Err(LoadError::new(
+                Code::Engine,
+                path.display().to_string(),
+                "an engine v1 migration: embedded engine v2 migrations are all v2",
+            ));
+        }
+        files.push(RawFile {
+            path,
+            text: (*text).to_owned(),
+            engine,
+        });
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    load_folders(vec![(folder, files)])
 }
 
 /// Load already-read v2 folders: one app label per folder, then the graphs.

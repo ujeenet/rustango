@@ -12,6 +12,7 @@ pub(crate) const SINGLE_DB_VERBS: &[&str] = &[
     "-h",
     // `migrate::manage`.
     "makemigrations",
+    "dbmigrate",
     "migrate",
     "downgrade",
     "showmigrations",

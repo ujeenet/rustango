@@ -191,6 +191,7 @@ pub(crate) async fn run_with_writer_for<W: Write + Send>(
             Ok(())
         }
         "makemigrations" => makemigrations(dir, &args[1..], writer),
+        "dbmigrate" => crate::migrate::v2::cli::run(pool, dir, &args[1..], writer).await,
         "migrate" => migrate(pool, dir, &args[1..], writer).await,
         "downgrade" => downgrade(pool, dir, &args[1..], writer).await,
         "showmigrations" | "status" => showmigrations(pool, dir, writer).await,

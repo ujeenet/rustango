@@ -40,6 +40,23 @@ pub mod sqlite_datetime;
 /// Engine v2: file format, loader, checksum and state by replay.
 pub(crate) mod v2;
 
+/// Apply `embed_migrations!` entries of an engine v2 folder; returns the
+/// `<app>:<id>` of each migration applied. Engine v1 folders use
+/// [`migrate_embedded_pool`].
+///
+/// # Errors
+/// An engine v1 entry, every v2 load error, a refusal, a failed unit, or
+/// a lost lock.
+pub async fn migrate_embedded_v2(
+    pool: &crate::sql::Pool,
+    embedded: &[(&str, &str)],
+) -> Result<Vec<String>, MigrateError> {
+    v2::run::migrate_embedded(pool, embedded, &v2::run::Options::default())
+        .await
+        .map(|r| r.applied)
+        .map_err(MigrateError::from)
+}
+
 pub use diff::{
     detect_changes, detect_unsupported_field_changes, render_changes,
     render_changes_split_with_dialect, RenderedBatch, SchemaChange,

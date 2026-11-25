@@ -13,6 +13,7 @@ use crate::sql::{raw_execute_pool, Pool};
 /// A database of the test's own; `Drop` removes a server database.
 struct Db {
     pool: Pool,
+    url: String,
     drop: Option<(String, String)>,
     _dir: tempfile::TempDir,
 }
@@ -67,6 +68,7 @@ async fn fresh(b: B) -> Option<Db> {
             let pool = Pool::connect(&url).await.unwrap();
             return Some(Db {
                 pool,
+                url,
                 drop: None,
                 _dir: dir,
             });
@@ -88,9 +90,11 @@ async fn fresh(b: B) -> Option<Db> {
     .unwrap();
     a.close().await;
     let (base, _) = admin.rsplit_once('/').unwrap();
-    let pool = Pool::connect(&format!("{base}/{name}")).await.unwrap();
+    let url = format!("{base}/{name}");
+    let pool = Pool::connect(&url).await.unwrap();
     Some(Db {
         pool,
+        url,
         drop: Some((admin, name)),
         _dir: dir,
     })
@@ -647,6 +651,183 @@ macro_rules! per_backend {
     };
 }
 
+/// Boot migrate (6.11): three replicas start together, one migrates and
+/// the others wait, then find nothing pending.
+async fn three_replicas_one_migrates(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let (_root, dir) = project();
+    let mut pools = Vec::new();
+    for _ in 0..3 {
+        pools.push(Pool::connect(&db.url).await.unwrap());
+    }
+    let o = opts();
+    let (r1, r2, r3) = tokio::join!(
+        migrate(&pools[0], &dir, &o),
+        migrate(&pools[1], &dir, &o),
+        migrate(&pools[2], &dir, &o),
+    );
+    let mut applied: Vec<Vec<String>> = [r1, r2, r3]
+        .into_iter()
+        .map(|r| r.expect("every replica serves").applied)
+        .collect();
+    applied.sort();
+    assert_eq!(
+        applied,
+        [
+            vec![],
+            vec![],
+            vec!["0001_author".to_owned(), "0002_bio".to_owned()]
+        ]
+    );
+    for p in pools {
+        p.close().await;
+    }
+}
+
+/// A shutdown signal mid-run stops after the unit in flight; the next
+/// start resumes and finishes.
+async fn stop_mid_run_then_resume(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let (_root, dir) = project();
+    let stopping = Options {
+        stop: Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            true,
+        ))),
+        ..Options::default()
+    };
+    let e = migrate(pool, &dir, &stopping).await.expect_err("stopped");
+    assert!(e.to_string().contains("shutdown signal"), "{e}");
+    assert_eq!(columns(pool, "rv_author").await, ["id", "name"]);
+    let rep = migrate(pool, &dir, &opts()).await.unwrap();
+    assert_eq!(rep.applied, ["0002_bio"]);
+    assert_eq!(columns(pool, "rv_author").await, ["id", "name", "bio"]);
+}
+
+/// Every 2.6 default passes `check` online on its own backend.
+async fn defaults_pass_check_online(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let backend = backend_of(&db.pool);
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("migrations");
+    let rows = super::super::check::tests::defaults_table(backend);
+    super::super::check::tests::project_with(&dir, &rows);
+    let found = super::super::check::check(&dir, &[backend], None, Some(&db.pool))
+        .await
+        .unwrap();
+    assert!(found.is_empty(), "{b:?}: {found:#?}");
+    // A default the server refuses is an error naming it.
+    let bad = tmp.path().join("bad");
+    super::super::check::tests::project_with(&bad, &[("i32", None, "(no_such_fn())".into())]);
+    let found = super::super::check::check(&bad, &[backend], None, Some(&db.pool))
+        .await
+        .unwrap();
+    assert!(
+        found
+            .iter()
+            .any(|f| f.msg.contains(&format!("on {}", backend.as_str()))
+                && f.severity == super::super::check::Severity::Error),
+        "{found:#?}"
+    );
+}
+
+/// ChainFacts (4.9): a v2 project owns a framework table and changes it;
+/// the system chain leaves it to the project instead of creating it first.
+async fn project_owns_a_framework_table(b: B) {
+    #[cfg(feature = "admin")]
+    owned_framework_table(b).await;
+    #[cfg(not(feature = "admin"))]
+    let _ = b;
+}
+
+#[cfg(feature = "admin")]
+async fn owned_framework_table(b: B) {
+    use crate::core::ModelScope;
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let root = tempfile::tempdir().unwrap();
+    for scope in [ModelScope::Registry, ModelScope::Tenant] {
+        crate::migrate::make_migrations_system(root.path(), scope, None).unwrap();
+    }
+    let sys = root.path().join("system/migrations");
+    let mut snap = crate::migrate::snapshot::SchemaSnapshot::default();
+    for e in std::fs::read_dir(&sys).unwrap() {
+        let m = crate::migrate::file::load(&e.unwrap().path()).unwrap();
+        snap.tables.extend(m.snapshot.tables);
+        snap.indexes.extend(m.snapshot.indexes);
+    }
+    let (table, column) = ("rustango_admin_users", "sessions_revoked_at");
+    let t = snap.tables.iter().find(|t| t.name == table).unwrap();
+    let state = super::super::make::table_of(t, &snap, &[backend_of(pool)], "test").unwrap();
+    let late = state.column(column).unwrap().clone();
+    let fields: Vec<Value> = state
+        .columns
+        .iter()
+        .filter(|c| c.column != column)
+        .map(|c| serde_json::to_value(c).unwrap())
+        .collect();
+    let create = json!({"op": "create_table", "v": 1,
+        "table": {"name": table, "scope": "tenant", "fields": fields},
+        "indexes": state.indexes, "checks": state.checks});
+    let add = json!({"op": "add_column", "v": 1, "table": table, "column": late});
+    let dir = root.path().join("migrations");
+    put(&dir, "0001_users", &v2("0001_users", &[], json!([create])));
+    put(
+        &dir,
+        "0002_revoked",
+        &v2("0002_revoked", &["0001_users"], json!([add])),
+    );
+    let rep = migrate(pool, &dir, &opts()).await.unwrap();
+    assert_eq!(rep.applied, ["0001_users", "0002_revoked"]);
+    assert!(columns(pool, table).await.iter().any(|c| c == column));
+    assert!(migrate(pool, &dir, &opts())
+        .await
+        .unwrap()
+        .applied
+        .is_empty());
+}
+
+/// Two apps, each with its own ledger, in one database.
+async fn two_apps_two_ledgers(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let app = |base: &str, table: &str| {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("migrations");
+        let create = json!({"op": "create_table", "v": 1, "table": {"name": table,
+            "scope": "tenant", "fields": [
+                {"column": "id", "ty": "i64", "primary_key": true, "nullable": false}]}});
+        put(
+            &dir,
+            "0001_initial",
+            &v2("0001_initial", &[], json!([create])),
+        );
+        let o = Options {
+            ledger: Some(base.to_owned()),
+            ..Options::default()
+        };
+        (root, dir, o)
+    };
+    let (_ra, a, oa) = app("__alpha_migrations__", "la_one");
+    let (_rb, bdir, ob) = app("__beta_migrations__", "lb_two");
+    assert_eq!(
+        migrate(pool, &a, &oa).await.unwrap().applied,
+        ["0001_initial"]
+    );
+    assert_eq!(
+        migrate(pool, &bdir, &ob).await.unwrap().applied,
+        ["0001_initial"]
+    );
+    for (o, n) in [(&oa, 1), (&ob, 1)] {
+        assert_eq!(Ledger::of(o).rows(pool).await.unwrap().len(), n);
+    }
+    // Rolling one back leaves the other.
+    downgrade(pool, &a, 1, &oa).await.unwrap();
+    assert!(columns(pool, "la_one").await.is_empty());
+    assert_eq!(columns(pool, "lb_two").await, ["id"]);
+    assert!(migrate(pool, &bdir, &ob).await.unwrap().applied.is_empty());
+}
+
 per_backend!(
     apply_rollback_reapply,
     edited_file_and_stored_body,
@@ -655,4 +836,9 @@ per_backend!(
     adopt_and_switch,
     adopt_switch_cases,
     switch_renames_and_fresh_matches,
+    three_replicas_one_migrates,
+    stop_mid_run_then_resume,
+    defaults_pass_check_online,
+    two_apps_two_ledgers,
+    project_owns_a_framework_table,
 );

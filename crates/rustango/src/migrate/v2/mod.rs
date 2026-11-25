@@ -1,20 +1,21 @@
-//! Migrations engine v2: the file format, its loader, checksum and state by
-//! replay. Nothing here reads a database, the clock, env or the models.
-//!
-//! Phase 1a: no runner, renderer, ledger or CLI uses this yet.
+//! Migrations engine v2: the file format, loader, checksum, state by replay,
+//! renderer, ledger, runner, `make`, `check` and the `dbmigrate` commands.
 
 // Wired to the runner and CLI in later phase 1 branches.
 #![cfg_attr(not(test), allow(dead_code))]
 
 pub(crate) mod adopt;
 pub(crate) mod catalog;
+pub(crate) mod check;
 pub(crate) mod checksum;
+pub(crate) mod cli;
 pub(crate) mod format;
 pub(crate) mod graph;
 pub(crate) mod invert;
 pub(crate) mod json;
 pub(crate) mod ledger;
 pub(crate) mod load;
+pub(crate) mod make;
 pub(crate) mod norm;
 pub(crate) mod probe;
 pub(crate) mod render;
