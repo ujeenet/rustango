@@ -237,6 +237,19 @@ async fn schema_tenants_stay_apart() {
     let t1 = target(&f.pools(), &f.org("t1").await, &f.db.url)
         .await
         .unwrap();
+    // The tenant's path is its schema alone: a registry table, named bare,
+    // fails loudly instead of falling through to `public` (decision 1).
+    let orgs = {
+        use crate::core::Model as _;
+        Org::SCHEMA.table
+    };
+    let stray: Result<Vec<(i64,)>, _> = raw_query_pool(
+        &format!("SELECT COUNT(*) FROM {orgs}"),
+        Vec::new(),
+        &t1.pool,
+    )
+    .await;
+    assert!(stray.is_err(), "{stray:?}");
     let back = Options {
         run_as: RunAs::Tenant,
         lock_scope: t1.scope.clone(),
