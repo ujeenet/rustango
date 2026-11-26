@@ -10,7 +10,9 @@ use crate::migrate::MigrateError;
 use crate::sql::Pool;
 
 /// The verbs; `make`, `sql` and `check --offline` never dial the database.
-pub(crate) const VERBS: &[&str] = &["make", "apply", "down", "status", "check", "sql", "adopt"];
+pub(crate) const VERBS: &[&str] = &[
+    "make", "apply", "down", "status", "check", "sql", "adopt", "squash",
+];
 
 /// Whether `args` (after `dbmigrate`) needs no connection.
 pub(crate) fn pool_free(args: &[String]) -> bool {
@@ -106,6 +108,11 @@ pub(crate) async fn run<W: Write + Send>(
     let verb = args.first().map_or("", String::as_str);
     let rest = args.get(1..).unwrap_or_default();
     match verb {
+        "make" if value(rest, "--rebase")?.is_some() => rebase(pool, dir, rest, w).await,
+        "make" if rest.iter().any(|a| a == "--merge") => {
+            let path = super::merge::merge(dir, &app_folder(dir, rest)?).map_err(load)?;
+            writeln!(w, "Wrote {}", path.display()).map_err(io)
+        }
         "make" => make(pool, dir, rest, w),
         "apply" => apply(pool, dir, rest, w).await,
         "down" => down(pool, dir, rest, w).await,
@@ -113,6 +120,7 @@ pub(crate) async fn run<W: Write + Send>(
         "check" => check(pool, dir, rest, w).await,
         "sql" => sql(pool, dir, rest, w),
         "adopt" => adopt(pool, dir, w),
+        "squash" => squash(pool, dir, rest, w).await,
         "" | "help" | "--help" | "-h" => {
             writeln!(w, "manage dbmigrate <{}>", VERBS.join("|")).map_err(io)
         }
@@ -198,6 +206,77 @@ fn make<W: Write>(pool: &Pool, dir: &Path, args: &[String], w: &mut W) -> Result
             Ok(())
         }
     }
+}
+
+/// `squash <app> <from>..<to>` writes the checkpoint; `squash --prune
+/// <checkpoint> [--app <app>] [--assume-all-applied]` deletes what it replaces.
+async fn squash<W: Write>(
+    pool: &Pool,
+    dir: &Path,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), MigrateError> {
+    if let Some(id) = value(args, "--prune")? {
+        let applied = super::ledger::Ledger::default_names()
+            .rows(pool)
+            .await?
+            .iter()
+            .any(|r| r.id == id && r.state == super::ledger::RowState::Applied);
+        let assume = args.iter().any(|a| a == "--assume-all-applied");
+        let removed = super::squash::prune(dir, &app_folder(dir, args)?, id, applied, assume)
+            .map_err(load)?;
+        for p in removed {
+            writeln!(w, "Removed {}", p.display()).map_err(io)?;
+        }
+        return Ok(());
+    }
+    let free: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
+    let (Some(app), Some(range)) = (free.first(), free.get(1)) else {
+        return Err(usage("squash <app> <from>..<to>"));
+    };
+    let (from, to) = range
+        .split_once("..")
+        .ok_or_else(|| usage("squash <app> <from>..<to>"))?;
+    let folder = if app.as_str() == "project" {
+        dir.to_path_buf()
+    } else {
+        crate::migrate::file::project_root_of(dir)
+            .join(app.as_str())
+            .join("migrations")
+    };
+    let path = super::squash::squash(dir, &folder, app, from, to).map_err(load)?;
+    writeln!(w, "Wrote {}", path.display()).map_err(io)
+}
+
+/// The folder `--app` names, else the flat one.
+fn app_folder(dir: &Path, args: &[String]) -> Result<PathBuf, MigrateError> {
+    Ok(match value(args, "--app")? {
+        Some(app) => crate::migrate::file::project_root_of(dir)
+            .join(app)
+            .join("migrations"),
+        None => dir.to_path_buf(),
+    })
+}
+
+/// `make --rebase <id> [--force]`: refused when this database ran it or a
+/// remote branch has it.
+async fn rebase<W: Write>(
+    pool: &Pool,
+    dir: &Path,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), MigrateError> {
+    let id = value(args, "--rebase")?.unwrap_or_default();
+    let folder = app_folder(dir, args)?;
+    let applied = super::ledger::Ledger::default_names()
+        .rows(pool)
+        .await?
+        .iter()
+        .any(|r| r.id == id);
+    let shared = super::merge::on_remote_branch(&folder.join(format!("{id}.json")));
+    let force = args.iter().any(|a| a == "--force");
+    let path = super::merge::rebase(dir, &folder, id, applied, shared, force).map_err(load)?;
+    writeln!(w, "Moved {id} to {}", path.display()).map_err(io)
 }
 
 async fn apply<W: Write>(
@@ -358,6 +437,9 @@ async fn check<W: Write>(
     args: &[String],
     w: &mut W,
 ) -> Result<(), MigrateError> {
+    if args.iter().any(|a| a == "--drift") {
+        return drift(pool, dir, args, w).await;
+    }
     crate::migrate::make::check_models()?;
     let models = crate::migrate::snapshot::SchemaSnapshot::from_registry();
     let online = (!args.iter().any(|a| a == "--offline")).then_some(pool);
@@ -377,6 +459,55 @@ async fn check<W: Write>(
         )));
     }
     writeln!(w, "No issues found.").map_err(io)
+}
+
+/// `check --drift [--target registry]`: the catalog against the state at
+/// this database's applied set (S6); any difference fails.
+async fn drift<W: Write>(
+    pool: &Pool,
+    dir: &Path,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), MigrateError> {
+    let target = match value(args, "--target")? {
+        Some("registry") => Target::Registry,
+        None | Some("tenant") => Target::Tenant,
+        Some(other) => return Err(usage(format!("--target {other}: `registry` or `tenant`"))),
+    };
+    let project = super::load::load_project(dir).map_err(load)?;
+    let done: std::collections::HashSet<(String, String)> = super::ledger::Ledger::default_names()
+        .rows(pool)
+        .await?
+        .into_iter()
+        .filter(|r| r.state == super::ledger::RowState::Applied)
+        .map(|r| (r.app, r.id))
+        .collect();
+    let applied: std::collections::BTreeSet<usize> = project
+        .order
+        .get(&target)
+        .into_iter()
+        .flatten()
+        .copied()
+        .filter(|&i| {
+            let f = &project.files[i].file;
+            done.contains(&(f.app.clone(), f.id.clone()))
+        })
+        .collect();
+    let planner = super::plan::TipPlanner::new(&project, target).map_err(load)?;
+    let state = planner.state_at(&project, &applied).map_err(load)?;
+    let found = super::probe::drift(pool, &state)
+        .await
+        .map_err(|e| MigrateError::Validation(e.to_string()))?;
+    for m in &found {
+        writeln!(w, "{m}").map_err(io)?;
+    }
+    if !found.is_empty() {
+        return Err(MigrateError::Validation(format!(
+            "dbmigrate check --drift: {} difference(s) from the migrations' state",
+            found.len()
+        )));
+    }
+    writeln!(w, "No drift.").map_err(io)
 }
 
 fn sql<W: Write>(pool: &Pool, dir: &Path, args: &[String], w: &mut W) -> Result<(), MigrateError> {

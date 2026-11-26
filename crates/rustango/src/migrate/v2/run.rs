@@ -1163,6 +1163,12 @@ impl Runner<'_> {
             .files
             .iter()
             .map(|f| (f.file.app.as_str(), f.file.id.as_str()))
+            .chain(
+                project
+                    .replaced
+                    .keys()
+                    .map(|(a, i)| (a.as_str(), i.as_str())),
+            )
             .collect();
         let mut unknown: Vec<String> = rows
             .keys()
@@ -2415,13 +2421,9 @@ impl Runner<'_> {
         state: State,
         memo: &mut HashMemo,
     ) -> Result<State, RunError> {
-        let base = f.file.base.as_ref().ok_or_else(|| {
-            refused(
-                Code::Checkpoint,
-                &f.at,
-                "only adopt checkpoints are enabled",
-            )
-        })?;
+        let Some(base) = f.file.base.as_ref() else {
+            return self.squash_checkpoint(f, state, memo).await;
+        };
         let mut after = state.clone();
         apply_file(&mut after, &f.file, &f.at, &self.ctx())?;
         let doc = f.file.state.clone().unwrap_or_default();
@@ -2561,6 +2563,110 @@ impl Runner<'_> {
         Ok(after)
     }
 
+    /// A squash checkpoint (9.6): a database that applied every replaced
+    /// id records it with no SQL; a fresh one installs its state and runs
+    /// its kept data ops; a partial set is refused with the missing ids.
+    async fn squash_checkpoint(
+        &mut self,
+        f: &Loaded,
+        state: State,
+        memo: &mut HashMemo,
+    ) -> Result<State, RunError> {
+        let mut after = state.clone();
+        apply_file(&mut after, &f.file, &f.at, &self.ctx())?;
+        let rows = self.ledger.rows(self.pool).await?;
+        let done: std::collections::HashSet<&str> = rows
+            .iter()
+            .filter(|r| r.app == f.file.app && r.state == RowState::Applied)
+            .map(|r| r.id.as_str())
+            .collect();
+        let missing: Vec<&str> = f
+            .file
+            .replaces
+            .iter()
+            .map(String::as_str)
+            .filter(|id| !done.contains(id))
+            .collect();
+        let k = key(&f.file);
+        let hashes = (state.hash(memo), after.hash(memo));
+        let units = if missing.is_empty() {
+            Vec::new()
+        } else if missing.len() < f.file.replaces.len() {
+            return Err(refused(
+                Code::Behind,
+                &f.at,
+                format!(
+                    "this database ran part of what `{}:{}` replaces; missing {}: apply them \
+                     with a release that still has those files, then migrate",
+                    f.file.app,
+                    f.file.id,
+                    missing.join(", ")
+                ),
+            ));
+        } else {
+            let checkpoint = State::from_doc(f.file.state.clone().unwrap_or_default());
+            for t in checkpoint.tables.keys() {
+                if crate::migrate::try_table_exists_here(self.pool, t).await? {
+                    return Err(refused(
+                        Code::Unowned,
+                        &f.at,
+                        format!(
+                            "table `{t}` exists but no ledger says how it got there; a database \
+                             not yet on engine v2 switches with a release from before the squash"
+                        ),
+                    ));
+                }
+            }
+            let mut externs = state.clone();
+            externs.externs.extend(checkpoint.externs.clone());
+            let order = fk_order(&checkpoint, &f.at)?;
+            let mut units = super::render::render_install(&externs, &order, &f.at, self.b)?;
+            // The kept data ops run on the installed state, as a fresh file would.
+            if !f.file.operations.is_empty() {
+                let data = File {
+                    kind: Kind::Migration,
+                    replaces: Vec::new(),
+                    state: None,
+                    ..f.file.clone()
+                };
+                let (more, _) = render_plan(&after, &data, &f.at, &self.ctx(), self.b)?;
+                let base = units.len();
+                units.extend(more.into_iter().map(|mut u| {
+                    u.op += base;
+                    u
+                }));
+            }
+            units
+        };
+        if self.opts.dry_run {
+            self.plan(&f.file.id, &units);
+            return Ok(after);
+        }
+        self.ledger
+            .insert(
+                self.pool,
+                k,
+                &f.checksum,
+                &f.body,
+                RowState::Running,
+                &units,
+                self.run_id,
+                (&hashes.0, Some(&hashes.1)),
+                true,
+            )
+            .await?;
+        let kind = if missing.is_empty() {
+            "checkpointed"
+        } else {
+            "installed"
+        };
+        self.ledger
+            .event(self.pool, kind, k, Some(&f.checksum), self.run_id, None)
+            .await?;
+        self.finish(f, &units, 0).await?;
+        Ok(after)
+    }
+
     /// Plan every rollback first (each inverse and blocker), then run them,
     /// newest first: a blocker anywhere runs zero statements (7.1).
     async fn downgrade(&mut self, back: Back<'_>) -> Result<Vec<String>, RunError> {
@@ -2575,6 +2681,11 @@ impl Runner<'_> {
             let at = format!("ledger:{}:{}", r.app, r.id);
             bodies.push(body(r, &at)?);
         }
+        // Rows a squash checkpoint row stands for: its state holds them.
+        let superseded: std::collections::HashSet<(String, String)> = bodies
+            .iter()
+            .flat_map(|f: &File| f.replaces.iter().map(|id| (f.app.clone(), id.clone())))
+            .collect();
         // Rows come in `seq` order; the chosen ones newest first.
         let chosen: Vec<usize> = match back {
             Back::Steps(n) => (0..applied.len()).rev().take(n).collect(),
@@ -2644,6 +2755,9 @@ impl Runner<'_> {
             // State before it: every earlier stored body, in apply order.
             let mut state = State::default();
             for (r, f) in applied[..idx].iter().zip(&bodies) {
+                if superseded.contains(&(r.app.clone(), r.id.clone())) {
+                    continue;
+                }
                 let at = format!("ledger:{}:{}", r.app, r.id);
                 apply_file(&mut state, f, &at, &self.ctx())?;
             }
@@ -2678,6 +2792,9 @@ impl Runner<'_> {
         if !plan.is_empty() {
             let mut now = State::default();
             for (r, f) in applied.iter().zip(&bodies) {
+                if superseded.contains(&(r.app.clone(), r.id.clone())) {
+                    continue;
+                }
                 let at = format!("ledger:{}:{}", r.app, r.id);
                 apply_file(&mut now, f, &at, &self.ctx())?;
             }

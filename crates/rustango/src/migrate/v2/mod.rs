@@ -9,6 +9,7 @@ pub(crate) mod catalog;
 pub(crate) mod check;
 pub(crate) mod checksum;
 pub(crate) mod cli;
+pub(crate) mod commute;
 pub(crate) mod data;
 pub(crate) mod format;
 pub(crate) mod graph;
@@ -17,6 +18,7 @@ pub(crate) mod json;
 pub(crate) mod ledger;
 pub(crate) mod load;
 pub(crate) mod make;
+pub(crate) mod merge;
 pub(crate) mod norm;
 pub(crate) mod plan;
 pub(crate) mod preflight;
@@ -25,6 +27,7 @@ pub(crate) mod render;
 pub(crate) mod replay;
 pub(crate) mod run;
 pub(crate) mod session;
+pub(crate) mod squash;
 pub(crate) mod state;
 pub(crate) mod step;
 pub mod testing;
@@ -81,6 +84,8 @@ pub(crate) enum Code {
     CrossTarget,
     /// Tenant SQL naming another schema (the registry's, `public`).
     OtherSchema,
+    /// Merged branches that do not commute (4.5).
+    Conflict,
     /// A checkpoint field misused, or its state hash does not match.
     Checkpoint,
     /// Two app labels in one folder, or one label in two folders.
@@ -153,6 +158,7 @@ impl Code {
             Self::StepChanged => "MV2-E032",
             Self::CrossTarget => "MV2-E030",
             Self::OtherSchema => "MV2-E031",
+            Self::Conflict => "MV2-E033",
             Self::FkType => "MV2-E3780",
             Self::CheckColumn => "MV2-E3959",
         }

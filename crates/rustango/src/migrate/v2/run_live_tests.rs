@@ -4213,6 +4213,8 @@ per_backend!(
     max_batches_per_run_binds_the_cli_only,
     a_held_lock_is_retried,
     a_waiter_finishes_a_killed_move,
+    squash_a_thirty_file_chain,
+    commuting_branches_in_either_order,
 );
 
 /// Legacy SQLite datetime text is swept before the first data unit, so a
@@ -4253,5 +4255,207 @@ async fn the_sqlite_sweep_runs_before_the_first_data_unit() {
     assert_eq!(
         count(pool, "SELECT COUNT(*) FROM sw_ev WHERE late = 1").await,
         1
+    );
+}
+
+/// A 30-file chain with data ops: five tables, columns and indexes, a seed
+/// kept for fresh installs, and backfills that fresh installs skip.
+fn thirty_files(dir: &Path) {
+    let mut parent: Option<String> = None;
+    for i in 1..=30usize {
+        let id = format!("{i:04}_s{i}");
+        let t = format!("sq_t{}", (i - 1) % 5);
+        let ops = match i {
+            1..=5 => json!([{"op": "create_table", "v": 1, "table": {"name": t, "scope": "tenant",
+                "fields": [{"column": "id", "ty": "i64", "primary_key": true, "nullable": false},
+                           {"column": "code", "ty": "string", "max_length": 20, "nullable": true}]}}]),
+            6 => {
+                json!([{"op": "create_table", "v": 1, "table": {"name": "sq_lookup", "scope": "tenant",
+                "fields": [{"column": "id", "ty": "i64", "primary_key": true, "nullable": false},
+                           {"column": "label", "ty": "string", "max_length": 20, "nullable": true}]}},
+                {"op": "data_sql", "v": 1, "id": "seed_v1", "tables": {"write": ["sq_lookup"]},
+                 "up": {"any": "INSERT INTO {{t:sq_lookup}} ({{c:id}}, {{c:label}}) VALUES (1, 'one'), (2, 'two')"},
+                 "down": {"any": "DELETE FROM {{t:sq_lookup}}"}}])
+            }
+            i if i % 3 == 0 => json!([{"op": "add_column", "v": 1, "table": t,
+                "column": {"column": format!("c{i}"), "ty": "i32", "nullable": true}},
+                {"op": "data_sql", "v": 1, "id": format!("fill{i}_v1"), "tables": {"write": [format!("{t}.c{i}")]},
+                 "up": {"any": format!("UPDATE {{{{t:{t}}}}} SET {{{{c:c{i}}}}} = 1")},
+                 "down": {"noop": "the column goes with the rollback"}, "on_fresh": "skip",
+                 "allow": [{"code": "MV2-E028", "reason": "test"}]}]),
+            i if i % 3 == 1 => json!([{"op": "add_index", "v": 1, "table": t,
+                "name": format!("sq_ix{i}"), "columns": ["code"]}]),
+            i => json!([{"op": "add_column", "v": 1, "table": t,
+                "column": {"column": format!("c{i}"), "ty": "string", "max_length": 10, "nullable": true}}]),
+        };
+        let parents: Vec<&str> = parent.iter().map(String::as_str).collect();
+        put(dir, &id, &v2(&id, &parents, ops));
+        parent = Some(id);
+    }
+}
+
+/// Every table's columns, indexes and checks, column order ignored (4.5).
+async fn catalog(pool: &Pool, tables: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    for t in tables {
+        let mut live = shape(pool, t).await;
+        live.columns.sort_by(|a, b| a.name.cmp(&b.name));
+        out.push(format!("{live:?}"));
+    }
+    out
+}
+
+/// Squash (9.6): an existing database records the checkpoint with no SQL;
+/// a fresh one installs it and runs the kept seed, with the same catalog
+/// as the full replay; a partial one is refused with the missing ids;
+/// after prune, rollback stops at the checkpoint.
+async fn squash_a_thirty_file_chain(b: B) {
+    let Some(full) = fresh(b).await else { return };
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    thirty_files(&dir);
+    migrate(&full.pool, &dir, &opts()).await.unwrap();
+    let partial = fresh(b).await.unwrap();
+    migrate(
+        &partial.pool,
+        &dir,
+        &Options {
+            up_to: Some("0010_s10".into()),
+            ..opts()
+        },
+    )
+    .await
+    .unwrap();
+    let path = super::super::squash::squash(&dir, &dir, "project", "0001_s1", "0030_s30").unwrap();
+    assert_eq!(path, dir.join("0030_squash.json"));
+    // The existing database: the checkpoint is recorded, nothing runs.
+    let rep = migrate(&full.pool, &dir, &opts()).await.unwrap();
+    assert_eq!(rep.applied, ["0030_squash"]);
+    let row = Ledger::default_names()
+        .rows(&full.pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.id == "0030_squash")
+        .unwrap();
+    assert!(row.unit_plan.is_empty(), "{:?}", row.unit_plan);
+    // A fresh database: the checkpoint installs the same catalog and the seed.
+    let installed = fresh(b).await.unwrap();
+    assert_eq!(
+        migrate(&installed.pool, &dir, &opts())
+            .await
+            .unwrap()
+            .applied,
+        ["0030_squash"]
+    );
+    let tables = ["sq_t0", "sq_t1", "sq_t2", "sq_t3", "sq_t4", "sq_lookup"];
+    assert_eq!(
+        catalog(&full.pool, &tables).await,
+        catalog(&installed.pool, &tables).await,
+        "{b:?}"
+    );
+    let seeded = |p: &Pool| {
+        let p = p.clone();
+        async move {
+            let r: Vec<(i64,)> =
+                crate::sql::raw_query_pool("SELECT COUNT(*) FROM sq_lookup", Vec::new(), &p)
+                    .await
+                    .unwrap();
+            r[0].0
+        }
+    };
+    assert_eq!(seeded(&installed.pool).await, 2);
+    // Part of the range applied: refused, the missing ids listed.
+    let e = migrate(&partial.pool, &dir, &opts()).await.unwrap_err();
+    assert_eq!(e.code(), Some(Code::Behind), "{e}");
+    assert!(e.to_string().contains("0011_s11"), "{e}");
+    // A file after the checkpoint, then prune; rollback stops at the checkpoint.
+    put(
+        &dir,
+        "0031_more",
+        &v2(
+            "0031_more",
+            &["0030_s30"],
+            json!([{"op": "add_column", "v": 1, "table": "sq_t0",
+                "column": {"column": "late", "ty": "i32", "nullable": true}}]),
+        ),
+    );
+    for db in [&full, &installed] {
+        assert_eq!(
+            migrate(&db.pool, &dir, &opts()).await.unwrap().applied,
+            ["0031_more"]
+        );
+    }
+    let removed = super::super::squash::prune(&dir, &dir, "0030_squash", false, true).unwrap();
+    assert_eq!(removed.len(), 30);
+    for db in [&full, &installed] {
+        assert_eq!(
+            downgrade(&db.pool, &dir, 1, &opts())
+                .await
+                .unwrap()
+                .rolled_back,
+            ["0031_more"]
+        );
+        assert_eq!(
+            code(downgrade(&db.pool, &dir, 1, &opts()).await),
+            Code::Floor
+        );
+    }
+}
+
+/// Branches that commute, merged, applied in either order give one catalog
+/// (column order ignored, 4.5).
+async fn commuting_branches_in_either_order(b: B) {
+    let base = || {
+        v2(
+            "0001_base",
+            &[],
+            json!([{"op": "create_table", "v": 1, "table": {"name": "cm_t", "scope": "tenant",
+                "fields": [{"column": "id", "ty": "i64", "primary_key": true, "nullable": false}]}}]),
+        )
+    };
+    let side = |id: &str, c: &str| {
+        v2(
+            id,
+            &["0001_base"],
+            json!([{"op": "add_column", "v": 1, "table": "cm_t",
+                "column": {"column": c, "ty": "i32", "nullable": true}},
+                {"op": "add_index", "v": 1, "table": "cm_t", "name": format!("cm_{c}_idx"),
+                 "columns": [c]}]),
+        )
+    };
+    let root = tempfile::tempdir().unwrap();
+    let only = |name: &str, extra: &[(&str, Value)]| {
+        let d = root.path().join(name).join("migrations");
+        put(&d, "0001_base", &base());
+        for (id, v) in extra {
+            put(&d, id, v);
+        }
+        d
+    };
+    let left = only("l", &[("0002_left", side("0002_left", "lc"))]);
+    let right = only("r", &[("0002_right", side("0002_right", "rc"))]);
+    let merged = only(
+        "m",
+        &[
+            ("0002_left", side("0002_left", "lc")),
+            ("0002_right", side("0002_right", "rc")),
+            (
+                "0003_merge",
+                v2("0003_merge", &["0002_left", "0002_right"], json!([])),
+            ),
+        ],
+    );
+    let Some(one) = fresh(b).await else { return };
+    let two = fresh(b).await.unwrap();
+    migrate(&one.pool, &left, &opts()).await.unwrap();
+    migrate(&two.pool, &right, &opts()).await.unwrap();
+    for db in [&one, &two] {
+        migrate(&db.pool, &merged, &opts()).await.unwrap();
+    }
+    assert_eq!(
+        catalog(&one.pool, &["cm_t"]).await,
+        catalog(&two.pool, &["cm_t"]).await,
+        "{b:?}"
     );
 }

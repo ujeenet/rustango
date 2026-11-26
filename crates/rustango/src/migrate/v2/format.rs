@@ -120,6 +120,11 @@ pub(crate) struct File {
     pub(crate) offline: bool,
     pub(crate) tx: FileTx,
     pub(crate) state: Option<StateDoc>,
+    /// A squash checkpoint's replaced ids, in its app (9.6).
+    pub(crate) replaces: Vec<String>,
+    /// A squash checkpoint over an op with no inverse: the id below which
+    /// nothing rolls back.
+    pub(crate) irreversible_below: Option<String>,
     pub(crate) allow: Vec<Allow>,
     pub(crate) operations: Vec<OpEnvelope>,
 }
@@ -755,15 +760,12 @@ pub(crate) fn decode(raw: &Value, at: &str) -> Result<File, LoadError> {
         offline: header.offline,
         tx: header.tx,
         state: header.state,
+        replaces: header.replaces,
+        irreversible_below: header.irreversible_below,
         allow: header.allow,
         operations,
     };
-    validate(
-        &file,
-        &header.replaces,
-        header.irreversible_below.as_ref(),
-        at,
-    )?;
+    validate(&file, at)?;
     Ok(file)
 }
 
@@ -875,12 +877,8 @@ fn decode_op(v: &Value, at: &str) -> Result<OpEnvelope, LoadError> {
 }
 
 /// Rules of section 2 that serde cannot state.
-fn validate(
-    file: &File,
-    replaces: &[String],
-    irreversible_below: Option<&String>,
-    at: &str,
-) -> Result<(), LoadError> {
+fn validate(file: &File, at: &str) -> Result<(), LoadError> {
+    let (replaces, irreversible_below) = (&file.replaces, file.irreversible_below.as_ref());
     verified_noops(file, at)?;
     if file.target == Target::Tenant {
         tenant_sql_stays_home(file, at)?;
@@ -900,12 +898,47 @@ fn validate(
             "`replaces` and `irreversible_below` belong on a checkpoint only",
         ));
     }
-    if checkpoint {
-        if !replaces.is_empty() || irreversible_below.is_some() {
+    if checkpoint && !replaces.is_empty() {
+        // A squash checkpoint: its state, the replaced ids, and only the
+        // data ops a fresh install runs (9.6).
+        if file.base.is_some() || file.state.is_none() {
             return Err(LoadError::new(
-                Code::NotEnabled,
+                Code::Checkpoint,
                 at,
-                "squash checkpoints are not enabled in this release",
+                "a squash checkpoint needs `state` and `replaces`, and no `base`",
+            ));
+        }
+        if !file.parents.is_empty() {
+            return Err(LoadError::new(
+                Code::Checkpoint,
+                at,
+                "a squash checkpoint replaces its app's chain from the root: no parents",
+            ));
+        }
+        if let Some(i) = file.operations.iter().position(|e| {
+            !matches!(
+                e.op,
+                Op::DataSql {
+                    on_fresh: OnFresh::Run,
+                    ..
+                } | Op::DataRust {
+                    on_fresh: OnFresh::Run,
+                    ..
+                }
+            )
+        }) {
+            return Err(LoadError::new(
+                Code::Checkpoint,
+                format!("{at}#/operations/{i}"),
+                "a squash checkpoint keeps only data ops with `on_fresh: \"run\"`",
+            ));
+        }
+    } else if checkpoint {
+        if irreversible_below.is_some() {
+            return Err(LoadError::new(
+                Code::Checkpoint,
+                at,
+                "`irreversible_below` belongs on a squash checkpoint",
             ));
         }
         if file.base.is_none() || file.state.is_none() {
@@ -1307,8 +1340,14 @@ mod tests {
         v["base"] = json!({"legacy": "0010_x", "state_sha256": "00"});
         v["state"] = json!({"tables": {}});
         assert!(decode(&v, "f.json").is_ok());
+        // A squash checkpoint has no `base`, and keeps fresh data ops only.
         v["replaces"] = json!(["0001_a"]);
-        assert_eq!(code(&v), Code::NotEnabled);
+        assert_eq!(code(&v), Code::Checkpoint);
+        v.as_object_mut().unwrap().remove("base");
+        assert!(decode(&v, "f.json").is_ok());
+        v["operations"] = json!([{"op": "add_check", "v": 1, "table": "t", "name": "c",
+                                  "expr": "x > 0"}]);
+        assert_eq!(code(&v), Code::Checkpoint);
     }
 
     #[test]

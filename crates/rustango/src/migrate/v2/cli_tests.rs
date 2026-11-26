@@ -149,3 +149,66 @@ async fn apply_to_an_earlier_target_needs_allow_rollback() {
     .unwrap();
     assert_eq!(out, "Rolled back 0002_n\n");
 }
+
+/// `check --drift` compares the catalog with the state at the applied set:
+/// clean after apply, a hand-added column is a difference.
+#[tokio::test]
+async fn check_drift_reports_a_hand_added_column() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("migrations");
+    v2_project(&dir);
+    let pool = sqlite(tmp.path()).await;
+    cli(&pool, &dir, &["dbmigrate", "apply"]).await.unwrap();
+    let out = cli(&pool, &dir, &["dbmigrate", "check", "--drift"])
+        .await
+        .unwrap();
+    assert!(out.contains("No drift."), "{out}");
+    crate::sql::raw_execute_pool(
+        &pool,
+        "ALTER TABLE cl_t ADD COLUMN stray INTEGER",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let e = cli(&pool, &dir, &["dbmigrate", "check", "--drift"])
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("1 difference"), "{e}");
+}
+
+/// Two leaves: `make --merge` writes the merge node over them; `make
+/// --rebase` moves one leaf on top of the other instead.
+#[tokio::test]
+async fn merge_and_rebase_join_two_leaves() {
+    let leaf = |id: &str, c: &str| {
+        json!({"engine": 2, "format": 1, "id": id, "app": "project", "parents": ["0002_n"],
+            "target": "tenant", "operations": [{"op": "add_column", "v": 1, "table": "cl_t",
+            "column": {"column": c, "ty": "i32", "nullable": true}}]})
+    };
+    for verb in ["--merge", "--rebase"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("migrations");
+        v2_project(&dir);
+        for (id, c) in [("0003_a", "a"), ("0003_b", "b")] {
+            std::fs::write(dir.join(format!("{id}.json")), leaf(id, c).to_string()).unwrap();
+        }
+        let pool = sqlite(tmp.path()).await;
+        assert!(
+            cli(&pool, &dir, &["dbmigrate", "apply"]).await.is_err(),
+            "two leaves"
+        );
+        let args: &[&str] = if verb == "--merge" {
+            &["dbmigrate", "make", "--merge"]
+        } else {
+            &["dbmigrate", "make", "--rebase", "0003_b"]
+        };
+        cli(&pool, &dir, args).await.unwrap();
+        let expect = if verb == "--merge" {
+            "0004_merge.json"
+        } else {
+            "0004_b.json"
+        };
+        assert!(dir.join(expect).exists(), "{verb}");
+        cli(&pool, &dir, &["dbmigrate", "apply"]).await.unwrap();
+    }
+}

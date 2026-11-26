@@ -94,6 +94,9 @@ impl crate::migrate::chains::ChainFacts for Loaded {
 pub(crate) struct Project {
     pub(crate) files: Vec<Loaded>,
     pub(crate) order: BTreeMap<Target, Vec<usize>>,
+    /// `(app, id)` a squash checkpoint replaces → that checkpoint's id
+    /// (9.6). Their files, when still on disk, are not in `files`.
+    pub(crate) replaced: BTreeMap<(String, String), String>,
 }
 
 /// Each target's final state, and the state hash before and after each file.
@@ -223,8 +226,59 @@ fn load_folders(raw: Vec<(PathBuf, Vec<RawFile>)>) -> Result<Project, LoadError>
             project.files.push(loaded);
         }
     }
+    remap_replaced(&mut project);
     project.order = order_targets(&project.files)?;
+    super::commute::refuse_conflicts(&project)?;
     Ok(project)
+}
+
+/// Squash checkpoints stand for the ids they replace, at load (9.6): the
+/// replaced files leave the graph, and every `parents`, `depends_on` and
+/// `requires` naming one names the checkpoint.
+fn remap_replaced(project: &mut Project) {
+    for l in &project.files {
+        for id in &l.file.replaces {
+            project
+                .replaced
+                .insert((l.file.app.clone(), id.clone()), l.file.id.clone());
+        }
+    }
+    if project.replaced.is_empty() {
+        return;
+    }
+    let replaced = &project.replaced;
+    project
+        .files
+        .retain(|l| !replaced.contains_key(&(l.file.app.clone(), l.file.id.clone())));
+    let to = |app: &str, id: &str| replaced.get(&(app.to_owned(), id.to_owned())).cloned();
+    for l in &mut project.files {
+        let app = l.file.app.clone();
+        let mut parents: Vec<String> = Vec::new();
+        for p in &l.file.parents {
+            let p = to(&app, p).unwrap_or_else(|| p.clone());
+            if !parents.contains(&p) {
+                parents.push(p);
+            }
+        }
+        l.file.parents = parents;
+        for (a, d) in &mut l.file.depends_on {
+            if let Some(c) = to(a, d) {
+                *d = c;
+            }
+        }
+        for r in &mut l.file.requires {
+            if let Some((side, id)) = r.split_once(':') {
+                // `requires` names another target; a checkpoint there has the app's ids.
+                if let Some(c) = replaced
+                    .iter()
+                    .find(|((_, rid), _)| rid == id)
+                    .map(|(_, c)| c.clone())
+                {
+                    *r = format!("{side}:{c}");
+                }
+            }
+        }
+    }
 }
 
 /// One DAG per target, each in canonical order.
