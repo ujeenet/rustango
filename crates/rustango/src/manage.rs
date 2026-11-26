@@ -93,6 +93,7 @@ async fn boot_migrate_v2(
 ) -> Result<(), crate::migrate::MigrateError> {
     let opts = crate::migrate::v2::run::Options {
         stop: Some(stop),
+        stale_after: Some(BOOT_STALE_AFTER),
         ..crate::migrate::v2::run::Options::default()
     };
     let report = crate::migrate::v2::run::migrate(pool, dir, &opts).await?;
@@ -108,6 +109,9 @@ async fn boot_migrate_v2(
         None => Ok(()),
     }
 }
+
+/// A booting waiter gives up when the lock holder's heartbeat is this old (6.11).
+const BOOT_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// How long a booting single-database server waits for another run's migrate lock.
 const BOOT_MIGRATE_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);

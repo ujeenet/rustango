@@ -81,6 +81,11 @@ pub(crate) enum Expect {
     },
     /// The statement is safe to run again.
     Idempotent,
+    /// A check or FK added `NOT VALID` earlier, now validated (PG).
+    Validated {
+        table: String,
+        name: String,
+    },
 }
 
 /// One unit: its op index, how it runs, its SQL and, for autocommit units,
@@ -334,6 +339,42 @@ pub(crate) fn render_file(
     Ok((units, st))
 }
 
+/// The units a run executes: [`render_file`], then PG and SQLite merge
+/// consecutive transactional schema units (6.1 rule 6).
+///
+/// # Errors
+/// As [`render_file`].
+pub(crate) fn render_plan(
+    state: &State,
+    file: &File,
+    at: &str,
+    ctx: &Ctx<'_>,
+    b: Backend,
+) -> Result<(Vec<Unit>, State), LoadError> {
+    let (units, after) = render_file(state, file, at, ctx, b)?;
+    let units = if b == Backend::Mysql {
+        units
+    } else {
+        merge_schema_units(units)
+    };
+    Ok((units, after))
+}
+
+/// PG and SQLite: consecutive transactional schema units share one unit
+/// (6.1 rule 6). Data, autocommit and rebuild units stay on their own.
+fn merge_schema_units(units: Vec<Unit>) -> Vec<Unit> {
+    let mut out: Vec<Unit> = Vec::with_capacity(units.len());
+    for u in units {
+        match out.last_mut() {
+            Some(prev) if prev.kind == UnitKind::Tx && u.kind == UnitKind::Tx => {
+                prev.sql.extend(u.sql);
+            }
+            _ => out.push(u),
+        }
+    }
+    out
+}
+
 /// Every file of `project` rendered for `b`, each target in canonical
 /// order, registry first: `(file index, units)`.
 ///
@@ -353,7 +394,7 @@ pub(crate) fn render_project(
                 target,
                 registry: registry.as_ref(),
             };
-            let (units, after) = render_file(&state, &f.file, &f.at, &ctx, b)?;
+            let (units, after) = render_plan(&state, &f.file, &f.at, &ctx, b)?;
             out.push((i, units));
             state = after;
         }
@@ -798,13 +839,21 @@ impl Render<'_> {
 
     /// PG on an existing table: `NOT VALID`, then `VALIDATE` in its own unit,
     /// so the scan holds only a SHARE UPDATE EXCLUSIVE lock.
+    /// The `VALIDATE` commits on its own, never merged with the add (6.1
+    /// rule 6), and its probe says whether a cut-off one finished.
     fn validate_later(&self, table: &str, name: &str, add: String) -> Vec<Unit> {
         let mut out = tx(vec![format!("{add} NOT VALID")]);
-        out.extend(tx(vec![format!(
-            "ALTER TABLE {} VALIDATE CONSTRAINT {}",
-            q(self.d, table),
-            q(self.d, name)
-        )]));
+        out.push(auto(
+            format!(
+                "ALTER TABLE {} VALIDATE CONSTRAINT {}",
+                q(self.d, table),
+                q(self.d, name)
+            ),
+            vec![Expect::Validated {
+                table: table.to_owned(),
+                name: name.to_owned(),
+            }],
+        ));
         out
     }
 

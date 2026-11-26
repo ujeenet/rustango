@@ -56,6 +56,8 @@ pub(crate) struct Row {
     pub(crate) run_id: String,
     /// Why the row failed (class only); `stopped` for a planned stop.
     pub(crate) error_class: Option<String>,
+    /// The DDL session of `started_unit`, reaped before its probe (6.5).
+    pub(crate) session: Option<super::session::Session>,
 }
 
 /// The ledger's table names, from the configured base.
@@ -261,10 +263,11 @@ impl Ledger {
             Option<i64>,
             String,
             Option<String>,
+            Option<String>,
         );
         let sql = format!(
             "SELECT app, id, checksum, applied_body, state, unit_plan, pos, started_unit, run_id, \
-             error_class FROM {} ORDER BY seq",
+             error_class, session FROM {} ORDER BY seq",
             self.qt(pool)
         );
         let raw: Vec<Raw> = raw_query_pool(&sql, Vec::new(), pool).await?;
@@ -281,6 +284,7 @@ impl Ledger {
                     started_unit,
                     run_id,
                     error_class,
+                    session,
                 )| {
                     Ok(Row {
                         unit_plan: serde_json::from_str(&plan)?,
@@ -293,6 +297,7 @@ impl Ledger {
                         started_unit,
                         run_id,
                         error_class,
+                        session: session.as_deref().map(serde_json::from_str).transpose()?,
                     })
                 },
             )
@@ -431,6 +436,62 @@ impl Ledger {
         )
     }
 
+    /// Refresh the heartbeat of every row this run holds.
+    ///
+    /// # Errors
+    /// Driver failures.
+    pub(crate) async fn touch(&self, pool: &Pool, run_id: &str) -> Result<(), MigrateError> {
+        let sql = format!(
+            "UPDATE {} SET heartbeat_at = {} WHERE run_id = {} AND state IN ({}, {})",
+            self.qt(pool),
+            pool.dialect().utc_now_sql(),
+            p(pool, 1),
+            p(pool, 2),
+            p(pool, 3),
+        );
+        raw_execute_pool(
+            pool,
+            &sql,
+            vec![
+                s(run_id),
+                s(RowState::Running.as_str()),
+                s(RowState::RollingBack.as_str()),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// A `running` row whose heartbeat is older than `stale`, by the DB clock:
+    /// `(app, id, age in seconds)`.
+    ///
+    /// # Errors
+    /// Driver failures.
+    pub(crate) async fn stale_running(
+        &self,
+        pool: &Pool,
+        stale: std::time::Duration,
+    ) -> Result<Option<(String, String, i64)>, MigrateError> {
+        let age = match pool.dialect().kind() {
+            crate::sql::DialectKind::Postgres => {
+                "CAST(EXTRACT(EPOCH FROM (now() - heartbeat_at)) AS BIGINT)"
+            }
+            crate::sql::DialectKind::Mysql => {
+                "TIMESTAMPDIFF(SECOND, heartbeat_at, UTC_TIMESTAMP(6))"
+            }
+            _ => "CAST((julianday('now') - julianday(heartbeat_at)) * 86400 AS INTEGER)",
+        };
+        let sql = format!(
+            "SELECT app, id, {age} FROM {} WHERE state = {} AND heartbeat_at IS NOT NULL",
+            self.qt(pool),
+            p(pool, 1),
+        );
+        let rows: Vec<(String, String, i64)> =
+            raw_query_pool(&sql, vec![s(RowState::Running.as_str())], pool).await?;
+        let limit = i64::try_from(stale.as_secs()).unwrap_or(i64::MAX);
+        Ok(rows.into_iter().find(|r| r.2 >= limit))
+    }
+
     /// Mark autocommit unit `unit` as started (fenced on `pos = unit - 1`).
     ///
     /// # Errors
@@ -441,23 +502,30 @@ impl Ledger {
         key: (&str, &str),
         run_id: &str,
         unit: i64,
+        session: Option<&super::session::Session>,
     ) -> Result<(), MigrateError> {
         let sql = format!(
-            "UPDATE {} SET started_unit = {}, heartbeat_at = {} \
+            "UPDATE {} SET started_unit = {}, session = {}, heartbeat_at = {} \
              WHERE app = {} AND id = {} AND run_id = {} AND pos = {}",
             self.qt(pool),
             p(pool, 1),
-            pool.dialect().utc_now_sql(),
             p(pool, 2),
+            pool.dialect().utc_now_sql(),
             p(pool, 3),
             p(pool, 4),
             p(pool, 5),
+            p(pool, 6),
         );
+        let session = match session {
+            Some(x) => s(&serde_json::to_string(x)?),
+            None => SqlValue::Null,
+        };
         let n = raw_execute_pool(
             pool,
             &sql,
             vec![
                 SqlValue::I64(unit),
+                session,
                 s(key.0),
                 s(key.1),
                 s(run_id),

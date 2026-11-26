@@ -282,7 +282,7 @@ async fn crash_and_resume(b: B) {
         );
         // Fencing: a run that does not own the row cannot move it.
         let other = Ledger::default_names()
-            .start_unit(pool, ("project", "0002_ix"), "not-the-owner", 0)
+            .start_unit(pool, ("project", "0002_ix"), "not-the-owner", 0, None)
             .await;
         assert!(
             other.unwrap_err().to_string().contains("lock lost"),
@@ -2410,6 +2410,487 @@ async fn a_lost_unit_ack_counts_as_done(b: B) {
     }
 }
 
+/// `url` logged in as `user` / `pass`.
+fn as_user(url: &str, user: &str, pass: &str) -> String {
+    let (scheme, rest) = url.split_once("://").unwrap();
+    let (_, host) = rest.split_once('@').unwrap();
+    format!("{scheme}://{user}:{pass}@{host}")
+}
+
+/// Another session holds `rv_author` open for `ms`: PG a snapshot (a
+/// `CONCURRENTLY` build waits on it), MySQL a metadata lock (an `ALTER`
+/// waits on it). Returns once it holds it.
+async fn hold_author(b: B, url: &str, ms: u64) -> tokio::task::JoinHandle<()> {
+    let (held_tx, held) = tokio::sync::oneshot::channel();
+    let url = url.to_owned();
+    let task = tokio::spawn(async move {
+        let holder = Pool::connect(&url).await.unwrap();
+        let mut conn = holder.acquire().await.unwrap();
+        let mut tx = conn.begin().await.unwrap();
+        if b == B::Pg {
+            crate::sql::raw_execute_tx(
+                &mut tx,
+                "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        }
+        let _: Vec<(i64,)> =
+            crate::sql::raw_query_tx(&mut tx, "SELECT COUNT(*) FROM rv_author", Vec::new())
+                .await
+                .unwrap();
+        held_tx.send(()).unwrap();
+        tokio::time::sleep(Duration::from_millis(ms)).await;
+        tx.rollback().await.unwrap();
+        drop(conn);
+        holder.close().await;
+    });
+    held.await.unwrap();
+    task
+}
+
+fn author_index(name: &str) -> Value {
+    json!([{"op": "add_index", "v": 1, "table": "rv_author", "name": name, "columns": ["name"]}])
+}
+
+async fn ledger_row(pool: &Pool, id: &str) -> super::super::ledger::Row {
+    Ledger::default_names()
+        .rows(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.id == id)
+        .unwrap()
+}
+
+/// A client killed while its DDL waits (PG `CONCURRENTLY`, MySQL `ALTER` in
+/// a metadata-lock wait) leaves the DDL running server-side. Resume, as a
+/// dedicated non-superuser migrate role, ends its own recorded session
+/// first, then probes: PG drops the invalid index and rebuilds it. A
+/// session of another role needs the grant: refused with its name and the
+/// ledger untouched, then reaped once granted (14 item 2).
+async fn a_dead_ddl_session_is_reaped_with_the_migrate_roles_rights(b: B) {
+    if b == B::Lite {
+        return;
+    }
+    let Some(db) = fresh(b).await else { return };
+    let admin = &db.pool;
+    let tag = format!("mv2r{}", std::process::id());
+    let (g, ra, rb) = (format!("{tag}_g"), format!("{tag}_a"), format!("{tag}_b"));
+    let dbname = db.url.rsplit('/').next().unwrap().to_owned();
+    let setup = match b {
+        B::Pg => vec![
+            format!("CREATE ROLE {g} NOLOGIN"),
+            format!("CREATE ROLE {ra} LOGIN PASSWORD 'pw' IN ROLE {g}"),
+            format!("CREATE ROLE {rb} LOGIN PASSWORD 'pw' IN ROLE {g}"),
+            format!("GRANT CREATE, USAGE ON SCHEMA public TO {g}"),
+        ],
+        _ => vec![
+            format!("CREATE USER {ra} IDENTIFIED BY 'pw'"),
+            format!("CREATE USER {rb} IDENTIFIED BY 'pw'"),
+            format!("GRANT ALL ON `{dbname}`.* TO {ra}"),
+            format!("GRANT ALL ON `{dbname}`.* TO {rb}"),
+        ],
+    };
+    for sql in setup {
+        raw_execute_pool(admin, &sql, Vec::new()).await.unwrap();
+    }
+    let pool_a = Pool::connect(&as_user(&db.url, &ra, "pw")).await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    put(
+        &dir,
+        "0001_author",
+        &v2("0001_author", &[], json!([author()])),
+    );
+    migrate(&pool_a, &dir, &opts()).await.unwrap();
+    if b == B::Pg {
+        // One owner for both login roles: either may build indexes.
+        raw_execute_pool(admin, &format!("REASSIGN OWNED BY {ra} TO {g}"), Vec::new())
+            .await
+            .unwrap();
+    }
+    let left_running = Options {
+        crash: Some(Crash::DdlLeftRunning(0)),
+        ..Options::default()
+    };
+    // Its own session: no grant needed.
+    put(
+        &dir,
+        "0002_ix",
+        &v2("0002_ix", &["0001_author"], author_index("rv_a_ix")),
+    );
+    let holder = hold_author(b, &db.url, 3000).await;
+    migrate(&pool_a, &dir, &left_running)
+        .await
+        .expect_err("killed");
+    assert!(ledger_row(admin, "0002_ix").await.session.is_some());
+    assert_eq!(
+        migrate(&pool_a, &dir, &opts()).await.unwrap().applied,
+        ["0002_ix"]
+    );
+    holder.await.unwrap();
+    let live = super::super::catalog::read_table(admin, "rv_author")
+        .await
+        .unwrap()
+        .unwrap();
+    let ix = live.indexes.iter().find(|i| i.name == "rv_a_ix").unwrap();
+    assert!(ix.valid, "rebuilt valid");
+    // Another role's session: refused with the grant, the ledger untouched.
+    put(
+        &dir,
+        "0003_ix",
+        &v2("0003_ix", &["0002_ix"], author_index("rv_b_ix")),
+    );
+    let holder = hold_author(b, &db.url, 4000).await;
+    migrate(&pool_a, &dir, &left_running)
+        .await
+        .expect_err("killed");
+    let before = ledger_row(admin, "0003_ix").await;
+    let pool_b = Pool::connect(&as_user(&db.url, &rb, "pw")).await.unwrap();
+    let e = migrate(&pool_b, &dir, &opts())
+        .await
+        .expect_err("no rights");
+    let grant = if b == B::Pg {
+        "pg_signal_backend"
+    } else {
+        "CONNECTION_ADMIN"
+    };
+    assert!(e.to_string().contains(grant), "{e}");
+    let after = ledger_row(admin, "0003_ix").await;
+    assert_eq!(
+        (after.pos, after.started_unit, &after.session, &after.run_id),
+        (
+            before.pos,
+            before.started_unit,
+            &before.session,
+            &before.run_id
+        )
+    );
+    pool_b.close().await;
+    let grant_sql = match b {
+        B::Pg => format!("GRANT pg_signal_backend TO {rb}"),
+        _ => format!("GRANT CONNECTION_ADMIN ON *.* TO {rb}"),
+    };
+    raw_execute_pool(admin, &grant_sql, Vec::new())
+        .await
+        .unwrap();
+    let pool_b = Pool::connect(&as_user(&db.url, &rb, "pw")).await.unwrap();
+    assert_eq!(
+        migrate(&pool_b, &dir, &opts()).await.unwrap().applied,
+        ["0003_ix"]
+    );
+    holder.await.unwrap();
+    pool_a.close().await;
+    pool_b.close().await;
+    let cleanup = match b {
+        B::Pg => vec![
+            format!("REASSIGN OWNED BY {g}, {ra}, {rb} TO CURRENT_USER"),
+            format!("DROP OWNED BY {g}, {ra}, {rb}"),
+            format!("DROP ROLE {rb}"),
+            format!("DROP ROLE {ra}"),
+            format!("DROP ROLE {g}"),
+        ],
+        _ => vec![format!("DROP USER {ra}, {rb}")],
+    };
+    for sql in cleanup {
+        raw_execute_pool(admin, &sql, Vec::new()).await.unwrap();
+    }
+}
+
+/// A `VALIDATE` cut off by a kill leaves the constraint `NOT VALID`: resume
+/// runs it again (6.5).
+async fn a_cut_off_validate_runs_again(b: B) {
+    if b != B::Pg {
+        return;
+    }
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let (_root, dir) = author_only();
+    migrate(pool, &dir, &opts()).await.unwrap();
+    let check = json!([{"op": "add_check", "v": 1, "table": "rv_author",
+        "check": {"name": "rv_author_name_ck", "expr": "name <> ''"}}]);
+    put(&dir, "0002_ck", &v2("0002_ck", &["0001_author"], check));
+    let crashing = Options {
+        crash: Some(Crash::AfterStart(1)),
+        ..Options::default()
+    };
+    migrate(pool, &dir, &crashing).await.expect_err("cut off");
+    let live = super::super::catalog::read_table(pool, "rv_author")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(live.checks.iter().any(|c| !c.validated), "{live:?}");
+    assert_eq!(
+        migrate(pool, &dir, &opts()).await.unwrap().applied,
+        ["0002_ck"]
+    );
+    let live = super::super::catalog::read_table(pool, "rv_author")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(live.checks.iter().all(|c| c.validated), "{live:?}");
+}
+
+/// A cut-off unit whose catalog is neither done nor repairable is refused
+/// with the property diff, and the ledger is not touched (6.5).
+async fn any_other_partial_is_refused_and_the_ledger_untouched(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    put(
+        &dir,
+        "0001_author",
+        &v2("0001_author", &[], json!([author()])),
+    );
+    put(
+        &dir,
+        "0002_ix",
+        &v2("0002_ix", &["0001_author"], raw_index()),
+    );
+    let crashing = Options {
+        crash: Some(Crash::AfterStart(1)),
+        ..Options::default()
+    };
+    migrate(pool, &dir, &crashing).await.expect_err("cut off");
+    // Someone built the index on the wrong column.
+    raw_execute_pool(pool, "CREATE INDEX rv_raw_ix ON rv_author (id)", Vec::new())
+        .await
+        .unwrap();
+    let before = ledger_row(pool, "0002_ix").await;
+    let e = migrate(pool, &dir, &opts()).await.expect_err("half way");
+    assert!(
+        e.to_string().contains("half way") && e.to_string().contains("rv_raw_ix"),
+        "{e}"
+    );
+    let after = ledger_row(pool, "0002_ix").await;
+    assert_eq!(
+        (
+            after.pos,
+            after.started_unit,
+            after.state,
+            &after.run_id,
+            &after.error_class
+        ),
+        (
+            before.pos,
+            before.started_unit,
+            before.state,
+            &before.run_id,
+            &before.error_class
+        )
+    );
+}
+
+/// A boot waiter exits when the lock holder's heartbeat is stale while it
+/// holds the lock, and waits on while the heartbeat is fresh (6.11).
+async fn a_waiter_exits_when_the_holders_heartbeat_is_stale(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let (_root, dir) = project();
+    // A crashed run leaves a row; then another holder takes the lock.
+    let crashing = Options {
+        crash: Some(Crash::BeforeUnit(1)),
+        ..Options::default()
+    };
+    migrate(pool, &dir, &crashing).await.expect_err("crashed");
+    let set = |when: String| {
+        let sql = format!(
+            "UPDATE {} SET state = 'running', heartbeat_at = {when}",
+            Ledger::default_names().table
+        );
+        async move { raw_execute_pool(pool, &sql, Vec::new()).await.unwrap() }
+    };
+    let waiting = Options {
+        stale_after: Some(Duration::from_secs(60)),
+        ..Options::default()
+    };
+    for stale in [true, false] {
+        if stale {
+            set("'2000-01-01 00:00:00'".to_owned()).await;
+        } else {
+            set(pool.dialect().utc_now_sql().to_string()).await;
+        }
+        let (held_tx, held) = tokio::sync::oneshot::channel::<()>();
+        let (go_tx, go) = tokio::sync::oneshot::channel::<()>();
+        let hpool = Pool::connect(&db.url).await.unwrap();
+        let holder = tokio::spawn(async move {
+            crate::migrate::with_migrate_lock_held_v2(V2Token(()), &hpool, |_| async move {
+                held_tx.send(()).unwrap();
+                let _ = tokio::time::timeout(Duration::from_secs(20), go).await;
+                Ok(())
+            })
+            .await
+            .unwrap();
+            hpool.close().await;
+        });
+        held.await.unwrap();
+        let wait = crate::migrate::with_lock_timeout(
+            Duration::from_secs(15),
+            migrate(pool, &dir, &waiting),
+        );
+        if stale {
+            let e = wait.await.expect_err("gave up");
+            assert!(e.to_string().contains("looks hung"), "{e}");
+            go_tx.send(()).unwrap();
+        } else {
+            // Fresh: it waits, then runs once the holder lets go.
+            let release = async {
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+                go_tx.send(()).unwrap();
+            };
+            let (r, ()) = tokio::join!(wait, release);
+            assert_eq!(r.unwrap().applied, ["0002_bio"]);
+        }
+        holder.await.unwrap();
+    }
+}
+
+/// The lock's own connection is killed mid-move: another runner takes the
+/// lock and the row, and fencing stops the first run at its next batch.
+/// Every row moves once.
+async fn a_killed_lock_backend_stops_the_run_by_fencing(b: B) {
+    if b == B::Lite {
+        return;
+    }
+    let Some(db) = fresh(b).await else { return };
+    let ids: Vec<i64> = (1..=30).collect();
+    let (_root, dir) = ed_project(&db.pool, &ids).await;
+    let mut slow = batched_sql(1);
+    slow["batch"]["sleep_ms"] = json!(150);
+    put(
+        &dir,
+        "0002_mark",
+        &vs("0002_mark", &["0001_user"], json!([slow])),
+    );
+    let a_pool = Pool::connect(&db.url).await.unwrap();
+    let da = dir.clone();
+    let a = tokio::spawn(async move { migrate(&a_pool, &da, &Options::default()).await });
+    while batch_events(&db.pool, "0002_mark").await < 3 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let lock_backend = match b {
+        B::Pg => {
+            "SELECT pg_terminate_backend(pid) FROM pg_locks \
+             WHERE locktype = 'advisory' AND granted AND pid <> pg_backend_pid()"
+        }
+        _ => {
+            "SELECT t.PROCESSLIST_ID FROM performance_schema.metadata_locks m \
+             JOIN performance_schema.threads t ON t.THREAD_ID = m.OWNER_THREAD_ID \
+             WHERE m.OBJECT_TYPE = 'USER LEVEL LOCK' AND m.LOCK_STATUS = 'GRANTED'"
+        }
+    };
+    if b == B::Pg {
+        raw_execute_pool(&db.pool, lock_backend, Vec::new())
+            .await
+            .unwrap();
+    } else {
+        let ids: Vec<(i64,)> = crate::sql::raw_query_pool(lock_backend, Vec::new(), &db.pool)
+            .await
+            .unwrap();
+        assert_eq!(ids.len(), 1, "{ids:?}");
+        raw_execute_pool(&db.pool, &format!("KILL {}", ids[0].0), Vec::new())
+            .await
+            .unwrap();
+    }
+    let rep = migrate(&db.pool, &dir, &Options::default()).await.unwrap();
+    assert_eq!(rep.applied, ["0002_mark"]);
+    let e = a.await.unwrap().expect_err("fenced");
+    assert!(e.to_string().contains("lock lost"), "{e}");
+    assert_eq!(
+        count(
+            &db.pool,
+            "SELECT COUNT(*) FROM ed_user WHERE street = 'moved'"
+        )
+        .await,
+        30
+    );
+    assert_eq!(batch_events(&db.pool, "0002_mark").await, 30);
+}
+
+/// Session settings of the pool's connections, one line each.
+async fn pool_sessions(pool: &Pool, n: usize) -> Vec<String> {
+    let sql = match pool.dialect().kind() {
+        crate::sql::DialectKind::Postgres => {
+            "SELECT current_setting('lock_timeout') || ',' || current_setting('statement_timeout') \
+             || ',' || current_setting('search_path') || ',' \
+             || current_setting('client_connection_check_interval')"
+        }
+        crate::sql::DialectKind::Mysql => {
+            "SELECT CONCAT(@@session.innodb_lock_wait_timeout, ',', @@session.lock_wait_timeout, \
+             ',', @@session.max_execution_time, ',', @@session.sql_mode)"
+        }
+        _ => "SELECT CAST(busy_timeout AS TEXT) FROM pragma_busy_timeout",
+    };
+    let mut conns = Vec::new();
+    for _ in 0..n {
+        conns.push(pool.acquire().await.unwrap());
+    }
+    let mut out = Vec::new();
+    for mut c in conns {
+        let mut tx = c.begin().await.unwrap();
+        let r: Vec<(String,)> = crate::sql::raw_query_tx(&mut tx, sql, Vec::new())
+            .await
+            .unwrap();
+        tx.rollback().await.unwrap();
+        out.push(r[0].0.clone());
+    }
+    out.sort();
+    out
+}
+
+/// After a run with data, DDL and autocommit units, every pooled connection
+/// keeps its session settings (12): units run on connections closed after them.
+async fn pool_session_state_is_unchanged_after_migrate(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    // A pool of two: every connection the run could have touched is checked.
+    let pool: Pool = match b {
+        #[cfg(feature = "postgres")]
+        B::Pg => sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&db.url)
+            .await
+            .unwrap()
+            .into(),
+        #[cfg(feature = "mysql")]
+        B::My => sqlx::mysql::MySqlPoolOptions::new()
+            .max_connections(2)
+            .connect(&db.url)
+            .await
+            .unwrap()
+            .into(),
+        _ => sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(2)
+            .connect(&db.url)
+            .await
+            .unwrap()
+            .into(),
+    };
+    let before = pool_sessions(&pool, 2).await;
+    let ids: Vec<i64> = (1..=5).collect();
+    let (_root, dir) = ed_project(&pool, &ids).await;
+    let ix = json!({"op": "add_index", "v": 1, "table": "ed_user", "name": "ed_user_street_ix",
+        "columns": ["street"]});
+    put(
+        &dir,
+        "0002_mark",
+        &vs("0002_mark", &["0001_user"], json!([batched_sql(2), ix])),
+    );
+    let quick = Options {
+        data_lock_timeout: Some(Duration::from_secs(2)),
+        data_statement_timeout: Some(Duration::from_secs(30)),
+        ..Options::default()
+    };
+    assert_eq!(
+        migrate(&pool, &dir, &quick).await.unwrap().applied,
+        ["0002_mark"]
+    );
+    assert_eq!(pool_sessions(&pool, 2).await, before);
+    pool.close().await;
+}
+
 /// A shutdown signal stops between batches; the next start resumes at the
 /// stored cursor and moves every row once.
 async fn a_shutdown_stops_between_batches(b: B) {
@@ -2581,6 +3062,12 @@ per_backend!(
     max_duration_stops_between_batches,
     a_shutdown_stops_between_batches,
     a_lost_unit_ack_counts_as_done,
+    a_dead_ddl_session_is_reaped_with_the_migrate_roles_rights,
+    a_cut_off_validate_runs_again,
+    any_other_partial_is_refused_and_the_ledger_untouched,
+    a_waiter_exits_when_the_holders_heartbeat_is_stale,
+    a_killed_lock_backend_stops_the_run_by_fencing,
+    pool_session_state_is_unchanged_after_migrate,
     max_batches_per_run_binds_the_cli_only,
     a_held_lock_is_retried,
     a_waiter_finishes_a_killed_move,

@@ -874,3 +874,35 @@ fn a_unique_constraint_renders_as_a_constraint() {
     let (lite, _) = render(&s1, &drop, Backend::Sqlite).unwrap();
     assert_eq!(lite[0].kind, UnitKind::Rebuild, "{lite:?}");
 }
+
+/// 6.1 rule 6: PG and SQLite run consecutive transactional schema ops in one
+/// unit; a data op, an autocommit unit and MySQL DDL keep their own.
+#[test]
+fn pg_and_sqlite_merge_consecutive_schema_units() {
+    let ops = json!([
+        create("mg_t", json!([id(), col("a", "i32", json!({}))]), json!({})),
+        {"op": "add_column", "v": 1, "table": "mg_t", "column": col("b", "i32", json!({}))},
+        {"op": "data_sql", "v": 1, "id": "fill_v1", "tables": {"write": ["mg_t.b"]},
+         "up": {"any": "UPDATE {{t:mg_t}} SET {{c:b}} = 1"},
+         "down": {"noop": "created here"}},
+        {"op": "add_column", "v": 1, "table": "mg_t", "column": col("c", "i32", json!({}))},
+        {"op": "add_column", "v": 1, "table": "mg_t", "column": col("d", "i32", json!({}))}
+    ]);
+    let f = file(&ops);
+    let kinds = |b| {
+        let (units, _) =
+            super::render::render_plan(&State::default(), &f, "case.json", &CTX, b).unwrap();
+        units
+            .iter()
+            .map(|u| (u.kind, u.sql.len()))
+            .collect::<Vec<_>>()
+    };
+    let merged = [(UnitKind::Tx, 2), (UnitKind::Data, 1), (UnitKind::Tx, 2)];
+    assert_eq!(kinds(Backend::Postgres), merged);
+    assert_eq!(kinds(Backend::Sqlite), merged);
+    let my = kinds(Backend::Mysql);
+    assert_eq!(my.len(), 5, "{my:?}");
+    // The per-op goldens stay one statement per unit.
+    let (per_op, _) = render(&State::default(), &ops, Backend::Postgres).unwrap();
+    assert_eq!(per_op.len(), 5);
+}

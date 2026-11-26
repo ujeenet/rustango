@@ -97,11 +97,33 @@ pub(crate) async fn probe(pool: &Pool, expects: &[Expect]) -> Result<Verdict, Ca
 
 /// What a cut-off `DROP INDEX CONCURRENTLY` leaves behind.
 pub(crate) const LEFT_BY_A_DROP: &str = "invalid index left by a drop";
+/// What a cut-off `CREATE INDEX CONCURRENTLY` leaves behind.
+pub(crate) const INVALID_INDEX: &str = "invalid index";
+/// A check or FK still `NOT VALID` after a cut-off `VALIDATE`.
+pub(crate) const NOT_VALIDATED: &str = "not validated";
 
-/// A Partial that running the unit again repairs: only invalid indexes a
-/// cut-off drop left.
-pub(crate) fn rerun_repairs(diff: &[Mismatch]) -> bool {
-    !diff.is_empty() && diff.iter().all(|m| m.what == LEFT_BY_A_DROP)
+/// How resume repairs a Partial unit (6.5); anything else is refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Repair {
+    /// Run the unit again: a drop left an invalid index, or a `VALIDATE`
+    /// did not finish.
+    Rerun,
+    /// `DROP INDEX CONCURRENTLY` these invalid indexes, then run the unit.
+    DropInvalid(Vec<String>),
+}
+
+/// The 6.5 repair for `diff`, when every mismatch is of one repairable kind.
+pub(crate) fn repair(diff: &[Mismatch]) -> Option<Repair> {
+    let only = |what: &str| !diff.is_empty() && diff.iter().all(|m| m.what == what);
+    if only(LEFT_BY_A_DROP) || only(NOT_VALIDATED) {
+        Some(Repair::Rerun)
+    } else if only(INVALID_INDEX) {
+        Some(Repair::DropInvalid(
+            diff.iter().map(|m| m.object.clone()).collect(),
+        ))
+    } else {
+        None
+    }
 }
 
 fn verdict(m: Vec<Mismatch>) -> Verdict {
@@ -217,6 +239,29 @@ async fn one(pool: &Pool, e: &Expect) -> Result<Verdict, CatalogError> {
             }
         }
         Expect::Idempotent => Verdict::Absent,
+        Expect::Validated { table, name } => match read_table(pool, table).await? {
+            Some(l) => {
+                let validated = l
+                    .checks
+                    .iter()
+                    .find(|k| k.name.as_deref() == Some(name))
+                    .map(|k| k.validated)
+                    .or_else(|| {
+                        l.fks
+                            .iter()
+                            .find(|f| f.name.as_deref() == Some(name))
+                            .map(|f| f.validated)
+                    });
+                match validated {
+                    Some(true) => Verdict::Present,
+                    Some(false) => {
+                        Verdict::Partial(vec![mm(name, NOT_VALIDATED, "validated", "NOT VALID")])
+                    }
+                    None => Verdict::Absent,
+                }
+            }
+            None => Verdict::Absent,
+        },
     })
 }
 
@@ -562,7 +607,7 @@ impl Cmp<'_> {
                 ));
             }
             if !l.valid {
-                out.push(mm(&ix.name, "index", "valid", "invalid"));
+                out.push(mm(&ix.name, INVALID_INDEX, "valid", "invalid"));
             }
         }
         if self.d != DialectKind::Mysql {

@@ -22,6 +22,7 @@ pub(crate) mod probe;
 pub(crate) mod render;
 pub(crate) mod replay;
 pub(crate) mod run;
+pub(crate) mod session;
 pub(crate) mod state;
 pub(crate) mod step;
 pub mod testing;

@@ -12,7 +12,7 @@ use super::invert::{invert, Allow};
 use super::ledger::{Ledger, Row, RowState};
 use super::load::{load_project, Loaded, Project};
 use super::probe::{drift, probe, Verdict};
-use super::render::{render_file, Unit, UnitKind};
+use super::render::{render_plan, Unit, UnitKind};
 use super::replay::{apply, apply_file, Ctx};
 use super::state::{Backend, HashMemo, State, Target};
 use super::{Code, LoadError};
@@ -52,6 +52,9 @@ pub(crate) struct Options {
     pub(crate) per_run_limits: bool,
     /// Row estimate above which a batched op is a long move (`MV2-W011`).
     pub(crate) long_move_rows: Option<u64>,
+    /// A boot waiter gives up when the lock holder's heartbeat is this old
+    /// while it still holds the lock (6.11); `None` waits on.
+    pub(crate) stale_after: Option<std::time::Duration>,
     /// Test failpoint: stop as if the process died.
     #[cfg(test)]
     pub(crate) crash: Option<Crash>,
@@ -72,6 +75,9 @@ pub(crate) enum Crash {
     AfterData(usize),
     /// After an autocommit unit's started mark, before its statement.
     AfterStart(usize),
+    /// An autocommit unit's statement left running on the server, as a
+    /// killed client's DDL keeps running (6.3).
+    DdlLeftRunning(usize),
     AfterStatement(usize),
 }
 
@@ -289,33 +295,46 @@ async fn migrate_project(
     let leaked_before = super::step::leaked_bytes();
     let sweep = sweep_targets(project)?;
     let run_id = new_run_id();
+    let got_lock = std::sync::atomic::AtomicBool::new(false);
     // A dry run writes nothing: no system chain, no ledger table.
-    let ((applied, planned, stopped, long_moves), system) =
-        locked(pool, dir, project, &ledger, !opts.dry_run, || async {
-            if !opts.dry_run {
-                ledger.ensure(pool).await?;
-            }
-            let mut runner = Runner {
-                pool,
-                ledger: &ledger,
-                run_id: &run_id,
-                b: backend_of(pool),
-                opts,
-                units_run: 0,
-                batches_run: 0,
-                warnings: Vec::new(),
-                started: std::time::Instant::now(),
-                planned: Vec::new(),
-                sweep: Some(sweep),
-            };
-            let (applied, stopped) = match runner.apply_project(project).await {
-                Ok(applied) => (applied, None),
-                Err(RunError::Stopped(why)) => (Vec::new(), Some(why)),
-                Err(e) => return Err(e),
-            };
-            Ok((applied, runner.planned, stopped, runner.warnings))
-        })
-        .await?;
+    let run = locked(pool, dir, project, &ledger, !opts.dry_run, || async {
+        got_lock.store(true, std::sync::atomic::Ordering::SeqCst);
+        if !opts.dry_run {
+            ledger.ensure(pool).await?;
+        }
+        let mut runner = Runner {
+            pool,
+            ledger: &ledger,
+            run_id: &run_id,
+            b: backend_of(pool),
+            opts,
+            units_run: 0,
+            batches_run: 0,
+            warnings: Vec::new(),
+            started: std::time::Instant::now(),
+            planned: Vec::new(),
+            sweep: Some(sweep),
+        };
+        // A long unit keeps its heartbeat fresh, so boot waiters wait on it.
+        let applying = runner.apply_project(project);
+        let result = tokio::select! {
+            r = applying => r,
+            never = heartbeats(pool, &ledger, &run_id) => match never {},
+        };
+        let (applied, stopped) = match result {
+            Ok(applied) => (applied, None),
+            Err(RunError::Stopped(why)) => (Vec::new(), Some(why)),
+            Err(e) => return Err(e),
+        };
+        Ok((applied, runner.planned, stopped, runner.warnings))
+    });
+    let ((applied, planned, stopped, long_moves), system) = match opts.stale_after {
+        None => run.await?,
+        Some(stale) => tokio::select! {
+            r = run => r?,
+            e = stale_holder(pool, &ledger, stale, &got_lock) => return Err(e),
+        },
+    };
     let mut warnings = warnings;
     warnings.extend(long_moves);
     let leaked = super::step::leaked_bytes() - leaked_before;
@@ -678,6 +697,62 @@ async fn session_timeouts(
     Ok(())
 }
 
+/// How often a run holding the lock refreshes its heartbeat.
+const HEARTBEAT_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Refresh this run's heartbeat every [`HEARTBEAT_EVERY`]; never returns.
+async fn heartbeats(pool: &Pool, ledger: &Ledger, run_id: &str) -> std::convert::Infallible {
+    loop {
+        tokio::time::sleep(HEARTBEAT_EVERY).await;
+        // Best effort: display and boot waiters only (6.2).
+        let _ = ledger.touch(pool, run_id).await;
+    }
+}
+
+/// Resolves with an error once a run holding the lock has a heartbeat older
+/// than `stale`, while this one still waits for the lock; pends after that.
+async fn stale_holder(
+    pool: &Pool,
+    ledger: &Ledger,
+    stale: std::time::Duration,
+    got_lock: &std::sync::atomic::AtomicBool,
+) -> RunError {
+    let every = (stale / 4).clamp(
+        std::time::Duration::from_millis(100),
+        std::time::Duration::from_secs(5),
+    );
+    loop {
+        tokio::time::sleep(every).await;
+        if got_lock.load(std::sync::atomic::Ordering::SeqCst) {
+            return std::future::pending().await;
+        }
+        match ledger.stale_running(pool, stale).await {
+            Ok(Some((app, id, age))) => {
+                return RunError::Db(MigrateError::Validation(format!(
+                    "the migrate lock is held by a run of `{app}:{id}` whose heartbeat is {age}s \
+                     old: it looks hung; stopping instead of waiting on it"
+                )))
+            }
+            Ok(None) => {}
+            // The ledger may not exist yet; keep waiting.
+            Err(_) => {}
+        }
+    }
+}
+
+/// A cut-off unit whose probe is neither done nor repairable.
+fn half_way(at: &str, unit: usize, diff: &[super::probe::Mismatch]) -> RunError {
+    let list: Vec<String> = diff.iter().map(ToString::to_string).collect();
+    refused(
+        Code::State,
+        at,
+        format!(
+            "unit {unit} was cut off and the catalog is half way: {}; the ledger is untouched",
+            list.join("; ")
+        ),
+    )
+}
+
 /// The SQLite datetime sweep's columns for a v2 run: every datetime column
 /// in the replayed state, and the ledgers (5.5, 5.7).
 fn sweep_targets(project: &Project) -> Result<Vec<(String, String)>, RunError> {
@@ -806,7 +881,7 @@ impl Runner<'_> {
         state: State,
         memo: &mut HashMemo,
     ) -> Result<State, RunError> {
-        let (units, after) = render_file(&state, &f.file, &f.at, &CTX, self.b)?;
+        let (units, after) = render_plan(&state, &f.file, &f.at, &CTX, self.b)?;
         let moves = self.long_moves(&units).await?;
         if self.opts.dry_run {
             self.plan(&f.file.id, &units);
@@ -925,6 +1000,15 @@ impl Runner<'_> {
             return Ok(from);
         };
         let unit = usize::try_from(started).unwrap_or(0);
+        // A dead client's DDL keeps running: end it before probing (6.5).
+        if let Some(s) = &row.session {
+            super::session::reap(self.pool, s, self.lock_timeout())
+                .await
+                .map_err(|e| match e {
+                    super::session::ReapError::Db(e) => RunError::Db(e),
+                    e => refused(Code::State, at, e.to_string()),
+                })?;
+        }
         let expects = units
             .get(unit)
             .and_then(|u| u.probe.clone())
@@ -938,20 +1022,30 @@ impl Runner<'_> {
                 Ok(unit + 1)
             }
             Verdict::Absent => Ok(unit),
-            Verdict::Partial(diff) if super::probe::rerun_repairs(&diff) => Ok(unit),
-            Verdict::Partial(diff) => {
-                let list: Vec<String> = diff.iter().map(ToString::to_string).collect();
-                Err(refused(
-                    Code::State,
-                    at,
-                    format!(
-                        "unit {unit} was cut off and the catalog is half way: {}; the ledger is \
-                         untouched",
-                        list.join("; ")
-                    ),
-                ))
-            }
+            Verdict::Partial(diff) => match super::probe::repair(&diff) {
+                Some(super::probe::Repair::Rerun) => Ok(unit),
+                Some(super::probe::Repair::DropInvalid(names)) => {
+                    let mut ddl = super::session::DdlConn::open(self.pool).await?;
+                    for name in names {
+                        let sql = format!(
+                            "DROP INDEX CONCURRENTLY {}",
+                            self.pool.dialect().quote_ident(&name)
+                        );
+                        ddl.execute(&sql).await.map_err(MigrateError::Driver)?;
+                    }
+                    Ok(unit)
+                }
+                None => Err(half_way(at, unit, &diff)),
+            },
         }
+    }
+
+    /// The lock timeout of data and DDL units; also how long a reaped
+    /// session may take to go.
+    fn lock_timeout(&self) -> std::time::Duration {
+        self.opts
+            .data_lock_timeout
+            .unwrap_or(std::time::Duration::from_secs(5))
     }
 
     /// Run units `from..`, each committing with its fenced position update.
@@ -978,14 +1072,28 @@ impl Runner<'_> {
                 UnitKind::Rebuild => self.rebuild_unit(k, u, n).await?,
                 UnitKind::Data => self.data_unit(k, u, n).await?,
                 UnitKind::Autocommit => {
-                    self.ledger.start_unit(self.pool, k, self.run_id, n).await?;
+                    let mut ddl = super::session::DdlConn::open(self.pool).await?;
+                    self.ledger
+                        .start_unit(self.pool, k, self.run_id, n, ddl.session.as_ref())
+                        .await?;
                     #[cfg(test)]
                     if self.opts.crash == Some(Crash::AfterStart(self.units_run)) {
                         return Err(MigrateError::Validation("test crash".into()).into());
                     }
-                    for s in &u.sql {
-                        raw_execute_pool(self.pool, s, Vec::new()).await?;
+                    #[cfg(test)]
+                    if self.opts.crash == Some(Crash::DdlLeftRunning(self.units_run)) {
+                        let sql = u.sql.clone();
+                        tokio::spawn(async move {
+                            for s in &sql {
+                                let _ = ddl.execute(s).await;
+                            }
+                        });
+                        return Err(MigrateError::Validation("test crash".into()).into());
                     }
+                    for s in &u.sql {
+                        ddl.execute(s).await.map_err(MigrateError::Driver)?;
+                    }
+                    drop(ddl);
                     #[cfg(test)]
                     if self.opts.crash == Some(Crash::AfterStatement(self.units_run)) {
                         return Err(MigrateError::Validation("test crash".into()).into());
@@ -1110,10 +1218,7 @@ impl Runner<'_> {
         ui: usize,
     ) -> Result<bool, Attempt> {
         let fatal = |e: RunError| Attempt::Fatal(e);
-        let lock = self
-            .opts
-            .data_lock_timeout
-            .unwrap_or(std::time::Duration::from_secs(5));
+        let lock = self.lock_timeout();
         let stmt = self
             .opts
             .data_statement_timeout
@@ -1679,7 +1784,7 @@ impl Runner<'_> {
             let down = self.down_file(&file, &state, &at)?;
             let mut after = state.clone();
             apply_file(&mut after, &file, &at, &CTX)?;
-            let (units, _) = render_file(&after, &down, &at, &CTX, self.b)?;
+            let (units, _) = render_plan(&after, &down, &at, &CTX, self.b)?;
             plan.push((row, units));
         }
         let mut done = Vec::new();
