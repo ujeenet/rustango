@@ -3879,6 +3879,53 @@ async fn a_restart_or_accepted_failover_is_not_reaped(b: B) {
     }
 }
 
+/// Lock scopes from one pool (its session schema is `public` for both):
+/// tenant t2's run does not wait on t1's, and a second t1 run does (6.6).
+async fn schema_scopes_on_one_pool_lock_apart(b: B) {
+    if b != B::Pg {
+        return;
+    }
+    let Some(db) = fresh(b).await else { return };
+    let scope = |s: &str| crate::migrate::LockScope::Schema(s.to_owned());
+    let (held_tx, held) = tokio::sync::oneshot::channel();
+    let hpool = Pool::connect(&db.url).await.unwrap();
+    let holder = tokio::spawn(async move {
+        crate::migrate::with_migrate_lock_held_v2(
+            V2Token(()),
+            &hpool,
+            &crate::migrate::LockScope::Schema("t1".into()),
+            |_| async move {
+                held_tx.send(()).unwrap();
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        hpool.close().await;
+    });
+    held.await.unwrap();
+    let started = std::time::Instant::now();
+    crate::migrate::with_migrate_lock_held_v2(V2Token(()), &db.pool, &scope("t2"), |_| async {
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_millis(1000),
+        "t2 waited on t1"
+    );
+    let again = crate::migrate::with_lock_timeout(
+        Duration::from_millis(300),
+        crate::migrate::with_migrate_lock_held_v2(V2Token(()), &db.pool, &scope("t1"), |_| async {
+            Ok(())
+        }),
+    )
+    .await;
+    assert!(again.is_err(), "a second t1 run did not wait");
+    holder.await.unwrap();
+}
+
 /// A shutdown signal stops between batches; the next start resumes at the
 /// stored cursor and moves every row once.
 async fn a_shutdown_stops_between_batches(b: B) {
@@ -4070,6 +4117,7 @@ per_backend!(
     a_batched_sql_down_undoes_every_batch,
     resume_forward_goes_forward_again,
     a_restart_or_accepted_failover_is_not_reaped,
+    schema_scopes_on_one_pool_lock_apart,
     max_batches_per_run_binds_the_cli_only,
     a_held_lock_is_retried,
     a_waiter_finishes_a_killed_move,

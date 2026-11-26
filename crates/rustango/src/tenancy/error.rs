@@ -68,6 +68,11 @@ pub enum TenancyError {
          another request holds Tenant::conn, or one request asked for two"
     )]
     TenantConnBusy { slug: String, max: u32 },
+
+    /// The tenant's migrations failed: it serves maintenance until a run
+    /// applies them (8.3). Answer 503.
+    #[error("tenant `{slug}` is in maintenance: its migrations must be run")]
+    Maintenance { slug: String },
 }
 
 /// A storage mode or backend name that names no variant.
@@ -92,6 +97,18 @@ impl TenancyError {
                 .into_response();
         resp.headers_mut()
             .insert(axum::http::header::RETRY_AFTER, 1u64.into());
+        resp
+    }
+
+    /// The 503 a tenant in maintenance answers, with `Retry-After`.
+    pub(crate) fn maintenance_response() -> axum::response::Response {
+        use axum::response::IntoResponse as _;
+        let mut resp = crate::api_errors::ApiError::service_unavailable(
+            "this tenant is in maintenance: migrations must be run",
+        )
+        .into_response();
+        resp.headers_mut()
+            .insert(axum::http::header::RETRY_AFTER, 60u64.into());
         resp
     }
 

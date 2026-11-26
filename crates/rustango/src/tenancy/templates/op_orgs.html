@@ -7,6 +7,15 @@
     is no tenant page left to return to. -#}
 {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
 {% if notice %}<div class="alert alert-notice">{{ notice }}</div>{% endif %}
+{% if maintenance | default(value=[]) | length > 0 %}
+<div class="alert alert-error">
+  Migrations must be run: these tenants failed to migrate and answer 503 until they do.
+  Run <code>manage migrate-tenants</code> after the fix.
+  <ul>
+    {% for slug in maintenance %}<li><strong>{{ slug }}</strong></li>{% endfor %}
+  </ul>
+</div>
+{% endif %}
 {% if bad_orgs | default(value=[]) | length > 0 %}
 <div class="alert alert-error">
   These tenants cannot be read: a stored value is not one this version knows.

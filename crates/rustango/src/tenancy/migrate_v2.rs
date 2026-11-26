@@ -338,3 +338,7 @@ where
     }
     Ok(report)
 }
+
+#[cfg(test)]
+#[path = "migrate_v2_tests.rs"]
+mod tests;

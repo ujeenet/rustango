@@ -761,6 +761,13 @@ impl<DB: Database> Builder<DB> {
         crate::tenancy::boot_checks(self.pools.as_ref()).await?;
         let root = project_root.as_ref();
         std::fs::create_dir_all(root)?;
+        if matches!(
+            crate::migrate::ProjectEngine::of_project(root)?,
+            crate::migrate::ProjectEngine::V2 { .. }
+        ) {
+            self.migrate_fleet_v2(root).await?;
+            return Ok(self);
+        }
         // Before `init_tenancy_fn` writes anything.
         crate::migrate::require_v1_project(root)?;
 
@@ -784,6 +791,37 @@ impl<DB: Database> Builder<DB> {
         // Each runner walks the flat dir and every app dir, with one system chain.
         self.migrate_registry_then_tenants(root).await?;
         Ok(self)
+    }
+
+    /// Engine v2 at boot (8.3): the registry chain, then the fleet. A
+    /// registry or system failure (or a blocker) stops the boot; a failed
+    /// tenant does not: it is logged and serves 503 maintenance.
+    async fn migrate_fleet_v2(
+        &self,
+        root: &std::path::Path,
+    ) -> Result<(), crate::tenancy::TenancyError>
+    where
+        crate::sql::Pool: From<sqlx::Pool<DB>>,
+    {
+        let report = crate::tenancy::migrate_v2::run_fleet(
+            self.pools.as_ref(),
+            root,
+            &self.registry_url,
+            &crate::tenancy::migrate_v2::FleetOptions::default(),
+        )
+        .await?;
+        let failed: Vec<String> = report.failed().map(|t| t.slug.clone()).collect();
+        for t in report.failed() {
+            tracing::error!(
+                target: "rustango::tenancy",
+                slug = %t.slug,
+                class = t.error_class.as_deref().unwrap_or_default(),
+                error = t.error.as_deref().unwrap_or_default(),
+                "tenant migration failed at boot: migrations must be run; it serves 503 until then"
+            );
+        }
+        self.pools.set_maintenance(failed);
+        Ok(())
     }
 
     /// The registry, then every tenant. A registry switched to engine v2

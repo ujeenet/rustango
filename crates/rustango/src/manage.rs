@@ -1919,6 +1919,18 @@ impl Cli {
         // have left `on_shutdown` working on one path and silently not
         // on the other.
         let on_shutdown = self.on_shutdown.take();
+        // A v2 project migrates its registry and fleet before it serves (8.3).
+        let fleet_boot = match self.boot_migrate() {
+            BootMigrate::Run { lock_timeout }
+                if matches!(
+                    crate::migrate::ProjectEngine::of_project(&self.migrations_dir)?,
+                    crate::migrate::ProjectEngine::V2 { .. }
+                ) =>
+            {
+                Some((lock_timeout, self.migrations_dir.clone()))
+            }
+            _ => None,
+        };
         // `take` rather than a move: `mount_observability` below needs
         // `&self`, and moving the field out would partially move `self`.
         let api = std::mem::take(&mut self.api);
@@ -1981,6 +1993,9 @@ impl Cli {
                 })
                 .await?;
         }
+        if let Some((lock_timeout, dir)) = fleet_boot {
+            builder = crate::migrate::with_lock_timeout(lock_timeout, builder.migrate(dir)).await?;
+        }
         builder.serve(&self.bind).await?;
         run_shutdown_hook(on_shutdown).await;
         Ok(())
@@ -1995,6 +2010,18 @@ impl Cli {
         // schema-mode tenants return `TenancyError::Validation` at
         // request time (schema-mode is PG-only by language).
         let on_shutdown = self.on_shutdown.take();
+        // A v2 project migrates its registry and fleet before it serves (8.3).
+        let fleet_boot = match self.boot_migrate() {
+            BootMigrate::Run { lock_timeout }
+                if matches!(
+                    crate::migrate::ProjectEngine::of_project(&self.migrations_dir)?,
+                    crate::migrate::ProjectEngine::V2 { .. }
+                ) =>
+            {
+                Some((lock_timeout, self.migrations_dir.clone()))
+            }
+            _ => None,
+        };
         // `take` rather than a move: `mount_observability` below needs
         // `&self`, and moving the field out would partially move `self`.
         let api = std::mem::take(&mut self.api);
@@ -2064,6 +2091,9 @@ impl Cli {
                     run_boot_hooks(seed, before_serve, &crate::sql::Pool::from(registry)).await
                 })
                 .await?;
+        }
+        if let Some((lock_timeout, dir)) = fleet_boot {
+            builder = crate::migrate::with_lock_timeout(lock_timeout, builder.migrate(dir)).await?;
         }
         builder.serve(&self.bind).await?;
         run_shutdown_hook(on_shutdown).await;

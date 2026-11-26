@@ -281,3 +281,28 @@ fn make_data_rust_writes_the_op_the_stub_and_the_mod_line() {
     assert_eq!(e.code, Code::Footprint, "{e}");
     assert!(!dir.join("0003_nope.json").exists());
 }
+
+/// Under tenancy a tenant model's FK to a registry model is refused at
+/// make, as replay refuses it (decision 4); a single database allows it.
+#[cfg(feature = "tenancy")]
+#[test]
+fn a_tenant_fk_to_a_registry_model_is_refused_under_tenancy() {
+    use crate::core::Model as _;
+    let orgs = crate::tenancy::Org::SCHEMA.table;
+    let m: SchemaSnapshot = serde_json::from_value(json!({"tables": [
+        {"name": "inv", "model": "Inv", "fields": [id(),
+            field("org_id", "i64", json!({"nullable": false,
+                "fk": {"kind": "fk", "to": orgs, "on": "id", "on_delete": "CASCADE"}}))]},
+    ]}))
+    .unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("migrations");
+    let tenancy = MakeOptions {
+        tenancy: true,
+        dry_run: true,
+        ..opts()
+    };
+    let e = make(&dir, &dir, &m, &tenancy).unwrap_err();
+    assert_eq!(e.code, Code::CrossTarget, "{e}");
+    assert!(e.msg.contains(&format!("registry table `{orgs}`")), "{e}");
+}

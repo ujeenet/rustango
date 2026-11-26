@@ -5289,6 +5289,25 @@ async fn unapply_nonatomic_pool(
 
 #[cfg(test)]
 mod tests {
+    /// A schema scope takes the key v1 takes for that schema (6.6): v1 and
+    /// v2 runs on one tenant exclude each other; two schemas never share one.
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn a_schema_scope_takes_v1s_key() {
+        use super::{lock_key_for_schema, lock_key_of, LockScope};
+        let t1 = lock_key_of(&LockScope::Schema("t1".into())).unwrap();
+        assert_eq!(t1, lock_key_for_schema(Some("t1")));
+        assert_ne!(t1, lock_key_of(&LockScope::Schema("t2".into())).unwrap());
+        assert_eq!(
+            lock_key_of(&LockScope::Schema("public".into())),
+            Some(super::MIGRATE_LOCK_KEY)
+        );
+        let fleet = lock_key_of(&LockScope::Fleet).unwrap();
+        assert_ne!(fleet, t1);
+        assert_ne!(fleet, super::MIGRATE_LOCK_KEY);
+        assert_eq!(lock_key_of(&LockScope::Session), None);
+    }
+
     /// The list names each engine v2 table under the name `v2_ledger` derives.
     #[test]
     fn ledger_tables_hold_the_v2_names() {

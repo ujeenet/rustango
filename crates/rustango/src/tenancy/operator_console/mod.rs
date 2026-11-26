@@ -1964,6 +1964,12 @@ async fn orgs_list(
     ctx.insert("operator_username", &op.username);
     ctx.insert("orgs", &view);
     ctx.insert("bad_orgs", &bad_view);
+    let maintenance = state
+        .pools
+        .as_ref()
+        .map(|p| p.tenants_in_maintenance())
+        .unwrap_or_default();
+    ctx.insert("maintenance", &maintenance);
     ctx.insert("edit_enabled", &state.pools.is_some());
     // Drives the "New tenant" button.
     ctx.insert("provisioning_enabled", &state.provisioner.is_some());

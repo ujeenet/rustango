@@ -1176,6 +1176,38 @@ mod tests {
         assert!(matches!(f.operations[1].op, Op::AlterColumn { .. }));
     }
 
+    /// Tenant SQL naming another schema is a load error (8.2); `extensions`
+    /// and an alias qualifier pass, and registry files may name `public`.
+    #[test]
+    fn tenant_sql_naming_another_schema_is_refused() {
+        let sql = |text: &str, target: &str| {
+            let mut f = file(json!([{"op": "data_sql", "v": 1, "id": "m_v1",
+                "tables": {"write": ["t.c"]},
+                "up": {"any": text}, "down": {"noop": "x"},
+                "allow": [{"code": "MV2-E028", "reason": "x"}]}]));
+            f["target"] = json!(target);
+            decode(&f, "f.json")
+        };
+        for bad in [
+            "UPDATE public.org SET c = 1",
+            "UPDATE {{t:t}} SET {{c:c}} = (SELECT 1 FROM registry.org)",
+            "INSERT INTO other.t (c) VALUES (1)",
+        ] {
+            assert_eq!(
+                sql(bad, "tenant").unwrap_err().code,
+                Code::OtherSchema,
+                "{bad}"
+            );
+        }
+        for ok in [
+            "UPDATE {{t:t}} SET {{c:c}} = extensions.f(1)",
+            "UPDATE {{t:t}} AS a SET {{c:c}} = a.c + 1",
+        ] {
+            sql(ok, "tenant").unwrap();
+        }
+        sql("UPDATE public.org SET c = 1", "registry").unwrap();
+    }
+
     #[test]
     fn a_composite_batch_key_is_refused_at_load() {
         let op = |key: Value| {

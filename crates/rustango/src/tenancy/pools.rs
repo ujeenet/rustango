@@ -673,6 +673,9 @@ pub struct TenantPools<DB: Database = DefaultTenantDb> {
     /// The registry's `current_database()`, part of each tenant role's name.
     #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
     database_name: Arc<tokio::sync::OnceCell<String>>,
+    /// Tenants whose migrations failed: they answer 503 until a run fixes
+    /// them (8.3 `require_head`). Per pools, never process-global.
+    maintenance: std::sync::RwLock<std::collections::BTreeSet<String>>,
 }
 
 /// Warns once a cache passes 80% of its cap, so the operator hears
@@ -769,7 +772,37 @@ impl<DB: Database> TenantPools<DB> {
             #[cfg(feature = "postgres")]
             role_secret: Arc::default(),
             database_name: Arc::default(),
+            maintenance: std::sync::RwLock::default(),
         }
+    }
+
+    /// Put exactly `slugs` in maintenance: their requests answer 503 until
+    /// the next fleet run that applies them.
+    pub(crate) fn set_maintenance(&self, slugs: impl IntoIterator<Item = String>) {
+        let mut set = self
+            .maintenance
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *set = slugs.into_iter().collect();
+    }
+
+    /// Whether `slug` is in maintenance.
+    pub(crate) fn in_maintenance(&self, slug: &str) -> bool {
+        self.maintenance
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(slug)
+    }
+
+    /// Tenants in maintenance after a failed migration, for the console banner.
+    #[must_use]
+    pub fn tenants_in_maintenance(&self) -> Vec<String> {
+        self.maintenance
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .cloned()
+            .collect()
     }
 
     /// Next LRU stamp. Relaxed is enough: the value only has to be
@@ -1137,6 +1170,11 @@ pub trait TenantPoolInvalidator: Send + Sync {
         >,
     >;
 
+    /// Tenants whose migrations failed at boot, for the console banner.
+    fn tenants_in_maintenance(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// How tenant URLs are opened and stored, so an edit can check a new
     /// reference before it is written. No default: a fallback would drop
     /// the deployment's `require_sealed_secrets()`.
@@ -1206,6 +1244,10 @@ impl<DB: Database> TenantPoolInvalidator for TenantPools<DB>
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
+    fn tenants_in_maintenance(&self) -> Vec<String> {
+        TenantPools::<DB>::tenants_in_maintenance(self)
+    }
+
     fn invalidate<'a>(
         &'a self,
         slug: &'a str,

@@ -403,12 +403,15 @@ pub enum TenantRejection {
     Internal(String),
     /// Too many tenant pools are being built: a 503 with `Retry-After`.
     Busy,
+    /// The tenant's migrations failed: a 503 maintenance answer (8.3).
+    Maintenance,
 }
 
 impl From<TenancyError> for TenantRejection {
     fn from(e: TenancyError) -> Self {
         match e {
             TenancyError::PoolBusy | TenancyError::TenantConnBusy { .. } => Self::Busy,
+            TenancyError::Maintenance { .. } => Self::Maintenance,
             e => Self::Internal(e.to_string()),
         }
     }
@@ -429,6 +432,7 @@ impl IntoResponse for TenantRejection {
                 ApiError::logged(StatusCode::INTERNAL_SERVER_ERROR, "extractors::tenant", msg)
             }
             Self::Busy => return TenancyError::pool_busy_response(),
+            Self::Maintenance => return TenancyError::maintenance_response(),
         }
         .into_response()
     }
