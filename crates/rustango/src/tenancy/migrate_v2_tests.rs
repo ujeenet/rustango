@@ -1,11 +1,16 @@
 //! Engine v2 under tenancy, live: schema mode on PG, DB mode on all three.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "postgres")]
+use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
 use super::*;
-use crate::migrate::v2::ledger::{cache_all, Ledger};
+#[cfg(feature = "postgres")]
+use crate::migrate::v2::ledger::cache_all;
+#[cfg(any(feature = "postgres", feature = "sqlite"))]
+use crate::migrate::v2::ledger::Ledger;
 use crate::sql::{raw_execute_pool, raw_query_pool, Pool};
 
 /// Every test here shares servers: one at a time.
@@ -33,6 +38,7 @@ fn items() -> Value {
 
 /// A database of the test's own on a server; dropped (and the roles the
 /// test made) on drop.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
 struct Scratch {
     admin: String,
     name: String,
@@ -40,6 +46,7 @@ struct Scratch {
     roles: Vec<String>,
 }
 
+#[cfg(any(feature = "postgres", feature = "mysql"))]
 impl Scratch {
     async fn create(admin: &str, tag: &str) -> Self {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -59,6 +66,7 @@ impl Scratch {
     }
 }
 
+#[cfg(any(feature = "postgres", feature = "mysql"))]
 impl Drop for Scratch {
     fn drop(&mut self) {
         let (admin, name, roles, url) = (
@@ -98,6 +106,7 @@ impl Drop for Scratch {
 }
 
 /// The schema tenants' login roles with rights in the database at `url`.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
 async fn tenant_roles(url: &str) -> Vec<String> {
     if !url.starts_with("postgres") {
         return Vec::new();
@@ -123,6 +132,7 @@ async fn count(pool: &Pool, sql: &str) -> i64 {
     r[0].0
 }
 
+#[cfg(feature = "postgres")]
 async fn exists_in(pool: &Pool, schema: &str, table: &str) -> bool {
     count(
         pool,
@@ -322,6 +332,7 @@ async fn requires_waits_for_the_registry() {
 }
 
 /// The registry cache holds no row value: every text in it.
+#[cfg(feature = "postgres")]
 async fn cache_text(registry: &Pool) -> String {
     format!("{:?}", cache_all(registry).await.unwrap())
 }
@@ -855,18 +866,21 @@ async fn boot_runs_the_fleet_and_parks_a_failed_tenant() {
 }
 
 /// The same tenant file, with `phase`.
+#[cfg(feature = "postgres")]
 fn phased(id: &str, parents: &[&str], phase: &str, ops: Value) -> Value {
     let mut f = file(id, parents, "tenant", ops);
     f["phase"] = json!(phase);
     f
 }
 
+#[cfg(feature = "postgres")]
 fn table_op(name: &str) -> Value {
     json!([{"op": "create_table", "v": 1, "table": {"name": name, "scope": "tenant",
         "fields": [{"column": "id", "ty": "i64", "primary_key": true, "nullable": false}]}}])
 }
 
 /// A seed that fails on a tenant holding row 99 (a duplicate key).
+#[cfg(feature = "postgres")]
 fn seed_failing_on_99() -> Value {
     json!([{"op": "data_sql", "v": 1, "id": "seed_v1",
         "tables": {"write": ["items"]},

@@ -248,7 +248,7 @@ fn tenant_cache_table() -> TableState {
 }
 
 /// One tenant's cached state: `(slug, state, head, error_class)`.
-#[cfg(feature = "tenancy")]
+#[cfg(all(test, feature = "tenancy", feature = "postgres"))]
 pub(crate) type CachedTenant = (String, String, Option<String>, Option<String>);
 
 /// Create the registry cache; once, before tenants run at once.
@@ -313,7 +313,7 @@ pub(crate) async fn cache_put(
 ///
 /// # Errors
 /// Driver failures.
-#[cfg(feature = "tenancy")]
+#[cfg(all(test, feature = "tenancy", feature = "postgres"))]
 pub(crate) async fn cache_all(registry: &Pool) -> Result<Vec<CachedTenant>, MigrateError> {
     if !crate::migrate::try_table_exists_here(registry, TENANT_CACHE).await? {
         return Ok(Vec::new());
@@ -468,7 +468,7 @@ async fn fleet_set(registry: &Pool, run_id: &str, state: &str) -> Result<(), Mig
 ///
 /// # Errors
 /// Driver failures.
-#[cfg(all(test, feature = "tenancy"))]
+#[cfg(all(test, feature = "tenancy", feature = "postgres"))]
 pub(crate) async fn fleet_runs(
     registry: &Pool,
 ) -> Result<Vec<(String, String, String)>, MigrateError> {
