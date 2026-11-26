@@ -125,6 +125,22 @@ pub(crate) async fn reap(
                     crate::core::SqlValue::String(backend_start.clone()),
                 ]
             };
+            const PG_GRANT: &str = "GRANT pg_signal_backend, pg_read_all_stats TO the migrate role";
+            // Another role's session shows its pid but hides its start: it
+            // cannot be told from a reused pid, so it is never taken as gone.
+            let seen: Vec<(Option<String>,)> = crate::sql::raw_query_pool(
+                "SELECT backend_start::text FROM pg_stat_activity WHERE pid = $1",
+                vec![crate::core::SqlValue::I64(*pid)],
+                pool,
+            )
+            .await
+            .map_err(MigrateError::from)?;
+            match seen.first() {
+                None => return Ok(()),
+                Some((None,)) => return Err(ReapError::NoRights(s.clone(), PG_GRANT)),
+                Some((Some(start),)) if start != backend_start => return Ok(()),
+                Some(_) => {}
+            }
             // Only when pid and start still match: a pid alone may be reused.
             let ended: Result<Vec<(bool,)>, _> = crate::sql::raw_query_pool(
                 "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
@@ -135,10 +151,7 @@ pub(crate) async fn reap(
             .await;
             if let Err(e) = ended {
                 if sqlstate(&e).as_deref() == Some("42501") {
-                    return Err(ReapError::NoRights(
-                        s.clone(),
-                        "GRANT pg_signal_backend TO the migrate role",
-                    ));
+                    return Err(ReapError::NoRights(s.clone(), PG_GRANT));
                 }
                 return Err(MigrateError::from(e).into());
             }
@@ -165,7 +178,7 @@ pub(crate) async fn reap(
                 Err(e) if mysql_code(&e) == Some(1095) => {
                     return Err(ReapError::NoRights(
                         s.clone(),
-                        "GRANT CONNECTION_ADMIN ON *.* TO the migrate user",
+                        "GRANT CONNECTION_ADMIN, PROCESS ON *.* TO the migrate user",
                     ))
                 }
                 Err(e) => return Err(MigrateError::Driver(e).into()),

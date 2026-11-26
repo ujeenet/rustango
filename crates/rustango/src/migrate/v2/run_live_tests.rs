@@ -1333,11 +1333,16 @@ async fn crashed_bio(pool: &Pool, dir: &Path) {
         crash: Some(Crash::BeforeUnit(1)),
         ..Options::default()
     };
-    put(
-        dir,
-        "0002_bio",
-        &v2("0002_bio", &["0001_author"], add_bio()),
+    // A data op between the column and the index: two units even where
+    // schema ops share one (6.1 rule 6).
+    let mut ops = add_bio();
+    ops.as_array_mut().unwrap().insert(
+        1,
+        json!({"op": "data_sql", "v": 1, "id": "touch_v1", "tables": {"write": ["rv_author.bio"]},
+            "up": {"any": "UPDATE {{t:rv_author}} SET {{c:bio}} = NULL WHERE 1 = 0"},
+            "down": {"noop": "test"}, "allow": [{"code": "MV2-E028", "reason": "test"}]}),
     );
+    put(dir, "0002_bio", &v2("0002_bio", &["0001_author"], ops));
     migrate(pool, dir, &crashing).await.expect_err("crashed");
 }
 
@@ -2570,8 +2575,8 @@ async fn a_dead_ddl_session_is_reaped_with_the_migrate_roles_rights(b: B) {
     );
     pool_b.close().await;
     let grant_sql = match b {
-        B::Pg => format!("GRANT pg_signal_backend TO {rb}"),
-        _ => format!("GRANT CONNECTION_ADMIN ON *.* TO {rb}"),
+        B::Pg => format!("GRANT pg_signal_backend, pg_read_all_stats TO {rb}"),
+        _ => format!("GRANT CONNECTION_ADMIN, PROCESS ON *.* TO {rb}"),
     };
     raw_execute_pool(admin, &grant_sql, Vec::new())
         .await
@@ -2610,13 +2615,14 @@ async fn a_cut_off_validate_runs_again(b: B) {
     let (_root, dir) = author_only();
     migrate(pool, &dir, &opts()).await.unwrap();
     let check = json!([{"op": "add_check", "v": 1, "table": "rv_author",
-        "check": {"name": "rv_author_name_ck", "expr": "name <> ''"}}]);
+        "name": "rv_author_name_ck", "expr": "name <> ''"}]);
     put(&dir, "0002_ck", &v2("0002_ck", &["0001_author"], check));
     let crashing = Options {
         crash: Some(Crash::AfterStart(1)),
         ..Options::default()
     };
-    migrate(pool, &dir, &crashing).await.expect_err("cut off");
+    let e = migrate(pool, &dir, &crashing).await.expect_err("cut off");
+    assert!(e.to_string().contains("test crash"), "{e}");
     let live = super::super::catalog::read_table(pool, "rv_author")
         .await
         .unwrap()
@@ -2698,7 +2704,7 @@ async fn a_waiter_exits_when_the_holders_heartbeat_is_stale(b: B) {
     migrate(pool, &dir, &crashing).await.expect_err("crashed");
     let set = |when: String| {
         let sql = format!(
-            "UPDATE {} SET state = 'running', heartbeat_at = {when}",
+            "UPDATE {} SET state = 'running', heartbeat_at = {when} WHERE id = '0002_bio'",
             Ledger::default_names().table
         );
         async move { raw_execute_pool(pool, &sql, Vec::new()).await.unwrap() }
@@ -2777,7 +2783,7 @@ async fn a_killed_lock_backend_stops_the_run_by_fencing(b: B) {
              WHERE locktype = 'advisory' AND granted AND pid <> pg_backend_pid()"
         }
         _ => {
-            "SELECT t.PROCESSLIST_ID FROM performance_schema.metadata_locks m \
+            "SELECT CAST(t.PROCESSLIST_ID AS SIGNED) FROM performance_schema.metadata_locks m \
              JOIN performance_schema.threads t ON t.THREAD_ID = m.OWNER_THREAD_ID \
              WHERE m.OBJECT_TYPE = 'USER LEVEL LOCK' AND m.LOCK_STATUS = 'GRANTED'"
         }
@@ -2822,7 +2828,7 @@ async fn pool_sessions(pool: &Pool, n: usize) -> Vec<String> {
             "SELECT CONCAT(@@session.innodb_lock_wait_timeout, ',', @@session.lock_wait_timeout, \
              ',', @@session.max_execution_time, ',', @@session.sql_mode)"
         }
-        _ => "SELECT CAST(busy_timeout AS TEXT) FROM pragma_busy_timeout",
+        _ => "SELECT CAST(timeout AS TEXT) FROM pragma_busy_timeout()",
     };
     let mut conns = Vec::new();
     for _ in 0..n {

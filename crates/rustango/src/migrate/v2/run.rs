@@ -740,6 +740,16 @@ async fn stale_holder(
     }
 }
 
+/// What resume does with a crashed row (6.5), decided before it is taken.
+enum ResumeAt {
+    /// Run from this unit.
+    Unit(usize),
+    /// The probe found this cut-off unit done: mark it, run the next.
+    Done(usize),
+    /// Drop these invalid indexes, then run this unit again.
+    Rebuild(usize, Vec<String>),
+}
+
 /// A cut-off unit whose probe is neither done nor repairable.
 fn half_way(at: &str, unit: usize, diff: &[super::probe::Mismatch]) -> RunError {
     let list: Vec<String> = diff.iter().map(ToString::to_string).collect();
@@ -966,6 +976,8 @@ impl Runner<'_> {
     /// then run the stored plan from the next unit. Never re-rendered.
     async fn resume(&mut self, f: &Loaded, row: &Row) -> Result<(), RunError> {
         let k = key(&f.file);
+        // Decide before taking the row: a refusal leaves the ledger untouched.
+        let at = self.resume_point(row, &f.at).await?;
         if row.run_id != self.run_id {
             self.ledger
                 .claim(self.pool, k, &row.run_id, self.run_id)
@@ -982,22 +994,18 @@ impl Runner<'_> {
             )
             .await?;
         let units = &row.unit_plan;
-        let from = self.resume_point(k, row, &f.at).await?;
+        let from = self.take_resume(k, at).await?;
         self.finish(f, units, from).await
     }
 
     /// Where a crashed row goes on: after its last unit, or, for an
-    /// autocommit unit cut off after it started, what its probe says.
-    async fn resume_point(
-        &mut self,
-        k: (&str, &str),
-        row: &Row,
-        at: &str,
-    ) -> Result<usize, RunError> {
+    /// autocommit unit cut off after it started, what its probe says. Ends
+    /// the unit's dead DDL session first; writes nothing to the ledger.
+    async fn resume_point(&self, row: &Row, at: &str) -> Result<ResumeAt, RunError> {
         let units = &row.unit_plan;
         let from = usize::try_from(row.pos + 1).unwrap_or(0);
         let Some(started) = row.started_unit else {
-            return Ok(from);
+            return Ok(ResumeAt::Unit(from));
         };
         let unit = usize::try_from(started).unwrap_or(0);
         // A dead client's DDL keeps running: end it before probing (6.5).
@@ -1013,30 +1021,38 @@ impl Runner<'_> {
             .get(unit)
             .and_then(|u| u.probe.clone())
             .unwrap_or_default();
-        match probe(self.pool, &expects).await? {
-            Verdict::Present => {
-                let (sql, binds) =
-                    self.ledger
-                        .advance(self.pool, k, self.run_id, started - 1, started);
-                super::ledger::fenced(raw_execute_pool(self.pool, &sql, binds).await?)?;
-                Ok(unit + 1)
-            }
-            Verdict::Absent => Ok(unit),
+        Ok(match probe(self.pool, &expects).await? {
+            Verdict::Present => ResumeAt::Done(unit),
+            Verdict::Absent => ResumeAt::Unit(unit),
             Verdict::Partial(diff) => match super::probe::repair(&diff) {
-                Some(super::probe::Repair::Rerun) => Ok(unit),
-                Some(super::probe::Repair::DropInvalid(names)) => {
-                    let mut ddl = super::session::DdlConn::open(self.pool).await?;
-                    for name in names {
-                        let sql = format!(
-                            "DROP INDEX CONCURRENTLY {}",
-                            self.pool.dialect().quote_ident(&name)
-                        );
-                        ddl.execute(&sql).await.map_err(MigrateError::Driver)?;
-                    }
-                    Ok(unit)
-                }
-                None => Err(half_way(at, unit, &diff)),
+                Some(super::probe::Repair::Rerun) => ResumeAt::Unit(unit),
+                Some(super::probe::Repair::DropInvalid(names)) => ResumeAt::Rebuild(unit, names),
+                None => return Err(half_way(at, unit, &diff)),
             },
+        })
+    }
+
+    /// Act on a [`ResumeAt`] once the row is this run's: the unit to run next.
+    async fn take_resume(&mut self, k: (&str, &str), at: ResumeAt) -> Result<usize, RunError> {
+        match at {
+            ResumeAt::Unit(n) => Ok(n),
+            ResumeAt::Done(n) => {
+                let to = i64::try_from(n).expect("unit index fits");
+                let (sql, binds) = self.ledger.advance(self.pool, k, self.run_id, to - 1, to);
+                super::ledger::fenced(raw_execute_pool(self.pool, &sql, binds).await?)?;
+                Ok(n + 1)
+            }
+            ResumeAt::Rebuild(n, names) => {
+                let mut ddl = super::session::DdlConn::open(self.pool).await?;
+                for name in names {
+                    let sql = format!(
+                        "DROP INDEX CONCURRENTLY {}",
+                        self.pool.dialect().quote_ident(&name)
+                    );
+                    ddl.execute(&sql).await.map_err(MigrateError::Driver)?;
+                }
+                Ok(n)
+            }
         }
     }
 
@@ -1819,18 +1835,19 @@ impl Runner<'_> {
         from: Option<usize>,
     ) -> Result<(), RunError> {
         let k = (row.app.as_str(), row.id.as_str());
+        let at = match from {
+            Some(n) => ResumeAt::Unit(n),
+            None => {
+                let at = format!("ledger:{}:{}", row.app, row.id);
+                self.resume_point(row, &at).await?
+            }
+        };
         if row.run_id != self.run_id {
             self.ledger
                 .claim(self.pool, k, &row.run_id, self.run_id)
                 .await?;
         }
-        let from = match from {
-            Some(n) => n,
-            None => {
-                let at = format!("ledger:{}:{}", row.app, row.id);
-                self.resume_point(k, row, &at).await?
-            }
-        };
+        let from = self.take_resume(k, at).await?;
         self.run_units(k, units, from).await?;
         self.ledger.remove(self.pool, k, self.run_id).await?;
         self.ledger
