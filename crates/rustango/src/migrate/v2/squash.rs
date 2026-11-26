@@ -214,7 +214,7 @@ pub(crate) fn squash(
                 );
                 if fresh {
                     kept.push((raw["operations"][n]).clone());
-                    refuse_changed_later(&project, &range, i, n, &env.op, &l.at)?;
+                    refuse_changed_later(&project, &range, i, n, &l.at)?;
                 }
                 state = after;
             }
@@ -278,10 +278,50 @@ fn refuse_changed_later(
     range: &[usize],
     file: usize,
     op: usize,
-    data: &Op,
     at: &str,
 ) -> Result<(), LoadError> {
-    let k = keys(data, at)?;
+    match changed_later(project, range, file, op)? {
+        None => Ok(()),
+        Some((later, w)) => Err(err(
+            Code::Checkpoint,
+            at,
+            format!(
+                "a kept data op of `{}` touches {w}, which `{}` changes later in the range: \
+                 squash before that change",
+                project.files[file].file.id, project.files[later].file.id
+            ),
+        )),
+    }
+}
+
+/// The fresh fast path's rule (8.5): every fresh data op (`(file, op)` in
+/// `order`) comes after the last schema op on the tables it names.
+///
+/// # Errors
+/// A nested state that does not decode.
+pub(crate) fn fresh_ops_follow_schema(
+    project: &Project,
+    order: &[usize],
+    fresh: &[(usize, usize)],
+) -> Result<bool, LoadError> {
+    for &(file, op) in fresh {
+        if changed_later(project, order, file, op)?.is_some() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// The first op after data op `op` of `file` in `seq` that changes the
+/// shape of a table the data op names: `(file, key)`.
+fn changed_later(
+    project: &Project,
+    seq: &[usize],
+    file: usize,
+    op: usize,
+) -> Result<Option<(usize, Key)>, LoadError> {
+    let l = &project.files[file];
+    let k = keys(&l.file.operations[op].op, &l.at)?;
     let tables: BTreeSet<String> = k
         .writes
         .iter()
@@ -291,30 +331,34 @@ fn refuse_changed_later(
             _ => None,
         })
         .collect();
-    let start = range.iter().position(|&i| i == file).expect("in range");
-    for (ri, &i) in range.iter().enumerate().skip(start) {
-        let l = &project.files[i];
-        for (n, env) in l.file.operations.iter().enumerate() {
-            if (ri == start && n <= op)
+    let start = seq.iter().position(|&i| i == file).expect("in sequence");
+    for (si, &i) in seq.iter().enumerate().skip(start) {
+        let m = &project.files[i];
+        if si > start {
+            // A checkpoint brings its tables in whole: a schema change.
+            if let Some(t) = m
+                .file
+                .state
+                .iter()
+                .flat_map(|d| d.tables.keys())
+                .find(|t| tables.contains(*t))
+            {
+                return Ok(Some((i, Key::Table(t.clone()))));
+            }
+        }
+        for (n, env) in m.file.operations.iter().enumerate() {
+            if (si == start && n <= op)
                 || matches!(env.op, Op::DataSql { .. } | Op::DataRust { .. })
             {
                 continue;
             }
-            let later = keys(&env.op, &l.at)?;
-            if let Some(w) = later.writes.iter().find(|w| touches_table(w, &tables)) {
-                return Err(err(
-                    Code::Checkpoint,
-                    at,
-                    format!(
-                        "a kept data op of `{}` touches {w}, which `{}` changes later in the \
-                         range: squash before that change",
-                        project.files[file].file.id, l.file.id
-                    ),
-                ));
+            let later = keys(&env.op, &m.at)?;
+            if let Some(w) = later.writes.into_iter().find(|w| touches_table(w, &tables)) {
+                return Ok(Some((i, w)));
             }
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Delete the files `checkpoint` replaces. Refused unless `applied` says

@@ -177,6 +177,7 @@ fn make<W: Write>(pool: &Pool, dir: &Path, args: &[String], w: &mut W) -> Result
         dry_run: args.iter().any(|a| a == "--check"),
         renames,
         no_rename: args.iter().any(|a| a == "--no-rename"),
+        no_split: args.iter().any(|a| a == "--no-split"),
         tenancy: args.iter().any(|a| a == "--tenancy"),
     };
     crate::migrate::make::check_models()?;

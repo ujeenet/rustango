@@ -4215,6 +4215,8 @@ per_backend!(
     a_waiter_finishes_a_killed_move,
     squash_a_thirty_file_chain,
     commuting_branches_in_either_order,
+    fast_fresh_matches_full_replay,
+    random_ops_render_to_their_state,
 );
 
 /// Legacy SQLite datetime text is swept before the first data unit, so a
@@ -4458,4 +4460,229 @@ async fn commuting_branches_in_either_order(b: B) {
         catalog(&two.pool, &["cm_t"]).await,
         "{b:?}"
     );
+}
+
+/// The fresh fast path (8.5): a fresh database installs the tip state and
+/// runs the fresh seeds, with the same catalog and rows as a full replay;
+/// a seed before a later change of its table keeps the full replay.
+async fn fast_fresh_matches_full_replay(b: B) {
+    let Some(full) = fresh(b).await else { return };
+    let fast = fresh(b).await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    thirty_files(&dir);
+    migrate(&full.pool, &dir, &opts()).await.unwrap();
+    let rep = migrate(
+        &fast.pool,
+        &dir,
+        &Options {
+            fast_fresh: true,
+            ..opts()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(rep.applied.len(), 30);
+    let kinds = Ledger::default_names()
+        .event_kinds(&fast.pool, ("project", "0001_s1"))
+        .await
+        .unwrap();
+    assert!(kinds.contains(&"fast_fresh".to_owned()), "{kinds:?}");
+    let tables = ["sq_t0", "sq_t1", "sq_t2", "sq_t3", "sq_t4", "sq_lookup"];
+    assert_eq!(
+        catalog(&full.pool, &tables).await,
+        catalog(&fast.pool, &tables).await,
+        "{b:?}"
+    );
+    let dump = |p: &Pool| {
+        let p = p.clone();
+        async move {
+            let r: Vec<(i64, Option<String>)> = crate::sql::raw_query_pool(
+                "SELECT id, label FROM sq_lookup ORDER BY id",
+                Vec::new(),
+                &p,
+            )
+            .await
+            .unwrap();
+            r
+        }
+    };
+    assert_eq!(dump(&full.pool).await, dump(&fast.pool).await);
+    // Every file is recorded: the next file applies and rolls back as usual.
+    put(
+        &dir,
+        "0031_more",
+        &v2(
+            "0031_more",
+            &["0030_s30"],
+            json!([{"op": "add_column", "v": 1, "table": "sq_lookup",
+                "column": {"column": "late", "ty": "i32", "nullable": true}}]),
+        ),
+    );
+    migrate(&fast.pool, &dir, &opts()).await.unwrap();
+    downgrade(&fast.pool, &dir, 2, &opts()).await.unwrap();
+    // A seed that a later file changes the table of: full replay.
+    let late = fresh(b).await.unwrap();
+    put(
+        &dir,
+        "0032_lookup",
+        &v2(
+            "0032_lookup",
+            &["0031_more"],
+            json!([{"op": "data_sql", "v": 1, "id": "seed2_v1", "tables": {"write": ["sq_t0"]},
+                "up": {"any": "INSERT INTO {{t:sq_t0}} ({{c:id}}) VALUES (7)"},
+                "down": {"any": "DELETE FROM {{t:sq_t0}} WHERE {{c:id}} = 7"}}]),
+        ),
+    );
+    put(
+        &dir,
+        "0033_after",
+        &v2(
+            "0033_after",
+            &["0032_lookup"],
+            json!([{"op": "add_column", "v": 1, "table": "sq_t0",
+                "column": {"column": "later", "ty": "i32", "nullable": true}}]),
+        ),
+    );
+    migrate(
+        &late.pool,
+        &dir,
+        &Options {
+            fast_fresh: true,
+            ..opts()
+        },
+    )
+    .await
+    .unwrap();
+    let kinds = Ledger::default_names()
+        .event_kinds(&late.pool, ("project", "0001_s1"))
+        .await
+        .unwrap();
+    assert!(!kinds.contains(&"fast_fresh".to_owned()), "{kinds:?}");
+}
+
+/// One random op on `tables` (name → columns `(name, max_length)`),
+/// updating the model; `None` when the pick does not fit.
+fn random_op(
+    rng: &mut super::super::perf_tests::Rng,
+    tables: &mut Vec<(String, Vec<(String, u32)>, Vec<String>)>,
+    n: usize,
+) -> Option<Value> {
+    let col =
+        |c: &str, w: u32| json!({"column": c, "ty": "string", "max_length": w, "nullable": true});
+    let kind = if tables.is_empty() { 0 } else { rng.next(8) };
+    if kind == 0 {
+        let t = format!("pr_t{n}");
+        tables.push((t.clone(), vec![("a".into(), 20)], Vec::new()));
+        return Some(
+            json!({"op": "create_table", "v": 1, "table": {"name": t, "scope": "tenant",
+            "fields": [{"column": "id", "ty": "i64", "primary_key": true, "nullable": false},
+                       col("a", 20)]}}),
+        );
+    }
+    let ti = rng.next(tables.len());
+    let (t, cols, idx) = &mut tables[ti];
+    let t = t.clone();
+    match kind {
+        1 | 2 => {
+            let c = format!("c{n}");
+            cols.push((c.clone(), 30));
+            Some(json!({"op": "add_column", "v": 1, "table": t, "column": col(&c, 30)}))
+        }
+        3 if cols.len() > 1 => {
+            let ci = rng.next(cols.len());
+            let (c, w) = cols[ci].clone();
+            if idx.iter().any(|i| i.ends_with(&format!("_{c}_ix"))) {
+                return None;
+            }
+            cols.remove(ci);
+            Some(json!({"op": "drop_column", "v": 1, "table": t, "column": c, "was": col(&c, w)}))
+        }
+        4 => {
+            let ci = rng.next(cols.len());
+            let (c, _) = cols[ci].clone();
+            if idx.iter().any(|i| i.ends_with(&format!("_{c}_ix"))) {
+                return None;
+            }
+            let to = format!("r{n}");
+            cols[ci].0.clone_from(&to);
+            Some(json!({"op": "rename_column", "v": 1, "table": t, "from": c, "to": to}))
+        }
+        5 => {
+            let ci = rng.next(cols.len());
+            let (c, w) = cols[ci].clone();
+            cols[ci].1 = w + 10;
+            Some(
+                json!({"op": "alter_column", "v": 1, "table": t, "column": c,
+                "changes": {"max_length": {"from": w, "to": w + 10}}}),
+            )
+        }
+        6 => {
+            let ci = rng.next(cols.len());
+            let c = cols[ci].0.clone();
+            let name = format!("{t}_{c}_ix");
+            if idx.contains(&name) {
+                return None;
+            }
+            idx.push(name.clone());
+            Some(json!({"op": "add_index", "v": 1, "table": t, "name": name, "columns": [c]}))
+        }
+        7 if !idx.is_empty() => {
+            let name = idx.remove(rng.next(idx.len()));
+            let c = name
+                .strip_prefix(&format!("{t}_"))
+                .and_then(|r| r.strip_suffix("_ix"))
+                .unwrap()
+                .to_owned();
+            Some(json!({"op": "drop_index", "v": 1, "table": t, "name": name,
+                "was": {"name": name, "columns": [c], "unique": false, "method": "btree"}}))
+        }
+        _ => None,
+    }
+}
+
+/// The renderer property (OR16): random ops, one file each, applied; the
+/// catalog equals the replayed state; rolled all back, the tables are gone.
+async fn random_ops_render_to_their_state(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    let mut rng = super::super::perf_tests::Rng(42);
+    let mut tables = Vec::new();
+    let mut ids: Vec<String> = Vec::new();
+    let mut n = 0;
+    while ids.len() < 40 {
+        n += 1;
+        let Some(op) = random_op(&mut rng, &mut tables, n) else {
+            continue;
+        };
+        let id = format!("{:04}_p{n}", ids.len() + 1);
+        let parents: Vec<&str> = ids.last().map(String::as_str).into_iter().collect();
+        put(&dir, &id, &v2(&id, &parents, json!([op])));
+        ids.push(id);
+    }
+    migrate(pool, &dir, &opts())
+        .await
+        .unwrap_or_else(|e| panic!("{b:?}: {e}"));
+    let p = super::super::load::load_project(&dir).unwrap();
+    let state = super::super::load::replay(&p).unwrap().states[&Target::Tenant].clone();
+    let diff = super::super::probe::drift(pool, &state).await.unwrap();
+    assert!(diff.is_empty(), "{b:?}: {diff:?}");
+    let back = Options {
+        accept_data_loss: true,
+        ..opts()
+    };
+    downgrade(pool, &dir, ids.len(), &back)
+        .await
+        .unwrap_or_else(|e| panic!("{b:?}: {e}"));
+    for (t, _, _) in &tables {
+        assert!(
+            super::super::catalog::read_table(pool, t)
+                .await
+                .unwrap()
+                .is_none(),
+            "{b:?}: {t} left"
+        );
+    }
 }

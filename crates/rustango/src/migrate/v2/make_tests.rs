@@ -306,3 +306,47 @@ fn a_tenant_fk_to_a_registry_model_is_refused_under_tenancy() {
     assert_eq!(e.code, Code::CrossTarget, "{e}");
     assert!(e.msg.contains(&format!("registry table `{orgs}`")), "{e}");
 }
+
+/// Expand/contract (6.8): an add and a drop become two files, the drop in
+/// a `phase: contract` file on top; `--no-split` keeps one contract file.
+#[test]
+fn contract_ops_split_into_their_own_file() {
+    for split in [true, false] {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("migrations");
+        make(&dir, &dir, &models(json!({})), &opts())
+            .unwrap()
+            .unwrap();
+        let mut m = models(json!({}));
+        m.tables[0].fields.retain(|f| f.column != "email");
+        let bio: crate::migrate::snapshot::FieldSnapshot =
+            serde_json::from_value(field("bio", "i32", json!({}))).unwrap();
+        m.tables[0].fields.push(bio);
+        let o = MakeOptions {
+            no_split: !split,
+            ..opts()
+        };
+        let made = make(&dir, &dir, &m, &o).unwrap().unwrap();
+        let read = |p: &Path| -> Value {
+            serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
+        };
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        files.sort();
+        if split {
+            assert_eq!(files.len(), 3, "{files:?}");
+            assert_eq!(ops_of(&made.path), ["add_column"]);
+            assert!(read(&made.path).get("phase").is_none());
+            let contract = read(&files[2]);
+            assert_eq!(contract["phase"], "contract");
+            assert_eq!(ops_of(&files[2]), ["drop_index", "drop_column"]);
+        } else {
+            assert_eq!(files.len(), 2, "{files:?}");
+            assert_eq!(read(&made.path)["phase"], "contract");
+        }
+        super::super::load::load_project(&dir).unwrap();
+        assert!(make(&dir, &dir, &m, &opts()).unwrap().is_none());
+    }
+}

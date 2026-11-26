@@ -87,6 +87,10 @@ pub(crate) struct Options {
     /// The fleet's planner: the state at this target's applied set comes
     /// from the tip instead of a forward replay (4.2, 8.3).
     pub(crate) plan: Option<std::sync::Arc<super::plan::TipPlanner>>,
+    /// A fresh target installs the tip state in one go and runs the fresh
+    /// data steps, when every one comes after the last schema op on its
+    /// tables (8.5); otherwise every file runs.
+    pub(crate) fast_fresh: bool,
     /// How often a run holding the lock refreshes its heartbeat; `None` = 30 s.
     pub(crate) heartbeat_every: Option<std::time::Duration>,
     /// Test failpoint: stop as if the process died.
@@ -1213,6 +1217,11 @@ impl Runner<'_> {
             .map(|r| ((r.app.clone(), r.id.clone()), r))
             .collect();
         self.refuse_unknown_rows(project, &rows)?;
+        if self.opts.fast_fresh && rows.is_empty() && self.opts.up_to.is_none() {
+            if let Some(applied) = self.fast_fresh(project).await? {
+                return Ok(applied);
+            }
+        }
         let mut state = State::default();
         let mut memo = HashMemo::default();
         let mut applied = Vec::new();
@@ -1312,6 +1321,115 @@ impl Runner<'_> {
             }
         }
         Ok(applied)
+    }
+
+    /// The fresh fast path (8.5): `None` when the target is not fresh or a
+    /// fresh data step would run on a shape a later op changes.
+    async fn fast_fresh(&mut self, project: &Project) -> Result<Option<Vec<String>>, RunError> {
+        let order = project
+            .order
+            .get(&self.opts.run_as.target())
+            .cloned()
+            .unwrap_or_default();
+        if order.is_empty() {
+            return Ok(None);
+        }
+        let mut tip = State::default();
+        let mut memo = HashMemo::default();
+        let mut hashes = Vec::with_capacity(order.len());
+        let mut fresh_ops: Vec<(usize, usize)> = Vec::new();
+        for &i in &order {
+            let f = &project.files[i];
+            for (n, env) in f.file.operations.iter().enumerate() {
+                match &env.op {
+                    // Raw SQL and extensions do more than state says.
+                    Op::RawSql { .. } | Op::CreateExtension { .. } => return Ok(None),
+                    Op::DataSql { on_fresh, .. } | Op::DataRust { on_fresh, .. }
+                        if *on_fresh == super::format::OnFresh::Run =>
+                    {
+                        fresh_ops.push((i, n));
+                    }
+                    _ => {}
+                }
+            }
+            let before = tip.hash(&mut memo);
+            apply_file(&mut tip, &f.file, &f.at, &self.ctx())?;
+            hashes.push((before, tip.hash(&mut memo)));
+        }
+        if !super::squash::fresh_ops_follow_schema(project, &order, &fresh_ops)? {
+            return Ok(None);
+        }
+        let v1 = self
+            .opts
+            .ledger
+            .as_deref()
+            .unwrap_or(crate::migrate::LEDGER_TABLE);
+        if crate::migrate::try_table_exists_here(self.pool, v1).await? {
+            return Ok(None);
+        }
+        for t in tip.tables.keys() {
+            if crate::migrate::try_table_exists_here(self.pool, t).await? {
+                return Ok(None);
+            }
+        }
+        let first = &project.files[order[0]];
+        let mut externs = State::default();
+        externs.externs.clone_from(&tip.externs);
+        let tables = fk_order(&tip, &first.at)?;
+        let mut units = super::render::render_install(&externs, &tables, &first.at, self.b)?;
+        for &(i, n) in &fresh_ops {
+            let f = &project.files[i];
+            let one = File {
+                kind: Kind::Migration,
+                state: None,
+                replaces: Vec::new(),
+                operations: vec![f.file.operations[n].clone()],
+                ..f.file.clone()
+            };
+            let (more, _) = render_plan(&tip, &one, &f.at, &self.ctx(), self.b)?;
+            let base = units.len();
+            units.extend(more.into_iter().map(|mut u| {
+                u.op += base;
+                u
+            }));
+        }
+        if self.opts.dry_run {
+            self.plan(&first.file.id, &units);
+            return Ok(Some(Vec::new()));
+        }
+        let mut applied = Vec::with_capacity(order.len());
+        for (pos, &i) in order.iter().enumerate() {
+            let f = &project.files[i];
+            let mine: &[Unit] = if pos == 0 { &units } else { &[] };
+            self.ledger
+                .insert(
+                    self.pool,
+                    key(&f.file),
+                    &f.checksum,
+                    &f.body,
+                    RowState::Running,
+                    mine,
+                    self.run_id,
+                    (&hashes[pos].0, Some(&hashes[pos].1)),
+                    false,
+                )
+                .await?;
+            if pos == 0 {
+                self.ledger
+                    .event(
+                        self.pool,
+                        "fast_fresh",
+                        key(&f.file),
+                        Some(&f.checksum),
+                        self.run_id,
+                        None,
+                    )
+                    .await?;
+            }
+            self.finish(f, mine, 0).await?;
+            applied.push(f.file.id.clone());
+        }
+        Ok(Some(applied))
     }
 
     /// Render, record `running` with the frozen plan, run its units.

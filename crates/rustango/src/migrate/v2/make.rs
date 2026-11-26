@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-use super::format::Kind;
+use super::format::{Kind, Op};
 use super::render::dialect;
 use super::replay::Ctx;
 use super::state::{
@@ -43,6 +43,25 @@ pub(crate) struct MakeOptions {
     /// between them is refused (decision 4). Also on when the project has
     /// registry-target files.
     pub(crate) tenancy: bool,
+    /// `--no-split`: contract ops stay in the one file (6.8).
+    pub(crate) no_split: bool,
+}
+
+/// A contract op (6.8): a drop, a rename, or NOT NULL on an existing column.
+pub(crate) fn is_contract_op(op: &Op) -> bool {
+    match op {
+        Op::DropTable { .. }
+        | Op::DropColumn { .. }
+        | Op::DropIndex { .. }
+        | Op::DropCheck { .. }
+        | Op::DropFk { .. }
+        | Op::RenameTable { .. }
+        | Op::RenameColumn { .. } => true,
+        Op::AlterColumn { changes, .. } => {
+            changes.nullable.as_ref().is_some_and(|n| n.from && !n.to)
+        }
+        _ => false,
+    }
 }
 
 /// The file `make` wrote (or would write), with one line per op.
@@ -148,31 +167,115 @@ pub(crate) fn make(
         .unwrap_or_else(|| slug_of(&plan, old.tables.is_empty()));
     let id = format!("{next:04}_{slug}");
     let path = folder.join(format!("{id}.json"));
-    let mut body = json!({
-        "engine": 2, "format": 1, "id": id, "app": app, "target": "tenant",
-        "parents": leaves,
-        "operations": plan.ops,
+    let file = |id: &str, parents: Vec<String>, ops: &[Value], contract: bool| {
+        let mut body = json!({
+            "engine": 2, "format": 1, "id": id, "app": app, "target": "tenant",
+            "parents": parents,
+            "operations": ops,
+        });
+        if contract {
+            body["phase"] = json!("contract");
+        }
+        format!("{}\n", serde_json::to_string_pretty(&body).expect("json"))
+    };
+    let leaves: Vec<String> = leaves.iter().map(|s| (*s).to_owned()).collect();
+    let with_deps = |text: String| -> String {
+        if plan.depends_on.is_empty() {
+            return text;
+        }
+        let mut v: Value = serde_json::from_str(&text).expect("json");
+        v["depends_on"] = json!(plan.depends_on);
+        format!("{}\n", serde_json::to_string_pretty(&v).expect("json"))
+    };
+    let decoded: Vec<Option<Op>> = plan
+        .ops
+        .iter()
+        .enumerate()
+        .map(|(i, v)| decode_one(v, &format!("{at}#/operations/{i}")).ok())
+        .collect();
+    let contract: Vec<bool> = decoded
+        .iter()
+        .map(|op| op.as_ref().is_some_and(is_contract_op))
+        .collect();
+    // An expand op moves ahead of the contract ops before it only when it
+    // commutes with each of them (4.5).
+    let movable = decoded.iter().enumerate().all(|(j, e)| {
+        if contract[j] {
+            return true;
+        }
+        let Some(ek) = e.as_ref().and_then(|e| super::commute::keys(e, &at).ok()) else {
+            return false;
+        };
+        decoded[..j].iter().zip(&contract).all(|(c, is_c)| {
+            !is_c
+                || c.as_ref()
+                    .and_then(|c| super::commute::keys(c, &at).ok())
+                    .is_some_and(|ck| ck.conflict(&ek).is_none())
+        })
     });
-    if !plan.depends_on.is_empty() {
-        body["depends_on"] = json!(plan.depends_on);
+    let any_contract = contract.iter().any(|c| *c);
+    let mut lines = plan.lines.clone();
+    // Expand ops in one file, contract ops in the next (6.8), when that
+    // split replays to the models; else one file.
+    let mut files: Vec<(PathBuf, String)> = Vec::new();
+    if !opts.no_split && movable && any_contract && contract.iter().any(|c| !*c) {
+        let mut exp: Vec<Value> = Vec::new();
+        let mut con: Vec<Value> = Vec::new();
+        for (op, c) in plan.ops.iter().zip(&contract) {
+            if *c {
+                con.push(op.clone());
+            } else {
+                exp.push(op.clone());
+            }
+        }
+        let id2 = format!("{:04}_{slug}_contract", next + 1);
+        let path2 = folder.join(format!("{id2}.json"));
+        let t1 = with_deps(file(&id, leaves.clone(), &exp, false));
+        let t2 = file(&id2, vec![id.clone()], &con, true);
+        let split_ok = super::load::load_file(&path, &t1).ok().and_then(|l| {
+            let mut mid = old.clone();
+            let ctx = Ctx {
+                target: Target::Tenant,
+                registry: None,
+            };
+            super::replay::apply_file(&mut mid, &l.file, &l.at, &ctx).ok()?;
+            verify(&mid, &owned, &plan.new, &path2, &t2).ok()
+        });
+        if split_ok.is_some() {
+            lines.push(format!("contract ops split into {}", path2.display()));
+            files.push((path.clone(), t1));
+            files.push((path2, t2));
+        }
     }
-    let text = format!("{}\n", serde_json::to_string_pretty(&body).expect("json"));
-    verify(&old, &owned, &plan.new, &path, &text)?;
+    if files.is_empty() {
+        let text = with_deps(file(&id, leaves, &plan.ops, any_contract));
+        verify(&old, &owned, &plan.new, &path, &text)?;
+        files.push((path.clone(), text));
+    }
     if !opts.dry_run {
         use std::io::Write as _;
         std::fs::create_dir_all(folder).map_err(|e| err(Code::Io, &at, e.to_string()))?;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|e| err(Code::Io, path.display().to_string(), e.to_string()))?;
-        f.write_all(text.as_bytes())
-            .map_err(|e| err(Code::Io, path.display().to_string(), e.to_string()))?;
+        for (p, text) in &files {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(p)
+                .map_err(|e| err(Code::Io, p.display().to_string(), e.to_string()))?;
+            f.write_all(text.as_bytes())
+                .map_err(|e| err(Code::Io, p.display().to_string(), e.to_string()))?;
+        }
     }
-    Ok(Some(Made {
-        path,
-        lines: plan.lines,
-    }))
+    Ok(Some(Made { path, lines }))
+}
+
+/// One op of a file being written, decoded on its own.
+fn decode_one(v: &Value, at: &str) -> Result<Op, LoadError> {
+    let f = super::format::decode(
+        &json!({"engine": 2, "format": 1, "id": "0001_x", "app": "x", "target": "tenant",
+                "operations": [v]}),
+        at,
+    )?;
+    Ok(f.operations.into_iter().next().expect("one op").op)
 }
 
 /// `make --data-rust <name>`: a file with one `data_rust` op (footprint

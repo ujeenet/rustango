@@ -212,3 +212,70 @@ async fn merge_and_rebase_join_two_leaves() {
         cli(&pool, &dir, &["dbmigrate", "apply"]).await.unwrap();
     }
 }
+
+/// `MV2-W012` (6.8): a pending contract file whose expand file is pending
+/// too; once the expand file ran, no warning. A batched data op next to a
+/// contract op in one file is an error.
+#[tokio::test]
+async fn a_contract_file_shipped_with_its_expand_file_warns() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("migrations");
+    v2_project(&dir);
+    let pool = sqlite(tmp.path()).await;
+    cli(&pool, &dir, &["dbmigrate", "apply"]).await.unwrap();
+    let write = |id: &str, v: serde_json::Value| {
+        std::fs::write(dir.join(format!("{id}.json")), v.to_string()).unwrap();
+    };
+    write(
+        "0003_m",
+        json!({"engine": 2, "format": 1, "id": "0003_m", "app": "project", "parents": ["0002_n"],
+            "target": "tenant", "operations": [{"op": "add_column", "v": 1, "table": "cl_t",
+            "column": {"column": "m", "ty": "i32", "nullable": true}}]}),
+    );
+    write(
+        "0004_drop_n",
+        json!({"engine": 2, "format": 1, "id": "0004_drop_n", "app": "project",
+            "parents": ["0003_m"], "target": "tenant", "phase": "contract",
+            "operations": [{"op": "drop_column", "v": 1, "table": "cl_t", "column": "n",
+            "was": {"column": "n", "ty": "i32", "nullable": true}}]}),
+    );
+    let w012 = |found: &[crate::migrate::v2::check::Finding]| {
+        found.iter().any(|f| f.msg.contains("MV2-W012"))
+    };
+    let found = crate::migrate::v2::check::check(&dir, &[Backend::Sqlite], None, Some(&pool))
+        .await
+        .unwrap();
+    assert!(w012(&found), "{found:?}");
+    let up_to = crate::migrate::v2::run::Options {
+        up_to: Some("0003_m".into()),
+        ..crate::migrate::v2::run::Options::default()
+    };
+    crate::migrate::v2::run::migrate(&pool, &dir, &up_to)
+        .await
+        .unwrap();
+    let found = crate::migrate::v2::check::check(&dir, &[Backend::Sqlite], None, Some(&pool))
+        .await
+        .unwrap();
+    assert!(!w012(&found), "{found:?}");
+    // A batched data op with a contract op in one file.
+    write(
+        "0005_mix",
+        json!({"engine": 2, "format": 1, "id": "0005_mix", "app": "project",
+            "parents": ["0004_drop_n"], "target": "tenant", "operations": [
+            {"op": "data_sql", "v": 1, "id": "b_v1", "tables": {"read": ["cl_t"], "write": ["cl_t.m"]},
+             "up": {"any": "UPDATE {{t:cl_t}} SET {{c:m}} = 1 WHERE {{batch_range}}"},
+             "batch": {"table": "cl_t", "key": "id", "size": 10},
+             "down": {"noop": "x"}, "allow": [{"code": "MV2-E028", "reason": "x"}]},
+            {"op": "drop_column", "v": 1, "table": "cl_t", "column": "m",
+             "was": {"column": "m", "ty": "i32", "nullable": true}}]}),
+    );
+    let found = crate::migrate::v2::check::check(&dir, &[Backend::Sqlite], None, Some(&pool))
+        .await
+        .unwrap();
+    assert!(
+        found
+            .iter()
+            .any(|f| f.msg.contains("batched data op and a contract op")),
+        "{found:?}"
+    );
+}

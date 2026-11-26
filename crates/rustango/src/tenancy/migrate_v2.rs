@@ -705,6 +705,7 @@ impl Fleet<'_> {
             dry_run,
             stop_before_contract: expand,
             plan: Some(self.plan.clone()),
+            fast_fresh: true,
             ..tenant_opts(t)
         }
     }

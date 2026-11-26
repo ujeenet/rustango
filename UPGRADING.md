@@ -166,6 +166,8 @@ untouched.
 - Under engine v2 tenancy on Postgres, the first fleet run moves relocatable extensions from `public` to a new `extensions` schema and sets the database `search_path` to `"$user", public, extensions`. It needs the extension owner or a superuser; without it the run stops and names the statement to run. Registry sessions opened before the move keep the old path until they reconnect.
 - A registry file's `create_extension` installs into `extensions`; a `schema` other than `extensions` is refused under tenancy.
 - Engine v2 database-mode tenants can be migrated as a separate login: set `RUSTANGO_TENANT_MIGRATOR=user:password`. The tenant's own login then loses its table-level grants on the ledger tables (SELECT on the ledger stays). On MySQL a tenant login with database-level writes refuses the fleet run: grant it table-level privileges instead. The migrator needs `SELECT` on the `mysql` schema and `GRANT OPTION`. Without a separate login, the tenant login can still write the ledger on MySQL.
+- Engine v2 `make` now writes contract ops in a second file with `phase: contract`; under tenancy those wait until every tenant reached its expand head. Pass `--no-split` for the old single file.
+- Loading an engine v2 project now refuses a merge file whose branches do not commute (`MV2-E033`); rebase one branch instead.
 
 ## 0.70.0
 

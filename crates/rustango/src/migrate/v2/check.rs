@@ -181,6 +181,7 @@ pub(crate) async fn check(
     }
     out.extend(step_findings(&project, dir, pool).await?);
     out.extend(batch_findings(&project, pool).await?);
+    out.extend(contract_findings(&project, pool).await?);
     if let Some(models) = models {
         let opts = super::make::MakeOptions {
             backends: backends.to_vec(),
@@ -264,6 +265,93 @@ async fn step_findings(
                         severity: Severity::Warning,
                         at: s.type_name.to_owned(),
                         msg: format!("data step `{app}:{id}` changed after it ran"),
+                    });
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Expand/contract (6.8): a batched data op and a contract op in one file
+/// is an error unless `offline`; online, a pending contract file whose
+/// expand ancestor is pending too is `MV2-W012` (old replicas may still
+/// read the shape it drops).
+async fn contract_findings(
+    project: &super::load::Project,
+    pool: Option<&Pool>,
+) -> Result<Vec<Finding>, LoadError> {
+    use super::format::Phase;
+    let mut out = Vec::new();
+    for f in &project.files {
+        let batched = f.file.operations.iter().any(|e| {
+            matches!(
+                &e.op,
+                Op::DataSql { batch: Some(_), .. } | Op::DataRust { batch: Some(_), .. }
+            )
+        });
+        let contract = f.file.phase == Phase::Contract
+            || f.file
+                .operations
+                .iter()
+                .any(|e| super::make::is_contract_op(&e.op));
+        if batched && contract && !f.file.offline {
+            out.push(Finding {
+                severity: Severity::Error,
+                at: f.at.clone(),
+                msg: "a batched data op and a contract op in one file: split them, or mark the \
+                      file `\"offline\": true`"
+                    .into(),
+            });
+        }
+    }
+    let Some(pool) = pool else {
+        return Ok(out);
+    };
+    let done: std::collections::HashSet<(String, String)> = super::ledger::Ledger::default_names()
+        .rows(pool)
+        .await
+        .map_err(|e| LoadError::new(super::Code::Io, "ledger", e.to_string()))?
+        .into_iter()
+        .filter(|r| r.state == super::ledger::RowState::Applied)
+        .map(|r| (r.app, r.id))
+        .collect();
+    let pending =
+        |l: &super::load::Loaded| !done.contains(&(l.file.app.clone(), l.file.id.clone()));
+    let by_id: std::collections::HashMap<(&str, &str), &super::load::Loaded> = project
+        .files
+        .iter()
+        .map(|l| ((l.file.app.as_str(), l.file.id.as_str()), l))
+        .collect();
+    for c in project
+        .files
+        .iter()
+        .filter(|l| l.file.phase == Phase::Contract && pending(l))
+    {
+        // The nearest ancestors: parents and depends_on.
+        let up = c
+            .file
+            .parents
+            .iter()
+            .map(|p| (c.file.app.as_str(), p.as_str()))
+            .chain(
+                c.file
+                    .depends_on
+                    .iter()
+                    .map(|(a, d)| (a.as_str(), d.as_str())),
+            );
+        for k in up {
+            if let Some(e) = by_id.get(&k) {
+                if e.file.phase != Phase::Contract && pending(e) {
+                    out.push(Finding {
+                        severity: Severity::Warning,
+                        at: c.at.clone(),
+                        msg: format!(
+                            "contract file `{}` and its expand file `{}` are both pending: \
+                             ship the expand one in an earlier release, old replicas may \
+                             still use the shape this drops [MV2-W012]",
+                            c.file.id, e.file.id
+                        ),
                     });
                 }
             }
