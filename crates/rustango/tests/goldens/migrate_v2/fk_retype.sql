@@ -9,7 +9,7 @@
   ALTER TABLE "s3_t" ALTER COLUMN "id" TYPE BIGINT USING "id"::BIGINT;
 [op 3] tx
   ALTER TABLE "s3_child" ADD CONSTRAINT "s3_child_pid_fk" FOREIGN KEY ("pid") REFERENCES "s3_t" ("id") NOT VALID;
-[op 3] tx
+[op 3] autocommit
   ALTER TABLE "s3_child" VALIDATE CONSTRAINT "s3_child_pid_fk";
 -- mysql
 [op 0] autocommit

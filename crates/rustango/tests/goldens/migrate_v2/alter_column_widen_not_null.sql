@@ -3,7 +3,7 @@
   ALTER TABLE "s3_parent" ALTER COLUMN "name" TYPE VARCHAR(100);
 [op 0] tx
   ALTER TABLE "s3_parent" ADD CONSTRAINT "s3_parent_name_v2nn" CHECK ("name" IS NOT NULL) NOT VALID;
-[op 0] tx
+[op 0] autocommit
   ALTER TABLE "s3_parent" VALIDATE CONSTRAINT "s3_parent_name_v2nn";
 [op 0] tx
   ALTER TABLE "s3_parent" ALTER COLUMN "name" SET NOT NULL;

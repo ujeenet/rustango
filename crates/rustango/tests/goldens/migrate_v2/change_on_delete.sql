@@ -3,7 +3,7 @@
   ALTER TABLE "s3_child" DROP CONSTRAINT "s3_child_parent_fk";
 [op 1] tx
   ALTER TABLE "s3_child" ADD CONSTRAINT "s3_child_parent_fk" FOREIGN KEY ("parent_id") REFERENCES "s3_parent" ("id") ON DELETE RESTRICT NOT VALID;
-[op 1] tx
+[op 1] autocommit
   ALTER TABLE "s3_child" VALIDATE CONSTRAINT "s3_child_parent_fk";
 -- mysql
 [op 0] autocommit

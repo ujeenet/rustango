@@ -5,7 +5,7 @@
   ALTER TABLE "s3_t" RENAME COLUMN "a" TO "b";
 [op 2] tx
   ALTER TABLE "s3_t" ADD CONSTRAINT "s3_t_b_pos" CHECK (b > 0) NOT VALID;
-[op 2] tx
+[op 2] autocommit
   ALTER TABLE "s3_t" VALIDATE CONSTRAINT "s3_t_b_pos";
 -- mysql
 [op 0] autocommit

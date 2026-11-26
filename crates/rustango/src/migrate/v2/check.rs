@@ -278,7 +278,7 @@ async fn batch_findings(
     project: &super::load::Project,
     pool: Option<&Pool>,
 ) -> Result<Vec<Finding>, LoadError> {
-    const LONG_MOVE_ROWS: i64 = 1_000_000;
+    use super::run::LONG_MOVE_ROWS;
     let mut out = Vec::new();
     for f in &project.files {
         for (i, env) in f.file.operations.iter().enumerate() {
@@ -303,7 +303,7 @@ async fn batch_findings(
                 let est = super::catalog::estimate_rows(pool, &b.table)
                     .await
                     .map_err(|e| LoadError::new(super::Code::Io, &at, e.to_string()))?;
-                if let Some(n) = est.filter(|n| *n > LONG_MOVE_ROWS) {
+                if let Some(n) = est.filter(|n| u64::try_from(*n).unwrap_or(0) > LONG_MOVE_ROWS) {
                     out.push(Finding {
                         severity: Severity::Warning,
                         at,

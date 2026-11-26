@@ -697,6 +697,9 @@ async fn session_timeouts(
     Ok(())
 }
 
+/// Row estimate above which a batched op is a long move (`MV2-W011`).
+pub(crate) const LONG_MOVE_ROWS: u64 = 1_000_000;
+
 /// How often a run holding the lock refreshes its heartbeat.
 const HEARTBEAT_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -1196,7 +1199,7 @@ impl Runner<'_> {
     /// Each batched unit's row estimate, as `--plan` prints it, marked
     /// `MV2-W011` above `long_move_rows`.
     async fn long_moves(&self, units: &[Unit]) -> Result<Vec<String>, RunError> {
-        let limit = self.opts.long_move_rows.unwrap_or(1_000_000);
+        let limit = self.opts.long_move_rows.unwrap_or(LONG_MOVE_ROWS);
         let mut out = Vec::new();
         for bp in units.iter().filter_map(|u| u.batch.as_ref()) {
             let est = super::catalog::estimate_rows(self.pool, &bp.table).await?;

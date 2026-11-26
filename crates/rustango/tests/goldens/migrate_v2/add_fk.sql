@@ -1,7 +1,7 @@
 -- postgres
 [op 0] tx
   ALTER TABLE "s3_child" ADD CONSTRAINT "s3_child_parent_fk" FOREIGN KEY ("parent_id") REFERENCES "s3_parent" ("id") ON DELETE CASCADE NOT VALID;
-[op 0] tx
+[op 0] autocommit
   ALTER TABLE "s3_child" VALIDATE CONSTRAINT "s3_child_parent_fk";
 -- mysql
 [op 0] autocommit

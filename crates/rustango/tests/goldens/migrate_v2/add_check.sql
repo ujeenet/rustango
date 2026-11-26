@@ -1,7 +1,7 @@
 -- postgres
 [op 0] tx
   ALTER TABLE "s3_t" ADD CONSTRAINT "s3_t_a_pos" CHECK (a > 0) NOT VALID;
-[op 0] tx
+[op 0] autocommit
   ALTER TABLE "s3_t" VALIDATE CONSTRAINT "s3_t_a_pos";
 -- mysql
 [op 0] autocommit

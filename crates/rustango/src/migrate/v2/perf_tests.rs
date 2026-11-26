@@ -163,9 +163,17 @@ fn s2_budgets_on_2000_files() {
         let project = load_project(&dir).unwrap();
         let units = render_project(&project, b).unwrap();
         renders.push((b, started.elapsed()));
-        // The fixture's repeated widenings to 80 are no-op alters: they render nothing.
-        let n: usize = units.iter().map(|(_, u)| u.len()).sum();
-        assert!(n > 4 * project.files.len(), "{}: {n} units", b.as_str());
+        // The fixture's repeated widenings to 80 are no-op alters: they render
+        // nothing. Statements, not units: PG and SQLite merge schema units.
+        let n: usize = units
+            .iter()
+            .flat_map(|(_, u)| u.iter().map(|u| u.sql.len()))
+            .sum();
+        assert!(
+            n > 4 * project.files.len(),
+            "{}: {n} statements",
+            b.as_str()
+        );
     }
 
     eprintln!(

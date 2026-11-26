@@ -2897,6 +2897,57 @@ async fn pool_session_state_is_unchanged_after_migrate(b: B) {
     pool.close().await;
 }
 
+/// A batched op over a table above the row threshold warns `MV2-W011` in
+/// the run, and online `check` warns too (PG stats raised to 2M rows).
+async fn a_long_move_warns_w011(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let ids: Vec<i64> = (1..=30).collect();
+    let (_root, dir) = ed_project(pool, &ids).await;
+    match b {
+        B::Pg => raw_execute_pool(pool, "ANALYZE ed_user", Vec::new())
+            .await
+            .unwrap(),
+        B::My => raw_execute_pool(pool, "ANALYZE TABLE ed_user", Vec::new())
+            .await
+            .unwrap(),
+        B::Lite => 0,
+    };
+    put(
+        &dir,
+        "0002_mark",
+        &vs("0002_mark", &["0001_user"], json!([batched_sql(10)])),
+    );
+    if b == B::Pg {
+        raw_execute_pool(
+            pool,
+            "UPDATE pg_class SET reltuples = 2000000 WHERE relname = 'ed_user'",
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let found = super::super::check::check(&dir, &[Backend::Postgres], None, Some(pool))
+            .await
+            .unwrap();
+        assert!(
+            found.iter().any(|f| f.msg.contains("MV2-W011")),
+            "{found:#?}"
+        );
+        raw_execute_pool(pool, "ANALYZE ed_user", Vec::new())
+            .await
+            .unwrap();
+    }
+    let low = Options {
+        long_move_rows: Some(10),
+        ..Options::default()
+    };
+    let rep = migrate(pool, &dir, &low).await.unwrap();
+    assert!(
+        rep.warnings.iter().any(|w| w.contains("MV2-W011")),
+        "{rep:?}"
+    );
+}
+
 /// A shutdown signal stops between batches; the next start resumes at the
 /// stored cursor and moves every row once.
 async fn a_shutdown_stops_between_batches(b: B) {
@@ -3074,6 +3125,7 @@ per_backend!(
     a_waiter_exits_when_the_holders_heartbeat_is_stale,
     a_killed_lock_backend_stops_the_run_by_fencing,
     pool_session_state_is_unchanged_after_migrate,
+    a_long_move_warns_w011,
     max_batches_per_run_binds_the_cli_only,
     a_held_lock_is_retried,
     a_waiter_finishes_a_killed_move,
