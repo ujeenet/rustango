@@ -1408,8 +1408,8 @@ async fn dry_runs_never_write(b: B) {
     }
 }
 
-/// `--to` rolls back what the ledger applied after the target, in `seq`
-/// order across apps (review fix 2).
+/// `--to` rolls back the target's descendants in `seq` order; one in
+/// another app needs `--cascade` (review fix 2, 7.1).
 async fn down_to_follows_the_ledger(b: B) {
     let Some(db) = fresh(b).await else { return };
     let pool = &db.pool;
@@ -1440,11 +1440,19 @@ async fn down_to_follows_the_ledger(b: B) {
         .await
         .unwrap();
     assert!(rep.rolled_back.is_empty(), "{rep:?}");
+    let e = downgrade_to(pool, &dir, "blog:0001_bl", &opts())
+        .await
+        .expect_err("needs --cascade");
+    assert!(
+        e.to_string().contains("project:0002_pb") && e.to_string().contains("--cascade"),
+        "{e}"
+    );
+    assert_eq!(columns(pool, "dt_pb").await, ["id"]);
     let mut out = Vec::new();
     crate::migrate::manage::run_with_writer(
         pool,
         &dir,
-        ["dbmigrate", "down", "--to", "blog:0001_bl"].map(String::from),
+        ["dbmigrate", "down", "--to", "blog:0001_bl", "--cascade"].map(String::from),
         &mut out,
     )
     .await
@@ -3453,6 +3461,207 @@ async fn undo_skips_edited_rows_and_keeps_app_rows(b: B) {
     assert_eq!(left, 0);
 }
 
+/// A drop whose data an earlier op of the same migration `restores`
+/// rolls back without --accept-data-loss: the re-added column is filled by
+/// that op's down (7.5). Without `restores` it is a blocker.
+async fn a_verified_restore_rolls_back_a_drop(b: B) {
+    for declared in [true, false] {
+        let Some(db) = fresh(b).await else { return };
+        let pool = &db.pool;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("migrations");
+        let create = json!({"op": "create_table", "v": 1, "table": {"name": "rr_t",
+            "scope": "tenant", "fields": [
+            {"column": "id", "ty": "i64", "primary_key": true, "nullable": false},
+            {"column": "a", "ty": "string", "max_length": 20, "nullable": true},
+            {"column": "b", "ty": "string", "max_length": 20, "nullable": true}]}});
+        put(&dir, "0001_rr", &v2("0001_rr", &[], json!([create])));
+        migrate(pool, &dir, &opts()).await.unwrap();
+        raw_execute_pool(pool, "INSERT INTO rr_t (id, a) VALUES (1, 'x')", Vec::new())
+            .await
+            .unwrap();
+        let mut copy = json!({"op": "data_sql", "v": 1, "id": "keep_a_v1",
+            "tables": {"write": ["rr_t.a", "rr_t.b"]},
+            "up": {"any": "UPDATE {{t:rr_t}} SET {{c:b}} = {{c:a}}"},
+            "down": {"any": "UPDATE {{t:rr_t}} SET {{c:a}} = {{c:b}}"}});
+        if declared {
+            copy["restores"] = json!(["rr_t.a"]);
+        }
+        let drop = json!({"op": "drop_column", "v": 1, "table": "rr_t", "column": "a",
+            "was": {"column": "a", "ty": "string", "max_length": 20, "nullable": true}});
+        put(
+            &dir,
+            "0002_drop",
+            &v2("0002_drop", &["0001_rr"], json!([copy, drop])),
+        );
+        migrate(pool, &dir, &opts()).await.unwrap();
+        let r = downgrade(pool, &dir, 1, &opts()).await;
+        if !declared {
+            assert_eq!(code(r), Code::Blocked);
+            continue;
+        }
+        assert_eq!(r.unwrap().rolled_back, ["0002_drop"]);
+        let a: Vec<(String,)> =
+            crate::sql::raw_query_pool("SELECT a FROM rr_t WHERE id = 1", Vec::new(), pool)
+                .await
+                .unwrap();
+        assert_eq!(a[0].0, "x");
+    }
+}
+
+/// A MySQL reverse DDL that fails (a lock wait timeout) leaves the row
+/// `rolling_back`; the next `downgrade` probes the cut unit and finishes.
+async fn a_failed_mysql_reverse_ddl_resumes_by_probe(b: B) {
+    if b != B::My {
+        return;
+    }
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let (_root, dir) = project();
+    migrate(pool, &dir, &opts()).await.unwrap();
+    let holder = hold_author(b, &db.url, 3000).await;
+    let quick = Options {
+        data_lock_timeout: Some(Duration::from_secs(1)),
+        ..Options::default()
+    };
+    let e = downgrade(pool, &dir, 1, &quick)
+        .await
+        .expect_err("lock wait timeout");
+    assert!(e.to_string().to_lowercase().contains("lock"), "{e}");
+    let row = ledger_row(pool, "0002_bio").await;
+    assert_eq!(row.state, RowState::RollingBack);
+    assert!(row.started_unit.is_some());
+    holder.await.unwrap();
+    assert_eq!(
+        downgrade(pool, &dir, 0, &opts()).await.unwrap().rolled_back,
+        ["0002_bio"]
+    );
+    assert_eq!(columns(pool, "rv_author").await, ["id", "name"]);
+}
+
+/// apply → rollback → apply → rollback: each rollback leaves no ledger,
+/// progress or undo row behind, and each apply moves every row once (7.6).
+async fn apply_rollback_cycles_leave_nothing_stale(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let ids: Vec<i64> = (1..=300).collect();
+    let (_root, dir) = ed_project(pool, &ids).await;
+    example_d_down(&dir, 100);
+    let lossy = Options {
+        accept_data_loss: true,
+        ..Options::default()
+    };
+    for round in 0..2 {
+        migrate(pool, &dir, &opts()).await.unwrap();
+        assert_eq!(
+            count(pool, "SELECT COUNT(*) FROM ed_address").await,
+            300,
+            "{round}"
+        );
+        downgrade_to(pool, &dir, "steps:0001_user", &lossy)
+            .await
+            .unwrap();
+        assert_eq!(
+            rows(pool)
+                .await
+                .into_iter()
+                .map(|r| r.0)
+                .collect::<Vec<_>>(),
+            ["0001_user"],
+            "{round}"
+        );
+        for id in ["0002_address", "0003_backfill", "0004_contract"] {
+            assert_eq!(progress_rows(pool, id).await, 0, "{round} {id}");
+        }
+        let undo = count(
+            pool,
+            &format!("SELECT COUNT(*) FROM {}", Ledger::default_names().undo),
+        )
+        .await;
+        assert_eq!(undo, 0, "{round}");
+        assert!(columns(pool, "ed_address").await.is_empty(), "{round}");
+    }
+}
+
+/// `restore: "archive"` (7.5): the drop copies key and value aside; the
+/// rollback re-adds the column, refills it and makes it NOT NULL again. A
+/// row with no archived value is a blocker, and a big archive needs
+/// `--accept-archive-size`.
+async fn an_archived_drop_rolls_back_with_its_data(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    let create = json!({"op": "create_table", "v": 1, "table": {"name": "ar_t", "scope": "tenant",
+        "fields": [{"column": "id", "ty": "i64", "primary_key": true, "nullable": false},
+                   {"column": "code", "ty": "string", "max_length": 10, "nullable": false}]}});
+    put(&dir, "0001_ar", &v2("0001_ar", &[], json!([create])));
+    migrate(pool, &dir, &opts()).await.unwrap();
+    raw_execute_pool(
+        pool,
+        "INSERT INTO ar_t (id, code) VALUES (1, 'a'), (2, 'b')",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let drop = json!({"op": "drop_column", "v": 1, "table": "ar_t", "column": "code",
+        "restore": "archive",
+        "was": {"column": "code", "ty": "string", "max_length": 10, "nullable": false}});
+    put(
+        &dir,
+        "0002_drop",
+        &v2("0002_drop", &["0001_ar"], json!([drop])),
+    );
+    if b == B::Pg {
+        // The estimate says 100M rows: refused before any statement.
+        raw_execute_pool(
+            pool,
+            "UPDATE pg_class SET reltuples = 100000000 WHERE relname = 'ar_t'",
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let e = migrate(pool, &dir, &opts()).await.expect_err("too big");
+        assert!(e.to_string().contains("--accept-archive-size"), "{e}");
+        assert_eq!(columns(pool, "ar_t").await, ["id", "code"]);
+        raw_execute_pool(pool, "ANALYZE ar_t", Vec::new())
+            .await
+            .unwrap();
+    }
+    let archive = super::super::format::archive_name("ar_t", "code");
+    migrate(pool, &dir, &opts()).await.unwrap();
+    assert_eq!(columns(pool, "ar_t").await, ["id"]);
+    assert_eq!(columns(pool, &archive).await, ["k", "v"]);
+    assert_eq!(
+        downgrade(pool, &dir, 1, &opts()).await.unwrap().rolled_back,
+        ["0002_drop"]
+    );
+    let r: Vec<(i64, String)> =
+        crate::sql::raw_query_pool("SELECT id, code FROM ar_t ORDER BY id", Vec::new(), pool)
+            .await
+            .unwrap();
+    assert_eq!(r, [(1, "a".to_owned()), (2, "b".to_owned())]);
+    let live = super::super::catalog::read_table(pool, "ar_t")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        live.columns.iter().any(|c| c.name == "code" && !c.nullable),
+        "{live:?}"
+    );
+    assert!(columns(pool, &archive).await.is_empty());
+    // A row added after the drop has no archived value: a blocker.
+    migrate(pool, &dir, &opts()).await.unwrap();
+    raw_execute_pool(pool, "INSERT INTO ar_t (id) VALUES (3)", Vec::new())
+        .await
+        .unwrap();
+    let e = downgrade(pool, &dir, 1, &opts())
+        .await
+        .expect_err("blocked");
+    assert!(e.to_string().contains("no archived value"), "{e}");
+    assert_eq!(columns(pool, "ar_t").await, ["id"]);
+}
+
 /// A shutdown signal stops between batches; the next start resumes at the
 /// stored cursor and moves every row once.
 async fn a_shutdown_stops_between_batches(b: B) {
@@ -3637,6 +3846,10 @@ per_backend!(
     example_d_rolls_back_from_mid_batch,
     unknown_rows_from_a_newer_binary,
     undo_skips_edited_rows_and_keeps_app_rows,
+    a_verified_restore_rolls_back_a_drop,
+    a_failed_mysql_reverse_ddl_resumes_by_probe,
+    apply_rollback_cycles_leave_nothing_stale,
+    an_archived_drop_rolls_back_with_its_data,
     max_batches_per_run_binds_the_cli_only,
     a_held_lock_is_retried,
     a_waiter_finishes_a_killed_move,

@@ -79,7 +79,9 @@ impl crate::migrate::chains::ChainFacts for Loaded {
                 | Op::CreateExtension { .. }
                 | Op::ExternTable { .. }
                 | Op::DataSql { .. }
-                | Op::DataRust { .. } => continue,
+                | Op::DataRust { .. }
+                | Op::ArchiveRestore { .. }
+                | Op::ArchiveDrop { .. } => continue,
             };
             out.push(Fact::Written(written));
         }

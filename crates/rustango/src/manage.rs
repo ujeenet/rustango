@@ -2942,6 +2942,43 @@ mod tests {
             .expect("the next start resumes");
     }
 
+    /// Boot never resumes a half rolled back migration: it stops with
+    /// "finish `downgrade` first" (7.6).
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn v2_boot_refuses_a_rolling_back_row() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (id, parents, name) in [
+            ("0001_a", vec![], "br_a"),
+            ("0002_b", vec!["0001_a"], "br_b"),
+        ] {
+            let file = serde_json::json!({"engine": 2, "format": 1, "id": id, "app": "project",
+                "parents": parents, "target": "tenant", "operations": [{"op": "create_table",
+                "v": 1, "table": {"name": name, "scope": "tenant", "fields": [
+                    {"column": "id", "ty": "i64", "primary_key": true, "nullable": false}]}}]});
+            std::fs::write(dir.join(format!("{id}.json")), file.to_string()).unwrap();
+        }
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("app.db").display());
+        let pool = crate::sql::Pool::connect(&url).await.expect("connect");
+        let stop = || std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        boot_migrate_v2(&pool, &dir, stop(), BOOT_STALE_AFTER)
+            .await
+            .unwrap();
+        let killed = crate::migrate::v2::run::Options {
+            crash: Some(crate::migrate::v2::run::Crash::BeforeUnit(0)),
+            ..crate::migrate::v2::run::Options::default()
+        };
+        crate::migrate::v2::run::downgrade(&pool, &dir, 1, &killed)
+            .await
+            .expect_err("killed mid rollback");
+        let e = boot_migrate_v2(&pool, &dir, stop(), BOOT_STALE_AFTER)
+            .await
+            .expect_err("refused");
+        assert!(e.to_string().contains("finish `downgrade` first"), "{e}");
+    }
+
     /// One plain HTTP/1.0 GET: the status code, or `None` when nothing listens.
     #[cfg(feature = "sqlite")]
     async fn http_status(port: u16, path: &str) -> Option<u16> {

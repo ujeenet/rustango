@@ -130,6 +130,58 @@ pub(crate) fn invert(op: &Op, after: &State, allow: Allow, at: &str) -> Result<V
                 restore: super::format::Restore::ShapeOnly,
             }]
         }
+        Op::DropColumn {
+            table,
+            was,
+            restore: super::format::Restore::Archive,
+            ..
+        } => {
+            // Re-add nullable, refill from the archive, then NOT NULL again.
+            let c = &was.column;
+            let key = table_after(table)?
+                .columns
+                .iter()
+                .find(|k| k.primary_key)
+                .map(|k| k.column.clone())
+                .ok_or_else(|| LoadError::new(Code::State, at, "no primary key to restore by"))?;
+            let archive = super::format::archive_name(table, &c.column);
+            let mut open = c.clone();
+            open.nullable = true;
+            let mut ops = vec![
+                Op::AddColumn {
+                    table: table.clone(),
+                    column: Field {
+                        column: open,
+                        fk: None,
+                    },
+                    fill: None,
+                },
+                Op::ArchiveRestore {
+                    table: table.clone(),
+                    column: c.column.clone(),
+                    key,
+                    archive: archive.clone(),
+                    not_null: !c.nullable,
+                },
+            ];
+            if !c.nullable {
+                ops.push(Op::AlterColumn {
+                    table: table.clone(),
+                    column: c.column.clone(),
+                    changes: super::format::ColumnChanges {
+                        nullable: Some(super::format::Change {
+                            from: true,
+                            to: false,
+                        }),
+                        ..super::format::ColumnChanges::default()
+                    },
+                    using: None,
+                    using_down: None,
+                });
+            }
+            ops.push(Op::ArchiveDrop { archive });
+            ops
+        }
         Op::DropColumn { table, was, .. } => {
             let c = &was.column;
             if !allow.data_loss {
@@ -311,7 +363,7 @@ pub(crate) fn invert(op: &Op, after: &State, allow: Allow, at: &str) -> Result<V
                 reverse: true,
             }],
         },
-        Op::DataRust { .. } => Vec::new(),
+        Op::DataRust { .. } | Op::ArchiveRestore { .. } | Op::ArchiveDrop { .. } => Vec::new(),
         Op::RawSql {
             id,
             up,

@@ -48,13 +48,24 @@ impl DdlConn {
     ///
     /// # Errors
     /// Driver failures.
-    pub(crate) async fn open(pool: &Pool, statement: &str) -> Result<Self, MigrateError> {
+    pub(crate) async fn open(
+        pool: &Pool,
+        statement: &str,
+        lock: std::time::Duration,
+    ) -> Result<Self, MigrateError> {
         let mut conn = pool.acquire().await?;
         conn.close_on_drop();
         let session = match conn.conn() {
             #[cfg(feature = "postgres")]
             PooledConn::Postgres(c) => {
                 use sqlx::Executor as _;
+                // The DDL lock timeout (6.6); session-wide, the connection closes after.
+                (&mut **c)
+                    .execute(sqlx::raw_sql(&format!(
+                        "SET lock_timeout = {}",
+                        lock.as_millis()
+                    )))
+                    .await?;
                 // PG 14+; older servers lack the setting and keep the default.
                 let _ = (&mut **c)
                     .execute(sqlx::raw_sql("SET client_connection_check_interval = 1000"))
@@ -72,6 +83,13 @@ impl DdlConn {
             }
             #[cfg(feature = "mysql")]
             PooledConn::Mysql(c) => {
+                use sqlx::Executor as _;
+                (&mut **c)
+                    .execute(sqlx::raw_sql(&format!(
+                        "SET SESSION lock_wait_timeout = {}",
+                        lock.as_secs().max(1)
+                    )))
+                    .await?;
                 let (id, user): (u64, String) = sqlx::query_as(
                     "SELECT CONNECTION_ID(), SUBSTRING_INDEX(CURRENT_USER(), '@', 1)",
                 )

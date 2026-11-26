@@ -81,6 +81,10 @@ pub(crate) enum Expect {
     },
     /// The statement is safe to run again.
     Idempotent,
+    /// A table outside state exists (an archive, 7.5).
+    TableExists {
+        table: String,
+    },
     /// A check or FK added `NOT VALID` earlier, now validated (PG).
     Validated {
         table: String,
@@ -892,6 +896,79 @@ impl Render<'_> {
     #[allow(clippy::too_many_lines)]
     fn op(&self, op: &Op, op_tx: Option<OpTx>) -> Result<Vec<Unit>, LoadError> {
         let d = self.d;
+        let my = self.b == Backend::Mysql;
+        let ddl = |sql: String, probe: Vec<Expect>| {
+            if my {
+                vec![auto(sql, probe)]
+            } else {
+                tx(vec![sql])
+            }
+        };
+        match op {
+            // The archive is copied before the drop, in its own unit (7.5).
+            Op::DropColumn {
+                table,
+                column,
+                restore: super::format::Restore::Archive,
+                ..
+            } => {
+                let key = self
+                    .table(self.before, table)?
+                    .columns
+                    .iter()
+                    .find(|c| c.primary_key)
+                    .map(|c| c.column.clone())
+                    .ok_or_else(|| self.err(Code::State, "no primary key to archive by"))?;
+                let archive = super::format::archive_name(table, column);
+                let mut out = ddl(
+                    format!(
+                        "CREATE TABLE {} AS SELECT {} AS {}, {} AS {} FROM {}",
+                        q(d, &archive),
+                        q(d, &key),
+                        q(d, "k"),
+                        q(d, column),
+                        q(d, "v"),
+                        q(d, table)
+                    ),
+                    vec![Expect::TableExists {
+                        table: archive.clone(),
+                    }],
+                );
+                out.extend(self.op_plain(op, op_tx)?);
+                return Ok(out);
+            }
+            Op::ArchiveRestore {
+                table,
+                column,
+                key,
+                archive,
+                ..
+            } => {
+                return Ok(tx(vec![format!(
+                    "UPDATE {t} SET {c} = (SELECT {v} FROM {a} WHERE {a}.{k} = {t}.{key})",
+                    t = q(d, table),
+                    c = q(d, column),
+                    v = q(d, "v"),
+                    a = q(d, archive),
+                    k = q(d, "k"),
+                    key = q(d, key),
+                )]))
+            }
+            Op::ArchiveDrop { archive } => {
+                return Ok(ddl(
+                    format!("DROP TABLE {}", q(d, archive)),
+                    vec![Expect::NoTable {
+                        table: archive.clone(),
+                    }],
+                ))
+            }
+            _ => {}
+        }
+        self.op_plain(op, op_tx)
+    }
+
+    fn op_plain(&self, op: &Op, op_tx: Option<OpTx>) -> Result<Vec<Unit>, LoadError> {
+        let d = self.d;
         let (pg, my, lite) = (
             self.b == Backend::Postgres,
             self.b == Backend::Mysql,
@@ -1309,6 +1386,8 @@ impl Render<'_> {
                 }]
             }
             Op::StateOnly { .. } | Op::ExternTable { .. } | Op::AdoptTable { .. } => Vec::new(),
+            // Rendered by `op`.
+            Op::ArchiveRestore { .. } | Op::ArchiveDrop { .. } => Vec::new(),
             Op::CreateExtension {
                 name,
                 schema,

@@ -239,6 +239,10 @@ async fn one(pool: &Pool, e: &Expect) -> Result<Verdict, CatalogError> {
             }
         }
         Expect::Idempotent => Verdict::Absent,
+        Expect::TableExists { table } => match read_table(pool, table).await? {
+            Some(_) => Verdict::Present,
+            None => Verdict::Absent,
+        },
         Expect::Validated { table, name } => match read_table(pool, table).await? {
             Some(l) => {
                 let validated = l

@@ -34,6 +34,14 @@ pub(crate) enum Need {
         column: String,
         max: u32,
     },
+    /// An archive refills a column that goes back to NOT NULL: every row
+    /// needs an archived value (7.5).
+    Archived {
+        table: String,
+        column: String,
+        key: String,
+        archive: String,
+    },
 }
 
 impl Need {
@@ -43,7 +51,8 @@ impl Need {
             | Self::Unique { table, .. }
             | Self::Parent { table, .. }
             | Self::Check { table, .. }
-            | Self::MaxLength { table, .. } => table,
+            | Self::MaxLength { table, .. }
+            | Self::Archived { table, .. } => table,
         }
     }
 
@@ -53,6 +62,7 @@ impl Need {
             | Self::Parent { column, .. }
             | Self::MaxLength { column, .. } => vec![column],
             Self::Unique { columns, .. } => columns.iter().map(String::as_str).collect(),
+            Self::Archived { key, .. } => vec![key],
             Self::Check { .. } => Vec::new(),
         }
     }
@@ -102,6 +112,18 @@ pub(crate) fn needs(op: &Op) -> Vec<Need> {
             table: table.clone(),
             name: check.name.clone(),
             body: check.body.clone(),
+        }],
+        Op::ArchiveRestore {
+            table,
+            column,
+            key,
+            archive,
+            not_null: true,
+        } => vec![Need::Archived {
+            table: table.clone(),
+            column: column.clone(),
+            key: key.clone(),
+            archive: archive.clone(),
         }],
         _ => Vec::new(),
     }
@@ -215,6 +237,24 @@ pub(crate) async fn probe(pool: &Pool, needs: &[Need]) -> Result<Vec<Hit>, crate
             Need::Check { table, name, body } => (
                 format!("NOT ({})", body.sql(d)),
                 format!("check `{name}` on `{table}` comes back, but rows break it"),
+            ),
+            Need::Archived {
+                table,
+                column,
+                key,
+                archive,
+            } => (
+                format!(
+                    "NOT EXISTS (SELECT 1 FROM {a} WHERE {a}.{k} = {t}.{key} AND {a}.{v} IS NOT NULL)",
+                    a = q(archive),
+                    k = q("k"),
+                    v = q("v"),
+                    key = q(key)
+                ),
+                format!(
+                    "`{table}.{column}` comes back NOT NULL from its archive, but rows have no \
+                     archived value"
+                ),
             ),
             Need::MaxLength { table, column, max } => {
                 let len = match d.kind() {

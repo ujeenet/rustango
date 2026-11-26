@@ -290,6 +290,9 @@ pub(crate) enum Restore {
     #[default]
     ShapeOnly,
     Data,
+    /// The forward op copies key and value into an archive table; the
+    /// rollback refills the column from it (7.5).
+    Archive,
 }
 
 /// A raw_sql probe after an autocommit unit.
@@ -619,6 +622,21 @@ pub(crate) enum Op {
         /// The inverse runs the step's `down`; never in a file.
         #[serde(skip_deserializing)]
         reverse: bool,
+    },
+    /// A rollback's refill of a re-added column from its archive; never in
+    /// a file. `not_null`: the column goes back to NOT NULL after.
+    #[serde(skip_deserializing)]
+    ArchiveRestore {
+        table: String,
+        column: String,
+        key: String,
+        archive: String,
+        not_null: bool,
+    },
+    /// A rollback's drop of a consumed archive; never in a file.
+    #[serde(skip_deserializing)]
+    ArchiveDrop {
+        archive: String,
     },
 }
 
@@ -1046,7 +1064,16 @@ pub(crate) fn op_name(op: &Op) -> &'static str {
         Op::ExternTable { .. } => "extern_table",
         Op::DataSql { .. } => "data_sql",
         Op::DataRust { .. } => "data_rust",
+        Op::ArchiveRestore { .. } => "archive_restore",
+        Op::ArchiveDrop { .. } => "archive_drop",
     }
+}
+
+/// The archive table of `table.column` (7.5): `__rustango_archive_<16 hex>`.
+pub(crate) fn archive_name(table: &str, column: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let h = super::checksum::hex(&Sha256::digest(format!("{table}.{column}").as_bytes()));
+    format!("__rustango_archive_{}", &h[..16])
 }
 
 #[cfg(test)]

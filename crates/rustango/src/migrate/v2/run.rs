@@ -55,6 +55,10 @@ pub(crate) struct Options {
     /// A boot waiter gives up when the lock holder's heartbeat is this old
     /// while it still holds the lock (6.11); `None` waits on.
     pub(crate) stale_after: Option<std::time::Duration>,
+    /// `--accept-archive-size`: archive a drop above [`ARCHIVE_LIMIT`].
+    pub(crate) accept_archive_size: bool,
+    /// `down --cascade`: roll back dependents in other apps too (7.1).
+    pub(crate) cascade: bool,
     /// `apply <target>`: stop after this migration (`<app>:<id>` or `<id>`).
     pub(crate) up_to: Option<String>,
     /// How often a run holding the lock refreshes its heartbeat; `None` = 30 s.
@@ -424,6 +428,50 @@ pub(crate) async fn applied_after(
     ))
 }
 
+/// Whether a data op among `earlier` (with a real down) declares that it
+/// restores what `drop` removes: `table.column` for a column, `table` for a
+/// table.
+fn restored(earlier: &[OpEnvelope], drop: &Op) -> bool {
+    let target = match drop {
+        Op::DropColumn { table, column, .. } => format!("{table}.{column}"),
+        Op::DropTable { table, .. } => table.clone(),
+        _ => return false,
+    };
+    earlier.iter().any(|env| match &env.op {
+        Op::DataSql {
+            restores,
+            down: super::format::DataDown::Sql(_),
+            ..
+        }
+        | Op::DataRust {
+            restores,
+            down: super::format::RustDown::Rust,
+            ..
+        } => restores.contains(&target),
+        _ => false,
+    })
+}
+
+/// The rows applied after `pos` that descend from it over `parents` (same
+/// app) and `depends_on` (any app), in `seq` order (7.1 step 1).
+fn descendants(rows: &[&Row], bodies: &[File], pos: usize) -> Vec<usize> {
+    let mut set: Vec<(String, String)> = vec![(rows[pos].app.clone(), rows[pos].id.clone())];
+    let mut out = Vec::new();
+    for i in pos + 1..rows.len() {
+        let f = &bodies[i];
+        let hit = f
+            .parents
+            .iter()
+            .any(|p| set.contains(&(rows[i].app.clone(), p.clone())))
+            || f.depends_on.iter().any(|d| set.contains(d));
+        if hit {
+            set.push((rows[i].app.clone(), rows[i].id.clone()));
+            out.push(i);
+        }
+    }
+    out
+}
+
 /// How far a rollback goes.
 #[derive(Clone, Copy)]
 enum Back<'a> {
@@ -591,6 +639,9 @@ fn rust_step<'t>(
 
 /// How often a data unit that hit a deadlock or lock timeout runs again.
 const DATA_RETRIES: u32 = 5;
+
+/// The largest archive a drop makes without `--accept-archive-size`.
+const ARCHIVE_LIMIT: u64 = 256 << 20;
 
 /// Captured changes an undo restore puts back per transaction.
 const UNDO_BATCH: u32 = 500;
@@ -1041,9 +1092,11 @@ impl Runner<'_> {
     ) -> Result<State, RunError> {
         let (units, after) = render_plan(&state, &f.file, &f.at, &CTX, self.b)?;
         let moves = self.long_moves(&units).await?;
+        let archives = self.archive_sizes(&f.file, &state, &f.at).await?;
         if self.opts.dry_run {
             self.plan(&f.file.id, &units);
             self.planned.extend(moves);
+            self.planned.extend(archives);
             return Ok(after);
         }
         for m in moves.into_iter().filter(|m| m.contains("MV2-W011")) {
@@ -1066,6 +1119,55 @@ impl Runner<'_> {
             .await?;
         self.finish(f, &units, 0).await?;
         Ok(after)
+    }
+
+    /// Each archived drop's estimated size, as `--plan` prints it. Above
+    /// [`ARCHIVE_LIMIT`] the run refuses before any statement, unless
+    /// `--accept-archive-size` (7.5).
+    async fn archive_sizes(
+        &self,
+        file: &File,
+        before: &State,
+        at: &str,
+    ) -> Result<Vec<String>, RunError> {
+        let mut out = Vec::new();
+        for env in &file.operations {
+            let Op::DropColumn {
+                table,
+                column,
+                was,
+                restore: super::format::Restore::Archive,
+            } = &env.op
+            else {
+                continue;
+            };
+            if !before.tables.contains_key(table.as_str()) {
+                continue;
+            }
+            let rows = super::catalog::estimate_rows(self.pool, table)
+                .await?
+                .unwrap_or(0);
+            let width = u64::from(was.column.max_length.unwrap_or(16)) + 8;
+            let bytes = u64::try_from(rows).unwrap_or(0) * width;
+            if bytes > ARCHIVE_LIMIT && !self.opts.accept_archive_size {
+                return Err(refused(
+                    Code::Blocked,
+                    at,
+                    format!(
+                        "archiving `{table}.{column}` takes ~{} MiB, above {} MiB: pass \
+                         --accept-archive-size, or drop it without `restore: \"archive\"`",
+                        bytes >> 20,
+                        ARCHIVE_LIMIT >> 20
+                    ),
+                ));
+            }
+            out.push(format!(
+                "-- archive of `{table}.{column}` into `{}`: ~{rows} rows, ~{} KiB",
+                super::format::archive_name(table, column),
+                bytes >> 10
+            ));
+        }
+        Ok(out)
     }
 
     fn plan(&mut self, id: &str, units: &[Unit]) {
@@ -1191,7 +1293,8 @@ impl Runner<'_> {
                 Ok(n + 1)
             }
             ResumeAt::Rebuild(n, names) => {
-                let mut ddl = super::session::DdlConn::open(self.pool, "").await?;
+                let mut ddl =
+                    super::session::DdlConn::open(self.pool, "", self.lock_timeout()).await?;
                 for name in names {
                     let sql = format!(
                         "DROP INDEX CONCURRENTLY {}",
@@ -1286,7 +1389,9 @@ impl Runner<'_> {
                 UnitKind::Autocommit => {
                     // MySQL units are one statement (6.1 rule 3): the session names it.
                     let first = u.sql.first().map_or("", String::as_str);
-                    let mut ddl = super::session::DdlConn::open(self.pool, first).await?;
+                    let mut ddl =
+                        super::session::DdlConn::open(self.pool, first, self.lock_timeout())
+                            .await?;
                     self.ledger
                         .start_unit(self.pool, k, self.run_id, n, ddl.session.as_ref())
                         .await?;
@@ -2108,45 +2213,74 @@ impl Runner<'_> {
             .iter()
             .filter(|r| r.state != RowState::RollingBack)
             .collect();
-        // Rows come in `seq` order: `--to` keeps the target and every row before it.
-        let steps = match back {
-            Back::Steps(n) => n,
-            Back::To(to) => {
-                let (app, id) = to.split_once(':').map_or((None, to), |(a, i)| (Some(a), i));
-                let pos = applied
-                    .iter()
-                    .position(|r| r.id == id && app.is_none_or(|a| a == r.app))
-                    .ok_or_else(|| {
-                        refused(Code::State, to, format!("`{to}` is not applied here"))
-                    })?;
-                applied.len() - pos - 1
-            }
-        };
-        let mut misses = Vec::new();
-        // What each row has in effect: its whole body, or a partial row's prefix.
         let mut bodies = Vec::with_capacity(applied.len());
         for r in &applied {
             let at = format!("ledger:{}:{}", r.app, r.id);
-            bodies.push(self.in_effect(r, body(r, &at)?, &at).await?);
+            bodies.push(body(r, &at)?);
         }
-        for idx in (0..applied.len()).rev().take(steps) {
+        // Rows come in `seq` order; the chosen ones newest first.
+        let chosen: Vec<usize> = match back {
+            Back::Steps(n) => (0..applied.len()).rev().take(n).collect(),
+            Back::To(to) => {
+                let pos = applied
+                    .iter()
+                    .position(|r| names(to, &r.app, &r.id))
+                    .ok_or_else(|| {
+                        refused(Code::State, to, format!("`{to}` is not applied here"))
+                    })?;
+                let set = descendants(&applied, &bodies, pos);
+                let others: Vec<String> = set
+                    .iter()
+                    .filter(|&&i| applied[i].app != applied[pos].app)
+                    .map(|&i| format!("{}:{}", applied[i].app, applied[i].id))
+                    .collect();
+                if !others.is_empty() && !self.opts.cascade {
+                    return Err(refused(
+                        Code::Blocked,
+                        to,
+                        format!(
+                            "migrations in other apps depend on `{to}`: {}; pass --cascade to \
+                             roll them back too",
+                            others.join(", ")
+                        ),
+                    ));
+                }
+                set.into_iter().rev().collect()
+            }
+        };
+        // What each chosen row has in effect: its whole body, or a partial
+        // row's prefix.
+        for &idx in &chosen {
+            let at = format!("ledger:{}:{}", applied[idx].app, applied[idx].id);
+            bodies[idx] = self
+                .in_effect(applied[idx], bodies[idx].clone(), &at)
+                .await?;
+        }
+        let mut misses = Vec::new();
+        for &idx in &chosen {
             misses.extend(super::data::misses(&bodies[idx], self.b, true));
         }
         super::data::refuse_misses(&misses, "rollback plan")?;
         let mut plan: Vec<(&Row, Vec<Unit>)> = Vec::new();
         let mut downs: Vec<File> = Vec::new();
-        for idx in (0..applied.len()).rev().take(steps) {
+        for &idx in &chosen {
             let row = applied[idx];
             let at = format!("ledger:{}:{}", row.app, row.id);
             let file = bodies[idx].clone();
-            if let (Kind::Checkpoint, Some(base)) = (file.kind, &file.base) {
+            if file.kind == Kind::Checkpoint {
                 return Err(refused(
                     Code::Floor,
                     &at,
-                    format!(
-                        "v2 rollback stops at the switch point (`{}:{}`, from v1 `{}`)",
-                        row.app, row.id, base.legacy
-                    ),
+                    match &file.base {
+                        Some(base) => format!(
+                            "v2 rollback stops at the switch point (`{}:{}`, from v1 `{}`)",
+                            row.app, row.id, base.legacy
+                        ),
+                        None => format!(
+                            "v2 rollback stops at the squash checkpoint: squashed at `{}:{}`",
+                            row.app, row.id
+                        ),
+                    },
                 ));
             }
             // State before it: every earlier stored body, in apply order.
@@ -2289,6 +2423,11 @@ impl Runner<'_> {
         let mut of = Vec::new();
         for (i, env) in file.operations.iter().enumerate().rev() {
             let op_at = format!("{at}#/operations/{i}");
+            // A drop that an earlier data op `restores` runs its reverse
+            // down after the re-add: no data is lost (7.5).
+            let allow = Allow {
+                data_loss: allow.data_loss || restored(&file.operations[..i], &env.op),
+            };
             for op in invert(&env.op, &states[i + 1], allow, &op_at)? {
                 // A raw op keeps its unit kind on the way down.
                 let tx = if matches!(op, Op::RawSql { .. }) {

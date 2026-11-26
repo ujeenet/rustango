@@ -222,9 +222,24 @@ pub(crate) fn apply(
             fill,
         } => add_column(s, at, table, column, fill.as_deref(), created_here)?,
         Op::DropColumn {
-            table, column, was, ..
+            table,
+            column,
+            was,
+            restore,
         } => {
             let t = get(s, at, table)?;
+            if *restore == super::format::Restore::Archive
+                && t.columns.iter().filter(|c| c.primary_key).count() != 1
+            {
+                return Err(coded(
+                    Code::Unsupported,
+                    at,
+                    format!(
+                        "drop_column `{table}.{column}` with `restore: \"archive\"` needs a \
+                         one-column primary key to restore by"
+                    ),
+                ));
+            }
             if was.column.column != *column || t.column(column) != Some(&was.column) {
                 return Err(fail(
                     at,
@@ -320,6 +335,8 @@ pub(crate) fn apply(
             }
         }
         Op::DataSql { .. } | Op::DataRust { .. } => super::data::check_op(s, op, at)?,
+        // A rollback's archive steps: the archive is not in state.
+        Op::ArchiveRestore { .. } | Op::ArchiveDrop { .. } => {}
         Op::RawSql { .. } | Op::StateOnly { .. } => {
             for (i, nested) in op.nested(at)?.iter().enumerate() {
                 apply(s, nested, &format!("{at}/state/{i}"), ctx, created_here)?;

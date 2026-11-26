@@ -155,6 +155,8 @@ untouched.
 - `migrate_embedded_pool` parses every entry before it takes the lock, so a bad entry no longer creates the ledger.
 - Inside an engine v2 migration data step, `&Pool` queries fail with the new `ExecError::InMigrationStep`, `databases::get`/`default` return `None` and `databases::pool` panics: a step writes only through its own unit.
 - `Settings` gains a `migrate` field (`[migrate]`, `MigrateSettings`): a struct literal of `Settings` must add it, or use `..Default::default()`. `boot_stale_after_secs` (default 120) is how old the lock holder's heartbeat may get before a booting replica gives up.
+- Engine v2 `down --to <id>` now rolls back only the target's descendants (over `parents` and `depends_on`), not every row applied after it; descendants in other apps need `--cascade`. A failed or partial migration is rolled back instead of refused.
+- Engine v2 DDL units run with the lock timeout (5 s by default): a PG `CONCURRENTLY` build or a MySQL `ALTER` that waits longer on a lock fails, and the next run resumes it.
 - Engine v2 resume ends the DDL session a killed run left behind. A migrate role ends its own sessions without extra rights; to end another role's session, PG needs `GRANT pg_signal_backend, pg_read_all_stats TO <migrate role>` and MySQL needs `GRANT CONNECTION_ADMIN, PROCESS ON *.* TO <migrate user>`. Without it, resume stops with an error naming the grant and leaves the ledger as it was.
 - `runserver` on an engine v2 project binds before it migrates: `/health` answers 200, `/ready` and every route 503 until the run ends. A SIGTERM during the run stops after the current unit and exits non-zero; the next start resumes.
 

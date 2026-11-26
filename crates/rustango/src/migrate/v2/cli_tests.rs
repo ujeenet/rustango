@@ -120,3 +120,32 @@ async fn status_names_a_planned_stop() {
     let out = cli(&pool, &dir, &["dbmigrate", "apply"]).await.unwrap();
     assert!(out.contains("Applied 0002_n"), "{out}");
 }
+
+/// `apply <earlier id>` rolls back only with --allow-rollback; a pending
+/// target applies up to it (decision 6).
+#[tokio::test]
+async fn apply_to_an_earlier_target_needs_allow_rollback() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("migrations");
+    v2_project(&dir);
+    let pool = sqlite(tmp.path()).await;
+    let out = cli(&pool, &dir, &["dbmigrate", "apply", "0001_t"])
+        .await
+        .unwrap();
+    assert_eq!(out, "Applied 0001_t\n");
+    cli(&pool, &dir, &["dbmigrate", "apply"]).await.unwrap();
+    let e = cli(&pool, &dir, &["dbmigrate", "apply", "0001_t"])
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("--allow-rollback"), "{e}");
+    let out = cli(&pool, &dir, &["dbmigrate", "status"]).await.unwrap();
+    assert_eq!(out, "[X] project:0001_t\n[X] project:0002_n\n");
+    let out = cli(
+        &pool,
+        &dir,
+        &["dbmigrate", "apply", "0001_t", "--allow-rollback"],
+    )
+    .await
+    .unwrap();
+    assert_eq!(out, "Rolled back 0002_n\n");
+}

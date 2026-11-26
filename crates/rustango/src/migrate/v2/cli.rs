@@ -236,6 +236,7 @@ async fn apply<W: Write>(
         accept_step_change,
         accept_drift: value(args, "--accept-drift")?.map(str::to_owned),
         dry_run: args.iter().any(|a| a == "--plan" || a == "--dry-run"),
+        accept_archive_size: args.iter().any(|a| a == "--accept-archive-size"),
         up_to: target.map(str::to_owned),
         ..super::run::Options::default()
     };
@@ -292,6 +293,7 @@ async fn down<W: Write>(
 ) -> Result<(), MigrateError> {
     let opts = super::run::Options {
         accept_data_loss: args.iter().any(|a| a == "--accept-data-loss"),
+        cascade: args.iter().any(|a| a == "--cascade"),
         ..super::run::Options::default()
     };
     let steps = match value(args, "--to")? {
