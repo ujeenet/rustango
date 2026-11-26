@@ -1442,10 +1442,14 @@ impl Cli {
                 canaries: m.fleet_canaries.clone(),
                 max_failures: m.fleet_max_failures,
                 active_only: m.fleet_active_only,
+                migrator: crate::tenancy::migrate_v2::MigratorLogin::from_env(),
                 ..Default::default()
             };
         }
-        crate::tenancy::migrate_v2::FleetOptions::default()
+        crate::tenancy::migrate_v2::FleetOptions {
+            migrator: crate::tenancy::migrate_v2::MigratorLogin::from_env(),
+            ..Default::default()
+        }
     }
 
     /// `[server] migrate_on_boot` / `migrate_lock_timeout_secs`, under [`Cli::migrate_on_boot`].

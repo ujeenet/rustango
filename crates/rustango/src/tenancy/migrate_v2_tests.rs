@@ -1594,3 +1594,154 @@ async fn extensions_move_to_their_own_schema() {
     f.fleet(&FleetOptions::default()).await.unwrap();
     assert!(exists_in(&reg, "s_t1", "other").await);
 }
+
+/// MySQL DB mode with a separate migrator login (design item 18): the
+/// tenant login's table-level ledger grants are revoked, SELECT on the
+/// ledger kept; a tenant login with database-level writes refuses the
+/// fleet before any change, naming the fix.
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn mysql_tenant_login_loses_ledger_writes_or_refuses() {
+    let _g = serial().lock().await;
+    let Some(admin) = crate::testkit::matrix::live_url("MYSQL_TEST_URL", "mysql") else {
+        return;
+    };
+    let (r, mut a, mut b) = (
+        Scratch::create(&admin, "rvr").await,
+        Scratch::create(&admin, "rva").await,
+        Scratch::create(&admin, "rvb").await,
+    );
+    let (narrow, wide) = (
+        format!("rv5n_{}", std::process::id()),
+        format!("rv5w_{}", std::process::id()),
+    );
+    let root = Pool::connect(&admin).await.unwrap();
+    for sql in [
+        format!("CREATE USER '{narrow}'@'%' IDENTIFIED BY 'pw'"),
+        format!("CREATE USER '{wide}'@'%' IDENTIFIED BY 'pw'"),
+        format!("GRANT ALL ON `{}`.* TO '{wide}'@'%'", b.name),
+    ] {
+        raw_execute_pool(&root, &sql, Vec::new()).await.unwrap();
+    }
+    a.roles.push(narrow.clone());
+    b.roles.push(wide.clone());
+    let (user, rest) = admin
+        .strip_prefix("mysql://")
+        .unwrap()
+        .split_once('@')
+        .unwrap();
+    let (mig_user, mig_pw) = user.split_once(':').unwrap();
+    let host = rest.split_once('/').unwrap().0;
+    let tenant_url = |login: &str, db: &str| format!("mysql://{login}:pw@{host}/{db}");
+    let raw = sqlx::MySqlPool::connect(&r.url).await.unwrap();
+    let registry: Pool = raw.clone().into();
+    let pools = TenantPools::new(raw);
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("migrations");
+    std::fs::create_dir_all(&dir).unwrap();
+    let fo = FleetOptions {
+        migrator: Some(MigratorLogin {
+            user: mig_user.to_owned(),
+            password: mig_pw.to_owned(),
+        }),
+        ..FleetOptions::default()
+    };
+    run_fleet(&pools, &dir, &r.url, &fo).await.unwrap();
+    let add = |slug: &str, url: String| {
+        let mut org = crate::testkit::org_with(|o| {
+            o.id = crate::sql::Auto::default();
+            o.slug = slug.into();
+            o.display_name = slug.into();
+            o.storage_mode = StorageMode::Database;
+            o.backend_kind = crate::tenancy::BackendKind::MySql;
+            o.database_url = Some(url);
+            o.schema_name = None;
+            o.host_pattern = None;
+            o.port = None;
+            o.path_prefix = None;
+        });
+        let registry = registry.clone();
+        async move { org.insert(&registry).await.unwrap() }
+    };
+    add("narrow", tenant_url(&narrow, &a.name)).await;
+    put(
+        &dir,
+        "0001_items",
+        &file("0001_items", &[], "tenant", items()),
+    );
+    // The narrow login alone: it migrates, then gets table-level ledger grants.
+    let rep = run_fleet(&pools, &dir, &r.url, &fo).await.unwrap();
+    assert_eq!(rep.failed().count(), 0, "{rep:?}");
+    let ledger = Ledger::default_names();
+    for t in [ledger.table.as_str(), ledger.events.as_str()] {
+        let sql = format!(
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON `{}`.`{t}` TO '{narrow}'@'%'",
+            a.name
+        );
+        raw_execute_pool(&root, &sql, Vec::new()).await.unwrap();
+    }
+    put(
+        &dir,
+        "0002_more",
+        &file(
+            "0002_more",
+            &["0001_items"],
+            "tenant",
+            json!([{"op": "create_table", "v": 1,
+            "table": {"name": "more", "scope": "tenant",
+            "fields": [{"column": "id", "ty": "i64", "primary_key": true, "nullable": false}]}}]),
+        ),
+    );
+    let rep = run_fleet(&pools, &dir, &r.url, &fo).await.unwrap();
+    assert_eq!(rep.failed().count(), 0, "{rep:?}");
+    let as_tenant = Pool::connect(&tenant_url(&narrow, &a.name)).await.unwrap();
+    let read: Vec<(i64,)> = raw_query_pool(
+        &format!("SELECT COUNT(*) FROM {}", ledger.table),
+        Vec::new(),
+        &as_tenant,
+    )
+    .await
+    .unwrap();
+    assert!(read[0].0 >= 2);
+    for sql in [
+        format!("UPDATE {} SET pos = pos", ledger.table),
+        format!("DELETE FROM {}", ledger.events),
+    ] {
+        let e = raw_execute_pool(&as_tenant, &sql, Vec::new())
+            .await
+            .expect_err("revoked");
+        assert!(e.to_string().contains("denied"), "{sql}: {e}");
+    }
+    as_tenant.close().await;
+    // A database-level grant: the fleet refuses before any tenant changes.
+    add("wide", tenant_url(&wide, &b.name)).await;
+    put(
+        &dir,
+        "0003_other",
+        &file(
+            "0003_other",
+            &["0002_more"],
+            "tenant",
+            json!([{"op": "create_table", "v": 1,
+            "table": {"name": "other", "scope": "tenant",
+            "fields": [{"column": "id", "ty": "i64", "primary_key": true, "nullable": false}]}}]),
+        ),
+    );
+    let e = run_fleet(&pools, &dir, &r.url, &fo)
+        .await
+        .expect_err("refused");
+    let msg = e.to_string();
+    assert!(
+        msg.contains("wide") && msg.contains("database-level") && msg.contains("table-level"),
+        "{msg}"
+    );
+    assert!(crate::migrate::v2::catalog::read_table(
+        &Pool::connect(&a.url).await.unwrap(),
+        "other"
+    )
+    .await
+    .unwrap()
+    .is_none());
+    registry.close().await;
+    root.close().await;
+}

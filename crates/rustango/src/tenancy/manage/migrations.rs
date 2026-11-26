@@ -444,6 +444,7 @@ fn fleet_flags(args: &[String]) -> Result<crate::tenancy::migrate_v2::FleetOptio
         expand_only,
         allow_mixed_heads: parsed.has("--allow-mixed-heads"),
         abandon: parsed.has("--abandon-fleet-run"),
+        migrator: crate::tenancy::migrate_v2::MigratorLogin::from_env(),
     })
 }
 
@@ -659,7 +660,11 @@ where
     }
 
     if is_v2(dir)? {
-        return v2_fleet(pools, registry_url, dir, &Default::default(), w).await;
+        let fo = crate::tenancy::migrate_v2::FleetOptions {
+            migrator: crate::tenancy::migrate_v2::MigratorLogin::from_env(),
+            ..Default::default()
+        };
+        return v2_fleet(pools, registry_url, dir, &fo, w).await;
     }
     // As boot does: the registry, then the tenants through the one
     // dispatch seam (see `migrate_tenants_dyn_with_progress`); each walks

@@ -518,6 +518,46 @@ fn events_table(name: &str) -> TableState {
     )
 }
 
+/// MySQL `GRANTEE` (`'user'@'host'`) names the login bound at `n`.
+fn grantee_is(pool: &Pool, n: usize) -> String {
+    format!(
+        "SUBSTRING(GRANTEE, 2, LOCATE('''@', GRANTEE) - 2) = {}",
+        p(pool, n)
+    )
+}
+
+/// Write privileges MySQL `login` holds on the whole database or server:
+/// no table-level REVOKE narrows them, so the ledger cannot be locked away
+/// from it. The refusal names the fix; `None` elsewhere.
+///
+/// # Errors
+/// Driver failures (reading grants needs `SELECT` on the `mysql` schema).
+pub(crate) async fn wide_grants(pool: &Pool, login: &str) -> Result<Option<String>, MigrateError> {
+    const WRITES: &str = "('INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'CREATE')";
+    if pool.dialect().kind() != crate::sql::DialectKind::Mysql {
+        return Ok(None);
+    }
+    let sql = format!(
+        "SELECT PRIVILEGE_TYPE FROM information_schema.SCHEMA_PRIVILEGES \
+         WHERE TABLE_SCHEMA = DATABASE() AND PRIVILEGE_TYPE IN {WRITES} AND {} \
+         UNION SELECT PRIVILEGE_TYPE FROM information_schema.USER_PRIVILEGES \
+         WHERE PRIVILEGE_TYPE IN {WRITES} AND {}",
+        grantee_is(pool, 1),
+        grantee_is(pool, 2)
+    );
+    let found: Vec<(String,)> = raw_query_pool(&sql, vec![s(login), s(login)], pool).await?;
+    if found.is_empty() {
+        return Ok(None);
+    }
+    let privs: Vec<String> = found.into_iter().map(|r| r.0).collect();
+    Ok(Some(format!(
+        "tenant login `{login}` holds database-level {} on its database, which MySQL cannot \
+         narrow by table: grant it table-level privileges instead (or a separate login with \
+         no database-wide writes), so the ledger stays read-only to it",
+        privs.join(", ")
+    )))
+}
+
 fn p(pool: &Pool, n: usize) -> String {
     pool.dialect().placeholder(n)
 }
@@ -571,9 +611,14 @@ impl Ledger {
     /// # Errors
     /// Driver failures.
     pub(crate) async fn revoke(&self, pool: &Pool, role: &str) -> Result<(), MigrateError> {
-        if pool.dialect().kind() != crate::sql::DialectKind::Postgres {
-            return Ok(());
+        match pool.dialect().kind() {
+            crate::sql::DialectKind::Postgres => self.revoke_pg(pool, role).await,
+            crate::sql::DialectKind::Mysql => self.revoke_mysql(pool, role).await,
+            _ => Ok(()),
         }
+    }
+
+    async fn revoke_pg(&self, pool: &Pool, role: &str) -> Result<(), MigrateError> {
         let d = pool.dialect();
         let all: Vec<String> = [&self.table, &self.events, &self.progress, &self.undo]
             .iter()
@@ -592,6 +637,47 @@ impl Ledger {
             Vec::new(),
         )
         .await?;
+        Ok(())
+    }
+
+    /// MySQL cannot narrow a database-level grant by table (design item
+    /// 18): `login`'s table-level grants on the ledger tables go, SELECT on
+    /// the ledger stays. [`wide_grants`] refuses the rest beforehand.
+    async fn revoke_mysql(&self, pool: &Pool, login: &str) -> Result<(), MigrateError> {
+        let d = pool.dialect();
+        for t in [&self.table, &self.events, &self.progress, &self.undo] {
+            let grants: Vec<(String, String)> = raw_query_pool(
+                &format!(
+                    "SELECT GRANTEE, PRIVILEGE_TYPE FROM information_schema.TABLE_PRIVILEGES \
+                     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = {} AND {}",
+                    p(pool, 1),
+                    grantee_is(pool, 2)
+                ),
+                vec![s(t.as_str()), s(login)],
+                pool,
+            )
+            .await?;
+            let mut by_grantee: std::collections::BTreeMap<String, Vec<String>> =
+                std::collections::BTreeMap::new();
+            for (grantee, privilege) in grants {
+                if !(t == &self.table && privilege == "SELECT") {
+                    by_grantee.entry(grantee).or_default().push(privilege);
+                }
+            }
+            for (grantee, privs) in by_grantee {
+                // The grantee is the catalog's own quoted `'user'@'host'`.
+                raw_execute_pool(
+                    pool,
+                    &format!(
+                        "REVOKE {} ON {} FROM {grantee}",
+                        privs.join(", "),
+                        d.quote_ident(t)
+                    ),
+                    Vec::new(),
+                )
+                .await?;
+            }
+        }
         Ok(())
     }
 

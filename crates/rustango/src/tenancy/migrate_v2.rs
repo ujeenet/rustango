@@ -23,15 +23,64 @@ pub(crate) struct Target {
     owned: bool,
 }
 
-/// `org`'s v2 target. A schema tenant gets a pool whose path is its schema
-/// alone: nothing falls through to `public` (decision 1).
+/// The login the fleet migrates database-mode tenants as, from
+/// `RUSTANGO_TENANT_MIGRATOR=user:password`. When it differs from a
+/// tenant's own login, that login gets no write access to the ledger (8.1).
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct MigratorLogin {
+    pub(crate) user: String,
+    pub(crate) password: String,
+}
+
+impl std::fmt::Debug for MigratorLogin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MigratorLogin")
+            .field("user", &self.user)
+            .finish_non_exhaustive()
+    }
+}
+
+impl MigratorLogin {
+    pub(crate) const ENV: &'static str = "RUSTANGO_TENANT_MIGRATOR";
+
+    /// [`Self::ENV`], when set.
+    pub(crate) fn from_env() -> Option<Self> {
+        let v = std::env::var(Self::ENV).ok()?;
+        let (user, password) = v.split_once(':')?;
+        Some(Self {
+            user: user.to_owned(),
+            password: password.to_owned(),
+        })
+    }
+}
+
+/// `org`'s v2 target, migrated as its own login.
 ///
 /// # Errors
-/// An unreachable database, a foreign schema, or schema mode off PG.
+/// As [`target_as`].
+#[cfg(test)]
 pub(crate) async fn target<DB: Database>(
     pools: &TenantPools<DB>,
     org: &Org,
     registry_url: &str,
+) -> Result<Target, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    target_as(pools, org, registry_url, None).await
+}
+
+/// `org`'s v2 target. A schema tenant gets a pool whose path is its schema
+/// alone: nothing falls through to `public` (decision 1). A database tenant
+/// is migrated as `migrator` when given and not its own login.
+///
+/// # Errors
+/// An unreachable database, a foreign schema, or schema mode off PG.
+pub(crate) async fn target_as<DB: Database>(
+    pools: &TenantPools<DB>,
+    org: &Org,
+    registry_url: &str,
+    migrator: Option<&MigratorLogin>,
 ) -> Result<Target, TenancyError>
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
@@ -75,6 +124,18 @@ where
         )));
     }
     let _ = registry_url;
+    if let Some(m) = migrator {
+        let url = pools.resolved_database_url(org).await?;
+        if let Some((pool, tenant_login)) = as_migrator(&url, m).await? {
+            return Ok(Target {
+                slug: org.slug.clone(),
+                pool,
+                scope: LockScope::Session,
+                role: Some(tenant_login),
+                owned: true,
+            });
+        }
+    }
     let pool = match pools.database_pool_for_org(org).await? {
         super::pools::TenantPool::Database { pool } => crate::sql::Pool::from((*pool).clone()),
         #[cfg(feature = "postgres")]
@@ -89,6 +150,46 @@ where
         role: None,
         owned: false,
     })
+}
+
+/// A pool on the tenant database at `url` logged in as `m`, and the
+/// tenant's own login; `None` when they are the same login (the
+/// documented gap) or the backend has no logins.
+#[allow(clippy::unused_async)]
+async fn as_migrator(
+    url: &str,
+    m: &MigratorLogin,
+) -> Result<Option<(crate::sql::Pool, String)>, TenancyError> {
+    let _ = m;
+    match super::BackendKind::of_url(url) {
+        #[cfg(feature = "mysql")]
+        Some(super::BackendKind::MySql) => {
+            let opts: sqlx::mysql::MySqlConnectOptions = url.parse()?;
+            let tenant = opts.get_username().to_owned();
+            if tenant == m.user {
+                return Ok(None);
+            }
+            let pool = sqlx::mysql::MySqlPoolOptions::new()
+                .max_connections(2)
+                .connect_with(opts.username(&m.user).password(&m.password))
+                .await?;
+            Ok(Some((pool.into(), tenant)))
+        }
+        #[cfg(feature = "postgres")]
+        Some(super::BackendKind::Postgres) => {
+            let opts: sqlx::postgres::PgConnectOptions = url.parse()?;
+            let tenant = opts.get_username().to_owned();
+            if tenant == m.user {
+                return Ok(None);
+            }
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(2)
+                .connect_with(opts.username(&m.user).password(&m.password))
+                .await?;
+            Ok(Some((pool.into(), tenant)))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// A small pool on the registry database whose every connection's path is
@@ -135,6 +236,8 @@ pub(crate) struct FleetOptions {
     /// `--abandon-fleet-run`: a run with another plan that did not finish
     /// is marked abandoned instead of refusing this one.
     pub(crate) abandon: bool,
+    /// The login database tenants are migrated as ([`MigratorLogin::from_env`]).
+    pub(crate) migrator: Option<MigratorLogin>,
 }
 
 /// One tenant's result.
@@ -254,7 +357,7 @@ where
         extensions_home(registry).await?;
     }
     let orgs = fleet_orgs(registry, fo).await?;
-    let (targets, unreachable) = targets_of(pools, &orgs, registry_url).await;
+    let (targets, unreachable) = targets_of(pools, &orgs, registry_url, fo.migrator.as_ref()).await;
     report.tenants.extend(unreachable);
     // `requires: tenants:<id>` holds when every tenant has applied it.
     let mut everywhere: Option<std::collections::BTreeSet<String>> = None;
@@ -439,7 +542,7 @@ where
         if fresh.is_empty() {
             break;
         }
-        let (t, unreachable) = targets_of(pools, &fresh, registry_url).await;
+        let (t, unreachable) = targets_of(pools, &fresh, registry_url, fo.migrator.as_ref()).await;
         bump(unreachable.len());
         report.tenants.extend(unreachable);
         targets = t;
@@ -564,6 +667,7 @@ async fn targets_of<DB: Database>(
     pools: &TenantPools<DB>,
     orgs: &[Org],
     registry_url: &str,
+    migrator: Option<&MigratorLogin>,
 ) -> (Vec<Target>, Vec<TenantOutcome>)
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
@@ -571,7 +675,7 @@ where
     let mut targets = Vec::new();
     let mut unreachable = Vec::new();
     for org in orgs {
-        match target(pools, org, registry_url).await {
+        match target_as(pools, org, registry_url, migrator).await {
             Ok(t) => targets.push(t),
             Err(e) => unreachable.push(TenantOutcome {
                 slug: org.slug.clone(),
@@ -609,6 +713,12 @@ impl Fleet<'_> {
     async fn refuse_blockers(&self, targets: &[Target]) -> Result<(), TenancyError> {
         let mut blockers = Vec::new();
         for t in targets {
+            if let Some(login) = &t.role {
+                if let Some(wide) = crate::migrate::v2::ledger::wide_grants(&t.pool, login).await? {
+                    blockers.push(format!("  - {}: {wide}", t.slug));
+                    continue;
+                }
+            }
             if let Err(e) = run::migrate(&t.pool, self.dir, &self.opts(t, true, false)).await {
                 if e.code().is_some() {
                     blockers.push(format!("  - {}: {e}", t.slug));

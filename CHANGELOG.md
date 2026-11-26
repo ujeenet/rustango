@@ -20,6 +20,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Engine v2 `adopt` switches tenancy folders: one checkpoint for the registry chain and one for the tenant chain. A tenant→registry FK is listed and refused; tenants behind the v1 head block the fleet with the pre-switch message.
 - Engine v2 under tenancy keeps Postgres extensions in an `extensions` schema: a one-time move from `public` (and the database `search_path`), tenant paths that leave out `public` when it holds tables, and a refusal naming the fix when an extension the registry chain declares is missing or off the tenant path.
 - Boot of a v2 tenancy project binds before the fleet runs: `/health` answers 200, `/ready` 503 until it ends.
+- Engine v2 database-mode tenants migrate as `RUSTANGO_TENANT_MIGRATOR` when set; the tenant login keeps read-only access to the ledger, and on MySQL a database-level tenant grant refuses the fleet run with the fix.
 
 ### Fixed
 
