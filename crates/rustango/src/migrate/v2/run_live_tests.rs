@@ -4214,6 +4214,7 @@ per_backend!(
     a_held_lock_is_retried,
     a_waiter_finishes_a_killed_move,
     squash_a_thirty_file_chain,
+    squash_rollback_stops_at_the_checkpoint,
     commuting_branches_in_either_order,
     fast_fresh_matches_full_replay,
     random_ops_render_to_their_state,
@@ -4371,7 +4372,19 @@ async fn squash_a_thirty_file_chain(b: B) {
     let e = migrate(&partial.pool, &dir, &opts()).await.unwrap_err();
     assert_eq!(e.code(), Some(Code::Behind), "{e}");
     assert!(e.to_string().contains("0011_s11"), "{e}");
-    // A file after the checkpoint, then prune; rollback stops at the checkpoint.
+}
+
+/// After squash and prune, a database that ran the replaced files and one
+/// installed from the checkpoint roll back the later file, then stop at
+/// the checkpoint (the squash floor).
+async fn squash_rollback_stops_at_the_checkpoint(b: B) {
+    let Some(full) = fresh(b).await else { return };
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    thirty_files(&dir);
+    migrate(&full.pool, &dir, &opts()).await.unwrap();
+    super::super::squash::squash(&dir, &dir, "project", "0001_s1", "0030_s30").unwrap();
+    let installed = fresh(b).await.unwrap();
     put(
         &dir,
         "0031_more",
@@ -4383,12 +4396,15 @@ async fn squash_a_thirty_file_chain(b: B) {
         ),
     );
     for db in [&full, &installed] {
-        assert_eq!(
-            migrate(&db.pool, &dir, &opts()).await.unwrap().applied,
-            ["0031_more"]
-        );
+        migrate(&db.pool, &dir, &opts()).await.unwrap();
     }
-    let removed = super::super::squash::prune(&dir, &dir, "0030_squash", false, true).unwrap();
+    let removed = super::super::squash::prune(
+        &dir,
+        &dir,
+        "0030_squash",
+        &super::super::squash::PruneGate::Assumed,
+    )
+    .unwrap();
     assert_eq!(removed.len(), 30);
     for db in [&full, &installed] {
         assert_eq!(

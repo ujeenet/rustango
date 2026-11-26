@@ -218,19 +218,40 @@ async fn squash<W: Write>(
     w: &mut W,
 ) -> Result<(), MigrateError> {
     if let Some(id) = value(args, "--prune")? {
-        let applied = super::ledger::Ledger::default_names()
-            .rows(pool)
-            .await?
-            .iter()
-            .any(|r| r.id == id && r.state == super::ledger::RowState::Applied);
-        let assume = args.iter().any(|a| a == "--assume-all-applied");
-        let removed = super::squash::prune(dir, &app_folder(dir, args)?, id, applied, assume)
-            .map_err(load)?;
-        for p in removed {
-            writeln!(w, "Removed {}", p.display()).map_err(io)?;
-        }
-        return Ok(());
+        let gate = if args.iter().any(|a| a == "--assume-all-applied") {
+            super::squash::PruneGate::Assumed
+        } else {
+            super::squash::PruneGate::Here {
+                applied: super::ledger::Ledger::default_names()
+                    .rows(pool)
+                    .await?
+                    .iter()
+                    .any(|r| r.id == id && r.state == super::ledger::RowState::Applied),
+            }
+        };
+        prune_with(dir, args, id, &gate, w)
+    } else {
+        make_squash(dir, args, w)
     }
+}
+
+/// `squash --prune` once its gate is known; the tenancy CLI reads the
+/// fleet's ledgers for it.
+pub(crate) fn prune_with<W: Write>(
+    dir: &Path,
+    args: &[String],
+    id: &str,
+    gate: &super::squash::PruneGate,
+    w: &mut W,
+) -> Result<(), MigrateError> {
+    let removed = super::squash::prune(dir, &app_folder(dir, args)?, id, gate).map_err(load)?;
+    for p in removed {
+        writeln!(w, "Removed {}", p.display()).map_err(io)?;
+    }
+    Ok(())
+}
+
+fn make_squash<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<(), MigrateError> {
     let free: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
     let (Some(app), Some(range)) = (free.first(), free.get(1)) else {
         return Err(usage("squash <app> <from>..<to>"));

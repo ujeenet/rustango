@@ -325,6 +325,13 @@ where
             )?;
             migrations::tenant_failures(report.failed, report.total_active)
         }
+        // A prune under tenancy reads every ledger, not just the registry's (9.6).
+        "dbmigrate"
+            if args.get(1).map(String::as_str) == Some("squash")
+                && !args.iter().any(|a| a == "--assume-all-applied") =>
+        {
+            migrations::v2_prune(pools, registry_url, dir, &args[2..], writer).await
+        }
         "migrate-tenants" => {
             migrations::migrate_tenants_cmd(pools, registry_url, dir, &args[1..], writer).await
         }

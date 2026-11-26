@@ -1,8 +1,6 @@
 //! Engine v2 under tenancy, live: schema mode on PG, DB mode on all three.
 
-use std::path::Path;
-#[cfg(feature = "postgres")]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
@@ -1596,11 +1594,23 @@ async fn extensions_move_to_their_own_schema() {
 
 /// MySQL DB mode with a separate migrator login (design item 18): the
 /// tenant login's table-level ledger grants are revoked, SELECT on the
-/// ledger kept; a tenant login with database-level writes refuses the
-/// fleet before any change, naming the fix.
+/// ledger kept.
 #[cfg(feature = "mysql")]
 #[tokio::test]
-async fn mysql_tenant_login_loses_ledger_writes_or_refuses() {
+async fn mysql_tenant_login_loses_table_level_ledger_writes() {
+    mysql_revoke_case(false).await;
+}
+
+/// A tenant login with database-level writes refuses the fleet before any
+/// change, naming the fix (design item 18).
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn mysql_tenant_login_with_database_writes_refuses() {
+    mysql_revoke_case(true).await;
+}
+
+#[cfg(feature = "mysql")]
+async fn mysql_revoke_case(wide_case: bool) {
     let _g = serial().lock().await;
     let Some(admin) = crate::testkit::matrix::live_url("MYSQL_TEST_URL", "mysql") else {
         return;
@@ -1662,6 +1672,32 @@ async fn mysql_tenant_login_loses_ledger_writes_or_refuses() {
         let registry = registry.clone();
         async move { org.insert(&registry).await.unwrap() }
     };
+    if wide_case {
+        add("wide", tenant_url(&wide, &b.name)).await;
+        put(
+            &dir,
+            "0001_items",
+            &file("0001_items", &[], "tenant", items()),
+        );
+        let e = run_fleet(&pools, &dir, &r.url, &fo)
+            .await
+            .expect_err("refused");
+        let msg = e.to_string();
+        assert!(
+            msg.contains("wide") && msg.contains("database-level") && msg.contains("table-level"),
+            "{msg}"
+        );
+        assert!(crate::migrate::v2::catalog::read_table(
+            &Pool::connect(&b.url).await.unwrap(),
+            "items"
+        )
+        .await
+        .unwrap()
+        .is_none());
+        registry.close().await;
+        root.close().await;
+        return;
+    }
     add("narrow", tenant_url(&narrow, &a.name)).await;
     put(
         &dir,
@@ -1712,35 +1748,137 @@ async fn mysql_tenant_login_loses_ledger_writes_or_refuses() {
         assert!(e.to_string().contains("denied"), "{sql}: {e}");
     }
     as_tenant.close().await;
-    // A database-level grant: the fleet refuses before any tenant changes.
-    add("wide", tenant_url(&wide, &b.name)).await;
-    put(
-        &dir,
-        "0003_other",
-        &file(
-            "0003_other",
-            &["0002_more"],
-            "tenant",
-            json!([{"op": "create_table", "v": 1,
-            "table": {"name": "other", "scope": "tenant",
-            "fields": [{"column": "id", "ty": "i64", "primary_key": true, "nullable": false}]}}]),
-        ),
-    );
-    let e = run_fleet(&pools, &dir, &r.url, &fo)
-        .await
-        .expect_err("refused");
-    let msg = e.to_string();
-    assert!(
-        msg.contains("wide") && msg.contains("database-level") && msg.contains("table-level"),
-        "{msg}"
-    );
-    assert!(crate::migrate::v2::catalog::read_table(
-        &Pool::connect(&a.url).await.unwrap(),
-        "other"
-    )
-    .await
-    .unwrap()
-    .is_none());
     registry.close().await;
     root.close().await;
+}
+
+/// Prune under tenancy (9.6): refused while a tenant ran part of what the
+/// checkpoint replaces; allowed once it caught up with the old files.
+/// `slugs` are orgs already on `pools`, the registry chain run.
+async fn prune_waits_for_tenants<DB: sqlx::Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    dir: &Path,
+    slugs: [&str; 2],
+) where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    use crate::core::Column as _;
+    use crate::sql::FetcherPool as _;
+    let registry = pools.registry_pool();
+    let org = |slug: &str| {
+        let registry = registry.clone();
+        let slug = slug.to_owned();
+        async move {
+            Org::objects()
+                .where_(Org::slug.eq(slug))
+                .fetch(&registry)
+                .await
+                .unwrap()
+                .remove(0)
+        }
+    };
+    let table = |name: &str| {
+        json!([{"op": "create_table", "v": 1, "table": {"name": name, "scope": "tenant",
+            "fields": [{"column": "id", "ty": "i64", "primary_key": true, "nullable": false}]}}])
+    };
+    put(dir, "0001_a", &file("0001_a", &[], "tenant", table("pr_a")));
+    run_fleet(pools, dir, registry_url, &FleetOptions::default())
+        .await
+        .unwrap();
+    put(
+        dir,
+        "0002_b",
+        &file("0002_b", &["0001_a"], "tenant", table("pr_b")),
+    );
+    put(
+        dir,
+        "0003_c",
+        &file("0003_c", &["0002_b"], "tenant", table("pr_c")),
+    );
+    // The pre-squash files, for the tenant that catches up later.
+    let old = tempfile::tempdir().unwrap();
+    let old_dir = old.path().join("migrations");
+    std::fs::create_dir_all(&old_dir).unwrap();
+    for e in std::fs::read_dir(dir).unwrap() {
+        let p = e.unwrap().path();
+        std::fs::copy(&p, old_dir.join(p.file_name().unwrap())).unwrap();
+    }
+    let run_one = |slug: &str, d: PathBuf| {
+        let o = org(slug);
+        async move {
+            let t = target(pools, &o.await, registry_url).await.unwrap();
+            let opts = Options {
+                run_as: RunAs::Tenant,
+                lock_scope: t.scope.clone(),
+                ..Options::default()
+            };
+            run::migrate(&t.pool, &d, &opts).await.unwrap();
+        }
+    };
+    run_one(slugs[0], dir.to_path_buf()).await;
+    crate::migrate::v2::squash::squash(dir, dir, "project", "0001_a", "0003_c").unwrap();
+    let gate = prune_gate(pools, dir, registry_url, "0003_squash")
+        .await
+        .unwrap();
+    assert_eq!(
+        gate,
+        crate::migrate::v2::squash::PruneGate::Fleet {
+            behind: vec![slugs[1].to_owned()]
+        }
+    );
+    let e = crate::migrate::v2::squash::prune(dir, dir, "0003_squash", &gate).unwrap_err();
+    assert!(e.msg.contains(slugs[1]), "{e}");
+    run_one(slugs[1], old_dir).await;
+    let gate = prune_gate(pools, dir, registry_url, "0003_squash")
+        .await
+        .unwrap();
+    let removed = crate::migrate::v2::squash::prune(dir, dir, "0003_squash", &gate).unwrap();
+    assert_eq!(removed.len(), 3);
+    run_fleet(pools, dir, registry_url, &FleetOptions::default())
+        .await
+        .unwrap();
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn prune_waits_for_a_behind_schema_tenant() {
+    let _g = serial().lock().await;
+    let Some(f) = PgFleet::new("prune").await else {
+        return;
+    };
+    f.with_orgs(&["t1", "t2"]).await;
+    prune_waits_for_tenants(&f.pools(), &f.db.url, &f.dir(), ["t1", "t2"]).await;
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn prune_waits_for_a_behind_database_tenant() {
+    let _g = serial().lock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let url = |n: &str| format!("sqlite:{}?mode=rwc", tmp.path().join(n).display());
+    let registry_url = url("registry.db");
+    let raw = sqlx::SqlitePool::connect(&registry_url).await.unwrap();
+    let pools = TenantPools::new(raw.clone());
+    let dir = tmp.path().join("project").join("migrations");
+    std::fs::create_dir_all(&dir).unwrap();
+    run_fleet(&pools, &dir, &registry_url, &FleetOptions::default())
+        .await
+        .unwrap();
+    for slug in ["d0", "d1"] {
+        let mut org = crate::testkit::org_with(|o| {
+            o.id = crate::sql::Auto::default();
+            o.slug = slug.into();
+            o.display_name = slug.into();
+            o.storage_mode = StorageMode::Database;
+            o.backend_kind = crate::tenancy::BackendKind::Sqlite;
+            o.database_url = Some(url(&format!("{slug}.db")));
+            o.schema_name = None;
+            o.host_pattern = None;
+            o.port = None;
+            o.path_prefix = None;
+        });
+        org.insert(&Pool::from(raw.clone())).await.unwrap();
+    }
+    prune_waits_for_tenants(&pools, &registry_url, &dir, ["d0", "d1"]).await;
 }

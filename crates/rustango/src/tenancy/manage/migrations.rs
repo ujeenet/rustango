@@ -448,6 +448,36 @@ fn fleet_flags(args: &[String]) -> Result<crate::tenancy::migrate_v2::FleetOptio
     })
 }
 
+/// `dbmigrate squash --prune <id>` under tenancy: refused while the registry
+/// or a tenant still needs the replaced files. Without `--prune` it writes
+/// the checkpoint as the single-database CLI does.
+pub(super) async fn v2_prune<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    dir: &Path,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let id = match args.iter().position(|a| a == "--prune") {
+        Some(i) => args
+            .get(i + 1)
+            .ok_or_else(|| TenancyError::Validation("--prune needs a checkpoint id".into()))?,
+        None => {
+            let mut full = vec!["squash".to_owned()];
+            full.extend(args.iter().cloned());
+            let registry = pools.registry_pool();
+            return Ok(crate::migrate::v2::cli::run(&registry, dir, &full, w).await?);
+        }
+    };
+    let gate = crate::tenancy::migrate_v2::prune_gate(pools, dir, registry_url, id).await?;
+    Ok(crate::migrate::v2::cli::prune_with(
+        dir, args, id, &gate, w,
+    )?)
+}
+
 /// The registry chain, then every tenant's, and the report. Failed
 /// tenants are listed with their error class; any failure exits non-zero.
 async fn v2_fleet<W: Write + Send, DB: Database>(

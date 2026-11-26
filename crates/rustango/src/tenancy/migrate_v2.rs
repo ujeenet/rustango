@@ -662,6 +662,64 @@ async fn refuse_missing_extensions(
     )))
 }
 
+/// Under tenancy, who still needs the files squash checkpoint `id`
+/// replaces (9.6): the registry, or each tenant (inactive ones too), that
+/// ran part of them and not the checkpoint. An unreachable tenant counts.
+///
+/// # Errors
+/// No such checkpoint, a load error, or reading a ledger.
+pub(crate) async fn prune_gate<DB: Database>(
+    pools: &TenantPools<DB>,
+    dir: &Path,
+    registry_url: &str,
+    id: &str,
+) -> Result<crate::migrate::v2::squash::PruneGate, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    use crate::migrate::v2::squash::{needs_replaced, squash_checkpoint, PruneGate};
+    let project = crate::migrate::v2::load::load_project(dir)
+        .map_err(|e| migrate_err(run::RunError::Load(e)))?;
+    let c = squash_checkpoint(&project, id)
+        .ok_or_else(|| TenancyError::Validation(format!("no squash checkpoint `{id}`")))?
+        .file
+        .clone();
+    let ledger = crate::migrate::v2::ledger::Ledger::default_names();
+    let applied =
+        |rows: Vec<crate::migrate::v2::ledger::Row>| -> std::collections::HashSet<String> {
+            rows.into_iter()
+                .filter(|r| {
+                    r.app == c.app && r.state == crate::migrate::v2::ledger::RowState::Applied
+                })
+                .map(|r| r.id)
+                .collect()
+        };
+    let registry = pools.registry_pool();
+    let mut behind = Vec::new();
+    if c.target == crate::migrate::v2::state::Target::Registry {
+        if needs_replaced(&c, &applied(ledger.rows(&registry).await?)) {
+            behind.push("the registry".to_owned());
+        }
+        return Ok(PruneGate::Fleet { behind });
+    }
+    let orgs = fleet_orgs(&registry, &FleetOptions::default()).await?;
+    let (targets, unreachable) = targets_of(pools, &orgs, registry_url, None).await;
+    behind.extend(
+        unreachable
+            .into_iter()
+            .map(|t| format!("{} (unreachable)", t.slug)),
+    );
+    for t in targets {
+        if needs_replaced(&c, &applied(ledger.rows(&t.pool).await?)) {
+            behind.push(t.slug.clone());
+        }
+        if t.owned {
+            t.pool.close().await;
+        }
+    }
+    Ok(PruneGate::Fleet { behind })
+}
+
 /// Each org's target, and an outcome for each one unreachable.
 async fn targets_of<DB: Database>(
     pools: &TenantPools<DB>,

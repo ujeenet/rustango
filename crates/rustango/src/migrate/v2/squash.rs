@@ -361,40 +361,51 @@ fn changed_later(
     Ok(None)
 }
 
-/// Delete the files `checkpoint` replaces. Refused unless `applied` says
-/// every database ran it (or `assume` is given).
+/// What says the replaced files are no longer needed (9.6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PruneGate {
+    /// One database: whether it applied the checkpoint.
+    Here { applied: bool },
+    /// Under tenancy: the targets (registry or tenant slugs) that ran part
+    /// of what the checkpoint replaces and not the checkpoint itself.
+    Fleet { behind: Vec<String> },
+    /// `--assume-all-applied`.
+    Assumed,
+}
+
+/// Delete the files `checkpoint` replaces, when `gate` allows it.
 ///
 /// # Errors
-/// No such checkpoint, not yet applied, or a file that does not delete.
+/// No such checkpoint, a gate that refuses, or a file that does not delete.
 pub(crate) fn prune(
     dir: &Path,
     folder: &Path,
     checkpoint: &str,
-    applied: bool,
-    assume: bool,
+    gate: &PruneGate,
 ) -> Result<Vec<PathBuf>, LoadError> {
     let project = load_project(dir)?;
     let at = folder.display().to_string();
-    let Some(c) = project
-        .files
-        .iter()
-        .find(|l| l.file.id == checkpoint && !l.file.replaces.is_empty())
-    else {
+    let Some(c) = squash_checkpoint(&project, checkpoint) else {
         return Err(err(
             Code::Graph,
             &at,
             format!("no squash checkpoint `{checkpoint}`"),
         ));
     };
-    if !applied && !assume {
-        return Err(err(
-            Code::State,
-            &c.at,
-            format!(
-                "`{checkpoint}` is not applied here: prune after every database ran it, or pass \
-                 --assume-all-applied"
-            ),
-        ));
+    let refusal = match gate {
+        PruneGate::Here { applied: false } => Some(format!(
+            "`{checkpoint}` is not applied here: prune after every database ran it, or pass \
+             --assume-all-applied"
+        )),
+        PruneGate::Fleet { behind } if !behind.is_empty() => Some(format!(
+            "{} ran part of what `{checkpoint}` replaces and need those files: migrate them \
+             first, or pass --assume-all-applied",
+            behind.join(", ")
+        )),
+        _ => None,
+    };
+    if let Some(msg) = refusal {
+        return Err(err(Code::State, &c.at, msg));
     }
     let mut removed = Vec::new();
     for id in &c.file.replaces {
@@ -406,4 +417,23 @@ pub(crate) fn prune(
         }
     }
     Ok(removed)
+}
+
+/// The squash checkpoint `id` of `project`.
+pub(crate) fn squash_checkpoint<'p>(
+    project: &'p Project,
+    id: &str,
+) -> Option<&'p super::load::Loaded> {
+    project
+        .files
+        .iter()
+        .find(|l| l.file.id == id && !l.file.replaces.is_empty())
+}
+
+/// Whether a ledger holding `applied` ids of the checkpoint's app still
+/// needs the replaced files: part of them ran, the checkpoint did not.
+pub(crate) fn needs_replaced(c: &super::format::File, applied: &HashSet<String>) -> bool {
+    !applied.contains(&c.id)
+        && c.replaces.iter().any(|r| applied.contains(r))
+        && !c.replaces.iter().all(|r| applied.contains(r))
 }
