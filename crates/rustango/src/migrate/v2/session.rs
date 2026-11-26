@@ -53,6 +53,8 @@ impl DdlConn {
         statement: &str,
         lock: std::time::Duration,
     ) -> Result<Self, MigrateError> {
+        // SQLite has no DDL session: neither is read there.
+        let _ = (statement, lock);
         let mut conn = pool.acquire().await?;
         conn.close_on_drop();
         let session = match conn.conn() {

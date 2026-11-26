@@ -1429,9 +1429,13 @@ impl Runner<'_> {
     /// A data step on the runner's own connection: timeouts set, the escape
     /// guard on, rolled back when poisoned, the ledger moved in the same tx.
     async fn data_unit(&mut self, k: (&str, &str), u: &Unit, n: i64) -> Result<(), RunError> {
+        // Only a SQLite pool holds legacy datetime text to sweep.
         if let Some(targets) = self.sweep.take() {
+            #[cfg(feature = "sqlite")]
             crate::migrate::sqlite_datetime::normalise_sqlite_datetimes_in(self.pool, targets)
                 .await?;
+            #[cfg(not(feature = "sqlite"))]
+            let _ = targets;
         }
         let ui = usize::try_from(n).unwrap_or(0);
         let mut batches_here = 0_u64;

@@ -1126,7 +1126,7 @@ async fn missing_steps_run_nothing(b: B) {
     );
     assert!(rows(pool).await.is_empty());
     assert!(
-        !crate::migrate::try_table_exists_here(pool, crate::migrate::SYSTEM_LEDGER_TABLE)
+        !crate::migrate::try_table_exists_here(pool, "__rustango_system_migrations__")
             .await
             .unwrap()
     );
@@ -2051,11 +2051,14 @@ async fn the_testing_helper_runs_a_step(b: B) {
     );
 }
 
+#[cfg(feature = "sqlite")]
 static LOCK_PROBE_URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+#[cfg(feature = "sqlite")]
 static LOCK_PROBE: std::sync::Mutex<Option<bool>> = std::sync::Mutex::new(None);
 
 /// Before writing anything, asks a second SQLite connection for the write
 /// lock: under `BEGIN IMMEDIATE` it is already taken.
+#[cfg(feature = "sqlite")]
 #[crate::data_step(app = "steps", id = "lock_probe_v1")]
 impl LockProbeV1 {
     async fn up(_ctx: &mut StepCtx<'_>, batch: Batch) -> StepResult {
@@ -2968,12 +2971,15 @@ async fn pool_session_state_is_unchanged_after_migrate(b: B) {
             .await
             .unwrap()
             .into(),
+        #[cfg(feature = "sqlite")]
         _ => sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(2)
             .connect(&db.url)
             .await
             .unwrap()
             .into(),
+        #[cfg(not(feature = "sqlite"))]
+        _ => unreachable!("the sqlite case runs only with the sqlite feature"),
     };
     let before = pool_sessions(&pool, 2).await;
     let ids: Vec<i64> = (1..=5).collect();
