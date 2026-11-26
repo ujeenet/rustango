@@ -55,6 +55,8 @@ pub(crate) struct Options {
     /// A boot waiter gives up when the lock holder's heartbeat is this old
     /// while it still holds the lock (6.11); `None` waits on.
     pub(crate) stale_after: Option<std::time::Duration>,
+    /// How often a run holding the lock refreshes its heartbeat; `None` = 30 s.
+    pub(crate) heartbeat_every: Option<std::time::Duration>,
     /// Test failpoint: stop as if the process died.
     #[cfg(test)]
     pub(crate) crash: Option<Crash>,
@@ -319,7 +321,12 @@ async fn migrate_project(
         let applying = runner.apply_project(project);
         let result = tokio::select! {
             r = applying => r,
-            never = heartbeats(pool, &ledger, &run_id) => match never {},
+            never = heartbeats(
+                pool,
+                &ledger,
+                &run_id,
+                opts.heartbeat_every.unwrap_or(HEARTBEAT_EVERY),
+            ) => match never {},
         };
         let (applied, stopped) = match result {
             Ok(applied) => (applied, None),
@@ -703,10 +710,15 @@ pub(crate) const LONG_MOVE_ROWS: u64 = 1_000_000;
 /// How often a run holding the lock refreshes its heartbeat.
 const HEARTBEAT_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Refresh this run's heartbeat every [`HEARTBEAT_EVERY`]; never returns.
-async fn heartbeats(pool: &Pool, ledger: &Ledger, run_id: &str) -> std::convert::Infallible {
+/// Refresh this run's heartbeat every `every`; never returns.
+async fn heartbeats(
+    pool: &Pool,
+    ledger: &Ledger,
+    run_id: &str,
+    every: std::time::Duration,
+) -> std::convert::Infallible {
     loop {
-        tokio::time::sleep(HEARTBEAT_EVERY).await;
+        tokio::time::sleep(every).await;
         // Best effort: display and boot waiters only (6.2).
         let _ = ledger.touch(pool, run_id).await;
     }
@@ -1046,7 +1058,7 @@ impl Runner<'_> {
                 Ok(n + 1)
             }
             ResumeAt::Rebuild(n, names) => {
-                let mut ddl = super::session::DdlConn::open(self.pool).await?;
+                let mut ddl = super::session::DdlConn::open(self.pool, "").await?;
                 for name in names {
                     let sql = format!(
                         "DROP INDEX CONCURRENTLY {}",
@@ -1091,7 +1103,9 @@ impl Runner<'_> {
                 UnitKind::Rebuild => self.rebuild_unit(k, u, n).await?,
                 UnitKind::Data => self.data_unit(k, u, n).await?,
                 UnitKind::Autocommit => {
-                    let mut ddl = super::session::DdlConn::open(self.pool).await?;
+                    // MySQL units are one statement (6.1 rule 3): the session names it.
+                    let first = u.sql.first().map_or("", String::as_str);
+                    let mut ddl = super::session::DdlConn::open(self.pool, first).await?;
                     self.ledger
                         .start_unit(self.pool, k, self.run_id, n, ddl.session.as_ref())
                         .await?;

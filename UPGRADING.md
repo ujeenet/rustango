@@ -154,6 +154,7 @@ untouched.
 - A v1 migrate on a database holding the engine v2 ledger (`__rustango_migrations_v2`, or `<ledger>_v2`) is refused with `MigrateError::SwitchedToV2`; `runserver` and `Builder::migrate` log a warning and serve without migrating.
 - `migrate_embedded_pool` parses every entry before it takes the lock, so a bad entry no longer creates the ledger.
 - Inside an engine v2 migration data step, `&Pool` queries fail with the new `ExecError::InMigrationStep`, `databases::get`/`default` return `None` and `databases::pool` panics: a step writes only through its own unit.
+- `Settings` gains a `migrate` field (`[migrate]`, `MigrateSettings`): a struct literal of `Settings` must add it, or use `..Default::default()`. `boot_stale_after_secs` (default 120) is how old the lock holder's heartbeat may get before a booting replica gives up.
 - Engine v2 resume ends the DDL session a killed run left behind. A migrate role ends its own sessions without extra rights; to end another role's session, PG needs `GRANT pg_signal_backend, pg_read_all_stats TO <migrate role>` and MySQL needs `GRANT CONNECTION_ADMIN, PROCESS ON *.* TO <migrate user>`. Without it, resume stops with an error naming the grant and leaves the ledger as it was.
 - `runserver` on an engine v2 project binds before it migrates: `/health` answers 200, `/ready` and every route 503 until the run ends. A SIGTERM during the run stops after the current unit and exits non-zero; the next start resumes.
 

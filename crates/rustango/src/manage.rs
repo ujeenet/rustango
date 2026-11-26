@@ -90,10 +90,11 @@ async fn boot_migrate_v2(
     pool: &crate::sql::Pool,
     dir: &std::path::Path,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    stale_after: std::time::Duration,
 ) -> Result<(), crate::migrate::MigrateError> {
     let opts = crate::migrate::v2::run::Options {
         stop: Some(stop),
-        stale_after: Some(BOOT_STALE_AFTER),
+        stale_after: Some(stale_after),
         ..crate::migrate::v2::run::Options::default()
     };
     let report = crate::migrate::v2::run::migrate(pool, dir, &opts).await?;
@@ -110,7 +111,8 @@ async fn boot_migrate_v2(
     }
 }
 
-/// A booting waiter gives up when the lock holder's heartbeat is this old (6.11).
+/// A booting waiter gives up when the lock holder's heartbeat is this old
+/// (6.11), unless `[migrate] boot_stale_after_secs` says otherwise.
 const BOOT_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// How long a booting single-database server waits for another run's migrate lock.
@@ -1412,6 +1414,19 @@ impl Cli {
         Ok(())
     }
 
+    /// `[migrate] boot_stale_after_secs`, else [`BOOT_STALE_AFTER`].
+    fn boot_stale_after(&self) -> std::time::Duration {
+        #[cfg(feature = "config")]
+        if let Some(n) = self
+            .settings_for_layers
+            .as_ref()
+            .and_then(|s| s.migrate.boot_stale_after_secs)
+        {
+            return std::time::Duration::from_secs(n);
+        }
+        BOOT_STALE_AFTER
+    }
+
     /// `[server] migrate_on_boot` / `migrate_lock_timeout_secs`, under [`Cli::migrate_on_boot`].
     fn boot_migrate(&self) -> BootMigrate {
         #[cfg(feature = "config")]
@@ -1863,8 +1878,10 @@ impl Cli {
             })
         };
         let dir = self.migrations_dir.clone();
+        let stale_after = self.boot_stale_after();
         let booted = async {
-            boot.run(boot_migrate_v2(&pool, &dir, stop)).await?;
+            boot.run(boot_migrate_v2(&pool, &dir, stop, stale_after))
+                .await?;
             run_boot_hooks(self.seed.take(), self.before_serve.take(), &pool)
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error> { e })?;
@@ -2662,6 +2679,19 @@ mod tests {
         );
     }
 
+    /// `[migrate] boot_stale_after_secs` sets the boot waiter's staleness; 120 s by default.
+    #[cfg(feature = "config")]
+    #[test]
+    fn boot_stale_after_comes_from_the_migrate_section() {
+        assert_eq!(Cli::new().boot_stale_after(), BOOT_STALE_AFTER);
+        let mut s = crate::config::Settings::default();
+        s.migrate.boot_stale_after_secs = Some(7);
+        assert_eq!(
+            Cli::new().with_settings(&s).boot_stale_after(),
+            std::time::Duration::from_secs(7)
+        );
+    }
+
     /// Skip never runs the migrate.
     #[tokio::test]
     async fn boot_migrate_skip_does_not_migrate() {
@@ -2782,13 +2812,13 @@ mod tests {
             .await
             .unwrap();
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        boot_migrate_v2(&pool, &dir, stop.clone())
+        boot_migrate_v2(&pool, &dir, stop.clone(), BOOT_STALE_AFTER)
             .await
             .expect_err("the unit fails");
         crate::sql::raw_execute_pool(&pool, "DROP TABLE bt_t", Vec::new())
             .await
             .unwrap();
-        boot_migrate_v2(&pool, &dir, stop)
+        boot_migrate_v2(&pool, &dir, stop, BOOT_STALE_AFTER)
             .await
             .expect("the next start runs it");
     }
@@ -2896,7 +2926,7 @@ mod tests {
         let url = format!("sqlite://{}?mode=rwc", tmp.path().join("app.db").display());
         let pool = crate::sql::Pool::connect(&url).await.expect("connect");
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let e = boot_migrate_v2(&pool, &dir, stop)
+        let e = boot_migrate_v2(&pool, &dir, stop, BOOT_STALE_AFTER)
             .await
             .expect_err("a stopped boot never serves");
         assert!(
@@ -2904,7 +2934,7 @@ mod tests {
             "{e}"
         );
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        boot_migrate_v2(&pool, &dir, stop)
+        boot_migrate_v2(&pool, &dir, stop, BOOT_STALE_AFTER)
             .await
             .expect("the next start resumes");
     }
@@ -2988,7 +3018,9 @@ mod tests {
         let url = format!("sqlite://{}?mode=rwc", tmp.path().join("app.db").display());
         let pool = crate::sql::Pool::connect(&url).await.expect("connect");
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        boot_migrate_v2(&pool, &dir, stop).await.expect("0001");
+        boot_migrate_v2(&pool, &dir, stop, BOOT_STALE_AFTER)
+            .await
+            .expect("0001");
         let values: Vec<String> = (1..=ROWS).map(|i| format!("({i}, 's')")).collect();
         crate::sql::raw_execute_pool(
             &pool,
@@ -3090,7 +3122,7 @@ mod tests {
         let url = format!("sqlite://{}?mode=rwc", tmp.path().join("app.db").display());
         let pool = crate::sql::Pool::connect(&url).await.expect("connect");
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let e = boot_migrate_v2(&pool, &dir, stop)
+        let e = boot_migrate_v2(&pool, &dir, stop, BOOT_STALE_AFTER)
             .await
             .expect_err("refused");
         assert!(e.to_string().contains("MV2-E029"), "{e}");

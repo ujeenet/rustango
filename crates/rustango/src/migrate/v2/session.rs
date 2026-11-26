@@ -15,15 +15,23 @@ use crate::sql::{PoolConn, PooledConn};
 pub(crate) enum Session {
     /// `pid` and `backend_start` together: a pid alone is reused.
     Postgres { pid: i64, backend_start: String },
-    /// `CONNECTION_ID()`.
-    Mysql { id: u64 },
+    /// `CONNECTION_ID()`, with what proves a live thread is still this one:
+    /// the server (`@@server_uuid`, start time from `Uptime`), the user and
+    /// the unit's statement, which names its table.
+    Mysql {
+        id: u64,
+        server_uuid: String,
+        server_started: i64,
+        user: String,
+        statement: String,
+    },
 }
 
 impl std::fmt::Display for Session {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Postgres { pid, .. } => write!(f, "pid {pid}"),
-            Self::Mysql { id } => write!(f, "thread {id}"),
+            Self::Mysql { id, .. } => write!(f, "thread {id}"),
         }
     }
 }
@@ -36,9 +44,11 @@ pub(crate) struct DdlConn {
 }
 
 impl DdlConn {
+    /// `statement` is what the unit runs on it (MySQL proves a thread by it).
+    ///
     /// # Errors
     /// Driver failures.
-    pub(crate) async fn open(pool: &Pool) -> Result<Self, MigrateError> {
+    pub(crate) async fn open(pool: &Pool, statement: &str) -> Result<Self, MigrateError> {
         let mut conn = pool.acquire().await?;
         conn.close_on_drop();
         let session = match conn.conn() {
@@ -62,10 +72,19 @@ impl DdlConn {
             }
             #[cfg(feature = "mysql")]
             PooledConn::Mysql(c) => {
-                let id: u64 = sqlx::query_scalar("SELECT CONNECTION_ID()")
-                    .fetch_one(&mut **c)
-                    .await?;
-                Some(Session::Mysql { id })
+                let (id, user): (u64, String) = sqlx::query_as(
+                    "SELECT CONNECTION_ID(), SUBSTRING_INDEX(CURRENT_USER(), '@', 1)",
+                )
+                .fetch_one(&mut **c)
+                .await?;
+                let (server_uuid, server_started) = mysql_server(&mut **c).await?;
+                Some(Session::Mysql {
+                    id,
+                    server_uuid,
+                    server_started,
+                    user,
+                    statement: statement.to_owned(),
+                })
             }
             #[cfg(feature = "sqlite")]
             PooledConn::Sqlite(_) => None,
@@ -81,6 +100,20 @@ impl DdlConn {
         execute(&mut self.conn, sql).await
     }
 }
+
+/// MySQL server identity: `@@server_uuid` and its start time (now - Uptime).
+#[cfg(feature = "mysql")]
+async fn mysql_server(c: &mut sqlx::MySqlConnection) -> Result<(String, i64), sqlx::Error> {
+    sqlx::query_as(
+        "SELECT @@server_uuid, CAST(UNIX_TIMESTAMP() - VARIABLE_VALUE AS SIGNED) \
+         FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Uptime'",
+    )
+    .fetch_one(c)
+    .await
+}
+
+/// Start times read twice can differ by the second that ticked between.
+const START_SLACK_SECS: i64 = 2;
 
 async fn execute(conn: &mut PoolConn, sql: &str) -> Result<(), sqlx::Error> {
     use sqlx::Executor as _;
@@ -104,6 +137,11 @@ pub(crate) enum ReapError {
     NoRights(Session, &'static str),
     #[error("previous DDL session {0} still running after {1:?}; the ledger is untouched")]
     StillRunning(Session, std::time::Duration),
+    #[error(
+        "the recorded DDL session ({0}) is not provably the one there now: {1}; it was not \
+         ended, and the ledger is untouched"
+    )]
+    Mismatch(Session, String),
     #[error(transparent)]
     Db(#[from] MigrateError),
 }
@@ -168,8 +206,49 @@ pub(crate) async fn reap(
             })
             .await
         }
-        Session::Mysql { id } => {
+        Session::Mysql {
+            id,
+            server_uuid,
+            server_started,
+            user,
+            statement,
+        } => {
             let mut conn = pool.acquire().await.map_err(MigrateError::from)?;
+            let (uuid_now, started_now, user_now, seen) = mysql_now(&mut conn, *id)
+                .await
+                .map_err(MigrateError::Driver)?;
+            // Another server, or the same one restarted: thread ids restart too.
+            if &uuid_now != server_uuid || (started_now - server_started).abs() > START_SLACK_SECS {
+                return Err(ReapError::Mismatch(
+                    s.clone(),
+                    format!(
+                        "the server is {uuid_now} started at {started_now}, the session ran on \
+                         {server_uuid} started at {server_started}"
+                    ),
+                ));
+            }
+            match seen {
+                // Gone, if it was ours to see; another user's thread needs PROCESS.
+                None if &user_now == user => return Ok(()),
+                None => {
+                    return Err(ReapError::NoRights(
+                        s.clone(),
+                        "GRANT CONNECTION_ADMIN, PROCESS ON *.* TO the migrate user",
+                    ))
+                }
+                Some((u, info))
+                    if &u != user || info.as_deref().map(str::trim) != Some(statement.trim()) =>
+                {
+                    return Err(ReapError::Mismatch(
+                        s.clone(),
+                        format!(
+                            "thread {id} now runs `{}` as `{u}`, not the unit's statement as `{user}`",
+                            info.as_deref().unwrap_or("nothing")
+                        ),
+                    ));
+                }
+                Some(_) => {}
+            }
             match execute(&mut conn, &format!("KILL {id}")).await {
                 Ok(()) => {}
                 // 1094: no such thread, it is already gone.
@@ -199,6 +278,30 @@ pub(crate) async fn reap(
             .await
         }
     }
+}
+
+/// The server identity, the current user and what thread `id` runs, if visible.
+async fn mysql_now(
+    conn: &mut PoolConn,
+    id: u64,
+) -> Result<(String, i64, String, Option<(String, Option<String>)>), sqlx::Error> {
+    #[cfg(feature = "mysql")]
+    if let PooledConn::Mysql(c) = conn.conn() {
+        let (uuid, started) = mysql_server(&mut **c).await?;
+        let user: String = sqlx::query_scalar("SELECT SUBSTRING_INDEX(CURRENT_USER(), '@', 1)")
+            .fetch_one(&mut **c)
+            .await?;
+        let seen: Option<(String, Option<String>)> =
+            sqlx::query_as("SELECT USER, INFO FROM information_schema.PROCESSLIST WHERE ID = ?")
+                .bind(id)
+                .fetch_optional(&mut **c)
+                .await?;
+        return Ok((uuid, started, user, seen));
+    }
+    let _ = (conn, id);
+    Err(sqlx::Error::Protocol(
+        "a MySQL session on another backend".into(),
+    ))
 }
 
 async fn gone<F, Fut>(wait: std::time::Duration, s: &Session, is_gone: F) -> Result<(), ReapError>

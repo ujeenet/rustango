@@ -2135,6 +2135,15 @@ impl StallV1 {
     }
 }
 
+/// Takes 1.5 s: longer than a test heartbeat interval.
+#[crate::data_step(app = "steps", id = "slow_v1")]
+impl SlowV1 {
+    async fn up(_ctx: &mut StepCtx<'_>, batch: Batch) -> StepResult {
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        Ok(batch.done())
+    }
+}
+
 fn ed_user() -> Value {
     json!({"op": "create_table", "v": 1, "table": {"name": "ed_user", "scope": "tenant", "fields": [
         {"column": "id", "ty": "i64", "primary_key": true, "nullable": false},
@@ -2948,6 +2957,172 @@ async fn a_long_move_warns_w011(b: B) {
     );
 }
 
+/// The ledger heartbeat as the database stores it.
+async fn heartbeat(pool: &Pool, id: &str) -> String {
+    let col = match pool.dialect().kind() {
+        crate::sql::DialectKind::Postgres => "CAST(heartbeat_at AS TEXT)",
+        crate::sql::DialectKind::Mysql => "CAST(heartbeat_at AS CHAR)",
+        _ => "heartbeat_at",
+    };
+    let sql = format!(
+        "SELECT {col} FROM {} WHERE id = '{id}'",
+        Ledger::default_names().table
+    );
+    let r: Vec<(String,)> = crate::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    r[0].0.clone()
+}
+
+/// A long unit keeps the holder's heartbeat fresh, so boot waiters wait on
+/// it. SQLite's one writer blocks the refresh during a data unit.
+async fn the_heartbeat_ticks_during_a_long_unit(b: B) {
+    if b == B::Lite {
+        return;
+    }
+    let Some(db) = fresh(b).await else { return };
+    let (_root, dir) = ed_project(&db.pool, &[1]).await;
+    let slow = json!({"op": "data_rust", "v": 1, "id": "slow_v1",
+        "tables": {"read": ["ed_user"]}, "down": {"noop": "test"}});
+    put(
+        &dir,
+        "0002_slow",
+        &vs("0002_slow", &["0001_user"], json!([slow])),
+    );
+    let ticking = Options {
+        heartbeat_every: Some(Duration::from_millis(200)),
+        ..Options::default()
+    };
+    let run_pool = Pool::connect(&db.url).await.unwrap();
+    let d = dir.clone();
+    let run = tokio::spawn(async move { migrate(&run_pool, &d, &ticking).await });
+    // Wait for the row, then watch its heartbeat move while the step sleeps.
+    let mut first = None;
+    for _ in 0..100 {
+        if Ledger::default_names()
+            .rows(&db.pool)
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.id == "0002_slow")
+        {
+            first = Some(heartbeat(&db.pool, "0002_slow").await);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let first = first.expect("the row appears");
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let later = heartbeat(&db.pool, "0002_slow").await;
+    assert_ne!(first, later, "the heartbeat did not move during the unit");
+    assert_eq!(run.await.unwrap().unwrap().applied, ["0002_slow"]);
+}
+
+/// MySQL never kills a thread it cannot prove is the unit's: a recorded id
+/// now held by another connection (a recycled id), or a session from
+/// another server, is refused with the diff and left running (14 item 15).
+async fn a_recycled_thread_id_is_never_killed(b: B) {
+    if b != B::My {
+        return;
+    }
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    put(
+        &dir,
+        "0001_author",
+        &v2("0001_author", &[], json!([author()])),
+    );
+    put(
+        &dir,
+        "0002_ix",
+        &v2("0002_ix", &["0001_author"], raw_index()),
+    );
+    let crashing = Options {
+        crash: Some(Crash::AfterStart(1)),
+        ..Options::default()
+    };
+    migrate(pool, &dir, &crashing).await.expect_err("cut off");
+    let recorded = ledger_row(pool, "0002_ix").await.session.unwrap();
+    // A bystander connection, busy with something else.
+    let bystander_pool = Pool::connect(&db.url).await.unwrap();
+    let bystander = tokio::spawn(async move {
+        let _: Vec<(i64,)> =
+            crate::sql::raw_query_pool("SELECT SLEEP(6)", Vec::new(), &bystander_pool)
+                .await
+                .unwrap_or_default();
+    });
+    let mut id = None;
+    for _ in 0..100 {
+        let r: Vec<(i64,)> = crate::sql::raw_query_pool(
+            "SELECT CAST(ID AS SIGNED) FROM information_schema.PROCESSLIST \
+             WHERE INFO = 'SELECT SLEEP(6)'",
+            Vec::new(),
+            pool,
+        )
+        .await
+        .unwrap();
+        if let Some(r) = r.first() {
+            id = Some(u64::try_from(r.0).unwrap());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let id = id.expect("the bystander runs");
+    let super::super::session::Session::Mysql {
+        server_uuid,
+        server_started,
+        user,
+        statement,
+        ..
+    } = recorded
+    else {
+        panic!("a MySQL session");
+    };
+    let alive = || async move {
+        count(
+            pool,
+            &format!("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE ID = {id}"),
+        )
+        .await
+    };
+    for (uuid, why) in [
+        (server_uuid.clone(), "now runs"),
+        (
+            "00000000-0000-0000-0000-000000000000".to_owned(),
+            "the server is",
+        ),
+    ] {
+        let forged = super::super::session::Session::Mysql {
+            id,
+            server_uuid: uuid,
+            server_started,
+            user: user.clone(),
+            statement: statement.clone(),
+        };
+        raw_execute_pool(
+            pool,
+            &format!(
+                "UPDATE {} SET session = ? WHERE id = '0002_ix'",
+                Ledger::default_names().table
+            ),
+            vec![crate::core::SqlValue::String(
+                serde_json::to_string(&forged).unwrap(),
+            )],
+        )
+        .await
+        .unwrap();
+        let e = migrate(pool, &dir, &opts()).await.expect_err("refused");
+        assert!(
+            e.to_string().contains("not provably") && e.to_string().contains(why),
+            "{e}"
+        );
+        assert_eq!(alive().await, 1, "the bystander was killed");
+    }
+    bystander.await.unwrap();
+}
+
 /// A shutdown signal stops between batches; the next start resumes at the
 /// stored cursor and moves every row once.
 async fn a_shutdown_stops_between_batches(b: B) {
@@ -3126,6 +3301,8 @@ per_backend!(
     a_killed_lock_backend_stops_the_run_by_fencing,
     pool_session_state_is_unchanged_after_migrate,
     a_long_move_warns_w011,
+    the_heartbeat_ticks_during_a_long_unit,
+    a_recycled_thread_id_is_never_killed,
     max_batches_per_run_binds_the_cli_only,
     a_held_lock_is_retried,
     a_waiter_finishes_a_killed_move,
