@@ -1340,6 +1340,8 @@ impl Runner<'_> {
         let mut fresh_ops: Vec<(usize, usize)> = Vec::new();
         for &i in &order {
             let f = &project.files[i];
+            // Every file is about to be recorded: each `requires` holds first (8.4).
+            self.check_requires(f)?;
             for (n, env) in f.file.operations.iter().enumerate() {
                 match &env.op {
                     // Raw SQL and extensions do more than state says.
