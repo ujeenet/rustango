@@ -16,12 +16,15 @@ fn is_false(b: &bool) -> bool {
 }
 
 /// Which DAG and database a file runs against.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Target {
     /// Once, on the registry database.
     Registry,
     /// Every tenant (or the single database).
+    #[default]
     Tenant,
 }
 

@@ -57,6 +57,20 @@ pub(crate) struct Options {
     pub(crate) stale_after: Option<std::time::Duration>,
     /// `--accept-archive-size`: archive a drop above [`ARCHIVE_LIMIT`].
     pub(crate) accept_archive_size: bool,
+    /// A single database, or under tenancy the registry chain or one
+    /// tenant's chain (8.1).
+    pub(crate) run_as: RunAs,
+    /// The lock this run takes; a schema-mode tenant names its schema (6.6).
+    pub(crate) lock_scope: crate::migrate::LockScope,
+    /// A tenant run: the registry ids applied, which `requires:
+    /// "registry:<id>"` checks; `None` refuses such a file (8.4).
+    pub(crate) registry_applied: Option<std::collections::BTreeSet<String>>,
+    /// A registry run: tenant ids every tenant has applied, which
+    /// `requires: "tenants:<id>"` checks; `None` refuses such a file.
+    pub(crate) tenants_applied: Option<std::collections::BTreeSet<String>>,
+    /// A tenant run: the tenant's login role, which gets no write access
+    /// to the ledger tables (8.1). PG only.
+    pub(crate) revoke_from: Option<String>,
     /// `--accept-failover <reason>`: a recorded MySQL DDL session ran on
     /// another server; resume probes without ending it, logged (14 item 16).
     pub(crate) accept_failover: Option<String>,
@@ -170,7 +184,7 @@ pub(crate) fn backend_of(pool: &Pool) -> Backend {
 }
 
 /// A fencing token unique to this run: time, process and a counter, hashed.
-fn new_run_id() -> String {
+pub(crate) fn new_run_id() -> String {
     use sha2::Digest as _;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nanos = std::time::SystemTime::now()
@@ -181,36 +195,89 @@ fn new_run_id() -> String {
     super::checksum::hex(&sha2::Sha256::digest(seed.as_bytes()))[..32].to_owned()
 }
 
-const CTX: Ctx<'static> = Ctx {
-    target: Target::Tenant,
-    registry: None,
-};
+/// `body` under the fleet lock on the registry (8.3): a second
+/// orchestrator waits; per-target runs inside take their own locks.
+///
+/// # Errors
+/// The lock's error, or `body`'s.
+pub(crate) async fn fleet_locked<F, Fut, R>(registry: &Pool, body: F) -> Result<R, MigrateError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<R, MigrateError>>,
+{
+    crate::migrate::with_migrate_lock_held_v2(
+        V2Token(()),
+        registry,
+        &crate::migrate::LockScope::Fleet,
+        |_| body(),
+    )
+    .await
+}
 
-/// Tenancy projects run on v2 from phase 5.
-fn refuse_registry(project: &Project) -> Result<(), RunError> {
-    if let Some(f) = project
-        .files
-        .iter()
-        .find(|f| f.file.target == Target::Registry)
-    {
-        return Err(refused(
-            Code::NotEnabled,
-            &f.at,
-            "registry migrations (tenancy) run on engine v2 from a later release",
-        ));
+/// The ids applied on `pool`'s ledger, as `id` and `app:id`: what a
+/// `requires` names (8.4).
+///
+/// # Errors
+/// Driver failures.
+pub(crate) async fn applied_ids(
+    pool: &Pool,
+    opts: &Options,
+) -> Result<std::collections::BTreeSet<String>, RunError> {
+    let mut out = std::collections::BTreeSet::new();
+    for r in Ledger::of(opts).rows(pool).await? {
+        if r.state == RowState::Applied {
+            out.insert(format!("{}:{}", r.app, r.id));
+            out.insert(r.id);
+        }
     }
-    Ok(())
+    Ok(out)
+}
+
+/// What a run migrates (8.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum RunAs {
+    /// A project without tenancy: one database, every framework table.
+    #[default]
+    Single,
+    /// The registry chain, once, on the registry database.
+    Registry,
+    /// One tenant's chain, on its schema or database.
+    Tenant,
+}
+
+impl RunAs {
+    /// The DAG it runs.
+    pub(crate) fn target(self) -> Target {
+        if self == Self::Registry {
+            Target::Registry
+        } else {
+            Target::Tenant
+        }
+    }
+
+    /// The model scopes of its framework system chain and bootstrap tables.
+    fn scopes(self) -> &'static [crate::core::ModelScope] {
+        use crate::core::ModelScope;
+        match self {
+            Self::Single => &[ModelScope::Registry, ModelScope::Tenant],
+            Self::Registry => &[ModelScope::Registry],
+            Self::Tenant => &[ModelScope::Tenant],
+        }
+    }
 }
 
 /// The lock, the v1 system chain around `body` (it sees `project` through
 /// `ChainFacts`), then the framework's bootstrap tables. One lock for all
 /// of it. Without `write` (a dry run) only `body` runs.
+#[allow(clippy::too_many_arguments)]
 async fn locked<F, Fut, R>(
     pool: &Pool,
     dir: Option<&Path>,
     project: &Project,
     ledger: &Ledger,
     write: bool,
+    scope: &crate::migrate::LockScope,
+    run_as: RunAs,
     body: F,
 ) -> Result<(R, Vec<String>), RunError>
 where
@@ -218,14 +285,19 @@ where
     Fut: std::future::Future<Output = Result<R, RunError>>,
 {
     use crate::core::ModelScope;
+    let scopes = run_as.scopes();
     let chain = match dir {
         Some(dir) => Some(crate::migrate::make::SystemChain::for_migrations_dir(
-            dir,
-            &[ModelScope::Registry, ModelScope::Tenant],
+            dir, scopes,
         )?),
         None => None,
     };
-    crate::migrate::with_migrate_lock_held_v2(V2Token(()), pool, |held| async move {
+    let chain_scope = if run_as == RunAs::Registry {
+        crate::migrate::MigrationScope::Registry
+    } else {
+        crate::migrate::MigrationScope::Tenant
+    };
+    crate::migrate::with_migrate_lock_held_v2(V2Token(()), pool, scope, |held| async move {
         let Some(chain) = chain.filter(|_| write) else {
             return Ok(body().await.map(|r| (r, Vec::new())));
         };
@@ -239,15 +311,19 @@ where
             held,
             pool,
             &chain,
-            crate::migrate::MigrationScope::Tenant,
+            chain_scope,
             &project.files,
             &applied,
             body,
         )
         .await;
         if result.is_ok() {
-            crate::migrate::manage::ensure_bootstrap_tables(pool).await?;
-            crate::migrate::manage::ensure_tenant_bootstrap_tables(pool).await?;
+            if scopes.contains(&ModelScope::Registry) {
+                crate::migrate::manage::ensure_bootstrap_tables(pool).await?;
+            }
+            if scopes.contains(&ModelScope::Tenant) {
+                crate::migrate::manage::ensure_tenant_bootstrap_tables(pool).await?;
+            }
         }
         Ok(result.map(|(system, r)| (r, system.into_iter().map(|m| m.name).collect())))
     })
@@ -285,7 +361,6 @@ async fn migrate_project(
     project: &Project,
     opts: &Options,
 ) -> Result<Report, RunError> {
-    refuse_registry(project)?;
     super::step::refuse_duplicates().map_err(|e| refused(Code::Unresolved, "data steps", e))?;
     let ledger = Ledger::of(opts);
     let b = backend_of(pool);
@@ -311,42 +386,54 @@ async fn migrate_project(
     let run_id = new_run_id();
     let got_lock = std::sync::atomic::AtomicBool::new(false);
     // A dry run writes nothing: no system chain, no ledger table.
-    let run = locked(pool, dir, project, &ledger, !opts.dry_run, || async {
-        got_lock.store(true, std::sync::atomic::Ordering::SeqCst);
-        if !opts.dry_run {
-            ledger.ensure(pool).await?;
-        }
-        let mut runner = Runner {
-            pool,
-            ledger: &ledger,
-            run_id: &run_id,
-            b: backend_of(pool),
-            opts,
-            units_run: 0,
-            batches_run: 0,
-            warnings: Vec::new(),
-            started: std::time::Instant::now(),
-            planned: Vec::new(),
-            sweep: Some(sweep),
-        };
-        // A long unit keeps its heartbeat fresh, so boot waiters wait on it.
-        let applying = runner.apply_project(project);
-        let result = tokio::select! {
-            r = applying => r,
-            never = heartbeats(
+    let run = locked(
+        pool,
+        dir,
+        project,
+        &ledger,
+        !opts.dry_run,
+        &opts.lock_scope,
+        opts.run_as,
+        || async {
+            got_lock.store(true, std::sync::atomic::Ordering::SeqCst);
+            if !opts.dry_run {
+                ledger.ensure(pool).await?;
+                if let Some(role) = &opts.revoke_from {
+                    ledger.revoke(pool, role).await?;
+                }
+            }
+            let mut runner = Runner {
                 pool,
-                &ledger,
-                &run_id,
-                opts.heartbeat_every.unwrap_or(HEARTBEAT_EVERY),
-            ) => match never {},
-        };
-        let (applied, stopped) = match result {
-            Ok(applied) => (applied, None),
-            Err(RunError::Stopped(why)) => (Vec::new(), Some(why)),
-            Err(e) => return Err(e),
-        };
-        Ok((applied, runner.planned, stopped, runner.warnings))
-    });
+                ledger: &ledger,
+                run_id: &run_id,
+                b: backend_of(pool),
+                opts,
+                units_run: 0,
+                batches_run: 0,
+                warnings: Vec::new(),
+                started: std::time::Instant::now(),
+                planned: Vec::new(),
+                sweep: Some(sweep),
+            };
+            // A long unit keeps its heartbeat fresh, so boot waiters wait on it.
+            let applying = runner.apply_project(project);
+            let result = tokio::select! {
+                r = applying => r,
+                never = heartbeats(
+                    pool,
+                    &ledger,
+                    &run_id,
+                    opts.heartbeat_every.unwrap_or(HEARTBEAT_EVERY),
+                ) => match never {},
+            };
+            let (applied, stopped) = match result {
+                Ok(applied) => (applied, None),
+                Err(RunError::Stopped(why)) => (Vec::new(), Some(why)),
+                Err(e) => return Err(e),
+            };
+            Ok((applied, runner.planned, stopped, runner.warnings))
+        },
+    );
     let ((applied, planned, stopped, long_moves), system) = match opts.stale_after {
         None => run.await?,
         Some(stale) => tokio::select! {
@@ -494,23 +581,32 @@ async fn rollback(
     let project = load_project(dir)?;
     let ledger = Ledger::of(opts);
     let run_id = new_run_id();
-    let (rolled_back, system) = locked(pool, Some(dir), &project, &ledger, true, || async {
-        ledger.ensure(pool).await?;
-        let mut runner = Runner {
-            pool,
-            ledger: &ledger,
-            run_id: &run_id,
-            b: backend_of(pool),
-            opts,
-            units_run: 0,
-            batches_run: 0,
-            warnings: Vec::new(),
-            started: std::time::Instant::now(),
-            planned: Vec::new(),
-            sweep: None,
-        };
-        runner.downgrade(back).await
-    })
+    let (rolled_back, system) = locked(
+        pool,
+        Some(dir),
+        &project,
+        &ledger,
+        true,
+        &opts.lock_scope,
+        opts.run_as,
+        || async {
+            ledger.ensure(pool).await?;
+            let mut runner = Runner {
+                pool,
+                ledger: &ledger,
+                run_id: &run_id,
+                b: backend_of(pool),
+                opts,
+                units_run: 0,
+                batches_run: 0,
+                warnings: Vec::new(),
+                started: std::time::Instant::now(),
+                planned: Vec::new(),
+                sweep: None,
+            };
+            runner.downgrade(back).await
+        },
+    )
     .await?;
     Ok(Report {
         planned: Vec::new(),
@@ -1033,7 +1129,7 @@ impl Runner<'_> {
         let mut applied = Vec::new();
         let order = project
             .order
-            .get(&Target::Tenant)
+            .get(&self.opts.run_as.target())
             .cloned()
             .unwrap_or_default();
         for i in order {
@@ -1075,13 +1171,14 @@ impl Runner<'_> {
                             applied.push(f.file.id.clone());
                         }
                     }
-                    apply_file(&mut state, &f.file, &f.at, &CTX)?;
+                    apply_file(&mut state, &f.file, &f.at, &self.ctx())?;
                 }
                 None if f.file.kind == Kind::Checkpoint => {
                     state = self.adopt(f, state, &mut memo).await?;
                     applied.push(f.file.id.clone());
                 }
                 None => {
+                    self.check_requires(f)?;
                     state = self.forward(f, state, &mut memo).await?;
                     applied.push(f.file.id.clone());
                 }
@@ -1105,7 +1202,7 @@ impl Runner<'_> {
         state: State,
         memo: &mut HashMemo,
     ) -> Result<State, RunError> {
-        let (units, after) = render_plan(&state, &f.file, &f.at, &CTX, self.b)?;
+        let (units, after) = render_plan(&state, &f.file, &f.at, &self.ctx(), self.b)?;
         let moves = self.long_moves(&units).await?;
         let archives = self.archive_sizes(&f.file, &state, &f.at).await?;
         if self.opts.dry_run {
@@ -1280,7 +1377,7 @@ impl Runner<'_> {
             }
         }
         let from_op = touched.into_iter().min().unwrap_or(m);
-        let (units, _) = render_plan(before, &f.file, &f.at, &CTX, self.b)?;
+        let (units, _) = render_plan(before, &f.file, &f.at, &self.ctx(), self.b)?;
         let first = units
             .iter()
             .position(|u| u.op >= from_op)
@@ -1463,6 +1560,42 @@ impl Runner<'_> {
 
     /// The lock timeout of data and DDL units; also how long a reaped
     /// session may take to go.
+    /// Replay context of this run's target.
+    fn ctx(&self) -> Ctx<'static> {
+        Ctx {
+            target: self.opts.run_as.target(),
+            registry: None,
+        }
+    }
+
+    /// A pending file's `requires` (8.4): `registry:<id>` from a tenant run
+    /// needs that registry migration applied; `tenants:<id>` from a registry
+    /// run needs every tenant past it.
+    fn check_requires(&self, f: &Loaded) -> Result<(), RunError> {
+        for req in &f.file.requires {
+            let (side, id) = req.split_once(':').unwrap_or(("", req));
+            let (set, verb) = match side {
+                "registry" => (&self.opts.registry_applied, "manage migrate-registry"),
+                "tenants" => (&self.opts.tenants_applied, "manage migrate-tenants"),
+                _ => {
+                    return Err(refused(
+                        Code::File,
+                        &f.at,
+                        format!("`requires: {req}` is not `registry:<id>` or `tenants:<id>`"),
+                    ))
+                }
+            };
+            if !set.as_ref().is_some_and(|s| s.contains(id)) {
+                return Err(refused(
+                    Code::State,
+                    &f.at,
+                    format!("apply {side} `{id}` first (`{verb}`)"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn lock_timeout(&self) -> std::time::Duration {
         self.opts
             .data_lock_timeout
@@ -2177,7 +2310,7 @@ impl Runner<'_> {
             )
         })?;
         let mut after = state.clone();
-        apply_file(&mut after, &f.file, &f.at, &CTX)?;
+        apply_file(&mut after, &f.file, &f.at, &self.ctx())?;
         let doc = f.file.state.clone().unwrap_or_default();
         let checkpoint = State::from_doc(doc.clone());
         let v1 = self
@@ -2399,12 +2532,12 @@ impl Runner<'_> {
             let mut state = State::default();
             for (r, f) in applied[..idx].iter().zip(&bodies) {
                 let at = format!("ledger:{}:{}", r.app, r.id);
-                apply_file(&mut state, f, &at, &CTX)?;
+                apply_file(&mut state, f, &at, &self.ctx())?;
             }
             let (down, of) = self.down_file(&file, &state, &at)?;
             let mut after = state.clone();
-            apply_file(&mut after, &file, &at, &CTX)?;
-            let (mut units, _) = render_plan(&after, &down, &at, &CTX, self.b)?;
+            apply_file(&mut after, &file, &at, &self.ctx())?;
+            let (mut units, _) = render_plan(&after, &down, &at, &self.ctx(), self.b)?;
             // A batched reverse walks down the progress its forward unit
             // left; an undo restore reads that unit's undo rows.
             for u in &mut units {
@@ -2433,7 +2566,7 @@ impl Runner<'_> {
             let mut now = State::default();
             for (r, f) in applied.iter().zip(&bodies) {
                 let at = format!("ledger:{}:{}", r.app, r.id);
-                apply_file(&mut now, f, &at, &CTX)?;
+                apply_file(&mut now, f, &at, &self.ctx())?;
             }
             let ops: Vec<&OpEnvelope> = downs.iter().flat_map(|f| &f.operations).collect();
             let needs = super::preflight::checkable(&ops, &now);
@@ -2540,7 +2673,7 @@ impl Runner<'_> {
                 &mut next,
                 &env.op,
                 &format!("{at}#/operations/{i}"),
-                &CTX,
+                &self.ctx(),
                 &[],
             )?;
             states.push(next);
@@ -2640,7 +2773,7 @@ fn body(row: &Row, at: &str) -> Result<File, RunError> {
 }
 
 /// The class of an error, for the ledger: never driver text or row values.
-fn error_class(e: &RunError) -> &'static str {
+pub(crate) fn error_class(e: &RunError) -> &'static str {
     match e {
         RunError::Load(l) => l.code.as_str(),
         RunError::Db(MigrateError::Driver(_) | MigrateError::Exec(_)) => "driver",

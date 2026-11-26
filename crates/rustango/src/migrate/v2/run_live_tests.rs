@@ -318,11 +318,16 @@ async fn runs_exclude_each_other(b: B) {
     let (go_tx, go_rx) = tokio::sync::oneshot::channel::<()>();
     let holder_pool = pool.clone();
     let holder = tokio::spawn(async move {
-        crate::migrate::with_migrate_lock_held_v2(V2Token(()), &holder_pool, |_| async move {
-            let _ = tx.send(());
-            let _ = go_rx.await;
-            Ok(())
-        })
+        crate::migrate::with_migrate_lock_held_v2(
+            V2Token(()),
+            &holder_pool,
+            &crate::migrate::LockScope::Session,
+            |_| async move {
+                let _ = tx.send(());
+                let _ = go_rx.await;
+                Ok(())
+            },
+        )
         .await
     });
     rx.await.unwrap();
@@ -1695,7 +1700,12 @@ async fn a_dropped_run_frees_the_lock(b: B) {
     // be free anyway, while the row is still held.
     let lock = crate::migrate::with_lock_timeout(
         Duration::from_secs(3),
-        crate::migrate::with_migrate_lock_held_v2(V2Token(()), pool, |_| async { Ok(()) }),
+        crate::migrate::with_migrate_lock_held_v2(
+            V2Token(()),
+            pool,
+            &crate::migrate::LockScope::Session,
+            |_| async { Ok(()) },
+        ),
     )
     .await;
     htx.rollback().await.unwrap();
@@ -2827,11 +2837,16 @@ async fn a_waiter_exits_when_the_holders_heartbeat_is_stale(b: B) {
         let (go_tx, go) = tokio::sync::oneshot::channel::<()>();
         let hpool = Pool::connect(&db.url).await.unwrap();
         let holder = tokio::spawn(async move {
-            crate::migrate::with_migrate_lock_held_v2(V2Token(()), &hpool, |_| async move {
-                held_tx.send(()).unwrap();
-                let _ = tokio::time::timeout(Duration::from_secs(20), go).await;
-                Ok(())
-            })
+            crate::migrate::with_migrate_lock_held_v2(
+                V2Token(()),
+                &hpool,
+                &crate::migrate::LockScope::Session,
+                |_| async move {
+                    held_tx.send(()).unwrap();
+                    let _ = tokio::time::timeout(Duration::from_secs(20), go).await;
+                    Ok(())
+                },
+            )
             .await
             .unwrap();
             hpool.close().await;

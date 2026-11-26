@@ -1117,8 +1117,25 @@ async fn build_schema_scoped_pool(
     schema: &str,
     acquire_timeout: std::time::Duration,
 ) -> Result<PgPool, TenancyError> {
-    // Ensure the schema exists. Use a one-shot connection so we don't
-    // pollute the migration pool's connections.
+    ensure_tenant_schema(registry_url, schema, acquire_timeout).await?;
+    super::pools::connect_schema_scoped(
+        registry_url,
+        schema,
+        2,
+        super::pools::FallThrough::CheckAfterMigrate,
+        acquire_timeout,
+    )
+    .await
+}
+
+/// Create the tenant's schema if missing; refuse one that holds tables but
+/// no rustango ledger. A one-shot connection, so no pool's session is touched.
+#[cfg(feature = "postgres")]
+pub(crate) async fn ensure_tenant_schema(
+    registry_url: &str,
+    schema: &str,
+    acquire_timeout: std::time::Duration,
+) -> Result<(), TenancyError> {
     let bootstrap = PgPool::connect(registry_url).await?;
     let origin = ensure_schema(&bootstrap, schema, acquire_timeout).await;
     bootstrap.close().await;
@@ -1128,15 +1145,7 @@ async fn build_schema_scoped_pool(
              may own it; move the tenant to a schema of its own"
         )));
     }
-
-    super::pools::connect_schema_scoped(
-        registry_url,
-        schema,
-        2,
-        super::pools::FallThrough::CheckAfterMigrate,
-        acquire_timeout,
-    )
-    .await
+    Ok(())
 }
 
 /// Where a tenant's schema came from, by [`ensure_schema`].

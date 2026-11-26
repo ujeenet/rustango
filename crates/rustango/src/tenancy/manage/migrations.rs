@@ -22,6 +22,26 @@ pub(super) async fn migrate_tenants_cmd<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
+    if is_v2(dir)? {
+        let parsed = super::args::parse(
+            args,
+            &super::args::Spec {
+                verb: "migrate-tenants",
+                usage: "migrate-tenants [--max-failures N]   the registry chain, then every active tenant",
+                switches: &[],
+                valued: &["--max-failures"],
+                max_positionals: 0,
+            },
+        )?;
+        let max_failures = parsed
+            .value("--max-failures")?
+            .map(|v| {
+                v.parse::<usize>()
+                    .map_err(|_| TenancyError::Validation(format!("--max-failures {v}: a number")))
+            })
+            .transpose()?;
+        return v2_fleet(pools, registry_url, dir, max_failures, w).await;
+    }
     // No `--dry-run` here: refusing it beats migrating every tenant (#1909).
     super::args::parse(
         args,
@@ -363,6 +383,64 @@ pub(super) fn tenant_failures(failed: usize, total: usize) -> Result<(), Tenancy
     )))
 }
 
+/// A project on migrations engine v2 runs through the v2 fleet (8.3).
+fn is_v2(dir: &Path) -> Result<bool, TenancyError> {
+    Ok(matches!(
+        crate::migrate::ProjectEngine::of_project(dir)?,
+        crate::migrate::ProjectEngine::V2 { .. }
+    ))
+}
+
+/// The registry chain, then every active tenant's, and the report. Failed
+/// tenants are listed with their error class; any failure exits non-zero.
+async fn v2_fleet<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    dir: &Path,
+    max_failures: Option<usize>,
+    w: &mut W,
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let fo = crate::tenancy::migrate_v2::FleetOptions { max_failures };
+    let report = crate::tenancy::migrate_v2::run_fleet(pools, dir, registry_url, &fo).await?;
+    writeln!(
+        w,
+        "registry: applied {} migration(s)",
+        report.registry.len()
+    )?;
+    for id in &report.registry {
+        writeln!(w, "  + {id}")?;
+    }
+    for t in &report.tenants {
+        match &t.error_class {
+            Some(class) => writeln!(w, "tenant {}: failed ({class})", t.slug)?,
+            None => writeln!(
+                w,
+                "tenant {}: applied {} migration(s)",
+                t.slug,
+                t.applied.len()
+            )?,
+        }
+    }
+    if report.stopped {
+        writeln!(
+            w,
+            "stopped: more than {} tenant(s) failed",
+            max_failures.unwrap_or_default()
+        )?;
+    }
+    let failed = report.failed().count();
+    if failed > 0 {
+        return Err(TenancyError::Validation(format!(
+            "{failed} of {} tenant(s) failed; see the report above",
+            report.tenants.len()
+        )));
+    }
+    Ok(())
+}
+
 // ---------- migrate-registry ----------
 
 pub(super) async fn migrate_registry_cmd<W: Write + Send, DB: Database>(
@@ -384,6 +462,24 @@ where
             max_positionals: 0,
         },
     )?;
+    if is_v2(dir)? {
+        let opts = crate::migrate::v2::run::Options {
+            run_as: crate::migrate::v2::run::RunAs::Registry,
+            dry_run: parsed.has("--dry-run"),
+            ..crate::migrate::v2::run::Options::default()
+        };
+        let report = crate::migrate::v2::run::migrate(&pools.registry_pool(), dir, &opts)
+            .await
+            .map_err(|e| TenancyError::Migrate(e.into()))?;
+        for line in &report.planned {
+            writeln!(w, "{line}")?;
+        }
+        writeln!(w, "registry: applied {} migration(s)", report.applied.len())?;
+        for id in &report.applied {
+            writeln!(w, "  + {id}")?;
+        }
+        return Ok(());
+    }
     if parsed.has("--dry-run") {
         return run_registry_scoped(pools, dir, &["--dry-run".to_owned()], w).await;
     }
@@ -508,6 +604,9 @@ where
         return run_registry_scoped(pools, dir, args, w).await;
     }
 
+    if is_v2(dir)? {
+        return v2_fleet(pools, registry_url, dir, None, w).await;
+    }
     // As boot does: the registry, then the tenants through the one
     // dispatch seam (see `migrate_tenants_dyn_with_progress`); each walks
     // the app folders itself.

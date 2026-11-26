@@ -224,6 +224,92 @@ fn undo_table(name: &str) -> TableState {
     )
 }
 
+/// The registry's cache of each tenant's migrate state (8.3): one row per
+/// tenant, the error class only, never driver text or row values.
+pub(crate) const TENANT_CACHE: &str = "__rustango_tenant_migrations__";
+
+fn tenant_cache_table() -> TableState {
+    let mut slug = col("slug", "string", false, Some(200));
+    slug.primary_key = true;
+    table(
+        TENANT_CACHE,
+        vec![
+            slug,
+            // running | applied | failed
+            col("state", "string", false, Some(16)),
+            col("head", "string", true, Some(200)),
+            col("error_class", "string", true, Some(64)),
+            col("run_id", "string", true, Some(64)),
+            col("updated_at", "datetime", true, None),
+        ],
+    )
+}
+
+/// One tenant's cached state: `(slug, state, head, error_class)`.
+pub(crate) type CachedTenant = (String, String, Option<String>, Option<String>);
+
+/// Write `slug`'s cached state, creating the cache on first use.
+///
+/// # Errors
+/// Driver failures.
+pub(crate) async fn cache_put(
+    registry: &Pool,
+    slug: &str,
+    state: &str,
+    head: Option<&str>,
+    error_class: Option<&str>,
+    run_id: &str,
+) -> Result<(), MigrateError> {
+    let d = registry.dialect();
+    if !crate::migrate::try_table_exists_here(registry, TENANT_CACHE).await? {
+        raw_execute_pool(
+            registry,
+            &create_table_sql_for(d, &tenant_cache_table()),
+            Vec::new(),
+        )
+        .await?;
+    }
+    let t = d.quote_ident(TENANT_CACHE);
+    raw_execute_pool(
+        registry,
+        &format!("DELETE FROM {t} WHERE slug = {}", d.placeholder(1)),
+        vec![s(slug)],
+    )
+    .await?;
+    let opt = |v: Option<&str>| v.map_or(SqlValue::Null, s);
+    raw_execute_pool(
+        registry,
+        &format!(
+            "INSERT INTO {t} (slug, state, head, error_class, run_id, updated_at) \
+             VALUES ({}, {}, {}, {}, {}, {})",
+            d.placeholder(1),
+            d.placeholder(2),
+            d.placeholder(3),
+            d.placeholder(4),
+            d.placeholder(5),
+            d.utc_now_sql()
+        ),
+        vec![s(slug), s(state), opt(head), opt(error_class), s(run_id)],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Every cached tenant; none before the first fleet run.
+///
+/// # Errors
+/// Driver failures.
+pub(crate) async fn cache_all(registry: &Pool) -> Result<Vec<CachedTenant>, MigrateError> {
+    if !crate::migrate::try_table_exists_here(registry, TENANT_CACHE).await? {
+        return Ok(Vec::new());
+    }
+    let sql = format!(
+        "SELECT slug, state, head, error_class FROM {} ORDER BY slug",
+        registry.dialect().quote_ident(TENANT_CACHE)
+    );
+    Ok(raw_query_pool(&sql, Vec::new(), registry).await?)
+}
+
 /// One captured change, as the restore reads it.
 #[derive(Debug, Clone)]
 pub(crate) struct UndoRow {
@@ -304,6 +390,36 @@ impl Ledger {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// The tenant login gets no write access to the ledger tables, only
+    /// SELECT on the ledger for boot status (8.1). PG roles; a no-op elsewhere.
+    ///
+    /// # Errors
+    /// Driver failures.
+    pub(crate) async fn revoke(&self, pool: &Pool, role: &str) -> Result<(), MigrateError> {
+        if pool.dialect().kind() != crate::sql::DialectKind::Postgres {
+            return Ok(());
+        }
+        let d = pool.dialect();
+        let all: Vec<String> = [&self.table, &self.events, &self.progress, &self.undo]
+            .iter()
+            .map(|t| d.quote_ident(t))
+            .collect();
+        let role = d.quote_ident(role);
+        raw_execute_pool(
+            pool,
+            &format!("REVOKE ALL ON TABLE {} FROM {role}", all.join(", ")),
+            Vec::new(),
+        )
+        .await?;
+        raw_execute_pool(
+            pool,
+            &format!("GRANT SELECT ON TABLE {} TO {role}", all[0]),
+            Vec::new(),
+        )
+        .await?;
         Ok(())
     }
 

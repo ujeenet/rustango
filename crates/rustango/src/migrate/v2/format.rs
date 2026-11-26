@@ -882,6 +882,9 @@ fn validate(
     at: &str,
 ) -> Result<(), LoadError> {
     verified_noops(file, at)?;
+    if file.target == Target::Tenant {
+        tenant_sql_stays_home(file, at)?;
+    }
     let checkpoint = file.kind == Kind::Checkpoint;
     if !checkpoint && (file.state.is_some() || file.base.is_some()) {
         return Err(LoadError::new(
@@ -987,6 +990,76 @@ fn validate(
 
 /// A `noop` down passes when the reverse of an earlier op of this file
 /// drops everything the step writes; otherwise it needs `allow` (7.5).
+/// Tenant SQL never names another schema (8.2): `public` anywhere, or a
+/// qualified table after FROM/JOIN/UPDATE/INTO/TABLE other than
+/// `extensions`. Positional, so the search path stays the real guard.
+fn tenant_sql_stays_home(file: &File, at: &str) -> Result<(), LoadError> {
+    use super::norm::Tok;
+    let mut texts: Vec<(usize, &str)> = Vec::new();
+    for (i, env) in file.operations.iter().enumerate() {
+        match &env.op {
+            Op::DataSql { up, down, .. } => {
+                texts.extend(up.texts().map(|t| (i, t)));
+                if let DataDown::Sql(d) = down {
+                    texts.extend(d.texts().map(|t| (i, t)));
+                }
+            }
+            Op::RawSql { up, down, .. } => {
+                texts.extend(up.texts().map(|t| (i, t)));
+                if let Some(d) = down {
+                    texts.extend(d.texts().map(|t| (i, t)));
+                }
+            }
+            Op::AddCheck { check, .. } => {
+                if let CheckBody::Sql(t) = &check.body {
+                    texts.push((i, t));
+                }
+            }
+            _ => {}
+        }
+    }
+    for (i, text) in texts {
+        // Templates are not SQL yet: each becomes a plain name.
+        let mut plain = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(a) = rest.find("{{") {
+            plain.push_str(&rest[..a]);
+            plain.push_str(" x ");
+            rest = rest[a..].find("}}").map_or("", |b| &rest[a + b + 2..]);
+        }
+        plain.push_str(rest);
+        let Ok(toks) = super::norm::tokenize(crate::sql::DialectKind::Postgres, &plain) else {
+            continue;
+        };
+        let ident = |k: usize| match toks.get(k).map(|t| &t.tok) {
+            Some(Tok::Ident(w)) => Some(w.as_str()),
+            _ => None,
+        };
+        let dot = |k: usize| matches!(toks.get(k).map(|t| &t.tok), Some(Tok::Op(o)) if o == ".");
+        for k in 0..toks.len() {
+            let Some(q) = ident(k) else { continue };
+            if !dot(k + 1) || ident(k + 2).is_none() {
+                continue;
+            }
+            let after_table_kw = k > 0
+                && ident(k - 1)
+                    .is_some_and(|w| ["from", "join", "update", "into", "table"].contains(&w));
+            if q == "public" || (after_table_kw && q != "extensions") {
+                return Err(LoadError::new(
+                    Code::OtherSchema,
+                    format!("{at}#/operations/{i}"),
+                    format!(
+                        "tenant SQL names schema `{q}`: a tenant file reaches only its own \
+                         schema (and `extensions`); registry tables change through the registry \
+                         chain"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn verified_noops(file: &File, at: &str) -> Result<(), LoadError> {
     let mut tables: Vec<&str> = Vec::new();
     let mut columns: Vec<(&str, &str)> = Vec::new();

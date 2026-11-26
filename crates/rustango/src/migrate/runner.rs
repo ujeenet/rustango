@@ -2297,6 +2297,7 @@ where
 {
     hold_migrate_lock(
         pool,
+        &LockScope::Session,
         Box::pin(async {
             create_ledger_locked(pool, ledger, Gate::V1).await?;
             body.await
@@ -2331,7 +2332,12 @@ where
     F: FnOnce(LockHeld) -> Fut,
     Fut: std::future::Future<Output = Result<R, MigrateError>>,
 {
-    hold_migrate_lock(pool, Box::pin(body(LockHeld(Gate::V1)))).await
+    hold_migrate_lock(
+        pool,
+        &LockScope::Session,
+        Box::pin(body(LockHeld(Gate::V1))),
+    )
+    .await
 }
 
 /// [`with_migrate_lock_held`] for the engine v2 runner: the same lock key,
@@ -2340,14 +2346,44 @@ where
 pub(crate) async fn with_migrate_lock_held_v2<F, Fut, R>(
     _: super::v2::run::V2Token,
     pool: &crate::sql::Pool,
+    scope: &LockScope,
     body: F,
 ) -> Result<R, MigrateError>
 where
     F: FnOnce(LockHeld) -> Fut,
     Fut: std::future::Future<Output = Result<R, MigrateError>>,
 {
-    hold_migrate_lock(pool, Box::pin(body(LockHeld(Gate::V2)))).await
+    hold_migrate_lock(pool, scope, Box::pin(body(LockHeld(Gate::V2)))).await
 }
+
+/// Which lock a run takes (6.6). Built from the target, never from the
+/// pool's session: one pool serving several schemas still locks each apart.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) enum LockScope {
+    /// The pool's database, and on PG its session schema (as engine v1).
+    #[default]
+    Session,
+    /// A schema-mode tenant: PG keys on the schema, as v1's
+    /// [`lock_key_for_schema`] does for that schema.
+    Schema(String),
+    /// The fleet run, in the registry: orchestrators exclude each other
+    /// while per-target runs take their own locks inside it.
+    Fleet,
+}
+
+/// The PG advisory key of `scope`, for a scope that names it.
+#[cfg(feature = "postgres")]
+pub(crate) fn lock_key_of(scope: &LockScope) -> Option<i64> {
+    match scope {
+        LockScope::Session => None,
+        LockScope::Schema(s) => Some(lock_key_for_schema(Some(s))),
+        LockScope::Fleet => Some(lock_key_for_schema(Some(FLEET_LOCK))),
+    }
+}
+
+/// The fleet lock's name in the schema key space: no schema is named so.
+#[cfg(feature = "postgres")]
+const FLEET_LOCK: &str = "\u{0}rustango_fleet";
 
 tokio::task_local! {
     /// Set while this task holds the migrate lock.
@@ -2389,13 +2425,29 @@ fn refuse_nested_lock() -> Result<(), MigrateError> {
 /// overflowed a 2 MiB stack in debug builds (#2305).
 async fn hold_migrate_lock<F, R>(
     pool: &crate::sql::Pool,
+    scope: &LockScope,
     body: std::pin::Pin<Box<F>>,
 ) -> Result<R, MigrateError>
 where
     F: std::future::Future<Output = Result<R, MigrateError>>,
 {
+    // The fleet lock wraps per-target runs, which take their own locks.
+    if *scope == LockScope::Fleet {
+        return hold_lock_session(pool, scope, body).await;
+    }
     refuse_nested_lock()?;
-    let body = LOCK_HELD.scope((), body);
+    hold_lock_session(pool, scope, Box::pin(LOCK_HELD.scope((), body))).await
+}
+
+/// Take `scope`'s lock on its own session, run `body`, release.
+async fn hold_lock_session<F, R>(
+    pool: &crate::sql::Pool,
+    scope: &LockScope,
+    body: std::pin::Pin<Box<F>>,
+) -> Result<R, MigrateError>
+where
+    F: std::future::Future<Output = Result<R, MigrateError>>,
+{
     let dialect = pool.dialect();
     let (Some(acquire), Some(release)) = (
         dialect.acquire_session_lock_sql(),
@@ -2408,7 +2460,10 @@ where
         crate::sql::Pool::Postgres(pg) => {
             let opts = pg.connect_options();
             let connect_timeout = pg.options().get_acquire_timeout();
-            let key = pg_migrate_lock_key(pg).await?;
+            let key = match lock_key_of(scope) {
+                Some(key) => key,
+                None => pg_migrate_lock_key(pg).await?,
+            };
             let mut held =
                 LockSession::<sqlx::PgConnection>::wait(&opts, connect_timeout, |conn| {
                     let sql = acquire.clone();
@@ -2428,7 +2483,12 @@ where
         }
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
-            const NAME: &str = "rustango_migrate_";
+            // The database name is bound in by the dialect; one DB, one tenant.
+            let name = if *scope == LockScope::Fleet {
+                "rustango_fleet_"
+            } else {
+                "rustango_migrate_"
+            };
             let opts = my.connect_options();
             let connect_timeout = my.options().get_acquire_timeout();
             let mut held =
@@ -2436,7 +2496,7 @@ where
                     let sql = acquire.clone();
                     Box::pin(async move {
                         let got: Option<i64> = sqlx::query_scalar(&sql)
-                            .bind(NAME)
+                            .bind(name)
                             .fetch_one(&mut *conn)
                             .await?;
                         mysql_lock_taken(got)
@@ -2444,13 +2504,18 @@ where
                 })
                 .await?;
             let result = body.await;
-            let _ = sqlx::query(&release).bind(NAME).execute(held.conn()).await;
+            let _ = sqlx::query(&release).bind(name).execute(held.conn()).await;
             held.close().await;
             result
         }
         #[cfg(feature = "sqlite")]
         crate::sql::Pool::Sqlite(sq) => {
-            let Some(opts) = sqlite_lock_options(sq).await? else {
+            let suffix = if *scope == LockScope::Fleet {
+                "fleet"
+            } else {
+                "migrate"
+            };
+            let Some(opts) = sqlite_lock_options(sq, suffix).await? else {
                 return body.await;
             };
             let connect_timeout = sq.options().get_acquire_timeout();
@@ -2498,6 +2563,7 @@ where
 #[cfg(feature = "sqlite")]
 async fn sqlite_lock_options(
     sq: &sqlx::SqlitePool,
+    suffix: &str,
 ) -> Result<Option<sqlx::sqlite::SqliteConnectOptions>, MigrateError> {
     let file: String =
         sqlx::query_scalar("SELECT file FROM pragma_database_list WHERE name = 'main'")
@@ -2508,7 +2574,7 @@ async fn sqlite_lock_options(
     }
     Ok(Some(
         sqlx::sqlite::SqliteConnectOptions::new()
-            .filename(format!("{file}-migrate.lock"))
+            .filename(format!("{file}-{suffix}.lock"))
             .create_if_missing(true)
             .busy_timeout(std::time::Duration::ZERO),
     ))

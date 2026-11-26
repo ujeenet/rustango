@@ -169,6 +169,7 @@ fn make<W: Write>(pool: &Pool, dir: &Path, args: &[String], w: &mut W) -> Result
         dry_run: args.iter().any(|a| a == "--check"),
         renames,
         no_rename: args.iter().any(|a| a == "--no-rename"),
+        tenancy: args.iter().any(|a| a == "--tenancy"),
     };
     crate::migrate::make::check_models()?;
     let (folder, models): (PathBuf, _) = match value(args, "--app")? {

@@ -78,6 +78,8 @@ pub(crate) enum Code {
     FkIndex,
     /// A tenant table referencing a registry table.
     CrossTarget,
+    /// Tenant SQL naming another schema (the registry's, `public`).
+    OtherSchema,
     /// A checkpoint field misused, or its state hash does not match.
     Checkpoint,
     /// Two app labels in one folder, or one label in two folders.
@@ -149,6 +151,7 @@ impl Code {
             Self::Unresolved => "MV2-E029",
             Self::StepChanged => "MV2-E032",
             Self::CrossTarget => "MV2-E030",
+            Self::OtherSchema => "MV2-E031",
             Self::FkType => "MV2-E3780",
             Self::CheckColumn => "MV2-E3959",
         }

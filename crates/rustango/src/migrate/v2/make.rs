@@ -39,6 +39,10 @@ pub(crate) struct MakeOptions {
     pub(crate) renames: Vec<(String, String, String)>,
     /// `--no-rename`: a drop and an add of one type are what they say.
     pub(crate) no_rename: bool,
+    /// `--tenancy`: tenant models live apart from registry models, so an FK
+    /// between them is refused (decision 4). Also on when the project has
+    /// registry-target files.
+    pub(crate) tenancy: bool,
 }
 
 /// The file `make` wrote (or would write), with one line per op.
@@ -55,6 +59,38 @@ pub(crate) struct Made {
 /// Load and replay errors, two leaves, a default with no one spelling on
 /// the configured backends, a NOT NULL column with no default or fill, an
 /// op v2 does not generate yet, or an internal mismatch of the self-check.
+/// A tenant model with an FK to a registry model: refused, as replay
+/// refuses it (decision 4, 3.2), in both tenancy modes.
+fn refuse_registry_fks(models: &SchemaSnapshot, at: &str) -> Result<(), LoadError> {
+    use crate::core::ModelScope;
+    let scope_of = |table: &str| {
+        crate::core::ModelEntry::for_table(table).map_or(ModelScope::Tenant, |e| e.schema.scope)
+    };
+    for t in models
+        .tables
+        .iter()
+        .filter(|t| scope_of(&t.name) == ModelScope::Tenant)
+    {
+        for f in &t.fields {
+            let Some(fk) = &f.fk else { continue };
+            if scope_of(&fk.to) == ModelScope::Registry {
+                return Err(LoadError::new(
+                    Code::CrossTarget,
+                    at,
+                    format!(
+                        "tenant table `{}.{}` references registry table `{}`. Tenant→registry \
+                         FKs are not allowed in v2: in DB mode the tables live in different \
+                         databases, and schema mode must behave the same. Keep the column plain \
+                         and check it in app code.",
+                        t.name, f.column, fk.to
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn make(
     dir: &Path,
     folder: &Path,
@@ -62,6 +98,9 @@ pub(crate) fn make(
     opts: &MakeOptions,
 ) -> Result<Option<Made>, LoadError> {
     let project = super::load::load_project(dir)?;
+    if opts.tenancy || project.order.contains_key(&Target::Registry) {
+        refuse_registry_fks(models, &folder.display().to_string())?;
+    }
     let replayed = super::load::replay(&project)?;
     let old = replayed
         .states
