@@ -1028,6 +1028,9 @@ fn tenant_sql_stays_home(file: &File, at: &str) -> Result<(), LoadError> {
             rest = rest[a..].find("}}").map_or("", |b| &rest[a + b + 2..]);
         }
         plain.push_str(rest);
+        // Comments are not SQL: `-- see public.org` names nothing, and an
+        // apostrophe in one must not hide the statement after it.
+        let (plain, _) = super::render::strip_comments(&plain, false);
         let Ok(toks) = super::norm::tokenize(crate::sql::DialectKind::Postgres, &plain) else {
             continue;
         };
@@ -1206,6 +1209,22 @@ mod tests {
             sql(ok, "tenant").unwrap();
         }
         sql("UPDATE public.org SET c = 1", "registry").unwrap();
+        // Tokens, not text: strings, comments and quoted names hold no qualifier.
+        for ok in [
+            "UPDATE {{t:t}} SET {{c:c}} = 'see public.org'",
+            "-- copied from public.org\nUPDATE {{t:t}} SET {{c:c}} = 1",
+            "/* FROM other.t */ UPDATE {{t:t}} SET {{c:c}} = 1",
+            "UPDATE {{t:t}} SET {{c:c}} = \"public.org\".x",
+        ] {
+            sql(ok, "tenant").unwrap_or_else(|e| panic!("{ok}: {e}"));
+        }
+        // A comment's apostrophe does not hide the statement after it.
+        assert_eq!(
+            sql("-- don't\nUPDATE public.org SET c = 1", "tenant")
+                .unwrap_err()
+                .code,
+            Code::OtherSchema
+        );
     }
 
     #[test]

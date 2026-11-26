@@ -344,6 +344,15 @@ pub(crate) fn legacy_baseline(
     current: &SchemaSnapshot,
     model_scope: crate::core::ModelScope,
 ) -> SchemaSnapshot {
+    legacy_chain_snapshot(prior_scoped, current).filtered_to_scope(model_scope)
+}
+
+/// [`legacy_baseline`] before the scope filter: a tenancy chain's
+/// snapshots hold that scope's tables already.
+pub(crate) fn legacy_chain_snapshot(
+    prior_scoped: &[&Migration],
+    current: &SchemaSnapshot,
+) -> SchemaSnapshot {
     let mut prev_snapshot = prior_scoped
         .last()
         .map_or_else(empty_snapshot, |m| effective_snapshot(prior_scoped, m));
@@ -354,7 +363,7 @@ pub(crate) fn legacy_baseline(
         }
     }
     fold_in_framework_tables(&mut prev_snapshot, current);
-    prev_snapshot.filtered_to_scope(model_scope)
+    prev_snapshot
 }
 
 fn plan_scoped(

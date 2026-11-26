@@ -18,6 +18,7 @@ pub(crate) mod ledger;
 pub(crate) mod load;
 pub(crate) mod make;
 pub(crate) mod norm;
+pub(crate) mod plan;
 pub(crate) mod preflight;
 pub(crate) mod probe;
 pub(crate) mod render;
@@ -35,7 +36,7 @@ pub use step::{
 #[cfg(test)]
 mod fixtures;
 #[cfg(test)]
-mod perf_tests;
+pub(crate) mod perf_tests;
 #[cfg(test)]
 mod render_live_tests;
 #[cfg(test)]

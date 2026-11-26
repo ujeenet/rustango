@@ -20,10 +20,10 @@ const REPLAY_BUDGET: Duration = Duration::from_millis(100);
 const PLAN_BUDGET: Duration = Duration::from_secs(2);
 
 /// Deterministic LCG, so the fixture is the same on every run.
-struct Rng(u64);
+pub(super) struct Rng(pub(super) u64);
 
 impl Rng {
-    fn next(&mut self, n: usize) -> usize {
+    pub(super) fn next(&mut self, n: usize) -> usize {
         self.0 = self
             .0
             .wrapping_mul(6_364_136_223_846_793_005)
@@ -59,11 +59,20 @@ fn id(i: usize) -> String {
     format!("{:04}_step", i + 1)
 }
 
-/// Write the project: `APPS` app folders of `FILES_PER_APP` files, about
-/// five ops each; apps after the first point FKs at the first app's tables.
 fn write_fixture(root: &Path) {
+    write_fixture_sized(root, APPS, FILES_PER_APP, TABLES_PER_APP);
+}
+
+/// Write the project: `apps` app folders of `files_per_app` files, about
+/// five ops each; apps after the first point FKs at the first app's tables.
+pub(super) fn write_fixture_sized(
+    root: &Path,
+    apps: usize,
+    files_per_app: usize,
+    tables_per_app: usize,
+) {
     let mut rng = Rng(7);
-    for a in 0..APPS {
+    for a in 0..apps {
         let app = format!("a{a}");
         let dir = if a == 0 {
             root.join("migrations")
@@ -73,9 +82,9 @@ fn write_fixture(root: &Path) {
         std::fs::create_dir_all(&dir).unwrap();
         let mut tables: Vec<String> = Vec::new();
         let mut plain: Vec<(String, String, u32)> = Vec::new();
-        for i in 0..FILES_PER_APP {
+        for i in 0..files_per_app {
             let mut ops = Vec::new();
-            if tables.len() < TABLES_PER_APP {
+            if tables.len() < tables_per_app {
                 for _ in 0..5 {
                     let name = format!("{app}_t{}", tables.len());
                     let parent = match (a, tables.is_empty()) {

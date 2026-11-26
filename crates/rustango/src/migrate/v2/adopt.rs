@@ -1,5 +1,6 @@
-//! `adopt`, the offline part (9.2): one checkpoint per app folder from the
-//! last engine v1 snapshot, then the v1 files go (git keeps them).
+//! `adopt`, the offline part (9.2): one checkpoint per app folder and
+//! target from the last engine v1 snapshot, then the v1 files go (git
+//! keeps them).
 //!
 //! The state is written for one backend: defaults as engine v1 rendered
 //! them there, and the names v1 left to that backend where it has them.
@@ -32,8 +33,8 @@ fn err(code: Code, at: impl Into<String>, msg: impl Into<String>) -> LoadError {
 /// Switch the engine v1 project around `dir` to engine v2 for backend `b`.
 ///
 /// # Errors
-/// Not a v1 project, a tenancy folder (phase 5), two leaves, an op v2 does
-/// not run yet (composite FKs, M2M, exclusions), or a checkpoint file that
+/// Not a v1 project, two leaves, a tenant→registry FK, an op v2 does not
+/// run yet (composite FKs, M2M, exclusions), or a checkpoint file that
 /// exists already.
 pub(crate) fn adopt(dir: &Path, b: Backend) -> Result<AdoptReport, LoadError> {
     let at = dir.display().to_string();
@@ -51,35 +52,19 @@ pub(crate) fn adopt(dir: &Path, b: Backend) -> Result<AdoptReport, LoadError> {
     for folder in crate::migrate::file::project_migration_dirs(dir) {
         let fat = folder.display().to_string();
         let migs = file::list_dir(&folder).map_err(|e| err(Code::File, &fat, e.to_string()))?;
-        let Some(last) = migs.last() else { continue };
-        if migs.iter().any(|m| m.scope == MigrationScope::Registry) {
-            return Err(err(
-                Code::NotEnabled,
-                &fat,
-                "a tenancy folder (registry migrations) is adopted from a later release",
-            ));
+        if migs.is_empty() {
+            continue;
         }
-        let prior: Vec<&Migration> = migs.iter().collect();
-        crate::migrate::make::refuse_branched(&prior)
-            .map_err(|e| err(Code::Graph, &fat, e.to_string()))?;
-        let snapshot = crate::migrate::make::legacy_baseline(
-            &prior,
-            &SchemaSnapshot::default(),
-            crate::core::ModelScope::Tenant,
-        );
-        let doc = state_of(&snapshot, b, &fat)?;
-        let hash = State::from_doc(doc.clone()).hash(&mut HashMemo::default());
-        let next = file::extract_index(&last.name).map_or(1, |n| n + 1);
-        let id = format!("{next:04}_adopt");
         let app = app_label(crate::migrate::file::project_root_of(dir), &folder);
-        let body = json!({
-            "engine": 2, "format": 1, "kind": "checkpoint", "id": id, "app": app,
-            "target": "tenant", "parents": [],
-            "base": {"legacy": last.name, "state_sha256": hash},
-            "state": doc,
-            "operations": [],
-            "description": "Switched from engine v1. Rollback stops here.",
-        });
+        let next = migs
+            .iter()
+            .filter_map(|m| file::extract_index(&m.name))
+            .max()
+            .map_or(1, |n| n + 1);
+        let v1_files: Vec<PathBuf> = migs
+            .iter()
+            .map(|m| folder.join(format!("{}.json", m.name)))
+            .collect();
         for m in &migs {
             for op in &m.forward {
                 match op {
@@ -93,11 +78,57 @@ pub(crate) fn adopt(dir: &Path, b: Backend) -> Result<AdoptReport, LoadError> {
                 }
             }
         }
-        let v1_files: Vec<PathBuf> = migs
-            .iter()
-            .map(|m| folder.join(format!("{}.json", m.name)))
-            .collect();
-        planned.push((folder.join(format!("{id}.json")), v1_files, body));
+        let chain = |scope: MigrationScope| -> Vec<&Migration> {
+            migs.iter().filter(|m| m.scope == scope).collect()
+        };
+        let registry = chain(MigrationScope::Registry);
+        let mut bodies = Vec::new();
+        if registry.is_empty() {
+            // One chain: as engine v1 planned it, tenant-scoped models only.
+            let prior: Vec<&Migration> = migs.iter().collect();
+            crate::migrate::make::refuse_branched(&prior)
+                .map_err(|e| err(Code::Graph, &fat, e.to_string()))?;
+            let snapshot = crate::migrate::make::legacy_baseline(
+                &prior,
+                &SchemaSnapshot::default(),
+                crate::core::ModelScope::Tenant,
+            );
+            let id = format!("{next:04}_adopt");
+            bodies.push((
+                id.clone(),
+                checkpoint(&snapshot, &prior, &id, &app, "tenant", b, &fat)?,
+            ));
+        } else {
+            // A tenancy folder: one checkpoint per target, each from its own chain.
+            let reg_snap =
+                crate::migrate::make::legacy_chain_snapshot(&registry, &SchemaSnapshot::default());
+            let tenant = chain(MigrationScope::Tenant);
+            let ten_snap =
+                crate::migrate::make::legacy_chain_snapshot(&tenant, &SchemaSnapshot::default());
+            refuse_tenant_fks(&ten_snap, &reg_snap, &fat)?;
+            for (target, prior, snap) in [
+                ("registry", &registry, &reg_snap),
+                ("tenant", &tenant, &ten_snap),
+            ] {
+                if prior.is_empty() {
+                    continue;
+                }
+                crate::migrate::make::refuse_branched(prior)
+                    .map_err(|e| err(Code::Graph, &fat, e.to_string()))?;
+                let id = format!("{next:04}_adopt_{target}");
+                bodies.push((
+                    id.clone(),
+                    checkpoint(snap, prior, &id, &app, target, b, &fat)?,
+                ));
+            }
+        }
+        let mut first = true;
+        for (id, body) in bodies {
+            // The v1 files go once, with the folder's first checkpoint.
+            let gone = if first { v1_files.clone() } else { Vec::new() };
+            first = false;
+            planned.push((folder.join(format!("{id}.json")), gone, body));
+        }
     }
     if planned.is_empty() {
         return Err(err(Code::Engine, &at, "no engine v1 migrations to adopt"));
@@ -123,6 +154,65 @@ pub(crate) fn adopt(dir: &Path, b: Backend) -> Result<AdoptReport, LoadError> {
         }
     }
     Ok(report)
+}
+
+/// One checkpoint over `snap`, the state after `prior`'s last migration.
+fn checkpoint(
+    snap: &SchemaSnapshot,
+    prior: &[&Migration],
+    id: &str,
+    app: &str,
+    target: &str,
+    b: Backend,
+    at: &str,
+) -> Result<serde_json::Value, LoadError> {
+    let doc = state_of(snap, b, at)?;
+    let hash = State::from_doc(doc.clone()).hash(&mut HashMemo::default());
+    let legacy = prior.last().map_or("", |m| m.name.as_str());
+    Ok(json!({
+        "engine": 2, "format": 1, "kind": "checkpoint", "id": id, "app": app,
+        "target": target, "parents": [],
+        "base": {"legacy": legacy, "state_sha256": hash},
+        "state": doc,
+        "operations": [],
+        "description": "Switched from engine v1. Rollback stops here.",
+    }))
+}
+
+/// Decision 4: a tenant table with an FK to a registry table cannot be
+/// adopted; every one is listed.
+fn refuse_tenant_fks(
+    tenant: &SchemaSnapshot,
+    registry: &SchemaSnapshot,
+    at: &str,
+) -> Result<(), LoadError> {
+    let is_registry = |t: &str| {
+        registry.tables.iter().any(|r| r.name == t)
+            || crate::core::ModelEntry::for_table(t)
+                .is_some_and(|e| e.schema.scope == crate::core::ModelScope::Registry)
+    };
+    let found: Vec<String> = tenant
+        .tables
+        .iter()
+        .flat_map(|t| {
+            t.fields.iter().filter_map(move |f| {
+                let fk = f.fk.as_ref()?;
+                is_registry(&fk.to).then(|| format!("{}.{} -> {}", t.name, f.column, fk.to))
+            })
+        })
+        .collect();
+    if found.is_empty() {
+        return Ok(());
+    }
+    Err(err(
+        Code::CrossTarget,
+        at,
+        format!(
+            "tenant→registry FKs cannot cross to engine v2: {}; drop them in a v1 migration \
+             first, then adopt",
+            found.join(", ")
+        ),
+    ))
 }
 
 /// `project` for the flat `migrations/` (or a bare folder), else the app

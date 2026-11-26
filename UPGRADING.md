@@ -161,6 +161,10 @@ untouched.
 - `TenancyError::Maintenance` and `TenantRejection::Maintenance` are new: a tenant whose engine v2 migration failed answers 503 until a run applies it.
 - Engine v2 resume ends the DDL session a killed run left behind. A migrate role ends its own sessions without extra rights; to end another role's session, PG needs `GRANT pg_signal_backend, pg_read_all_stats TO <migrate role>` and MySQL needs `GRANT CONNECTION_ADMIN, PROCESS ON *.* TO <migrate user>`. Without it, resume stops with an error naming the grant and leaves the ledger as it was.
 - `runserver` on an engine v2 project binds before it migrates: `/health` answers 200, `/ready` and every route 503 until the run ends. A SIGTERM during the run stops after the current unit and exits non-zero; the next start resumes.
+- `MigrateSettings` gains `fleet_parallel`, `fleet_canaries`, `fleet_max_failures` and `fleet_active_only`; it is `#[non_exhaustive]`, so build it with `..Default::default()`.
+- An engine v2 tenancy fleet now migrates inactive tenants too; pass `--active-only` (or `fleet_active_only = true`) for the old set.
+- Under engine v2 tenancy on Postgres, the first fleet run moves relocatable extensions from `public` to a new `extensions` schema and sets the database `search_path` to `"$user", public, extensions`. It needs the extension owner or a superuser; without it the run stops and names the statement to run. Registry sessions opened before the move keep the old path until they reconnect.
+- A registry file's `create_extension` installs into `extensions`; a `schema` other than `extensions` is refused under tenancy.
 
 ## 0.70.0
 

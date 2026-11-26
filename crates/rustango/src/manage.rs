@@ -33,7 +33,7 @@ use std::pin::Pin;
 
 use axum::Router;
 
-mod boot_gate;
+pub(crate) mod boot_gate;
 mod command;
 mod serve_args;
 pub use command::{CommandContext, CommandError, CommandFuture};
@@ -1430,6 +1430,24 @@ impl Cli {
         BOOT_STALE_AFTER
     }
 
+    /// `[migrate] fleet_*`: how the boot fleet run goes (8.3).
+    #[cfg(feature = "tenancy")]
+    #[allow(clippy::unused_self)]
+    fn boot_fleet_options(&self) -> crate::tenancy::migrate_v2::FleetOptions {
+        #[cfg(feature = "config")]
+        if let Some(s) = &self.settings_for_layers {
+            let m = &s.migrate;
+            return crate::tenancy::migrate_v2::FleetOptions {
+                parallel: m.fleet_parallel.unwrap_or(1),
+                canaries: m.fleet_canaries.clone(),
+                max_failures: m.fleet_max_failures,
+                active_only: m.fleet_active_only,
+                ..Default::default()
+            };
+        }
+        crate::tenancy::migrate_v2::FleetOptions::default()
+    }
+
     /// `[server] migrate_on_boot` / `migrate_lock_timeout_secs`, under [`Cli::migrate_on_boot`].
     fn boot_migrate(&self) -> BootMigrate {
         #[cfg(feature = "config")]
@@ -1927,7 +1945,11 @@ impl Cli {
                     crate::migrate::ProjectEngine::V2 { .. }
                 ) =>
             {
-                Some((lock_timeout, self.migrations_dir.clone()))
+                Some((
+                    lock_timeout,
+                    self.migrations_dir.clone(),
+                    self.boot_fleet_options(),
+                ))
             }
             _ => None,
         };
@@ -1993,10 +2015,14 @@ impl Cli {
                 })
                 .await?;
         }
-        if let Some((lock_timeout, dir)) = fleet_boot {
-            builder = crate::migrate::with_lock_timeout(lock_timeout, builder.migrate(dir)).await?;
+        if let Some((lock_timeout, dir, fleet)) = fleet_boot {
+            builder.fleet = fleet;
+            builder
+                .serve_after_fleet(&self.bind, dir, lock_timeout)
+                .await?;
+        } else {
+            builder.serve(&self.bind).await?;
         }
-        builder.serve(&self.bind).await?;
         run_shutdown_hook(on_shutdown).await;
         Ok(())
     }
@@ -2018,7 +2044,11 @@ impl Cli {
                     crate::migrate::ProjectEngine::V2 { .. }
                 ) =>
             {
-                Some((lock_timeout, self.migrations_dir.clone()))
+                Some((
+                    lock_timeout,
+                    self.migrations_dir.clone(),
+                    self.boot_fleet_options(),
+                ))
             }
             _ => None,
         };
@@ -2092,10 +2122,14 @@ impl Cli {
                 })
                 .await?;
         }
-        if let Some((lock_timeout, dir)) = fleet_boot {
-            builder = crate::migrate::with_lock_timeout(lock_timeout, builder.migrate(dir)).await?;
+        if let Some((lock_timeout, dir, fleet)) = fleet_boot {
+            builder.fleet = fleet;
+            builder
+                .serve_after_fleet(&self.bind, dir, lock_timeout)
+                .await?;
+        } else {
+            builder.serve(&self.bind).await?;
         }
-        builder.serve(&self.bind).await?;
         run_shutdown_hook(on_shutdown).await;
         Ok(())
     }

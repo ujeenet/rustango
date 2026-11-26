@@ -639,18 +639,100 @@ async fn switch_renames_and_fresh_matches(b: B) {
     }
 }
 
+/// A v1 tenancy folder: a registry chain and a tenant chain.
+pub(crate) fn v1_tenancy_project(dir: &Path, tenant_fk: bool) {
+    let plan = json!({"name": "ad_plan", "model": "AdPlan", "fields": [
+        v1_field("id", "i64", json!({"primary_key": true, "auto": true, "nullable": false}))]});
+    put(
+        dir,
+        "0001_plan",
+        &json!({"name": "0001_plan", "created_at": "", "scope": "registry",
+        "snapshot": {"tables": [plan]},
+        "forward": [{"schema": {"CreateTable": "ad_plan"}}]}),
+    );
+    let mut fields = vec![
+        v1_field(
+            "id",
+            "i64",
+            json!({"primary_key": true, "auto": true, "nullable": false}),
+        ),
+        v1_field("title", "string", json!({"max_length": 50})),
+    ];
+    if tenant_fk {
+        fields.push(v1_field(
+            "plan_id",
+            "i64",
+            json!({"nullable": false,
+            "fk": {"kind": "fk", "to": "ad_plan", "on": "id", "on_delete": "CASCADE"}}),
+        ));
+    }
+    let invoice = json!({"name": "ad_invoice", "model": "AdInvoice", "fields": fields});
+    put(
+        dir,
+        "0002_invoice",
+        &json!({"name": "0002_invoice", "created_at": "",
+        "snapshot": {"tables": [invoice.clone()]},
+        "forward": [{"schema": {"CreateTable": "ad_invoice"}}]}),
+    );
+    let mut invoice2 = invoice;
+    invoice2["fields"]
+        .as_array_mut()
+        .unwrap()
+        .push(v1_field("total", "i32", json!({})));
+    put(
+        dir,
+        "0003_total",
+        &json!({"name": "0003_total", "created_at": "", "prev": "0002_invoice",
+        "snapshot": {"tables": [invoice2]},
+        "forward": [{"schema": {"AddColumn": {"table": "ad_invoice", "column": "total"}}}]}),
+    );
+}
+
+/// A tenancy folder adopts per target: a registry checkpoint and a tenant
+/// one, each based on its own chain's last v1 migration (9.2).
 #[test]
-fn a_tenancy_folder_is_not_adopted_yet() {
+fn a_tenancy_folder_adopts_per_target() {
     let root = tempfile::tempdir().unwrap();
     let dir = root.path().join("migrations");
-    put(
-        &dir,
-        "0001_org",
-        &json!({"name": "0001_org", "created_at": "", "scope": "registry",
-        "snapshot": {"tables": []}, "forward": []}),
+    v1_tenancy_project(&dir, false);
+    let report = super::super::adopt::adopt(&dir, Backend::Postgres).unwrap();
+    assert_eq!(
+        report.written,
+        [
+            dir.join("0004_adopt_registry.json"),
+            dir.join("0004_adopt_tenant.json")
+        ]
     );
+    assert_eq!(report.removed.len(), 3);
+    let read = |n: &str| -> Value {
+        serde_json::from_str(&std::fs::read_to_string(dir.join(n)).unwrap()).unwrap()
+    };
+    let reg = read("0004_adopt_registry.json");
+    assert_eq!(
+        (reg["target"].as_str(), reg["base"]["legacy"].as_str()),
+        (Some("registry"), Some("0001_plan"))
+    );
+    assert!(reg["state"]["tables"].get("ad_plan").is_some(), "{reg}");
+    let ten = read("0004_adopt_tenant.json");
+    assert_eq!(
+        (ten["target"].as_str(), ten["base"]["legacy"].as_str()),
+        (Some("tenant"), Some("0003_total"))
+    );
+    assert!(ten["state"]["tables"].get("ad_plan").is_none(), "{ten}");
+    super::super::load::load_project(&dir).unwrap();
+}
+
+/// Decision 4: a tenant→registry FK is listed and nothing is written.
+#[test]
+fn adopt_refuses_a_tenant_fk_to_the_registry() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    v1_tenancy_project(&dir, true);
     let e = super::super::adopt::adopt(&dir, Backend::Postgres).unwrap_err();
-    assert_eq!(e.code, Code::NotEnabled, "{e}");
+    assert_eq!(e.code, Code::CrossTarget, "{e}");
+    assert!(e.msg.contains("ad_invoice.plan_id -> ad_plan"), "{e}");
+    assert!(dir.join("0001_plan.json").exists());
+    assert!(!dir.join("0004_adopt_tenant.json").exists());
 }
 
 /// A live test that waits on a lock past this fails instead of hanging.

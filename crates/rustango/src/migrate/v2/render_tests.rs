@@ -906,3 +906,33 @@ fn pg_and_sqlite_merge_consecutive_schema_units() {
     let (per_op, _) = render(&State::default(), &ops, Backend::Postgres).unwrap();
     assert_eq!(per_op.len(), 5);
 }
+
+/// Under tenancy a registry file's extension goes to `extensions` (8.2);
+/// another schema is refused.
+#[test]
+fn a_registry_extension_lives_in_extensions() {
+    let reg = |ops: &Value| {
+        let f = decode(
+            &json!({"engine": 2, "format": 1, "id": "0001_case", "app": "project",
+                    "target": "registry", "operations": ops}),
+            "case.json",
+        )
+        .unwrap();
+        let ctx = Ctx {
+            target: Target::Registry,
+            registry: None,
+        };
+        render_file(&State::default(), &f, "case.json", &ctx, Backend::Postgres)
+    };
+    let (units, _) = reg(&json!([{"op": "create_extension", "v": 1, "name": "citext"}])).unwrap();
+    assert_eq!(
+        units[0].sql,
+        [
+            "CREATE SCHEMA IF NOT EXISTS \"extensions\"",
+            "CREATE EXTENSION IF NOT EXISTS \"citext\" SCHEMA \"extensions\""
+        ]
+    );
+    let e = reg(&json!([{"op": "create_extension", "v": 1, "name": "citext", "schema": "public"}]))
+        .unwrap_err();
+    assert_eq!(e.code, Code::OtherSchema, "{e}");
+}

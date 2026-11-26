@@ -315,6 +315,163 @@ pub(crate) async fn cache_all(registry: &Pool) -> Result<Vec<CachedTenant>, Migr
     Ok(raw_query_pool(&sql, Vec::new(), registry).await?)
 }
 
+/// The registry's fleet run record (8.3): one row per fleet run.
+#[cfg(feature = "tenancy")]
+pub(crate) const FLEET_RUNS: &str = "__rustango_fleet_runs__";
+
+#[cfg(feature = "tenancy")]
+fn fleet_runs_table() -> TableState {
+    let mut id = col("run_id", "string", false, Some(64));
+    id.primary_key = true;
+    table(
+        FLEET_RUNS,
+        vec![
+            id,
+            // up | down
+            col("direction", "string", false, Some(8)),
+            col("plan_hash", "string", false, Some(64)),
+            // running | succeeded | failed | abandoned | resumed
+            col("state", "string", false, Some(16)),
+            col("heartbeat_at", "datetime", true, None),
+            col("started_at", "datetime", true, None),
+            col("finished_at", "datetime", true, None),
+        ],
+    )
+}
+
+/// Open a fleet run record. Called under the fleet lock, so a `running`
+/// row is a run that died: the same plan and direction resumes it,
+/// another one refuses unless `abandon`.
+///
+/// # Errors
+/// Another plan's unfinished run, or driver failures.
+#[cfg(feature = "tenancy")]
+pub(crate) async fn fleet_open(
+    registry: &Pool,
+    run_id: &str,
+    direction: &str,
+    plan_hash: &str,
+    abandon: bool,
+) -> Result<(), MigrateError> {
+    let d = registry.dialect();
+    if !crate::migrate::try_table_exists_here(registry, FLEET_RUNS).await? {
+        raw_execute_pool(
+            registry,
+            &create_table_sql_for(d, &fleet_runs_table()),
+            Vec::new(),
+        )
+        .await?;
+    }
+    let t = d.quote_ident(FLEET_RUNS);
+    let open: Vec<(String, String, String)> = raw_query_pool(
+        &format!(
+            "SELECT run_id, direction, plan_hash FROM {t} WHERE state = {}",
+            p(registry, 1)
+        ),
+        vec![s("running")],
+        registry,
+    )
+    .await?;
+    for (id, dir, plan) in open {
+        let same = dir == direction && plan == plan_hash;
+        if !same && !abandon {
+            return Err(MigrateError::Validation(format!(
+                "fleet run {id} ({dir}, plan {}) did not finish and this one has another plan: \
+                 finish it with the release that started it, or pass --abandon-fleet-run",
+                &plan[..plan.len().min(12)]
+            )));
+        }
+        let to = if same { "resumed" } else { "abandoned" };
+        tracing::warn!(target: "rustango::migrate", run = %id, "unfinished fleet run {to}");
+        fleet_set(registry, &id, to).await?;
+    }
+    raw_execute_pool(
+        registry,
+        &format!(
+            "INSERT INTO {t} (run_id, direction, plan_hash, state, heartbeat_at, started_at) \
+             VALUES ({}, {}, {}, {}, {now}, {now})",
+            p(registry, 1),
+            p(registry, 2),
+            p(registry, 3),
+            p(registry, 4),
+            now = d.utc_now_sql()
+        ),
+        vec![s(run_id), s(direction), s(plan_hash), s("running")],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Refresh a fleet run's heartbeat.
+///
+/// # Errors
+/// Driver failures.
+#[cfg(feature = "tenancy")]
+pub(crate) async fn fleet_beat(registry: &Pool, run_id: &str) -> Result<(), MigrateError> {
+    let d = registry.dialect();
+    raw_execute_pool(
+        registry,
+        &format!(
+            "UPDATE {} SET heartbeat_at = {} WHERE run_id = {}",
+            d.quote_ident(FLEET_RUNS),
+            d.utc_now_sql(),
+            p(registry, 1)
+        ),
+        vec![s(run_id)],
+    )
+    .await?;
+    Ok(())
+}
+
+/// End a fleet run: `succeeded` or `failed`.
+///
+/// # Errors
+/// Driver failures.
+#[cfg(feature = "tenancy")]
+pub(crate) async fn fleet_close(
+    registry: &Pool,
+    run_id: &str,
+    state: &str,
+) -> Result<(), MigrateError> {
+    fleet_set(registry, run_id, state).await
+}
+
+#[cfg(feature = "tenancy")]
+async fn fleet_set(registry: &Pool, run_id: &str, state: &str) -> Result<(), MigrateError> {
+    let d = registry.dialect();
+    raw_execute_pool(
+        registry,
+        &format!(
+            "UPDATE {} SET state = {}, finished_at = {} WHERE run_id = {}",
+            d.quote_ident(FLEET_RUNS),
+            p(registry, 1),
+            d.utc_now_sql(),
+            p(registry, 2)
+        ),
+        vec![s(state), s(run_id)],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Every fleet run record, oldest first: `(run_id, direction, state)`.
+///
+/// # Errors
+/// Driver failures.
+#[cfg(all(test, feature = "tenancy"))]
+pub(crate) async fn fleet_runs(
+    registry: &Pool,
+) -> Result<Vec<(String, String, String)>, MigrateError> {
+    if !crate::migrate::try_table_exists_here(registry, FLEET_RUNS).await? {
+        return Ok(Vec::new());
+    }
+    let sql = format!(
+        "SELECT run_id, direction, state FROM {} ORDER BY started_at, run_id",
+        registry.dialect().quote_ident(FLEET_RUNS)
+    );
+    Ok(raw_query_pool(&sql, Vec::new(), registry).await?)
+}
+
 /// One captured change, as the restore reads it.
 #[derive(Debug, Clone)]
 pub(crate) struct UndoRow {

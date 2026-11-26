@@ -9,7 +9,9 @@ use std::sync::Arc;
 
 use super::format::{File, Kind, Op, OpTx, Probe as FileProbe, ProbeKind};
 use super::replay::{apply, Ctx};
-use super::state::{Backend, CheckDef, ColumnDef, FkDef, IndexDef, OnDelete, State, TableState};
+use super::state::{
+    Backend, CheckDef, ColumnDef, FkDef, IndexDef, OnDelete, State, TableState, Target,
+};
 use super::{Code, LoadError, MAX_IDENT};
 use crate::migrate::diff::{self, DefaultText, SchemaChange};
 use crate::migrate::rebuild::TableRebuild;
@@ -200,7 +202,7 @@ const MYSQL_DDL: &[&str] = &[
 /// `sql` without comments, and the number of statements in it (a `;`
 /// outside strings and quoted names ends one). `#` starts a comment on
 /// MySQL only; elsewhere it is an operator.
-fn strip_comments(sql: &str, mysql: bool) -> (String, usize) {
+pub(super) fn strip_comments(sql: &str, mysql: bool) -> (String, usize) {
     let b: Vec<char> = sql.chars().collect();
     let mut out = String::with_capacity(sql.len());
     let mut stmts = 0;
@@ -324,6 +326,7 @@ pub(crate) fn render_file(
             b,
             created: &created,
             at: &op_at,
+            registry: ctx.target == Target::Registry,
         };
         for mut u in r.op(&env.op, env.tx)? {
             if u.kind == UnitKind::Autocommit && u.probe.is_none() {
@@ -428,7 +431,12 @@ struct Render<'a> {
     /// Tables this file created before the op: no online recipe for them.
     created: &'a BTreeSet<String>,
     at: &'a str,
+    /// A registry file: extensions go to [`EXTENSIONS_SCHEMA`] (8.2).
+    registry: bool,
 }
+
+/// Where extensions live under tenancy (8.2).
+pub(crate) const EXTENSIONS_SCHEMA: &str = "extensions";
 
 fn q(d: &dyn Dialect, s: &str) -> String {
     d.quote_ident(s)
@@ -641,6 +649,7 @@ pub(crate) fn render_install(
             b,
             created: &created,
             at,
+            registry: false,
         };
         let op = Op::CreateTable {
             table: super::format::TableDef {
@@ -1405,12 +1414,34 @@ impl Render<'_> {
                         ),
                     ));
                 }
+                // Under tenancy every extension lives in `extensions` (8.2).
+                let schema = match (schema.as_deref(), self.registry) {
+                    (None, true) => Some(EXTENSIONS_SCHEMA),
+                    (Some(sc), true) if sc != EXTENSIONS_SCHEMA => {
+                        return Err(self.err(
+                            Code::OtherSchema,
+                            format!(
+                                "create_extension `{name}`: under tenancy extensions live in \
+                                 `{EXTENSIONS_SCHEMA}`; drop `schema`"
+                            ),
+                        ))
+                    }
+                    (sc, _) => sc,
+                };
+                let mut sql = Vec::new();
+                if schema == Some(EXTENSIONS_SCHEMA) {
+                    sql.push(format!(
+                        "CREATE SCHEMA IF NOT EXISTS {}",
+                        q(d, EXTENSIONS_SCHEMA)
+                    ));
+                }
                 // The one allowed IF NOT EXISTS: provisioning may have installed it.
                 let mut s = format!("CREATE EXTENSION IF NOT EXISTS {}", q(d, name));
                 if let Some(sc) = schema {
                     s.push_str(&format!(" SCHEMA {}", q(d, sc)));
                 }
-                tx(vec![s])
+                sql.push(s);
+                tx(sql)
             }
         })
     }

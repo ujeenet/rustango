@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use super::format::{File, Kind, Op, OpEnvelope};
+use super::format::{File, Kind, Op, OpEnvelope, Phase};
 use super::invert::{invert, Allow};
 use super::ledger::{Ledger, Row, RowState};
 use super::load::{load_project, Loaded, Project};
@@ -81,6 +81,12 @@ pub(crate) struct Options {
     pub(crate) cascade: bool,
     /// `apply <target>`: stop after this migration (`<app>:<id>` or `<id>`).
     pub(crate) up_to: Option<String>,
+    /// `--phase expand` and the fleet's expand stage: stop before the first
+    /// pending contract file (8.3).
+    pub(crate) stop_before_contract: bool,
+    /// The fleet's planner: the state at this target's applied set comes
+    /// from the tip instead of a forward replay (4.2, 8.3).
+    pub(crate) plan: Option<std::sync::Arc<super::plan::TipPlanner>>,
     /// How often a run holding the lock refreshes its heartbeat; `None` = 30 s.
     pub(crate) heartbeat_every: Option<std::time::Duration>,
     /// Test failpoint: stop as if the process died.
@@ -231,6 +237,68 @@ pub(crate) async fn applied_ids(
         }
     }
     Ok(out)
+}
+
+/// The fleet's plan: every file of the project and its checksum, hashed,
+/// so a fleet run record names the release that started it (8.3).
+///
+/// # Errors
+/// A load error.
+#[cfg(feature = "tenancy")]
+pub(crate) fn plan_hash(dir: &Path) -> Result<String, RunError> {
+    use sha2::Digest as _;
+    let mut parts: Vec<String> = load_project(dir)?
+        .files
+        .iter()
+        .map(|f| format!("{}:{}:{}", f.file.app, f.file.id, f.checksum))
+        .collect();
+    parts.sort();
+    Ok(super::checksum::hex(&sha2::Sha256::digest(
+        parts.join("\n").as_bytes(),
+    )))
+}
+
+/// The extensions the registry chain creates on PG (8.2).
+///
+/// # Errors
+/// A load error.
+#[cfg(all(feature = "tenancy", feature = "postgres"))]
+pub(crate) fn registry_extensions(
+    dir: &Path,
+) -> Result<std::collections::BTreeSet<String>, RunError> {
+    Ok(load_project(dir)?
+        .files
+        .iter()
+        .filter(|f| f.file.target == Target::Registry)
+        .flat_map(|f| &f.file.operations)
+        .filter_map(|env| match &env.op {
+            Op::CreateExtension {
+                name, skipped_on, ..
+            } if !skipped_on.contains(&Backend::Postgres) => Some(name.clone()),
+            _ => None,
+        })
+        .collect())
+}
+
+/// Whether `pool`'s chain has a contract file pending (8.3).
+///
+/// # Errors
+/// A load error or driver failures.
+#[cfg(feature = "tenancy")]
+pub(crate) async fn contract_pending(
+    pool: &Pool,
+    dir: &Path,
+    opts: &Options,
+) -> Result<bool, RunError> {
+    let project = load_project(dir)?;
+    let done = applied_ids(pool, opts).await?;
+    Ok(project
+        .order
+        .get(&opts.run_as.target())
+        .into_iter()
+        .flatten()
+        .map(|&i| &project.files[i].file)
+        .any(|f| f.phase == Phase::Contract && !done.contains(&format!("{}:{}", f.app, f.id))))
 }
 
 /// What a run migrates (8.1).
@@ -1147,9 +1215,37 @@ impl Runner<'_> {
             .get(&self.opts.run_as.target())
             .cloned()
             .unwrap_or_default();
+        let applied_set: std::collections::BTreeSet<usize> = order
+            .iter()
+            .copied()
+            .filter(|&i| {
+                let f = &project.files[i].file;
+                rows.get(&(f.app.clone(), f.id.clone()))
+                    .is_some_and(|r| r.state == RowState::Applied)
+            })
+            .collect();
+        // Every applied file before every other one: the planner's state
+        // at that set stands for replaying them.
+        let planned = match &self.opts.plan {
+            Some(p)
+                if p.serves(project)
+                    && order
+                        .iter()
+                        .skip_while(|i| applied_set.contains(i))
+                        .all(|i| !applied_set.contains(i)) =>
+            {
+                state = (*p.state_at(project, &applied_set)?).clone();
+                true
+            }
+            _ => false,
+        };
         for i in order {
             let f = &project.files[i];
             let k = (f.file.app.clone(), f.file.id.clone());
+            let applied_row = applied_set.contains(&i);
+            if self.opts.stop_before_contract && f.file.phase == Phase::Contract && !applied_row {
+                break;
+            }
             match rows.get(&k) {
                 Some(row) => {
                     if row.checksum != f.checksum {
@@ -1186,7 +1282,9 @@ impl Runner<'_> {
                             applied.push(f.file.id.clone());
                         }
                     }
-                    apply_file(&mut state, &f.file, &f.at, &self.ctx())?;
+                    if !(planned && applied_row) {
+                        apply_file(&mut state, &f.file, &f.at, &self.ctx())?;
+                    }
                 }
                 None if f.file.kind == Kind::Checkpoint => {
                     state = self.adopt(f, state, &mut memo).await?;
@@ -2833,4 +2931,4 @@ pub(crate) fn fk_order<'s>(
 
 #[cfg(test)]
 #[path = "run_live_tests.rs"]
-mod live_tests;
+pub(crate) mod live_tests;

@@ -63,6 +63,8 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     first_admin_mail: Option<(crate::email::BoxedMailer, String)>,
     /// How long `serve` lets open connections finish after SIGTERM.
     pub(crate) drain_timeout: std::time::Duration,
+    /// How the boot fleet run goes: `[migrate]` rollout settings (8.3).
+    pub(crate) fleet: crate::tenancy::migrate_v2::FleetOptions,
     /// A `running` run silent this long is closed at boot.
     stale_run_after: std::time::Duration,
     /// Mounts registered via [`Builder::with_static_files`].
@@ -196,6 +198,7 @@ impl<DB: Database> Builder<DB> {
             #[cfg(feature = "email")]
             first_admin_mail: None,
             drain_timeout: crate::shutdown::DEFAULT_DRAIN_TIMEOUT,
+            fleet: crate::tenancy::migrate_v2::FleetOptions::default(),
             stale_run_after: crate::tenancy::provision_store::STALE_RUN_AFTER,
             static_dirs: Vec::new(),
             observability: false,
@@ -807,10 +810,15 @@ impl<DB: Database> Builder<DB> {
             self.pools.as_ref(),
             root,
             &self.registry_url,
-            &crate::tenancy::migrate_v2::FleetOptions::default(),
+            &self.fleet,
         )
         .await?;
-        let failed: Vec<String> = report.failed().map(|t| t.slug.clone()).collect();
+        // Failed tenants, and those a stop left behind, serve 503.
+        let failed: Vec<String> = report
+            .failed()
+            .map(|t| t.slug.clone())
+            .chain(report.skipped.iter().cloned())
+            .collect();
         for t in report.failed() {
             tracing::error!(
                 target: "rustango::tenancy",
@@ -1358,6 +1366,60 @@ impl<DB: Database> Builder<DB> {
         self
     }
 
+    /// Bind first, run the boot fleet behind the boot gate (`/health` 200,
+    /// `/ready` and every route 503), then serve the app (6.11, 8.3).
+    ///
+    /// # Errors
+    /// A bind failure, the boot migrate, or [`Self::into_router`].
+    #[cfg(feature = "manage")]
+    pub(crate) async fn serve_after_fleet(
+        self,
+        addr: &str,
+        dir: std::path::PathBuf,
+        lock_timeout: std::time::Duration,
+    ) -> Result<(), Box<dyn std::error::Error>>
+    where
+        crate::sql::Pool: From<sqlx::Pool<DB>>,
+    {
+        let drain = self.drain_timeout;
+        let gate = crate::manage::boot_gate::BootGate::default();
+        let listener = crate::shutdown::bind_announced(addr, Some(&self.apex)).await?;
+        let port = listener.local_addr()?.port();
+        let serving = tokio::spawn(crate::shutdown::serve_until_drained(
+            listener,
+            gate.router(),
+            drain,
+        ));
+        let booted = async {
+            let b = crate::migrate::with_lock_timeout(lock_timeout, self.migrate(dir)).await?;
+            b.warn_email_gaps();
+            b.into_router().await
+        }
+        .await;
+        match booted {
+            Ok(app) => gate.open(app.layer(Extension(ListenerPort(port)))),
+            Err(e) => {
+                serving.abort();
+                return Err(e);
+            }
+        }
+        serving.await??;
+        Ok(())
+    }
+
+    #[allow(clippy::unused_self)]
+    fn warn_email_gaps(&self)
+    where
+        crate::sql::Pool: From<sqlx::Pool<DB>>,
+    {
+        #[cfg(feature = "sso")]
+        if crate::tenancy::login_field() == crate::login_field::LoginField::Email {
+            // Off the boot path: one slow tenant must not delay the bind.
+            let pools = self.pools.clone();
+            tokio::spawn(async move { crate::tenancy::login::warn_email_gaps(&pools).await });
+        }
+    }
+
     /// Assemble everything and bind.
     ///
     /// # Errors
@@ -1368,12 +1430,7 @@ impl<DB: Database> Builder<DB> {
     {
         let drain = self.drain_timeout;
         let apex = self.apex.clone();
-        #[cfg(feature = "sso")]
-        if crate::tenancy::login_field() == crate::login_field::LoginField::Email {
-            // Off the boot path: one slow tenant must not delay the bind.
-            let pools = self.pools.clone();
-            tokio::spawn(async move { crate::tenancy::login::warn_email_gaps(&pools).await });
-        }
+        self.warn_email_gaps();
         let app = self.into_router().await?;
         let listener = crate::shutdown::bind_announced(addr, Some(&apex)).await?;
         let app = tag_listener_port(app, &listener)?;

@@ -1133,6 +1133,10 @@ read_only_tables = ["audit_log"]
 /// ```toml
 /// [migrate]
 /// boot_stale_after_secs = 120   # a booting waiter gives up on a hung lock holder
+/// fleet_parallel = 4            # tenants migrated at once at boot
+/// fleet_canaries = ["acme"]     # migrated first; a failure stops the fleet
+/// fleet_max_failures = 10       # stop after more tenants failed
+/// fleet_active_only = false     # inactive tenants are migrated too by default
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
@@ -1141,4 +1145,12 @@ pub struct MigrateSettings {
     /// A booting replica waiting for the migrate lock exits when the
     /// holder's heartbeat is older than this. `None` means 120.
     pub boot_stale_after_secs: Option<u64>,
+    /// Tenants the boot fleet migrates at once; `None` means one by one.
+    pub fleet_parallel: Option<usize>,
+    /// Tenants the boot fleet migrates first; a failure stops the fleet.
+    pub fleet_canaries: Vec<String>,
+    /// The boot fleet stops after more tenants than this failed.
+    pub fleet_max_failures: Option<usize>,
+    /// The boot fleet leaves inactive tenants out.
+    pub fleet_active_only: bool,
 }
