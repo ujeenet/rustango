@@ -1493,16 +1493,44 @@ async fn rollback_is_planned_up_front(b: B) {
     assert_eq!(code(downgrade(pool, &dir, 2, &opts()).await), Code::Blocked);
     assert_eq!(columns(pool, "rv_author").await, ["id", "name", "nick"]);
     assert_eq!(rows(pool).await.len(), 4);
-    // A failed row: rollback waits for it.
+    // A failed row rolls back the work it has in effect (7.6).
     let Some(db2) = fresh(b).await else { return };
     let (_root, dir) = author_only();
     crashed_bio(&db2.pool, &dir).await;
-    let before = ledger_snapshot(&db2.pool).await;
+    assert_eq!(columns(&db2.pool, "rv_author").await, ["id", "name", "bio"]);
     assert_eq!(
-        code(downgrade(&db2.pool, &dir, 1, &opts()).await),
+        downgrade(&db2.pool, &dir, 1, &opts())
+            .await
+            .unwrap()
+            .rolled_back,
+        ["0002_bio"]
+    );
+    assert_eq!(columns(&db2.pool, "rv_author").await, ["id", "name"]);
+    // A cut-off autocommit unit: its effect is unknown until apply settles it.
+    let Some(db3) = fresh(b).await else { return };
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    put(
+        &dir,
+        "0001_author",
+        &v2("0001_author", &[], json!([author()])),
+    );
+    put(
+        &dir,
+        "0002_ix",
+        &v2("0002_ix", &["0001_author"], raw_index()),
+    );
+    let cut = Options {
+        crash: Some(Crash::AfterStart(1)),
+        ..Options::default()
+    };
+    migrate(&db3.pool, &dir, &cut).await.expect_err("cut off");
+    let before = ledger_snapshot(&db3.pool).await;
+    assert_eq!(
+        code(downgrade(&db3.pool, &dir, 1, &opts()).await),
         Code::State
     );
-    assert_eq!(ledger_snapshot(&db2.pool).await, before);
+    assert_eq!(ledger_snapshot(&db3.pool).await, before);
 }
 
 /// A custom ledger name keeps its case on every query (review fix 11), and
@@ -2124,6 +2152,62 @@ impl MoveAddressV1 {
             .collect();
         address.insert_many(ctx, &copies).await?;
         Ok(batch.advance_to(rows.last().and_then(|r| r.key("id"))))
+    }
+}
+
+/// Example D's backfill with a down: it deletes the copies of its range.
+#[crate::data_step(app = "steps", id = "move_address_v2")]
+impl MoveAddressV2 {
+    async fn up(ctx: &mut StepCtx<'_>, batch: Batch) -> StepResult {
+        MoveAddressV1::up(ctx, batch).await
+    }
+
+    async fn down(ctx: &mut StepCtx<'_>, batch: Batch) -> StepResult {
+        let address = ctx.table("ed_address")?;
+        let mut q = address.query();
+        if let Some(lo) = batch.lo() {
+            q = q.filter_gt("user_id", lo.clone());
+        }
+        if let Some(hi) = batch.hi() {
+            q = q.filter_lte("user_id", hi.clone());
+        }
+        q.delete(ctx).await?;
+        Ok(batch.done())
+    }
+}
+
+/// Retags rows 1-3, adds row 100, deletes row 4, capturing undo for each.
+#[crate::data_step(app = "steps", id = "retag_v1")]
+impl RetagV1 {
+    async fn up(ctx: &mut StepCtx<'_>, batch: Batch) -> StepResult {
+        let t = ctx.table("ud_t")?;
+        use crate::core::SqlValue as V;
+        for id in 1..=3_i64 {
+            t.query()
+                .filter_eq("id", V::I64(id))
+                .update(ctx, &[("tag", V::String("b".into()))])
+                .await?;
+            ctx.undo()?
+                .update(
+                    "ud_t",
+                    "id",
+                    V::I64(id),
+                    "tag",
+                    V::String("a".into()),
+                    V::String("b".into()),
+                )
+                .await?;
+        }
+        t.insert(
+            ctx,
+            &[("id", V::I64(100)), ("tag", V::String("new".into()))],
+        )
+        .await?;
+        ctx.undo()?.insert("ud_t", "id", V::I64(100)).await?;
+        let gone = t.query().filter_eq("id", V::I64(4)).fetch(ctx).await?;
+        ctx.undo()?.delete("ud_t", "id", &gone[0]).await?;
+        t.query().filter_eq("id", V::I64(4)).delete(ctx).await?;
+        Ok(batch.done())
     }
 }
 
@@ -3123,6 +3207,252 @@ async fn a_recycled_thread_id_is_never_killed(b: B) {
     bystander.await.unwrap();
 }
 
+/// NULLs written after a column was made nullable block its rollback: the
+/// plan lists them with the query that finds them, and nothing runs.
+async fn nulls_written_since_block_the_rollback(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    let create = json!({"op": "create_table", "v": 1, "table": {"name": "rv_nn", "scope": "tenant",
+        "fields": [{"column": "id", "ty": "i64", "primary_key": true, "nullable": false},
+                   {"column": "name", "ty": "string", "max_length": 20, "nullable": false}]}});
+    put(&dir, "0001_nn", &v2("0001_nn", &[], json!([create])));
+    let relax = json!({"op": "alter_column", "v": 1, "table": "rv_nn", "column": "name",
+        "changes": {"nullable": {"from": false, "to": true}}});
+    put(
+        &dir,
+        "0002_relax",
+        &v2("0002_relax", &["0001_nn"], json!([relax])),
+    );
+    migrate(pool, &dir, &opts()).await.unwrap();
+    raw_execute_pool(
+        pool,
+        "INSERT INTO rv_nn (id, name) VALUES (1, 'a'), (2, NULL)",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let before = ledger_row(pool, "0002_relax").await;
+    let e = downgrade(pool, &dir, 1, &opts())
+        .await
+        .expect_err("blocked");
+    let msg = e.to_string();
+    assert!(
+        msg.contains("NOT NULL") && msg.contains("IS NULL") && msg.contains("1 row"),
+        "{msg}"
+    );
+    // Zero statements: the row, its events and the column are as they were.
+    let after = ledger_row(pool, "0002_relax").await;
+    assert_eq!(
+        (after.state, after.pos, &after.run_id),
+        (before.state, before.pos, &before.run_id)
+    );
+    let kinds = Ledger::default_names()
+        .event_kinds(pool, ("project", "0002_relax"))
+        .await
+        .unwrap();
+    assert!(!kinds.iter().any(|k| k == "rolled_back"), "{kinds:?}");
+    raw_execute_pool(pool, "UPDATE rv_nn SET name = 'b' WHERE id = 2", Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        downgrade(pool, &dir, 1, &opts()).await.unwrap().rolled_back,
+        ["0002_relax"]
+    );
+}
+
+/// Example D whose backfill has a down that deletes its copies.
+fn example_d_down(dir: &Path, size: u64) {
+    example_d(dir, size);
+    let backfill = json!({"op": "data_rust", "v": 1, "id": "move_address_v2",
+        "tables": {"read": ["ed_user"], "write": ["ed_address"]},
+        "batch": {"table": "ed_user", "key": "id", "size": size}, "down": "rust"});
+    put(
+        dir,
+        "0003_backfill",
+        &vs("0003_backfill", &["0002_address"], json!([backfill])),
+    );
+}
+
+async fn progress_rows(pool: &Pool, id: &str) -> i64 {
+    count(
+        pool,
+        &format!(
+            "SELECT COUNT(*) FROM {} WHERE id = '{id}'",
+            Ledger::default_names().progress
+        ),
+    )
+    .await
+}
+
+/// Example D stopped mid-batch rolls back from where it stopped: the down
+/// walks the moved range back by batch. Killed at every reverse unit and
+/// mid reverse batch, the next `downgrade` finishes; nothing stale is left.
+async fn example_d_rolls_back_from_mid_batch(b: B) {
+    const ROWS: i64 = 10_000;
+    for crash in [
+        None,
+        Some(Crash::BeforeUnit(0)),
+        Some(Crash::BeforeUnit(1)),
+        Some(Crash::MidBatch(0)),
+        Some(Crash::MidBatch(1)),
+    ] {
+        let Some(db) = fresh(b).await else { return };
+        let pool = &db.pool;
+        let ids: Vec<i64> = (1..=ROWS).collect();
+        let (_root, dir) = ed_project(pool, &ids).await;
+        example_d_down(&dir, 2000);
+        let forward = Options {
+            crash: Some(Crash::MidBatch(2)),
+            ..Options::default()
+        };
+        migrate(pool, &dir, &forward)
+            .await
+            .expect_err("stopped mid-batch");
+        assert_eq!(count(pool, "SELECT COUNT(*) FROM ed_address").await, 4000);
+        let killing = Options {
+            crash,
+            ..Options::default()
+        };
+        let first = downgrade_to(pool, &dir, "steps:0001_user", &killing).await;
+        match crash {
+            None => assert_eq!(
+                first.unwrap().rolled_back,
+                ["0003_backfill", "0002_address"]
+            ),
+            Some(c) => {
+                first.expect_err("killed");
+                let left = match c {
+                    Crash::MidBatch(0) | Crash::BeforeUnit(0) => 4000,
+                    Crash::MidBatch(_) => 2000,
+                    _ => 0,
+                };
+                assert_eq!(
+                    count(pool, "SELECT COUNT(*) FROM ed_address").await,
+                    left,
+                    "{c:?}"
+                );
+                // Boot (the same run) never resumes a half rolled back row.
+                let e = migrate(pool, &dir, &opts()).await.expect_err("refused");
+                assert!(
+                    e.to_string().contains("finish `downgrade` first"),
+                    "{c:?}: {e}"
+                );
+                downgrade_to(pool, &dir, "steps:0001_user", &opts())
+                    .await
+                    .unwrap_or_else(|e| panic!("{c:?}: {e}"));
+            }
+        }
+        assert!(columns(pool, "ed_address").await.is_empty(), "{crash:?}");
+        assert_eq!(
+            rows(pool)
+                .await
+                .into_iter()
+                .map(|r| r.0)
+                .collect::<Vec<_>>(),
+            ["0001_user"],
+            "{crash:?}"
+        );
+        assert_eq!(progress_rows(pool, "0003_backfill").await, 0, "{crash:?}");
+        // Applying again moves every row once.
+        migrate(pool, &dir, &opts()).await.unwrap();
+        assert_eq!(count(pool, "SELECT COUNT(*) FROM ed_address").await, ROWS);
+    }
+}
+
+/// An N-1 binary on a database a newer one migrated: with nothing pending
+/// it warns and serves; with a file pending it refuses (7.8).
+async fn unknown_rows_from_a_newer_binary(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let (_root, dir) = project();
+    migrate(pool, &dir, &opts()).await.unwrap();
+    // The older binary has no 0002.
+    std::fs::remove_file(dir.join("0002_bio.json")).unwrap();
+    let rep = migrate(pool, &dir, &opts()).await.unwrap();
+    assert!(rep.applied.is_empty());
+    assert!(
+        rep.warnings
+            .iter()
+            .any(|w| w.contains("ahead") && w.contains("project:0002_bio")),
+        "{rep:?}"
+    );
+    // And a file of its own still pending: refused, nothing runs.
+    let other = json!([{"op": "add_column", "v": 1, "table": "rv_author",
+        "column": {"column": "nick", "ty": "string", "max_length": 20, "nullable": true}}]);
+    put(&dir, "0002_nick", &v2("0002_nick", &["0001_author"], other));
+    let e = migrate(pool, &dir, &opts()).await.expect_err("refused");
+    assert!(e.to_string().contains("newer binary first"), "{e}");
+    assert_eq!(columns(pool, "rv_author").await, ["id", "name", "bio"]);
+}
+
+/// Undo capture (7.4): rollback restores captured updates unless the
+/// user edited the row since, deletes only captured inserts (rows the app
+/// created stay) and re-inserts captured deletes. No undo row is left.
+async fn undo_skips_edited_rows_and_keeps_app_rows(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    let create = json!({"op": "create_table", "v": 1, "table": {"name": "ud_t", "scope": "tenant",
+        "fields": [{"column": "id", "ty": "i64", "primary_key": true, "nullable": false},
+                   {"column": "tag", "ty": "string", "max_length": 20, "nullable": true}]}});
+    put(&dir, "0001_ud", &vs("0001_ud", &[], json!([create])));
+    migrate(pool, &dir, &opts()).await.unwrap();
+    raw_execute_pool(
+        pool,
+        "INSERT INTO ud_t (id, tag) VALUES (1, 'a'), (2, 'a'), (3, 'a'), (4, 'a')",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let retag = json!({"op": "data_rust", "v": 1, "id": "retag_v1",
+        "tables": {"write": ["ud_t"]}, "undo": true, "down": {"noop": "undo restores it"}});
+    put(
+        &dir,
+        "0002_retag",
+        &vs("0002_retag", &["0001_ud"], json!([retag])),
+    );
+    migrate(pool, &dir, &opts()).await.unwrap();
+    let tags = || async {
+        let r: Vec<(i64, Option<String>)> =
+            crate::sql::raw_query_pool("SELECT id, tag FROM ud_t ORDER BY id", Vec::new(), pool)
+                .await
+                .unwrap();
+        r.into_iter()
+            .map(|(i, t)| format!("{i}={}", t.unwrap_or_default()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(tags().await, ["1=b", "2=b", "3=b", "100=new"]);
+    // Since then: a user edits row 2, the app creates row 200.
+    raw_execute_pool(
+        pool,
+        "UPDATE ud_t SET tag = 'user' WHERE id = 2",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    raw_execute_pool(
+        pool,
+        "INSERT INTO ud_t (id, tag) VALUES (200, 'app')",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        downgrade(pool, &dir, 1, &opts()).await.unwrap().rolled_back,
+        ["0002_retag"]
+    );
+    assert_eq!(tags().await, ["1=a", "2=user", "3=a", "4=a", "200=app"]);
+    let left = count(
+        pool,
+        &format!("SELECT COUNT(*) FROM {}", Ledger::default_names().undo),
+    )
+    .await;
+    assert_eq!(left, 0);
+}
+
 /// A shutdown signal stops between batches; the next start resumes at the
 /// stored cursor and moves every row once.
 async fn a_shutdown_stops_between_batches(b: B) {
@@ -3303,6 +3633,10 @@ per_backend!(
     a_long_move_warns_w011,
     the_heartbeat_ticks_during_a_long_unit,
     a_recycled_thread_id_is_never_killed,
+    nulls_written_since_block_the_rollback,
+    example_d_rolls_back_from_mid_batch,
+    unknown_rows_from_a_newer_binary,
+    undo_skips_edited_rows_and_keeps_app_rows,
     max_batches_per_run_binds_the_cli_only,
     a_held_lock_is_retried,
     a_waiter_finishes_a_killed_move,

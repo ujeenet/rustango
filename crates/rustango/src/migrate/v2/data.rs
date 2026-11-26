@@ -85,10 +85,14 @@ pub(crate) fn check_op(state: &State, op: &Op, at: &str) -> Result<(), LoadError
                 e,
             )
         })?;
-        // The down of a batched op runs unbatched in this release.
-        let range = if key == "up" { key_col } else { None };
         for b in Backend::ALL {
             if let Some(text) = sql.get(b) {
+                // A batched op's down walks back by batch when it names the range.
+                let range = if key == "up" || text.0.contains("{{batch_range}}") {
+                    key_col
+                } else {
+                    None
+                };
                 resolve_with(
                     &text.0,
                     b,

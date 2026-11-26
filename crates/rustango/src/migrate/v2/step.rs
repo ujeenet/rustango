@@ -35,6 +35,7 @@ pub type StepFn = for<'a, 'b> fn(&'a mut StepCtx<'b>, Batch) -> StepFuture<'a>;
 #[non_exhaustive]
 pub struct Batch {
     lo: Option<SqlValue>,
+    hi: Option<SqlValue>,
     size: u64,
 }
 
@@ -42,18 +43,37 @@ impl Batch {
     pub(crate) fn whole() -> Self {
         Self {
             lo: None,
+            hi: None,
             size: u64::MAX,
         }
     }
 
     pub(crate) fn range(lo: Option<SqlValue>, size: u64) -> Self {
-        Self { lo, size }
+        Self { lo, hi: None, size }
     }
 
-    /// The last key the previous batch covered; `None` on the first.
+    /// A down batch: keys above `lo` (all when `None`) up to and including `hi`.
+    pub(crate) fn down(lo: Option<SqlValue>, hi: SqlValue, size: u64) -> Self {
+        Self {
+            lo,
+            hi: Some(hi),
+            size,
+        }
+    }
+
+    /// The last key the previous batch covered; `None` on the first. In a
+    /// down batch: the batch covers keys above it.
     #[must_use]
     pub fn lo(&self) -> Option<&SqlValue> {
         self.lo.as_ref()
+    }
+
+    /// A down batch's highest key (inclusive); `None` going up. A down step
+    /// undoes keys in `(lo, hi]` and may return [`Self::done`]: the runner
+    /// walks the range.
+    #[must_use]
+    pub fn hi(&self) -> Option<&SqlValue> {
+        self.hi.as_ref()
     }
 
     /// Rows this batch may cover.
@@ -199,6 +219,17 @@ pub(crate) struct Scope {
     pub(crate) app: String,
     pub(crate) footprint: Footprint,
     pub(crate) tables: BTreeMap<String, TableState>,
+    /// Where `ctx.undo()` records, for an op with `"undo": true`.
+    pub(crate) undo: Option<UndoTarget>,
+}
+
+/// The undo rows of one forward unit: the INSERT and its key binds.
+#[derive(Debug, Clone)]
+pub(crate) struct UndoTarget {
+    pub(crate) sql: String,
+    pub(crate) app: String,
+    pub(crate) mig: String,
+    pub(crate) op: i32,
 }
 
 /// What a data step runs on: the unit's transaction on the runner's own
@@ -426,6 +457,224 @@ impl UnitError {
             Self::Poisoned { retryable } => *retryable,
             Self::Step(StepError::Exec(e) | StepError::Hist(HistError::Exec(e))) => retryable(e),
             _ => false,
+        }
+    }
+}
+
+/// Records what a step changes, in the step's transaction, so rollback can
+/// put it back (7.4): a captured insert is deleted, an update restored
+/// unless the value was edited since, a delete re-inserted.
+pub struct Undo<'c, 't> {
+    ctx: &'c mut StepCtx<'t>,
+}
+
+impl<'t> StepCtx<'t> {
+    /// The undo recorder.
+    ///
+    /// # Errors
+    /// The op does not set `"undo": true`.
+    pub fn undo(&mut self) -> Result<Undo<'_, 't>, HistError> {
+        if self.scope.undo.is_none() {
+            return Err(HistError::Footprint(
+                "this op does not capture undo: set `\"undo\": true` on it".into(),
+            ));
+        }
+        Ok(Undo { ctx: self })
+    }
+}
+
+/// `v` as `f` stores it, as canonical JSON: two equal values read back
+/// alike whatever Rust type wrote them.
+fn canonical(v: &SqlValue, f: &'static FieldSchema) -> Result<String, HistError> {
+    let bad = |why: String| HistError::BadCell {
+        column: f.column,
+        why,
+    };
+    let j = v
+        .clone()
+        .into_json()
+        .ok_or_else(|| bad("not representable as JSON".into()))?;
+    let typed = crate::migrate::manage::fixtures::json_to_sql_value(&j, f).map_err(bad)?;
+    Ok(typed
+        .into_json()
+        .ok_or_else(|| bad("not representable as JSON".into()))?
+        .to_string())
+}
+
+fn hash(text: &str) -> String {
+    super::checksum::hex(&Sha256::digest(text.as_bytes()))
+}
+
+impl Undo<'_, '_> {
+    /// The step inserted the row whose `key_col` is `key`.
+    ///
+    /// # Errors
+    /// A table or column outside the op, or the driver.
+    pub async fn insert(
+        &mut self,
+        table: &str,
+        key_col: &str,
+        key: SqlValue,
+    ) -> Result<(), HistError> {
+        self.record("insert", table, key_col, &key, None, None)
+            .await
+    }
+
+    /// The step set `column` from `old` to `new` on the row `key`.
+    ///
+    /// # Errors
+    /// As [`Self::insert`].
+    pub async fn update(
+        &mut self,
+        table: &str,
+        key_col: &str,
+        key: SqlValue,
+        column: &str,
+        old: SqlValue,
+        new: SqlValue,
+    ) -> Result<(), HistError> {
+        let f = self.ctx.table(table)?.field(column)?;
+        let change = (column, canonical(&old, f)?, hash(&canonical(&new, f)?));
+        self.record("update", table, key_col, &key, Some(change), None)
+            .await
+    }
+
+    /// The step is deleting `row` (read before the delete).
+    ///
+    /// # Errors
+    /// As [`Self::insert`]; a row without `key_col`.
+    pub async fn delete(
+        &mut self,
+        table: &str,
+        key_col: &str,
+        row: &HistRow,
+    ) -> Result<(), HistError> {
+        let t = self.ctx.table(table)?;
+        let key = row.key(key_col).ok_or_else(|| HistError::UnknownColumn {
+            table: table.to_owned(),
+            column: key_col.to_owned(),
+        })?;
+        let mut obj = serde_json::Map::new();
+        for (c, v) in &row.0 {
+            let f = t.field(c)?;
+            obj.insert(
+                (*c).to_owned(),
+                serde_json::from_str(&canonical(v, f)?).unwrap_or_default(),
+            );
+        }
+        let json = serde_json::Value::Object(obj).to_string();
+        self.record("delete", table, key_col, &key, None, Some(json))
+            .await
+    }
+
+    async fn record(
+        &mut self,
+        kind: &str,
+        table: &str,
+        key_col: &str,
+        key: &SqlValue,
+        change: Option<(&str, String, String)>,
+        row: Option<String>,
+    ) -> Result<(), HistError> {
+        let kf = self.ctx.table(table)?.field(key_col)?;
+        let key_json = canonical(key, kf)?;
+        let target = self.ctx.scope.undo.clone().expect("checked by undo()");
+        let text = |v: Option<String>| v.map_or(SqlValue::Null, SqlValue::String);
+        let (col, old, new) = match change {
+            Some((c, o, n)) => (Some(c.to_owned()), Some(o), Some(n)),
+            None => (None, None, None),
+        };
+        let binds = vec![
+            SqlValue::String(target.app),
+            SqlValue::String(target.mig),
+            SqlValue::I32(target.op),
+            SqlValue::String(kind.to_owned()),
+            SqlValue::String(table.to_owned()),
+            SqlValue::String(key_col.to_owned()),
+            SqlValue::String(key_json.clone()),
+            SqlValue::String(hash(&key_json)),
+            text(col),
+            text(old),
+            text(new),
+            text(row),
+        ];
+        self.ctx.execute(&target.sql, binds).await?;
+        Ok(())
+    }
+}
+
+/// Put back one captured change. `false`: skipped, because the row was
+/// edited since (an update), is gone, or is back already (a delete).
+///
+/// # Errors
+/// A table or column outside the op, a bad stored value, or the driver.
+pub(crate) async fn restore(
+    ctx: &mut StepCtx<'_>,
+    rec: &super::ledger::UndoRow,
+) -> Result<bool, HistError> {
+    let t = ctx.table(&rec.table)?;
+    let kf = t.field(&rec.key_col)?;
+    let parse = |text: &str, f: &'static FieldSchema| {
+        let j: serde_json::Value = serde_json::from_str(text).map_err(|e| HistError::BadCell {
+            column: f.column,
+            why: e.to_string(),
+        })?;
+        crate::migrate::manage::fixtures::json_to_sql_value(&j, f).map_err(|why| {
+            HistError::BadCell {
+                column: f.column,
+                why,
+            }
+        })
+    };
+    let key = parse(&rec.key_json, kf)?;
+    match rec.kind.as_str() {
+        "insert" => Ok(t.query().filter_eq(&rec.key_col, key).delete(ctx).await? > 0),
+        "update" => {
+            let col = rec.col.as_deref().unwrap_or_default();
+            let f = t.field(col)?;
+            let rows = t
+                .query()
+                .filter_eq(&rec.key_col, key.clone())
+                .fetch(ctx)
+                .await?;
+            let Some(cur) = rows.first().and_then(|r| r.get(col)) else {
+                return Ok(false);
+            };
+            if Some(hash(&canonical(cur, f)?)) != rec.new_hash {
+                return Ok(false);
+            }
+            let old = parse(rec.old_json.as_deref().unwrap_or("null"), f)?;
+            t.query()
+                .filter_eq(&rec.key_col, key)
+                .update(ctx, &[(col, old)])
+                .await?;
+            Ok(true)
+        }
+        _ => {
+            if t.query().filter_eq(&rec.key_col, key).exists(ctx).await? {
+                return Ok(false);
+            }
+            let obj: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_str(rec.row_json.as_deref().unwrap_or("{}")).map_err(|e| {
+                    HistError::BadCell {
+                        column: kf.column,
+                        why: e.to_string(),
+                    }
+                })?;
+            let mut row = Vec::new();
+            for (c, j) in &obj {
+                let f = t.field(c)?;
+                let v =
+                    crate::migrate::manage::fixtures::json_to_sql_value(j, f).map_err(|why| {
+                        HistError::BadCell {
+                            column: f.column,
+                            why,
+                        }
+                    })?;
+                row.push((f.column, v));
+            }
+            t.reset_sequence().insert(ctx, &row).await?;
+            Ok(true)
         }
     }
 }
@@ -1008,6 +1257,11 @@ impl HistQuery {
     #[must_use]
     pub fn filter_lt(self, column: &str, v: impl Into<SqlValue>) -> Self {
         self.push(column, Op::Lt, v.into())
+    }
+    /// `column <= v`: a down batch's upper bound ([`Batch::hi`]).
+    #[must_use]
+    pub fn filter_lte(self, column: &str, v: impl Into<SqlValue>) -> Self {
+        self.push(column, Op::Lte, v.into())
     }
     #[must_use]
     pub fn filter_in(self, column: &str, vs: Vec<SqlValue>) -> Self {

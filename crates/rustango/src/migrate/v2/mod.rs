@@ -18,6 +18,7 @@ pub(crate) mod ledger;
 pub(crate) mod load;
 pub(crate) mod make;
 pub(crate) mod norm;
+pub(crate) mod preflight;
 pub(crate) mod probe;
 pub(crate) mod render;
 pub(crate) mod replay;

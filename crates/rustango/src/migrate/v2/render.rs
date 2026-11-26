@@ -119,6 +119,10 @@ pub(crate) struct BatchPlan {
     pub(crate) sleep_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) max_batches_per_run: Option<u64>,
+    /// A reverse unit: walks down the progress of forward op `n` from its
+    /// cursor (`effect_hi`), each batch shrinking it (7.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) down_of: Option<usize>,
 }
 
 impl BatchPlan {
@@ -132,6 +136,7 @@ impl BatchPlan {
             size: spec.size,
             sleep_ms: spec.sleep_ms,
             max_batches_per_run: spec.max_batches_per_run,
+            down_of: None,
         })
     }
 }
@@ -142,6 +147,12 @@ impl BatchPlan {
 pub(crate) struct StepRef {
     pub(crate) id: String,
     pub(crate) reverse: bool,
+    /// Forward: capture undo rows. Reverse: restore from them (7.4).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) undo: bool,
+    /// A reverse undo unit: the forward unit whose undo rows it restores.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) undo_of: Option<usize>,
     pub(crate) footprint: super::format::Footprint,
     pub(crate) tables: std::collections::BTreeMap<String, TableState>,
 }
@@ -1261,6 +1272,7 @@ impl Render<'_> {
                 tables,
                 reverse,
                 batch,
+                undo,
                 ..
             } => {
                 let mut scope = std::collections::BTreeMap::new();
@@ -1288,14 +1300,12 @@ impl Render<'_> {
                     step: Some(StepRef {
                         id: id.clone(),
                         reverse: *reverse,
+                        undo: *undo,
+                        undo_of: None,
                         footprint: tables.clone(),
                         tables: scope,
                     }),
-                    // The reverse of a batched step runs unbatched in this release.
-                    batch: batch
-                        .as_ref()
-                        .filter(|_| !*reverse)
-                        .and_then(|b| BatchPlan::of(b, self.before)),
+                    batch: batch.as_ref().and_then(|b| BatchPlan::of(b, self.before)),
                 }]
             }
             Op::StateOnly { .. } | Op::ExternTable { .. } | Op::AdoptTable { .. } => Vec::new(),

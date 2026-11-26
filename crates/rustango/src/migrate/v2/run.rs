@@ -55,6 +55,8 @@ pub(crate) struct Options {
     /// A boot waiter gives up when the lock holder's heartbeat is this old
     /// while it still holds the lock (6.11); `None` waits on.
     pub(crate) stale_after: Option<std::time::Duration>,
+    /// `apply <target>`: stop after this migration (`<app>:<id>` or `<id>`).
+    pub(crate) up_to: Option<String>,
     /// How often a run holding the lock refreshes its heartbeat; `None` = 30 s.
     pub(crate) heartbeat_every: Option<std::time::Duration>,
     /// Test failpoint: stop as if the process died.
@@ -392,6 +394,36 @@ pub(crate) async fn downgrade_to(
     rollback(pool, dir, Back::To(to), opts).await
 }
 
+/// Whether `target` (`<app>:<id>` or `<id>`) names `(app, id)`.
+fn names(target: &str, app: &str, id: &str) -> bool {
+    match target.split_once(':') {
+        Some((a, i)) => a == app && i == id,
+        None => target == id,
+    }
+}
+
+/// For an applied `target`, the rows applied after it (newest last);
+/// `None` when it is not applied.
+///
+/// # Errors
+/// Driver failures.
+pub(crate) async fn applied_after(
+    pool: &Pool,
+    opts: &Options,
+    target: &str,
+) -> Result<Option<Vec<String>>, RunError> {
+    let rows = Ledger::of(opts).rows(pool).await?;
+    let Some(pos) = rows.iter().position(|r| names(target, &r.app, &r.id)) else {
+        return Ok(None);
+    };
+    Ok(Some(
+        rows[pos + 1..]
+            .iter()
+            .map(|r| format!("{}:{}", r.app, r.id))
+            .collect(),
+    ))
+}
+
 /// How far a rollback goes.
 #[derive(Clone, Copy)]
 enum Back<'a> {
@@ -560,6 +592,9 @@ fn rust_step<'t>(
 /// How often a data unit that hit a deadlock or lock timeout runs again.
 const DATA_RETRIES: u32 = 5;
 
+/// Captured changes an undo restore puts back per transaction.
+const UNDO_BATCH: u32 = 500;
+
 /// Jittered backoff: about 100 ms doubled per try, at most 5 s.
 fn backoff(tries: u32) -> std::time::Duration {
     use std::hash::{BuildHasher as _, Hasher as _};
@@ -597,6 +632,52 @@ async fn keyset(
     bp: &super::render::BatchPlan,
     lo: Option<&crate::core::SqlValue>,
 ) -> Result<(Option<crate::core::SqlValue>, bool), RunError> {
+    let keys = batch_keys(
+        tx,
+        bp,
+        lo.map(|v| (">", v)),
+        false,
+        2,
+        bp.size.saturating_sub(1),
+    )
+    .await?;
+    let mut keys = keys.into_iter();
+    let hi = keys.next();
+    let more = keys.next().is_some();
+    Ok((hi.clone(), hi.is_none() || !more))
+}
+
+/// The highest key above `lo`: the cursor a last, open-ended batch leaves,
+/// so a down walk starts above every row it covered.
+async fn top_key(
+    tx: &mut crate::sql::PoolTx<'_>,
+    bp: &super::render::BatchPlan,
+    lo: Option<&crate::core::SqlValue>,
+) -> Result<Option<crate::core::SqlValue>, RunError> {
+    let keys = batch_keys(tx, bp, lo.map(|v| (">", v)), true, 1, 0).await?;
+    Ok(keys.into_iter().next().or_else(|| lo.cloned()))
+}
+
+/// A down batch below `hi`: its exclusive lower key, `None` when the batch
+/// reaches the bottom (the last one).
+async fn keyset_down(
+    tx: &mut crate::sql::PoolTx<'_>,
+    bp: &super::render::BatchPlan,
+    hi: &crate::core::SqlValue,
+) -> Result<Option<crate::core::SqlValue>, RunError> {
+    let keys = batch_keys(tx, bp, Some(("<=", hi)), true, 1, bp.size).await?;
+    Ok(keys.into_iter().next())
+}
+
+/// Keys of the batch table, ordered, filtered by `key <op> value`.
+async fn batch_keys(
+    tx: &mut crate::sql::PoolTx<'_>,
+    bp: &super::render::BatchPlan,
+    filter: Option<(&str, &crate::core::SqlValue)>,
+    desc: bool,
+    limit: u32,
+    offset: u64,
+) -> Result<Vec<crate::core::SqlValue>, RunError> {
     use crate::core::SqlValue;
     let d = tx.dialect();
     let k = d.quote_ident(&bp.key);
@@ -611,27 +692,23 @@ async fn keyset(
     };
     let mut binds = Vec::new();
     let mut sql = format!("SELECT {as_text} FROM {t}");
-    if let Some(lo) = lo {
-        binds.push(lo.clone());
-        sql.push_str(&format!(" WHERE {k} > "));
+    if let Some((op, v)) = filter {
+        binds.push(v.clone());
+        sql.push_str(&format!(" WHERE {k} {op} "));
         d.push_placeholder(&mut sql, 1);
     }
-    let offset = bp.size.saturating_sub(1);
-    sql.push_str(&format!(" ORDER BY {k} LIMIT 2 OFFSET {offset}"));
-    let keys: Vec<SqlValue> = if super::data::BATCH_KEY_TYPES[..3].contains(&bp.key_ty.as_str()) {
+    let dir = if desc { " DESC" } else { "" };
+    sql.push_str(&format!(" ORDER BY {k}{dir} LIMIT {limit} OFFSET {offset}"));
+    if super::data::BATCH_KEY_TYPES[..3].contains(&bp.key_ty.as_str()) {
         let rows: Vec<(i64,)> = crate::sql::raw_query_tx(tx, &sql, binds).await?;
-        rows.into_iter().map(|r| SqlValue::I64(r.0)).collect()
+        Ok(rows.into_iter().map(|r| SqlValue::I64(r.0)).collect())
     } else {
         let rows: Vec<(String,)> = crate::sql::raw_query_tx(tx, &sql, binds).await?;
         rows.into_iter()
             .map(|r| cursor_value(&serde_json::Value::String(r.0).to_string(), &bp.key_ty))
             .collect::<Result<_, _>>()
-            .map_err(MigrateError::Validation)?
-    };
-    let mut keys = keys.into_iter();
-    let hi = keys.next();
-    let more = keys.next().is_some();
-    Ok((hi.clone(), hi.is_none() || !more))
+            .map_err(|e| MigrateError::Validation(e).into())
+    }
 }
 
 /// A cursor as stored in the progress row: JSON typed by the key.
@@ -834,6 +911,53 @@ impl Runner<'_> {
             .is_some_and(|s| s.load(std::sync::atomic::Ordering::SeqCst))
     }
 
+    /// Rows this binary has no file for: a newer one migrated the database
+    /// (7.8). With nothing pending it is ahead: warn and go on. With files
+    /// pending, they would run on a schema this binary cannot replay.
+    fn refuse_unknown_rows(
+        &mut self,
+        project: &Project,
+        rows: &HashMap<(String, String), Row>,
+    ) -> Result<(), RunError> {
+        let known: std::collections::HashSet<(&str, &str)> = project
+            .files
+            .iter()
+            .map(|f| (f.file.app.as_str(), f.file.id.as_str()))
+            .collect();
+        let mut unknown: Vec<String> = rows
+            .keys()
+            .filter(|(a, i)| !known.contains(&(a.as_str(), i.as_str())))
+            .map(|(a, i)| format!("{a}:{i}"))
+            .collect();
+        if unknown.is_empty() {
+            return Ok(());
+        }
+        unknown.sort();
+        let pending: Vec<String> = project
+            .files
+            .iter()
+            .filter(|f| !rows.contains_key(&(f.file.app.clone(), f.file.id.clone())))
+            .map(|f| format!("{}:{}", f.file.app, f.file.id))
+            .collect();
+        if pending.is_empty() {
+            self.warnings.push(format!(
+                "the database is ahead of this binary: it holds {} it does not know",
+                unknown.join(", ")
+            ));
+            return Ok(());
+        }
+        Err(refused(
+            Code::State,
+            "ledger",
+            format!(
+                "the database holds {} that this binary does not know, and {} pending here: roll \
+                 back with the newer binary first",
+                unknown.join(", "),
+                pending.join(", ")
+            ),
+        ))
+    }
+
     async fn apply_project(&mut self, project: &Project) -> Result<Vec<String>, RunError> {
         let rows: HashMap<(String, String), Row> = self
             .ledger
@@ -842,6 +966,7 @@ impl Runner<'_> {
             .into_iter()
             .map(|r| ((r.app.clone(), r.id.clone()), r))
             .collect();
+        self.refuse_unknown_rows(project, &rows)?;
         let mut state = State::default();
         let mut memo = HashMemo::default();
         let mut applied = Vec::new();
@@ -894,6 +1019,14 @@ impl Runner<'_> {
                     state = self.forward(f, state, &mut memo).await?;
                     applied.push(f.file.id.clone());
                 }
+            }
+            if self
+                .opts
+                .up_to
+                .as_deref()
+                .is_some_and(|t| names(t, &f.file.app, &f.file.id))
+            {
+                break;
             }
         }
         Ok(applied)
@@ -1071,6 +1204,54 @@ impl Runner<'_> {
         }
     }
 
+    /// The runner's own connection for a data unit, closed after the
+    /// attempt: its session settings never reach the app's pool, and an
+    /// in-memory SQLite pool of one is free again for the next unit.
+    async fn unit_conn(&self) -> Result<crate::sql::PoolConn, Attempt> {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| Attempt::Fatal(e.into()))?;
+        conn.close_on_drop();
+        session_timeouts(
+            &mut conn,
+            self.b,
+            self.lock_timeout(),
+            self.statement_timeout(),
+        )
+        .await
+        .map_err(Attempt::Fatal)?;
+        Ok(conn)
+    }
+
+    /// A data unit's write transaction, with PG's local timeouts.
+    async fn unit_tx<'c>(
+        &self,
+        conn: &'c mut crate::sql::PoolConn,
+    ) -> Result<crate::sql::PoolTx<'c>, Attempt> {
+        let mut tx = conn
+            .begin_write()
+            .await
+            .map_err(|e| retry_or_fatal(e.into()))?;
+        if self.b == Backend::Postgres {
+            tx.execute_unprepared(&format!(
+                "SET LOCAL lock_timeout = {}; SET LOCAL statement_timeout = {}",
+                self.lock_timeout().as_millis(),
+                self.statement_timeout().as_millis()
+            ))
+            .await
+            .map_err(|e| Attempt::Fatal(MigrateError::Driver(e).into()))?;
+        }
+        Ok(tx)
+    }
+
+    fn statement_timeout(&self) -> std::time::Duration {
+        self.opts
+            .data_statement_timeout
+            .unwrap_or(std::time::Duration::from_secs(300))
+    }
+
     /// The lock timeout of data and DDL units; also how long a reaped
     /// session may take to go.
     fn lock_timeout(&self) -> std::time::Duration {
@@ -1174,9 +1355,14 @@ impl Runner<'_> {
                     }
                 }
             }
+            let restore = u.step.as_ref().filter(|s| s.reverse && s.undo);
             let mut tries = 0_u32;
             let done = loop {
-                match self.data_attempt(k, u, n, ui).await {
+                let attempt = match restore {
+                    Some(sr) => self.undo_attempt(k, n, sr).await,
+                    None => self.data_attempt(k, u, n, ui).await,
+                };
+                match attempt {
                     Ok(done) => break done,
                     Err(Attempt::Retry(why)) if tries < DATA_RETRIES => {
                         tries += 1;
@@ -1199,7 +1385,7 @@ impl Runner<'_> {
                     Err(Attempt::Fatal(e)) => return Err(e),
                 }
             };
-            if u.batch.is_none() || done {
+            if (u.batch.is_none() && restore.is_none()) || done {
                 return Ok(());
             }
             batches_here += 1;
@@ -1251,41 +1437,19 @@ impl Runner<'_> {
         ui: usize,
     ) -> Result<bool, Attempt> {
         let fatal = |e: RunError| Attempt::Fatal(e);
-        let lock = self.lock_timeout();
-        let stmt = self
-            .opts
-            .data_statement_timeout
-            .unwrap_or(std::time::Duration::from_secs(300));
-        // The runner's own connection, closed after the attempt: its session
-        // settings never reach the app's pool, and an in-memory SQLite pool
-        // of one is free again for the next unit.
-        let mut conn = self.pool.acquire().await.map_err(|e| fatal(e.into()))?;
-        conn.close_on_drop();
-        session_timeouts(&mut conn, self.b, lock, stmt)
-            .await
-            .map_err(fatal)?;
+        let mut conn = self.unit_conn().await?;
         let binds = super::data::bind_values(&u.binds)
             .map_err(|e| fatal(refused(Code::File, &format!("{}:{}", k.0, k.1), e)))?;
-        let mut tx = conn
-            .begin_write()
-            .await
-            .map_err(|e| retry_or_fatal(e.into()))?;
-        if self.b == Backend::Postgres {
-            tx.execute_unprepared(&format!(
-                "SET LOCAL lock_timeout = {}; SET LOCAL statement_timeout = {}",
-                lock.as_millis(),
-                stmt.as_millis()
-            ))
-            .await
-            .map_err(|e| fatal(MigrateError::Driver(e).into()))?;
-        }
-        // A batched unit continues from its cursor, read in this transaction.
+        let mut tx = self.unit_tx(&mut conn).await?;
+        // A batched unit continues from its cursor, read in this transaction;
+        // a reverse one from the forward op's.
+        let pi = u.batch.as_ref().and_then(|b| b.down_of).unwrap_or(ui);
         let (lo, rows_done, batches) = match &u.batch {
             None => (None, 0, 0),
             Some(bp) => {
                 let got = self
                     .ledger
-                    .progress_tx(&mut tx, k, ui)
+                    .progress_tx(&mut tx, k, pi)
                     .await
                     .map_err(|e| fatal(e.into()))?;
                 let (hi, rows, batches) = got.unwrap_or((None, 0, 0));
@@ -1299,6 +1463,55 @@ impl Runner<'_> {
         let mut hash = None;
         // (rows changed, the cursor after this batch, unit done)
         let (mut tx, r) = match (&u.step, &u.batch) {
+            // Down: nothing in effect, nothing to undo.
+            (_, Some(bp)) if bp.down_of.is_some() && lo.is_none() => (tx, Ok((0, None, true))),
+            (_, Some(bp)) if bp.down_of.is_some() => {
+                let hi = lo.clone().expect("checked above");
+                let next = keyset_down(&mut tx, bp, &hi)
+                    .await
+                    .map_err(retry_or_fatal)?;
+                let last = next.is_none();
+                let (tx, r) = match &u.step {
+                    None => {
+                        let (sql, params) = super::data::expand(
+                            &u.sql.join("\n"),
+                            tx.dialect(),
+                            binds,
+                            &bp.key,
+                            next.as_ref(),
+                            Some(&hi),
+                        );
+                        super::step::run_step(
+                            tx,
+                            super::step::Scope::default(),
+                            sql_step(sql, params),
+                        )
+                        .await
+                    }
+                    Some(sr) => {
+                        let f = super::step::registered(k.0, &sr.id)
+                            .first()
+                            .and_then(|s| s.down)
+                            .ok_or_else(|| {
+                                fatal(refused(
+                                    Code::Unresolved,
+                                    &format!("{}:{}", k.0, k.1),
+                                    format!("data step `{}:{}` has no down here", k.0, sr.id),
+                                ))
+                            })?;
+                        let scope = super::step::Scope {
+                            app: k.0.to_owned(),
+                            footprint: sr.footprint.clone(),
+                            tables: sr.tables.clone(),
+                            undo: None,
+                        };
+                        let batch = super::step::Batch::down(next.clone(), hi.clone(), bp.size);
+                        let (tx, r) = super::step::run_step(tx, scope, rust_step(f, batch)).await;
+                        (tx, r.map(|_| 0))
+                    }
+                };
+                (tx, r.map(|rows| (rows, next, last)))
+            }
             (None, None) => {
                 let sql = u.sql.join("\n");
                 let (tx, r) =
@@ -1322,7 +1535,15 @@ impl Runner<'_> {
                 let (tx, r) =
                     super::step::run_step(tx, super::step::Scope::default(), sql_step(sql, params))
                         .await;
-                let cursor = if last { hi.or_else(|| lo.clone()) } else { hi };
+                let (mut tx, r) = (tx, r);
+                // The last batch is open-ended: its cursor is the top key it covered.
+                let cursor = if last && r.is_ok() {
+                    top_key(&mut tx, bp, lo.as_ref())
+                        .await
+                        .map_err(retry_or_fatal)?
+                } else {
+                    hi
+                };
                 (tx, r.map(|rows| (rows, cursor, last)))
             }
             (Some(sr), _) => {
@@ -1342,12 +1563,18 @@ impl Runner<'_> {
                     app: k.0.to_owned(),
                     footprint: sr.footprint.clone(),
                     tables: sr.tables.clone(),
+                    undo: (sr.undo && !sr.reverse).then(|| super::step::UndoTarget {
+                        sql: self.ledger.undo_record_sql(tx.dialect()),
+                        app: k.0.to_owned(),
+                        mig: k.1.to_owned(),
+                        op: i32::try_from(ui).unwrap_or(i32::MAX),
+                    }),
                 };
                 let batch = match &u.batch {
                     Some(bp) => super::step::Batch::range(lo.clone(), bp.size),
                     None => super::step::Batch::whole(),
                 };
-                let (tx, r) = super::step::run_step(tx, scope, rust_step(f, batch)).await;
+                let (mut tx, r) = super::step::run_step(tx, scope, rust_step(f, batch)).await;
                 let r = match (r, &u.batch) {
                     (Ok(super::step::Progress::Next(v)), Some(bp)) => {
                         // Strict progress: the cursor moves up, or the step is wrong.
@@ -1363,7 +1590,15 @@ impl Runner<'_> {
                             _ => Ok((0, Some(v), false)),
                         }
                     }
-                    (Ok(_), Some(_)) => Ok((0, lo.clone(), true)),
+                    // Done: the cursor is the top key, so a down walk covers it all.
+                    (Ok(_), Some(bp)) => top_key(&mut tx, bp, lo.as_ref())
+                        .await
+                        .map(|top| (0, top, true))
+                        .map_err(|e| {
+                            super::step::UnitError::Step(super::step::StepError::Message(
+                                e.to_string(),
+                            ))
+                        }),
                     (Ok(_), None) => Ok((0, None, true)),
                     (Err(e), _) => Err(e),
                 };
@@ -1405,7 +1640,19 @@ impl Runner<'_> {
                 .transpose()
                 .map_err(|e| fatal(refused(Code::State, &format!("{}:{}", k.0, k.1), e)))?;
             self.ledger
-                .put_progress_tx(&mut tx, k, ui, json.as_deref(), rows_done, batches)
+                .put_progress_tx(
+                    &mut tx,
+                    k,
+                    pi,
+                    json.as_deref(),
+                    rows_done,
+                    batches,
+                    if u.batch.as_ref().is_some_and(|b| b.down_of.is_some()) {
+                        super::ledger::Walk::Down
+                    } else {
+                        super::ledger::Walk::Up
+                    },
+                )
                 .await
                 .map_err(|e| fatal(e.into()))?;
             let detail = format!(
@@ -1442,7 +1689,7 @@ impl Runner<'_> {
         if let Err(e) = committed {
             // An unknown outcome (6.3): read what the database holds.
             let landed = match u.batch {
-                Some(_) => self.batch_committed(k, ui, batches).await?,
+                Some(_) => self.batch_committed(k, pi, batches).await?,
                 None => self.unit_committed(k, n).await.map_err(fatal)?,
             };
             if !landed {
@@ -1482,6 +1729,107 @@ impl Runner<'_> {
         }
         let _ = batched;
         r
+    }
+
+    /// One batch of an undo restore (7.4): up to [`UNDO_BATCH`] captured
+    /// changes, newest first, put back and deleted in one transaction with
+    /// the fenced heartbeat. `Ok(true)` once none are left (the unit is done).
+    async fn undo_attempt(
+        &mut self,
+        k: (&str, &str),
+        n: i64,
+        sr: &super::render::StepRef,
+    ) -> Result<bool, Attempt> {
+        let fatal = |e: RunError| Attempt::Fatal(e);
+        let at = format!("{}:{}", k.0, k.1);
+        let of = sr.undo_of.ok_or_else(|| {
+            fatal(refused(
+                Code::State,
+                &at,
+                "an undo restore without its forward unit",
+            ))
+        })?;
+        let mut conn = self.unit_conn().await?;
+        let mut tx = self.unit_tx(&mut conn).await?;
+        let recs = self
+            .ledger
+            .undo_rows_tx(&mut tx, k, of, UNDO_BATCH)
+            .await
+            .map_err(|e| retry_or_fatal(e.into()))?;
+        let done = recs.is_empty();
+        if !done {
+            let scope = super::step::Scope {
+                app: k.0.to_owned(),
+                footprint: sr.footprint.clone(),
+                tables: sr.tables.clone(),
+                undo: None,
+            };
+            let batch = recs.clone();
+            let (back, r) = super::step::run_step(tx, scope, move |ctx| {
+                Box::pin(async move {
+                    let mut skipped = 0_u64;
+                    for rec in &batch {
+                        if !super::step::restore(ctx, rec).await? {
+                            skipped += 1;
+                        }
+                    }
+                    Ok(skipped)
+                })
+            })
+            .await;
+            tx = back;
+            match r {
+                Ok(skipped) if skipped > 0 => tracing::info!(
+                    target: "rustango::migrate",
+                    "`{at}`: {skipped} captured change(s) left as they are: edited since, or gone"
+                ),
+                Ok(_) => {}
+                Err(e) => {
+                    let _ = tx.rollback().await;
+                    let why = format!("undo restore in `{at}`: {e}");
+                    return Err(if e.retryable() {
+                        Attempt::Retry(why)
+                    } else {
+                        fatal(MigrateError::Validation(why).into())
+                    });
+                }
+            }
+            let ids: Vec<i64> = recs.iter().map(|r| r.id).collect();
+            self.ledger
+                .undo_delete_tx(&mut tx, &ids)
+                .await
+                .map_err(|e| fatal(e.into()))?;
+            #[cfg(test)]
+            if self.opts.crash == Some(Crash::MidBatch(self.batches_run)) {
+                let _ = tx.rollback().await;
+                return Err(fatal(MigrateError::Validation("test crash".into()).into()));
+            }
+        }
+        let (sql, fb) = if done {
+            self.ledger.advance(self.pool, k, self.run_id, n - 1, n)
+        } else {
+            self.ledger.heartbeat(self.pool, k, self.run_id, n - 1)
+        };
+        let moved = raw_execute_tx(&mut tx, &sql, fb)
+            .await
+            .map_err(|e| fatal(e.into()))?;
+        if moved != 1 {
+            let _ = tx.rollback().await;
+            return Err(fatal(
+                super::ledger::fenced(moved)
+                    .expect_err("not one row")
+                    .into(),
+            ));
+        }
+        // Restored rows are deleted with the batch, so a redo after a lost
+        // answer finds the next ones; the last batch carries the advance.
+        if let Err(e) = tx.commit().await {
+            if done && self.unit_committed(k, n).await.map_err(fatal)? {
+                return Ok(true);
+            }
+            return Err(Attempt::Retry(format!("commit failed: {e}")));
+        }
+        Ok(done)
     }
 
     /// After a lost commit answer on unit `n`: its commit carries the
@@ -1755,23 +2103,10 @@ impl Runner<'_> {
     /// newest first: a blocker anywhere runs zero statements (7.1).
     async fn downgrade(&mut self, back: Back<'_>) -> Result<Vec<String>, RunError> {
         let rows = self.ledger.rows(self.pool).await?;
-        if let Some(r) = rows
-            .iter()
-            .find(|r| matches!(r.state, RowState::Running | RowState::Failed))
-        {
-            return Err(refused(
-                Code::State,
-                &format!("ledger:{}:{}", r.app, r.id),
-                format!(
-                    "`{}:{}` did not finish: run `manage dbmigrate apply` to resume it before \
-                     rolling back",
-                    r.app, r.id
-                ),
-            ));
-        }
+        // Applied rows, and a partial one: its forward work in effect rolls back (7.6).
         let applied: Vec<&Row> = rows
             .iter()
-            .filter(|r| r.state == RowState::Applied)
+            .filter(|r| r.state != RowState::RollingBack)
             .collect();
         // Rows come in `seq` order: `--to` keeps the target and every row before it.
         let steps = match back {
@@ -1788,16 +2123,22 @@ impl Runner<'_> {
             }
         };
         let mut misses = Vec::new();
+        // What each row has in effect: its whole body, or a partial row's prefix.
+        let mut bodies = Vec::with_capacity(applied.len());
+        for r in &applied {
+            let at = format!("ledger:{}:{}", r.app, r.id);
+            bodies.push(self.in_effect(r, body(r, &at)?, &at).await?);
+        }
         for idx in (0..applied.len()).rev().take(steps) {
-            let at = format!("ledger:{}:{}", applied[idx].app, applied[idx].id);
-            misses.extend(super::data::misses(&body(applied[idx], &at)?, self.b, true));
+            misses.extend(super::data::misses(&bodies[idx], self.b, true));
         }
         super::data::refuse_misses(&misses, "rollback plan")?;
         let mut plan: Vec<(&Row, Vec<Unit>)> = Vec::new();
+        let mut downs: Vec<File> = Vec::new();
         for idx in (0..applied.len()).rev().take(steps) {
             let row = applied[idx];
             let at = format!("ledger:{}:{}", row.app, row.id);
-            let file = body(row, &at)?;
+            let file = bodies[idx].clone();
             if let (Kind::Checkpoint, Some(base)) = (file.kind, &file.base) {
                 return Err(refused(
                     Code::Floor,
@@ -1810,15 +2151,55 @@ impl Runner<'_> {
             }
             // State before it: every earlier stored body, in apply order.
             let mut state = State::default();
-            for r in &applied[..idx] {
+            for (r, f) in applied[..idx].iter().zip(&bodies) {
                 let at = format!("ledger:{}:{}", r.app, r.id);
-                apply_file(&mut state, &body(r, &at)?, &at, &CTX)?;
+                apply_file(&mut state, f, &at, &CTX)?;
             }
-            let down = self.down_file(&file, &state, &at)?;
+            let (down, of) = self.down_file(&file, &state, &at)?;
             let mut after = state.clone();
             apply_file(&mut after, &file, &at, &CTX)?;
-            let (units, _) = render_plan(&after, &down, &at, &CTX, self.b)?;
+            let (mut units, _) = render_plan(&after, &down, &at, &CTX, self.b)?;
+            // A batched reverse walks down the progress its forward unit
+            // left; an undo restore reads that unit's undo rows.
+            for u in &mut units {
+                let fwd_op = of[u.op];
+                if let Some(bp) = u.batch.as_mut() {
+                    bp.down_of = row
+                        .unit_plan
+                        .iter()
+                        .position(|f| f.op == fwd_op && f.batch.is_some());
+                }
+                if let Some(sr) = u.step.as_mut().filter(|s| s.undo) {
+                    sr.undo_of = row
+                        .unit_plan
+                        .iter()
+                        .position(|f| f.op == fwd_op && f.step.is_some());
+                }
+            }
             plan.push((row, units));
+            downs.push(down);
+        }
+        // Data probes before any statement (7.1 step 6): every hit is a blocker.
+        if !plan.is_empty() {
+            let mut now = State::default();
+            for (r, f) in applied.iter().zip(&bodies) {
+                let at = format!("ledger:{}:{}", r.app, r.id);
+                apply_file(&mut now, f, &at, &CTX)?;
+            }
+            let ops: Vec<&OpEnvelope> = downs.iter().flat_map(|f| &f.operations).collect();
+            let needs = super::preflight::checkable(&ops, &now);
+            let hits = super::preflight::probe(self.pool, &needs).await?;
+            if !hits.is_empty() {
+                let list: Vec<String> = hits.iter().map(|h| format!("  - {h}")).collect();
+                return Err(refused(
+                    Code::Blocked,
+                    "rollback plan",
+                    format!(
+                        "the rows do not fit the schema the rollback restores; nothing ran:\n{}",
+                        list.join("\n")
+                    ),
+                ));
+            }
         }
         let mut done = Vec::new();
         // A half-finished rollback finishes first, from its frozen plan.
@@ -1881,7 +2262,14 @@ impl Runner<'_> {
     }
 
     /// The inverse of `file`'s ops, newest first, as a file to render.
-    fn down_file(&self, file: &File, before: &State, at: &str) -> Result<File, RunError> {
+    /// The inverse of `file`'s ops, newest first, and for each reverse op the
+    /// index of the forward op it undoes.
+    fn down_file(
+        &self,
+        file: &File,
+        before: &State,
+        at: &str,
+    ) -> Result<(File, Vec<usize>), RunError> {
         let allow = Allow {
             data_loss: self.opts.accept_data_loss,
         };
@@ -1898,6 +2286,7 @@ impl Runner<'_> {
             states.push(next);
         }
         let mut ops = Vec::new();
+        let mut of = Vec::new();
         for (i, env) in file.operations.iter().enumerate().rev() {
             let op_at = format!("{at}#/operations/{i}");
             for op in invert(&env.op, &states[i + 1], allow, &op_at)? {
@@ -1912,11 +2301,68 @@ impl Runner<'_> {
                     tx,
                     allow: Vec::new(),
                 });
+                of.push(i);
+            }
+        }
+        Ok((
+            File {
+                operations: ops,
+                ..file.clone()
+            },
+            of,
+        ))
+    }
+
+    /// What `row` has in effect: an applied row its whole body; a partial
+    /// one the ops its committed units cover, plus a batched op whose
+    /// batches began. A cut inside any other multi-unit op is refused.
+    async fn in_effect(&self, row: &Row, file: File, at: &str) -> Result<File, RunError> {
+        if row.state == RowState::Applied {
+            return Ok(file);
+        }
+        if row.started_unit.is_some() {
+            return Err(refused(
+                Code::State,
+                at,
+                "an autocommit unit was cut off: run `manage dbmigrate apply` to settle it, then \
+                 roll back",
+            ));
+        }
+        let units = &row.unit_plan;
+        let done = usize::try_from(row.pos + 1).unwrap_or(0);
+        let mut ops = units[..done.min(units.len())]
+            .iter()
+            .map(|u| u.op + 1)
+            .max()
+            .unwrap_or(0);
+        if let Some(next) = units.get(done) {
+            let begun = next.batch.is_some() && {
+                let mut conn = self.pool.acquire().await?;
+                let mut tx = conn.begin().await?;
+                let got = self
+                    .ledger
+                    .progress_tx(&mut tx, (&row.app, &row.id), done)
+                    .await?;
+                let _ = tx.rollback().await;
+                got.is_some_and(|(_, _, batches)| batches > 0)
+            };
+            if begun {
+                ops = next.op + 1;
+            } else if done > 0 && units[done - 1].op == next.op {
+                return Err(refused(
+                    Code::State,
+                    at,
+                    format!(
+                        "the run stopped inside op {} (unit {done} of its units): run `manage \
+                         dbmigrate apply` to finish it, then roll back",
+                        next.op
+                    ),
+                ));
             }
         }
         Ok(File {
-            operations: ops,
-            ..file.clone()
+            operations: file.operations[..ops.min(file.operations.len())].to_vec(),
+            ..file
         })
     }
 }

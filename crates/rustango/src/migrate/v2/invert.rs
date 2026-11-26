@@ -241,6 +241,7 @@ pub(crate) fn invert(op: &Op, after: &State, allow: Allow, at: &str) -> Result<V
             down,
             down_binds,
             on_fresh,
+            batch,
             ..
         } => match down {
             DataDown::Noop(_) => Vec::new(),
@@ -259,14 +260,36 @@ pub(crate) fn invert(op: &Op, after: &State, allow: Allow, at: &str) -> Result<V
                 down_binds: Vec::new(),
                 on_fresh: *on_fresh,
                 restores: Vec::new(),
-                batch: None,
+                // A down that names `{{batch_range}}` walks back by batch.
+                batch: batch
+                    .clone()
+                    .filter(|_| sql.texts().any(|t| t.contains("{{batch_range}}"))),
             }],
         },
+        // Captured undo rows restore it, whatever `down` says (7.4).
+        Op::DataRust {
+            id,
+            tables,
+            on_fresh,
+            undo: true,
+            reverse: false,
+            ..
+        } => vec![Op::DataRust {
+            id: id.clone(),
+            tables: tables.clone(),
+            down: RustDown::Noop("the reverse of a reverse".into()),
+            on_fresh: *on_fresh,
+            restores: Vec::new(),
+            batch: None,
+            undo: true,
+            reverse: true,
+        }],
         Op::DataRust {
             id,
             tables,
             down,
             on_fresh,
+            batch,
             reverse: false,
             ..
         } => match down {
@@ -283,7 +306,8 @@ pub(crate) fn invert(op: &Op, after: &State, allow: Allow, at: &str) -> Result<V
                 down: RustDown::Noop("the reverse of a reverse".into()),
                 on_fresh: *on_fresh,
                 restores: Vec::new(),
-                batch: None,
+                batch: batch.clone(),
+                undo: false,
                 reverse: true,
             }],
         },

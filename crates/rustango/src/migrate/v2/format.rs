@@ -191,6 +191,14 @@ impl PerBackend {
             None => self.any.as_ref().and_then(Option::as_ref),
         }
     }
+
+    /// The SQL text each backend runs.
+    pub(crate) fn texts(&self) -> impl Iterator<Item = &str> {
+        Backend::ALL
+            .into_iter()
+            .filter_map(|b| self.get(b))
+            .map(|s| s.0.as_str())
+    }
 }
 
 /// A column in `create_table.fields` or `add_column`: the state column plus
@@ -604,6 +612,10 @@ pub(crate) enum Op {
         restores: Vec<String>,
         #[serde(default)]
         batch: Option<BatchSpec>,
+        /// Capture undo rows (`ctx.undo()`): rollback restores from them,
+        /// whatever `down` says (7.4).
+        #[serde(default)]
+        undo: bool,
         /// The inverse runs the step's `down`; never in a file.
         #[serde(skip_deserializing)]
         reverse: bool,
@@ -779,11 +791,18 @@ fn decode_op(v: &Value, at: &str) -> Result<OpEnvelope, LoadError> {
         ));
     }
     if kind == "data_sql" || kind == "data_rust" {
-        if let Some(k) = ["verify", "undo"].iter().find(|k| obj.contains_key(**k)) {
+        if obj.contains_key("verify") {
             return Err(LoadError::new(
                 Code::NotEnabled,
-                format!("{at}/{k}"),
-                format!("`{k}` on a data op comes in a later release"),
+                format!("{at}/verify"),
+                "`verify` on a data op comes in a later release",
+            ));
+        }
+        if kind == "data_sql" && obj.contains_key("undo") {
+            return Err(LoadError::new(
+                Code::File,
+                format!("{at}/undo"),
+                "undo capture needs a data_rust step (`ctx.undo()`)",
             ));
         }
         if obj.get("tx").and_then(Value::as_str) == Some("autocommit") {
@@ -965,6 +984,7 @@ fn verified_noops(file: &File, at: &str) -> Result<(), LoadError> {
             | Op::DataRust {
                 tables: fp,
                 down: RustDown::Noop(_),
+                undo: false,
                 ..
             } => {
                 let dropped = |w: &String| match w.split_once('.') {

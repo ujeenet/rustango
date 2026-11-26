@@ -221,14 +221,49 @@ async fn apply<W: Write>(
                 .map_err(|_| usage(format!("`--max-duration {v}`: seconds, e.g. 300")))
         })
         .transpose()?;
+    let target = positional(
+        args,
+        &[
+            "--accept-step-change",
+            "--reason",
+            "--max-duration",
+            "--accept-drift",
+        ],
+    );
     let opts = super::run::Options {
         max_duration,
         per_run_limits: true,
         accept_step_change,
         accept_drift: value(args, "--accept-drift")?.map(str::to_owned),
         dry_run: args.iter().any(|a| a == "--plan" || a == "--dry-run"),
+        up_to: target.map(str::to_owned),
         ..super::run::Options::default()
     };
+    // An applied target with later rows means rolling back (decision 6).
+    if let Some(t) = target {
+        let later = super::run::applied_after(pool, &opts, t)
+            .await
+            .map_err(run_err)?;
+        if let Some(later) = later {
+            if later.is_empty() {
+                writeln!(w, "Nothing to apply.").map_err(io)?;
+                return Ok(());
+            }
+            if !args.iter().any(|a| a == "--allow-rollback") {
+                return Err(usage(format!(
+                    "`apply {t}` would roll back {}: pass --allow-rollback, or use `down`",
+                    later.join(", ")
+                )));
+            }
+            let report = super::run::downgrade_to(pool, dir, t, &opts)
+                .await
+                .map_err(run_err)?;
+            for id in &report.rolled_back {
+                writeln!(w, "Rolled back {id}").map_err(io)?;
+            }
+            return Ok(());
+        }
+    }
     let report = super::run::migrate(pool, dir, &opts)
         .await
         .map_err(run_err)?;

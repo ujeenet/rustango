@@ -101,6 +101,9 @@ async fn boot_migrate_v2(
     for id in &report.applied {
         tracing::info!(target: "rustango::migrate", migration = %id, "applied");
     }
+    for w in &report.warnings {
+        tracing::warn!(target: "rustango::migrate", "{w}");
+    }
     // A stopped run never opens the gate; the process exits non-zero.
     match report.stopped {
         Some(why) => Err(crate::migrate::MigrateError::Validation(format!(

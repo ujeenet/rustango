@@ -79,6 +79,7 @@ pub async fn at(pool: &Pool, dir: &Path, app: &str, step_id: &str) -> Result<Ste
             .filter_map(|t| state.tables.get(t).map(|ts| (t.to_owned(), (**ts).clone())))
             .collect(),
         footprint,
+        undo: None,
     };
     Ok(StepTest {
         pool: pool.clone(),

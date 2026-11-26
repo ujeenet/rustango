@@ -60,6 +60,13 @@ pub(crate) struct Row {
     pub(crate) session: Option<super::session::Session>,
 }
 
+/// Which way a batched unit walks its key range (6.2 `direction`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Walk {
+    Up,
+    Down,
+}
+
 /// The ledger's table names, from the configured base.
 #[derive(Debug, Clone)]
 pub(crate) struct Ledger {
@@ -67,6 +74,8 @@ pub(crate) struct Ledger {
     pub(crate) events: String,
     /// Batch progress per `(app, id, op_index)` (6.2).
     pub(crate) progress: String,
+    /// Undo rows of data steps that capture them (7.4).
+    pub(crate) undo: String,
 }
 
 impl Ledger {
@@ -81,6 +90,7 @@ impl Ledger {
         Self {
             events: format!("{table}_events"),
             progress: format!("{table}_progress"),
+            undo: format!("{table}_undo"),
             table,
         }
     }
@@ -185,6 +195,49 @@ fn progress_table(name: &str) -> TableState {
     )
 }
 
+fn undo_table(name: &str) -> TableState {
+    let mut id = col("id", "i64", false, None);
+    id.primary_key = true;
+    id.auto = true;
+    table(
+        name,
+        vec![
+            id,
+            col("app", "string", false, Some(100)),
+            col("mig", "string", false, Some(200)),
+            col("op_index", "i32", false, None),
+            // insert | update | delete
+            col("kind", "string", false, Some(8)),
+            col("tbl", "string", false, Some(63)),
+            col("key_col", "string", false, Some(63)),
+            // The key as JSON, decoded by the key column's type.
+            col("key_json", "string", false, None),
+            col("key_hash", "string", false, Some(64)),
+            col("col", "string", true, Some(63)),
+            col("old_json", "string", true, None),
+            // The written value's canonical hash: the restore skips a row
+            // whose value no longer matches (the user edited it).
+            col("new_hash", "string", true, Some(64)),
+            col("row_json", "string", true, None),
+            col("at", "datetime", true, None),
+        ],
+    )
+}
+
+/// One captured change, as the restore reads it.
+#[derive(Debug, Clone)]
+pub(crate) struct UndoRow {
+    pub(crate) id: i64,
+    pub(crate) kind: String,
+    pub(crate) table: String,
+    pub(crate) key_col: String,
+    pub(crate) key_json: String,
+    pub(crate) col: Option<String>,
+    pub(crate) old_json: Option<String>,
+    pub(crate) new_hash: Option<String>,
+    pub(crate) row_json: Option<String>,
+}
+
 fn events_table(name: &str) -> TableState {
     let mut id = col("id", "i64", false, None);
     id.primary_key = true;
@@ -236,6 +289,7 @@ impl Ledger {
             ledger_table(&self.table),
             events_table(&self.events),
             progress_table(&self.progress),
+            undo_table(&self.undo),
         ] {
             if !crate::migrate::try_table_exists_here(pool, &t.name).await? {
                 raw_execute_pool(pool, &create_table_sql_for(d, &t), Vec::new()).await?;
@@ -644,6 +698,104 @@ impl Ledger {
             );
             raw_execute_pool(pool, &del, vec![s(key.0), s(key.1)]).await?;
         }
+        if crate::migrate::try_table_exists_here(pool, &self.undo).await? {
+            let del = format!(
+                "DELETE FROM {} WHERE app = {} AND mig = {}",
+                pool.dialect().quote_ident(&self.undo),
+                p(pool, 1),
+                p(pool, 2),
+            );
+            raw_execute_pool(pool, &del, vec![s(key.0), s(key.1)]).await?;
+        }
+        Ok(())
+    }
+
+    /// The INSERT of one undo row; binds: app, mig, op_index, kind, tbl,
+    /// key_col, key_json, key_hash, col, old_json, new_hash, row_json.
+    pub(crate) fn undo_record_sql(&self, d: &dyn crate::sql::Dialect) -> String {
+        let marks: Vec<String> = (1..=12).map(|n| d.placeholder(n)).collect();
+        format!(
+            "INSERT INTO {} (app, mig, op_index, kind, tbl, key_col, key_json, key_hash, col, \
+             old_json, new_hash, row_json, at) VALUES ({}, {})",
+            d.quote_ident(&self.undo),
+            marks.join(", "),
+            d.utc_now_sql()
+        )
+    }
+
+    /// Up to `limit` undo rows of forward unit `op`, newest first.
+    ///
+    /// # Errors
+    /// Driver failures.
+    pub(crate) async fn undo_rows_tx(
+        &self,
+        tx: &mut crate::sql::PoolTx<'_>,
+        key: (&str, &str),
+        op: usize,
+        limit: u32,
+    ) -> Result<Vec<UndoRow>, MigrateError> {
+        let d = tx.dialect();
+        let sql = format!(
+            "SELECT id, kind, tbl, key_col, key_json, col, old_json, new_hash, row_json FROM {} \
+             WHERE app = {} AND mig = {} AND op_index = {} ORDER BY id DESC LIMIT {limit}",
+            d.quote_ident(&self.undo),
+            d.placeholder(1),
+            d.placeholder(2),
+            d.placeholder(3),
+        );
+        type Raw = (
+            i64,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        let op = i32::try_from(op).unwrap_or(i32::MAX);
+        let rows: Vec<Raw> =
+            crate::sql::raw_query_tx(tx, &sql, vec![s(key.0), s(key.1), SqlValue::I32(op)]).await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(id, kind, table, key_col, key_json, col, old_json, new_hash, row_json)| UndoRow {
+                    id,
+                    kind,
+                    table,
+                    key_col,
+                    key_json,
+                    col,
+                    old_json,
+                    new_hash,
+                    row_json,
+                },
+            )
+            .collect())
+    }
+
+    /// Delete restored undo rows, in the restore's transaction.
+    ///
+    /// # Errors
+    /// Driver failures.
+    pub(crate) async fn undo_delete_tx(
+        &self,
+        tx: &mut crate::sql::PoolTx<'_>,
+        ids: &[i64],
+    ) -> Result<(), MigrateError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let d = tx.dialect();
+        let marks: Vec<String> = (1..=ids.len()).map(|n| d.placeholder(n)).collect();
+        let sql = format!(
+            "DELETE FROM {} WHERE id IN ({})",
+            d.quote_ident(&self.undo),
+            marks.join(", ")
+        );
+        crate::sql::raw_execute_tx(tx, &sql, ids.iter().map(|i| SqlValue::I64(*i)).collect())
+            .await?;
         Ok(())
     }
 
@@ -687,9 +839,41 @@ impl Ledger {
         effect_hi: Option<&str>,
         rows_done: i64,
         batches: i64,
+        walk: Walk,
     ) -> Result<(), MigrateError> {
         let d = tx.dialect();
         let op = i32::try_from(op).unwrap_or(i32::MAX);
+        if walk == Walk::Down {
+            // `done_hi` keeps the forward high-water; `effect_hi` shrinks.
+            let up = format!(
+                "UPDATE {} SET effect_hi = {}, rows_done = {}, batches = {}, direction = {}, \
+                 updated_at = {} WHERE app = {} AND id = {} AND op_index = {}",
+                d.quote_ident(&self.progress),
+                d.placeholder(1),
+                d.placeholder(2),
+                d.placeholder(3),
+                d.placeholder(4),
+                d.utc_now_sql(),
+                d.placeholder(5),
+                d.placeholder(6),
+                d.placeholder(7),
+            );
+            crate::sql::raw_execute_tx(
+                tx,
+                &up,
+                vec![
+                    effect_hi.map_or(SqlValue::Null, s),
+                    SqlValue::I64(rows_done),
+                    SqlValue::I64(batches),
+                    s("down"),
+                    s(key.0),
+                    s(key.1),
+                    SqlValue::I32(op),
+                ],
+            )
+            .await?;
+            return Ok(());
+        }
         let del = format!(
             "DELETE FROM {} WHERE app = {} AND id = {} AND op_index = {}",
             d.quote_ident(&self.progress),
