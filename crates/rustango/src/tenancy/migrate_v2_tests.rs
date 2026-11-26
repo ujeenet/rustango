@@ -9,7 +9,6 @@ use serde_json::{json, Value};
 use super::*;
 #[cfg(feature = "postgres")]
 use crate::migrate::v2::ledger::cache_all;
-#[cfg(any(feature = "postgres", feature = "sqlite"))]
 use crate::migrate::v2::ledger::Ledger;
 use crate::sql::{raw_execute_pool, raw_query_pool, Pool};
 
