@@ -216,7 +216,17 @@ async fn apply_rollback_reapply(b: B) {
         .event_kinds(pool, ("project", "0002_bio"))
         .await
         .unwrap();
-    assert_eq!(kinds, ["applied", "rolled_back", "applied", "rolled_back"]);
+    assert_eq!(
+        kinds,
+        [
+            "applied",
+            "rollback_began",
+            "rolled_back",
+            "applied",
+            "rollback_began",
+            "rolled_back"
+        ]
+    );
     migrate(pool, &dir, &opts()).await.unwrap();
     assert_eq!(columns(pool, "rv_author").await, ["id", "name", "bio"]);
 }
@@ -544,7 +554,7 @@ async fn adopt_switch_cases(b: B) {
     );
 }
 
-/// Registry (tenancy) files run on engine v2 from phase 5.
+/// A single-database run refuses registry files: they run under tenancy.
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn registry_files_are_refused() {
@@ -554,10 +564,9 @@ async fn registry_files_are_refused() {
     let mut f = v2("0001_org", &[], json!([]));
     f["target"] = json!("registry");
     put(&dir, "0001_org", &f);
-    assert_eq!(
-        code(migrate(&db.pool, &dir, &opts()).await),
-        Code::NotEnabled
-    );
+    let e = migrate(&db.pool, &dir, &opts()).await.expect_err("refused");
+    assert_eq!(e.code(), Some(Code::State), "{e}");
+    assert!(e.to_string().contains("migrate-registry"), "{e}");
 }
 
 /// The catalog's view of `t`, with what engine v1 and a fresh install may

@@ -362,6 +362,21 @@ async fn migrate_project(
     opts: &Options,
 ) -> Result<Report, RunError> {
     super::step::refuse_duplicates().map_err(|e| refused(Code::Unresolved, "data steps", e))?;
+    // Registry files belong to a tenancy run, never a single database's.
+    if opts.run_as == RunAs::Single {
+        if let Some(f) = project
+            .files
+            .iter()
+            .find(|f| f.file.target == Target::Registry)
+        {
+            return Err(refused(
+                Code::State,
+                &f.at,
+                "a registry migration runs under tenancy: `manage migrate-registry` (or \
+                 `migrate-tenants`)",
+            ));
+        }
+    }
     let ledger = Ledger::of(opts);
     let b = backend_of(pool);
     // Every data step the plan needs resolves before the lock and the

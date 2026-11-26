@@ -513,9 +513,11 @@ async fn v1_refuses_v2_tenancy_pub_apis(backend: Backend) {
 
 /// The tenancy server's boot: `Builder::migrate(project_root)`.
 async fn v1_refuses_v2_builder_migrate(backend: Backend) {
+    // An engine v2 project (the `system` folder does not decide) runs its
+    // fleet there; the mixed shapes refuse.
     refuses(
         backend,
-        PROJECT,
+        &[Shape::MixedApps, Shape::MixedFolder],
         vec![(
             "Builder::migrate",
             call(|c| Box::pin(async move { builder_migrate(&c.pool, &c.url, &c.root).await })),
