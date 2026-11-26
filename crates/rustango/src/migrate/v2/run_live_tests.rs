@@ -3662,6 +3662,35 @@ async fn an_archived_drop_rolls_back_with_its_data(b: B) {
     assert_eq!(columns(pool, "ar_t").await, ["id"]);
 }
 
+/// A batched data_sql's down walks back by batch from the top key its
+/// open-ended last batch reached: 25 rows by 10, every row undone (7.3).
+async fn a_batched_sql_down_undoes_every_batch(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let ids: Vec<i64> = (1..=25).collect();
+    let (_root, dir) = ed_project(pool, &ids).await;
+    let mut mark = batched_sql(10);
+    mark["down"] =
+        json!({"any": "UPDATE {{t:ed_user}} SET {{c:street}} = NULL WHERE {{batch_range}}"});
+    mark.as_object_mut().unwrap().remove("allow");
+    put(
+        &dir,
+        "0002_mark",
+        &vs("0002_mark", &["0001_user"], json!([mark])),
+    );
+    migrate(pool, &dir, &opts()).await.unwrap();
+    assert_eq!(
+        count(pool, "SELECT COUNT(*) FROM ed_user WHERE street = 'moved'").await,
+        25
+    );
+    downgrade(pool, &dir, 1, &opts()).await.unwrap();
+    assert_eq!(
+        count(pool, "SELECT COUNT(*) FROM ed_user WHERE street IS NULL").await,
+        25
+    );
+    assert_eq!(progress_rows(pool, "0002_mark").await, 0);
+}
+
 /// A shutdown signal stops between batches; the next start resumes at the
 /// stored cursor and moves every row once.
 async fn a_shutdown_stops_between_batches(b: B) {
@@ -3850,6 +3879,7 @@ per_backend!(
     a_failed_mysql_reverse_ddl_resumes_by_probe,
     apply_rollback_cycles_leave_nothing_stale,
     an_archived_drop_rolls_back_with_its_data,
+    a_batched_sql_down_undoes_every_batch,
     max_batches_per_run_binds_the_cli_only,
     a_held_lock_is_retried,
     a_waiter_finishes_a_killed_move,
