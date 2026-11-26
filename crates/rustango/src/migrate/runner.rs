@@ -2365,6 +2365,7 @@ pub(crate) enum LockScope {
     Session,
     /// A schema-mode tenant: PG keys on the schema, as v1's
     /// [`lock_key_for_schema`] does for that schema.
+    #[cfg_attr(not(all(feature = "tenancy", feature = "postgres")), allow(dead_code))]
     Schema(String),
     /// The fleet run, in the registry: orchestrators exclude each other
     /// while per-target runs take their own locks inside it.

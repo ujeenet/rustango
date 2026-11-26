@@ -226,8 +226,10 @@ fn undo_table(name: &str) -> TableState {
 
 /// The registry's cache of each tenant's migrate state (8.3): one row per
 /// tenant, the error class only, never driver text or row values.
+#[cfg(feature = "tenancy")]
 pub(crate) const TENANT_CACHE: &str = "__rustango_tenant_migrations__";
 
+#[cfg(feature = "tenancy")]
 fn tenant_cache_table() -> TableState {
     let mut slug = col("slug", "string", false, Some(200));
     slug.primary_key = true;
@@ -246,12 +248,14 @@ fn tenant_cache_table() -> TableState {
 }
 
 /// One tenant's cached state: `(slug, state, head, error_class)`.
+#[cfg(feature = "tenancy")]
 pub(crate) type CachedTenant = (String, String, Option<String>, Option<String>);
 
 /// Write `slug`'s cached state, creating the cache on first use.
 ///
 /// # Errors
 /// Driver failures.
+#[cfg(feature = "tenancy")]
 pub(crate) async fn cache_put(
     registry: &Pool,
     slug: &str,
@@ -299,6 +303,7 @@ pub(crate) async fn cache_put(
 ///
 /// # Errors
 /// Driver failures.
+#[cfg(feature = "tenancy")]
 pub(crate) async fn cache_all(registry: &Pool) -> Result<Vec<CachedTenant>, MigrateError> {
     if !crate::migrate::try_table_exists_here(registry, TENANT_CACHE).await? {
         return Ok(Vec::new());
