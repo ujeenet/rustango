@@ -1223,7 +1223,12 @@ async fn boot_binds_before_the_fleet_runs() {
     );
     let registry = sqlx::SqlitePool::connect(&registry_url).await.unwrap();
     let root = tmp.path().join("project");
-    std::fs::create_dir_all(root.join("migrations")).unwrap();
+    // A v2 project: the boot runs the fleet.
+    put(
+        &root.join("migrations"),
+        "0001_items",
+        &file("0001_items", &[], "tenant", items()),
+    );
     let port = std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()

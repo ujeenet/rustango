@@ -719,7 +719,8 @@ fn a_tenancy_folder_adopts_per_target() {
         (Some("tenant"), Some("0003_total"))
     );
     assert!(ten["state"]["tables"].get("ad_plan").is_none(), "{ten}");
-    super::super::load::load_project(&dir).unwrap();
+    let project = super::super::load::load_project(&dir).unwrap();
+    super::super::load::replay(&project).unwrap();
 }
 
 /// Decision 4: a tenant→registry FK is listed and nothing is written.

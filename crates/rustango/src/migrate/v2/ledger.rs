@@ -251,6 +251,23 @@ fn tenant_cache_table() -> TableState {
 #[cfg(feature = "tenancy")]
 pub(crate) type CachedTenant = (String, String, Option<String>, Option<String>);
 
+/// Create the registry cache; once, before tenants run at once.
+///
+/// # Errors
+/// Driver failures.
+#[cfg(feature = "tenancy")]
+pub(crate) async fn cache_ensure(registry: &Pool) -> Result<(), MigrateError> {
+    if !crate::migrate::try_table_exists_here(registry, TENANT_CACHE).await? {
+        raw_execute_pool(
+            registry,
+            &create_table_sql_for(registry.dialect(), &tenant_cache_table()),
+            Vec::new(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 /// Write `slug`'s cached state, creating the cache on first use.
 ///
 /// # Errors
@@ -264,15 +281,8 @@ pub(crate) async fn cache_put(
     error_class: Option<&str>,
     run_id: &str,
 ) -> Result<(), MigrateError> {
+    cache_ensure(registry).await?;
     let d = registry.dialect();
-    if !crate::migrate::try_table_exists_here(registry, TENANT_CACHE).await? {
-        raw_execute_pool(
-            registry,
-            &create_table_sql_for(d, &tenant_cache_table()),
-            Vec::new(),
-        )
-        .await?;
-    }
     let t = d.quote_ident(TENANT_CACHE);
     raw_execute_pool(
         registry,

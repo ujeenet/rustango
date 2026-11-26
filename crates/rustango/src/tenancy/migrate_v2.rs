@@ -293,6 +293,7 @@ where
     report.run_id = run::new_run_id();
     crate::migrate::v2::ledger::fleet_open(registry, &report.run_id, "up", &plan_hash, fo.abandon)
         .await?;
+    crate::migrate::v2::ledger::cache_ensure(registry).await?;
     let run_id = report.run_id.clone();
     // One tip for every tenant: each distinct applied set plans once (4.4).
     let project = crate::migrate::v2::load::load_project(dir)

@@ -166,7 +166,12 @@ fn checkpoint(
     b: Backend,
     at: &str,
 ) -> Result<serde_json::Value, LoadError> {
-    let doc = state_of(snap, b, at)?;
+    let mut doc = state_of(snap, b, at)?;
+    if target == "registry" {
+        for t in doc.tables.values_mut() {
+            t.scope = super::state::Target::Registry;
+        }
+    }
     let hash = State::from_doc(doc.clone()).hash(&mut HashMemo::default());
     let legacy = prior.last().map_or("", |m| m.name.as_str());
     Ok(json!({
