@@ -166,6 +166,16 @@ pub(crate) enum ReapError {
     Db(#[from] MigrateError),
 }
 
+/// What reaping found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Reaped {
+    /// The session was ended, or is provably gone.
+    Gone,
+    /// It ran on another server (a failover), accepted with
+    /// `--accept-failover`: not ended; the probe decides. The diff says why.
+    Failover(String),
+}
+
 /// End `s` if it still runs, then wait until it is gone, at most `wait`.
 ///
 /// # Errors
@@ -174,7 +184,8 @@ pub(crate) async fn reap(
     pool: &Pool,
     s: &Session,
     wait: std::time::Duration,
-) -> Result<(), ReapError> {
+    accept_failover: bool,
+) -> Result<Reaped, ReapError> {
     match s {
         Session::Postgres { pid, backend_start } => {
             let binds = || {
@@ -194,9 +205,9 @@ pub(crate) async fn reap(
             .await
             .map_err(MigrateError::from)?;
             match seen.first() {
-                None => return Ok(()),
+                None => return Ok(Reaped::Gone),
                 Some((None,)) => return Err(ReapError::NoRights(s.clone(), PG_GRANT)),
-                Some((Some(start),)) if start != backend_start => return Ok(()),
+                Some((Some(start),)) if start != backend_start => return Ok(Reaped::Gone),
                 Some(_) => {}
             }
             // Only when pid and start still match: a pid alone may be reused.
@@ -238,18 +249,30 @@ pub(crate) async fn reap(
                 .await
                 .map_err(MigrateError::Driver)?;
             // Another server, or the same one restarted: thread ids restart too.
-            if &uuid_now != server_uuid || (started_now - server_started).abs() > START_SLACK_SECS {
+            let diff = format!(
+                "the server is {uuid_now} started at {started_now}, the session ran on \
+                 {server_uuid} started at {server_started}"
+            );
+            if &uuid_now != server_uuid {
+                // A failover: the old server may still run the DDL; nothing here can end it.
+                if accept_failover {
+                    return Ok(Reaped::Failover(diff));
+                }
                 return Err(ReapError::Mismatch(
                     s.clone(),
-                    format!(
-                        "the server is {uuid_now} started at {started_now}, the session ran on \
-                         {server_uuid} started at {server_started}"
-                    ),
+                    format!("{diff}; pass --accept-failover <reason> if the old server is gone"),
                 ));
+            }
+            if started_now > server_started + START_SLACK_SECS {
+                // The server restarted since: every thread of the old run is gone.
+                return Ok(Reaped::Gone);
+            }
+            if (started_now - server_started).abs() > START_SLACK_SECS {
+                return Err(ReapError::Mismatch(s.clone(), diff));
             }
             match seen {
                 // Gone, if it was ours to see; another user's thread needs PROCESS.
-                None if &user_now == user => return Ok(()),
+                None if &user_now == user => return Ok(Reaped::Gone),
                 None => {
                     return Err(ReapError::NoRights(
                         s.clone(),
@@ -272,7 +295,7 @@ pub(crate) async fn reap(
             match execute(&mut conn, &format!("KILL {id}")).await {
                 Ok(()) => {}
                 // 1094: no such thread, it is already gone.
-                Err(e) if mysql_code(&e) == Some(1094) => return Ok(()),
+                Err(e) if mysql_code(&e) == Some(1094) => return Ok(Reaped::Gone),
                 // 1095: not the owner, and no CONNECTION_ADMIN.
                 Err(e) if mysql_code(&e) == Some(1095) => {
                     return Err(ReapError::NoRights(
@@ -324,7 +347,11 @@ async fn mysql_now(
     ))
 }
 
-async fn gone<F, Fut>(wait: std::time::Duration, s: &Session, is_gone: F) -> Result<(), ReapError>
+async fn gone<F, Fut>(
+    wait: std::time::Duration,
+    s: &Session,
+    is_gone: F,
+) -> Result<Reaped, ReapError>
 where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<bool, MigrateError>>,
@@ -332,7 +359,7 @@ where
     let until = std::time::Instant::now() + wait;
     loop {
         if is_gone().await? {
-            return Ok(());
+            return Ok(Reaped::Gone);
         }
         if std::time::Instant::now() >= until {
             return Err(ReapError::StillRunning(s.clone(), wait));

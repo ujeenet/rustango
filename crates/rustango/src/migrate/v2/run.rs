@@ -57,6 +57,12 @@ pub(crate) struct Options {
     pub(crate) stale_after: Option<std::time::Duration>,
     /// `--accept-archive-size`: archive a drop above [`ARCHIVE_LIMIT`].
     pub(crate) accept_archive_size: bool,
+    /// `--accept-failover <reason>`: a recorded MySQL DDL session ran on
+    /// another server; resume probes without ending it, logged (14 item 16).
+    pub(crate) accept_failover: Option<String>,
+    /// `--resume-forward`: a half rolled back migration goes forward again
+    /// from where the rollback stopped (7.6).
+    pub(crate) resume_forward: bool,
     /// `down --cascade`: roll back dependents in other apps too (7.1).
     pub(crate) cascade: bool,
     /// `apply <target>`: stop after this migration (`<app>:<id>` or `<id>`).
@@ -640,6 +646,10 @@ fn rust_step<'t>(
 /// How often a data unit that hit a deadlock or lock timeout runs again.
 const DATA_RETRIES: u32 = 5;
 
+/// The event a rollback opens with; its reason is the count of forward ops
+/// it undoes.
+const ROLLBACK_BEGAN: &str = "rollback_began";
+
 /// The largest archive a drop makes without `--accept-archive-size`.
 const ARCHIVE_LIMIT: u64 = 256 << 20;
 
@@ -1044,11 +1054,16 @@ impl Runner<'_> {
                     }
                     match row.state {
                         RowState::Applied => {}
+                        RowState::RollingBack if self.opts.resume_forward => {
+                            self.resume_forward(f, row, &state).await?;
+                            applied.push(f.file.id.clone());
+                        }
                         RowState::RollingBack => {
                             return Err(refused(
                                 Code::State,
                                 &f.at,
-                                "this migration is half rolled back: finish `downgrade` first",
+                                "this migration is half rolled back: finish `downgrade` first, \
+                                 or `apply --resume-forward` to go forward again",
                             ))
                         }
                         RowState::Running | RowState::Failed if self.opts.dry_run => {
@@ -1222,6 +1237,78 @@ impl Runner<'_> {
         Ok(())
     }
 
+    /// `--resume-forward` (7.6): a half rolled back row goes forward again
+    /// from the first forward op its rollback touched; a batched data op the
+    /// rollback walked down continues up from its cursor.
+    async fn resume_forward(
+        &mut self,
+        f: &Loaded,
+        row: &Row,
+        before: &State,
+    ) -> Result<(), RunError> {
+        let k = key(&f.file);
+        if row.started_unit.is_some() {
+            return Err(refused(
+                Code::State,
+                &f.at,
+                "a reverse unit was cut off: run `downgrade` to settle it first",
+            ));
+        }
+        let m: usize = self
+            .ledger
+            .last_reason(self.pool, k, ROLLBACK_BEGAN)
+            .await?
+            .and_then(|r| r.parse().ok())
+            .ok_or_else(|| refused(Code::State, &f.at, "no record of where this rollback began"))?;
+        let back = &row.unit_plan;
+        let done = usize::try_from(row.pos + 1).unwrap_or(0).min(back.len());
+        let mut touched: Vec<usize> = back[..done].iter().map(|u| u.op).collect();
+        if let Some(next) = back.get(done) {
+            if next.batch.is_some() {
+                // Its batches may have walked down: it goes up again from the cursor.
+                touched.push(next.op);
+            } else if done > 0 && back[done - 1].op == next.op {
+                return Err(refused(
+                    Code::State,
+                    &f.at,
+                    format!(
+                        "the rollback stopped inside the undo of op {}: run `downgrade` to finish \
+                         it, then apply",
+                        next.op
+                    ),
+                ));
+            }
+        }
+        let from_op = touched.into_iter().min().unwrap_or(m);
+        let (units, _) = render_plan(before, &f.file, &f.at, &CTX, self.b)?;
+        let first = units
+            .iter()
+            .position(|u| u.op >= from_op)
+            .unwrap_or(units.len());
+        let pos = i64::try_from(first).expect("unit index fits") - 1;
+        self.ledger
+            .replan(
+                self.pool,
+                k,
+                (&row.run_id, self.run_id),
+                RowState::Running,
+                &units,
+                pos,
+            )
+            .await?;
+        self.ledger
+            .event(
+                self.pool,
+                "resumed_forward",
+                k,
+                Some(&f.checksum),
+                self.run_id,
+                Some(&format!("from op {from_op}")),
+            )
+            .await?;
+        self.finish(f, &units, first).await
+    }
+
     /// A crashed run's row: take it over, probe a started autocommit unit,
     /// then run the stored plan from the next unit. Never re-rendered.
     async fn resume(&mut self, f: &Loaded, row: &Row) -> Result<(), RunError> {
@@ -1260,12 +1347,31 @@ impl Runner<'_> {
         let unit = usize::try_from(started).unwrap_or(0);
         // A dead client's DDL keeps running: end it before probing (6.5).
         if let Some(s) = &row.session {
-            super::session::reap(self.pool, s, self.lock_timeout())
-                .await
-                .map_err(|e| match e {
-                    super::session::ReapError::Db(e) => RunError::Db(e),
-                    e => refused(Code::State, at, e.to_string()),
-                })?;
+            let reaped = super::session::reap(
+                self.pool,
+                s,
+                self.lock_timeout(),
+                self.opts.accept_failover.is_some(),
+            )
+            .await
+            .map_err(|e| match e {
+                super::session::ReapError::Db(e) => RunError::Db(e),
+                e => refused(Code::State, at, e.to_string()),
+            })?;
+            if let (super::session::Reaped::Failover(diff), Some(why)) =
+                (reaped, &self.opts.accept_failover)
+            {
+                self.ledger
+                    .event(
+                        self.pool,
+                        "accept_failover",
+                        (&row.app, &row.id),
+                        None,
+                        self.run_id,
+                        Some(&format!("{why}: {diff}")),
+                    )
+                    .await?;
+            }
         }
         let expects = units
             .get(unit)
@@ -1932,7 +2038,8 @@ impl Runner<'_> {
         }
         // Restored rows are deleted with the batch, so a redo after a lost
         // answer finds the next ones; the last batch carries the advance.
-        if let Err(e) = tx.commit().await {
+        // Failpoint: a batch's lost answer counts in batches, the last one in units.
+        if let Err(e) = self.lose_ack(!done, tx.commit().await) {
             if done && self.unit_committed(k, n).await.map_err(fatal)? {
                 return Ok(true);
             }
@@ -2266,6 +2373,7 @@ impl Runner<'_> {
         }
         super::data::refuse_misses(&misses, "rollback plan")?;
         let mut plan: Vec<(&Row, Vec<Unit>)> = Vec::new();
+        let mut in_effect_ops: Vec<usize> = Vec::new();
         let mut downs: Vec<File> = Vec::new();
         for &idx in &chosen {
             let row = applied[idx];
@@ -2313,8 +2421,11 @@ impl Runner<'_> {
                         .iter()
                         .position(|f| f.op == fwd_op && f.step.is_some());
                 }
+                // From here on a reverse unit names the forward op it undoes.
+                u.op = fwd_op;
             }
             plan.push((row, units));
+            in_effect_ops.push(file.operations.len());
             downs.push(down);
         }
         // Data probes before any statement (7.1 step 6): every hit is a blocker.
@@ -2345,10 +2456,21 @@ impl Runner<'_> {
             self.finish_rollback(row, &row.unit_plan, None).await?;
             done.push(row.id.clone());
         }
-        for (row, units) in plan {
+        for ((row, units), ops) in plan.into_iter().zip(in_effect_ops) {
             let k = (row.app.as_str(), row.id.as_str());
             self.ledger
                 .begin_rollback(self.pool, k, &row.run_id, self.run_id, &units)
+                .await?;
+            // How many forward ops were in effect: `--resume-forward` needs it.
+            self.ledger
+                .event(
+                    self.pool,
+                    ROLLBACK_BEGAN,
+                    k,
+                    Some(&row.checksum),
+                    self.run_id,
+                    Some(&ops.to_string()),
+                )
                 .await?;
             let mine = Row {
                 run_id: self.run_id.to_owned(),

@@ -293,6 +293,15 @@ impl Ledger {
         ] {
             if !crate::migrate::try_table_exists_here(pool, &t.name).await? {
                 raw_execute_pool(pool, &create_table_sql_for(d, &t), Vec::new()).await?;
+                // The restore finds a key's captured changes by its hash (7.4).
+                if t.name == self.undo {
+                    let ix = format!(
+                        "CREATE INDEX {} ON {} (key_hash)",
+                        d.quote_ident(&format!("{}_kh", self.undo)),
+                        d.quote_ident(&self.undo)
+                    );
+                    raw_execute_pool(pool, &ix, Vec::new()).await?;
+                }
             }
         }
         Ok(())
@@ -643,9 +652,34 @@ impl Ledger {
         run_id: &str,
         plan: &[Unit],
     ) -> Result<(), MigrateError> {
+        self.replan(
+            pool,
+            key,
+            (old_run, run_id),
+            RowState::RollingBack,
+            plan,
+            -1,
+        )
+        .await
+    }
+
+    /// Take the row from `runs.0` for `runs.1` with a new plan, state and
+    /// position (fenced): a rollback begins, or goes forward again.
+    ///
+    /// # Errors
+    /// Driver failures, or the lock was lost.
+    pub(crate) async fn replan(
+        &self,
+        pool: &Pool,
+        key: (&str, &str),
+        runs: (&str, &str),
+        state: RowState,
+        plan: &[Unit],
+        pos: i64,
+    ) -> Result<(), MigrateError> {
         let sql = format!(
-            "UPDATE {} SET state = {}, unit_plan = {}, pos = -1, started_unit = NULL, run_id = {} \
-             WHERE app = {} AND id = {} AND run_id = {}",
+            "UPDATE {} SET state = {}, unit_plan = {}, pos = {}, started_unit = NULL, \
+             session = NULL, run_id = {} WHERE app = {} AND id = {} AND run_id = {}",
             self.qt(pool),
             p(pool, 1),
             p(pool, 2),
@@ -653,17 +687,19 @@ impl Ledger {
             p(pool, 4),
             p(pool, 5),
             p(pool, 6),
+            p(pool, 7),
         );
         let n = raw_execute_pool(
             pool,
             &sql,
             vec![
-                s(RowState::RollingBack.as_str()),
+                s(state.as_str()),
                 s(serde_json::to_string(plan)?),
-                s(run_id),
+                SqlValue::I64(pos),
+                s(runs.1),
                 s(key.0),
                 s(key.1),
-                s(old_run),
+                s(runs.0),
             ],
         )
         .await?;
@@ -1040,6 +1076,28 @@ impl Ledger {
         );
         let rows: Vec<(String,)> = raw_query_pool(&sql, vec![s(key.0), s(key.1)], pool).await?;
         Ok(rows.into_iter().map(|r| r.0).collect())
+    }
+
+    /// The reason of the latest `kind` event of a migration.
+    ///
+    /// # Errors
+    /// Driver failures.
+    pub(crate) async fn last_reason(
+        &self,
+        pool: &Pool,
+        key: (&str, &str),
+        kind: &str,
+    ) -> Result<Option<String>, MigrateError> {
+        let sql = format!(
+            "SELECT reason FROM {} WHERE app = {} AND mig = {} AND kind = {} ORDER BY id DESC",
+            self.qe(pool),
+            p(pool, 1),
+            p(pool, 2),
+            p(pool, 3),
+        );
+        let rows: Vec<(Option<String>,)> =
+            raw_query_pool(&sql, vec![s(key.0), s(key.1), s(kind)], pool).await?;
+        Ok(rows.into_iter().next().and_then(|r| r.0))
     }
 }
 

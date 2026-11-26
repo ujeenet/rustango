@@ -228,6 +228,7 @@ async fn apply<W: Write>(
             "--reason",
             "--max-duration",
             "--accept-drift",
+            "--accept-failover",
         ],
     );
     let opts = super::run::Options {
@@ -237,6 +238,8 @@ async fn apply<W: Write>(
         accept_drift: value(args, "--accept-drift")?.map(str::to_owned),
         dry_run: args.iter().any(|a| a == "--plan" || a == "--dry-run"),
         accept_archive_size: args.iter().any(|a| a == "--accept-archive-size"),
+        accept_failover: value(args, "--accept-failover")?.map(str::to_owned),
+        resume_forward: args.iter().any(|a| a == "--resume-forward"),
         up_to: target.map(str::to_owned),
         ..super::run::Options::default()
     };

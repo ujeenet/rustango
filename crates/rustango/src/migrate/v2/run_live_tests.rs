@@ -3289,6 +3289,21 @@ fn example_d_down(dir: &Path, size: u64) {
     );
 }
 
+/// A progress row: `(effect_hi, done_hi, direction)`.
+async fn progress_of(pool: &Pool, id: &str) -> (String, String, String) {
+    let r: Vec<(String, String, String)> = crate::sql::raw_query_pool(
+        &format!(
+            "SELECT effect_hi, done_hi, direction FROM {} WHERE id = '{id}'",
+            Ledger::default_names().progress
+        ),
+        Vec::new(),
+        pool,
+    )
+    .await
+    .unwrap();
+    r[0].clone()
+}
+
 async fn progress_rows(pool: &Pool, id: &str) -> i64 {
     count(
         pool,
@@ -3347,6 +3362,13 @@ async fn example_d_rolls_back_from_mid_batch(b: B) {
                     left,
                     "{c:?}"
                 );
+                if c == Crash::MidBatch(1) {
+                    // A down batch shrinks `effect_hi` and keeps the forward `done_hi`.
+                    assert_eq!(
+                        progress_of(pool, "0003_backfill").await,
+                        ("2000".to_owned(), "4000".to_owned(), "down".to_owned())
+                    );
+                }
                 // Boot (the same run) never resumes a half rolled back row.
                 let e = migrate(pool, &dir, &opts()).await.expect_err("refused");
                 assert!(
@@ -3405,6 +3427,18 @@ async fn unknown_rows_from_a_newer_binary(b: B) {
 /// user edited the row since, deletes only captured inserts (rows the app
 /// created stay) and re-inserts captured deletes. No undo row is left.
 async fn undo_skips_edited_rows_and_keeps_app_rows(b: B) {
+    for crash in [None, Some(Crash::LostAck(0)), Some(Crash::LostUnitAck(0))] {
+        undo_restores_once(b, crash).await;
+    }
+}
+
+/// [`undo_skips_edited_rows_and_keeps_app_rows`], the restore's commit
+/// answer lost at `crash`: the restore still lands once.
+async fn undo_restores_once(b: B, crash: Option<Crash>) {
+    let lost = Options {
+        crash,
+        ..Options::default()
+    };
     let Some(db) = fresh(b).await else { return };
     let pool = &db.pool;
     let root = tempfile::tempdir().unwrap();
@@ -3439,6 +3473,17 @@ async fn undo_skips_edited_rows_and_keeps_app_rows(b: B) {
             .collect::<Vec<_>>()
     };
     assert_eq!(tags().await, ["1=b", "2=b", "3=b", "100=new"]);
+    let undo = Ledger::default_names().undo;
+    let live = super::super::catalog::read_table(pool, &undo)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        live.indexes
+            .iter()
+            .any(|i| i.name == format!("{undo}_kh") && i.columns == ["key_hash"]),
+        "{live:?}"
+    );
     // Since then: a user edits row 2, the app creates row 200.
     raw_execute_pool(
         pool,
@@ -3455,7 +3500,7 @@ async fn undo_skips_edited_rows_and_keeps_app_rows(b: B) {
     .await
     .unwrap();
     assert_eq!(
-        downgrade(pool, &dir, 1, &opts()).await.unwrap().rolled_back,
+        downgrade(pool, &dir, 1, &lost).await.unwrap().rolled_back,
         ["0002_retag"]
     );
     assert_eq!(tags().await, ["1=a", "2=user", "3=a", "4=a", "200=app"]);
@@ -3697,6 +3742,128 @@ async fn a_batched_sql_down_undoes_every_batch(b: B) {
     assert_eq!(progress_rows(pool, "0002_mark").await, 0);
 }
 
+/// `--resume-forward` (7.6): a half rolled back migration goes forward
+/// again; the batched backfill walks up from where its down stopped, and
+/// every row is moved once.
+async fn resume_forward_goes_forward_again(b: B) {
+    const ROWS: i64 = 10_000;
+    for crash in [Crash::MidBatch(1), Crash::BeforeUnit(1)] {
+        let Some(db) = fresh(b).await else { return };
+        let pool = &db.pool;
+        let ids: Vec<i64> = (1..=ROWS).collect();
+        let (_root, dir) = ed_project(pool, &ids).await;
+        example_d_down(&dir, 2000);
+        let forward = Options {
+            crash: Some(Crash::MidBatch(2)),
+            ..Options::default()
+        };
+        migrate(pool, &dir, &forward)
+            .await
+            .expect_err("stopped mid-batch");
+        let killing = Options {
+            crash: Some(crash),
+            ..Options::default()
+        };
+        downgrade_to(pool, &dir, "steps:0001_user", &killing)
+            .await
+            .expect_err("killed");
+        let again = Options {
+            resume_forward: true,
+            ..Options::default()
+        };
+        let rep = migrate(pool, &dir, &again).await.unwrap();
+        assert!(
+            rep.applied.contains(&"0004_contract".to_owned()),
+            "{crash:?}: {rep:?}"
+        );
+        assert_eq!(
+            count(pool, "SELECT COUNT(*) FROM ed_address").await,
+            ROWS,
+            "{crash:?}"
+        );
+        assert!(
+            rows(pool).await.iter().all(|r| r.1 == RowState::Applied),
+            "{crash:?}"
+        );
+    }
+}
+
+/// A MySQL session from before a server restart is gone; one from another
+/// server (a failover) runs the probe only with `--accept-failover`, which
+/// is logged (14 item 16).
+async fn a_restart_or_accepted_failover_is_not_reaped(b: B) {
+    if b != B::My {
+        return;
+    }
+    for (shift, uuid, accept) in [
+        (-1000, None, false),
+        (0, Some("00000000-0000-0000-0000-000000000000"), true),
+    ] {
+        let Some(db) = fresh(b).await else { return };
+        let pool = &db.pool;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("migrations");
+        put(
+            &dir,
+            "0001_author",
+            &v2("0001_author", &[], json!([author()])),
+        );
+        put(
+            &dir,
+            "0002_ix",
+            &v2("0002_ix", &["0001_author"], raw_index()),
+        );
+        let crashing = Options {
+            crash: Some(Crash::AfterStart(1)),
+            ..Options::default()
+        };
+        migrate(pool, &dir, &crashing).await.expect_err("cut off");
+        let super::super::session::Session::Mysql {
+            id,
+            server_uuid,
+            server_started,
+            user,
+            statement,
+        } = ledger_row(pool, "0002_ix").await.session.unwrap()
+        else {
+            panic!("a MySQL session");
+        };
+        let forged = super::super::session::Session::Mysql {
+            id,
+            server_uuid: uuid.map_or(server_uuid, str::to_owned),
+            server_started: server_started + shift,
+            user,
+            statement,
+        };
+        raw_execute_pool(
+            pool,
+            &format!(
+                "UPDATE {} SET session = ? WHERE id = '0002_ix'",
+                Ledger::default_names().table
+            ),
+            vec![crate::core::SqlValue::String(
+                serde_json::to_string(&forged).unwrap(),
+            )],
+        )
+        .await
+        .unwrap();
+        let o = Options {
+            accept_failover: accept.then(|| "old primary is gone".to_owned()),
+            ..Options::default()
+        };
+        assert_eq!(migrate(pool, &dir, &o).await.unwrap().applied, ["0002_ix"]);
+        let kinds = Ledger::default_names()
+            .event_kinds(pool, ("project", "0002_ix"))
+            .await
+            .unwrap();
+        assert_eq!(
+            kinds.iter().any(|k| k == "accept_failover"),
+            accept,
+            "{kinds:?}"
+        );
+    }
+}
+
 /// A shutdown signal stops between batches; the next start resumes at the
 /// stored cursor and moves every row once.
 async fn a_shutdown_stops_between_batches(b: B) {
@@ -3886,6 +4053,8 @@ per_backend!(
     apply_rollback_cycles_leave_nothing_stale,
     an_archived_drop_rolls_back_with_its_data,
     a_batched_sql_down_undoes_every_batch,
+    resume_forward_goes_forward_again,
+    a_restart_or_accepted_failover_is_not_reaped,
     max_batches_per_run_binds_the_cli_only,
     a_held_lock_is_retried,
     a_waiter_finishes_a_killed_move,
