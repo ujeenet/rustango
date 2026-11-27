@@ -428,9 +428,10 @@ async fn v1_refuses_v2_tenancy_verbs(backend: Backend) {
 }
 
 async fn v1_refuses_v2_provisioning(backend: Backend) {
+    // A v2 project provisions through the v2 fleet's per-tenant run.
     refuses(
         backend,
-        PROJECT,
+        &PROJECT[1..],
         vec![
             (
                 "migrate_one_tenant",

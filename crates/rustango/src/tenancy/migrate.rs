@@ -665,6 +665,14 @@ pub async fn migrate_one_tenant<DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
+    // Engine v2: the fleet's own per-tenant run. It reports no v1 migrations.
+    if matches!(
+        crate::migrate::ProjectEngine::of_project(dir)?,
+        crate::migrate::ProjectEngine::V2 { .. }
+    ) {
+        super::migrate_v2::migrate_tenant(pools, org, dir, registry_url).await?;
+        return Ok(Vec::new());
+    }
     let project = ScopedProject::of(dir, MigrationScope::Tenant).await?;
     let chain = project.system_chain(crate::core::ModelScope::Tenant)?;
 

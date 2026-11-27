@@ -260,13 +260,13 @@ async fn schema_tenants_stay_apart() {
     let stray: Result<Vec<(i64,)>, _> = raw_query_pool(
         &format!("SELECT COUNT(*) FROM {orgs}"),
         Vec::new(),
-        &t1.pool,
+        &t1.pool().await,
     )
     .await;
     assert!(stray.is_err(), "{stray:?}");
     let back = super::tenant_opts(&t1);
     assert_eq!(
-        run::downgrade(&t1.pool, &f.dir(), 1, &back)
+        run::downgrade(&t1.pool().await, &f.dir(), 1, &back)
             .await
             .unwrap()
             .rolled_back,
@@ -703,7 +703,7 @@ async fn db_mode_tenants_stay_apart<DB: sqlx::Database>(
     let t0 = target(&pools, &d0, &registry_url).await.unwrap();
     let back = super::tenant_opts(&t0);
     assert_eq!(
-        run::downgrade(&t0.pool, &dir, 1, &back)
+        run::downgrade(&t0.pool().await, &dir, 1, &back)
             .await
             .unwrap()
             .rolled_back,
@@ -1182,7 +1182,7 @@ async fn an_unfinished_fleet_run_with_another_plan_refuses() {
     .await
     .unwrap();
     assert!(exists_in(&reg, "s_t1", "items").await);
-    let plan = run::plan_hash(&f.dir()).unwrap();
+    let plan = run::plan_hash(&crate::migrate::v2::load::load_project(&f.dir()).unwrap());
     raw_execute_pool(&reg, &dead("dead2", &plan), Vec::new())
         .await
         .unwrap();
@@ -1496,7 +1496,7 @@ async fn a_tenancy_project_switches_and_behind_tenants_block() {
     no_system_ddl(&reg).await;
     for slug in ["t1", "t2", "t3"] {
         let t = target(&pools, &f.org(slug).await, &f.db.url).await.unwrap();
-        no_system_ddl(&t.pool).await;
+        no_system_ddl(&t.pool().await).await;
     }
 }
 
@@ -1932,7 +1932,7 @@ async fn prune_waits_for_tenants<DB: sqlx::Database>(
         async move {
             let t = target(pools, &o.await, registry_url).await.unwrap();
             let opts = super::tenant_opts(&t);
-            run::migrate(&t.pool, &d, &opts).await.unwrap();
+            run::migrate(&t.pool().await, &d, &opts).await.unwrap();
         }
     };
     run_one(slugs[0], dir.to_path_buf()).await;
@@ -2193,4 +2193,379 @@ async fn every_database_runs_once_for_schema_tenants() {
     let home = "SELECT COUNT(*) FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace \
                 WHERE e.extname = 'citext' AND n.nspname = 'extensions'";
     assert_eq!(count(&reg, home).await, 1);
+}
+
+/// Counts `sqlx::query` events process-wide (each test runs in its own process).
+#[cfg(feature = "postgres")]
+static QUERIES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(feature = "postgres")]
+struct QueryCounter;
+
+#[cfg(feature = "postgres")]
+impl tracing::Subscriber for QueryCounter {
+    fn enabled(&self, m: &tracing::Metadata<'_>) -> bool {
+        m.target().starts_with("sqlx::query")
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, e: &tracing::Event<'_>) {
+        if e.metadata().target().starts_with("sqlx::query") {
+            QUERIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// The most connections the database at `url` had while `work` ran.
+#[cfg(feature = "postgres")]
+async fn peak_connections<F: std::future::Future>(
+    admin: &str,
+    db: &str,
+    work: F,
+) -> (F::Output, i64) {
+    let watch = Pool::connect(admin).await.unwrap();
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let poll = {
+        let (watch, done, db) = (watch.clone(), done.clone(), db.to_owned());
+        tokio::spawn(async move {
+            let mut peak = 0;
+            while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                let n = count(
+                    &watch,
+                    &format!("SELECT COUNT(*) FROM pg_stat_activity WHERE datname = '{db}'"),
+                )
+                .await;
+                peak = peak.max(n);
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            peak
+        })
+    };
+    let out = work.await;
+    done.store(true, std::sync::atomic::Ordering::SeqCst);
+    let peak = poll.await.unwrap();
+    watch.close().await;
+    (out, peak)
+}
+
+/// Open connections follow `--parallel`, not the number of tenants.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn fleet_connections_follow_parallel_not_tenants() {
+    let _g = serial().lock().await;
+    let Some(admin) = crate::testkit::matrix::live_url("DATABASE_URL", "postgres") else {
+        return;
+    };
+    let db = Scratch::create(&admin, "conns").await;
+    let pg = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&db.url)
+        .await
+        .unwrap();
+    let f = PgFleet {
+        db,
+        pg,
+        root: tempfile::tempdir().unwrap(),
+    };
+    let slugs: Vec<String> = (0..16).map(|i| format!("t{i:02}")).collect();
+    let refs: Vec<&str> = slugs.iter().map(String::as_str).collect();
+    f.with_orgs(&refs).await;
+    put(
+        &f.dir(),
+        "0001_items",
+        &file("0001_items", &[], "tenant", items()),
+    );
+    let (rep, peak) = peak_connections(&admin, &f.db.name, f.fleet(&FleetOptions::default())).await;
+    let rep = rep.unwrap();
+    assert_eq!(rep.failed().count(), 0, "{rep:?}");
+    assert!(
+        peak <= 8,
+        "{peak} connections open for 16 tenants one by one"
+    );
+}
+
+/// A fleet run with nothing to do costs a handful of statements per tenant.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn a_no_op_fleet_is_cheap_per_tenant() {
+    let _g = serial().lock().await;
+    let Some(f) = PgFleet::new("noop").await else {
+        return;
+    };
+    let _ = tracing::subscriber::set_global_default(QueryCounter);
+    let slugs: Vec<String> = (0..8).map(|i| format!("t{i}")).collect();
+    let refs: Vec<&str> = slugs.iter().map(String::as_str).collect();
+    f.with_orgs(&refs).await;
+    put(
+        &f.dir(),
+        "0001_items",
+        &file("0001_items", &[], "tenant", items()),
+    );
+    f.fleet(&FleetOptions::default()).await.unwrap();
+    // The registry's own cost, with no tenant, is not the tenants'.
+    let run = |n: usize| {
+        let f = &f;
+        async move {
+            let before = QUERIES.load(std::sync::atomic::Ordering::SeqCst);
+            let rep = f.fleet(&FleetOptions::default()).await.unwrap();
+            assert_eq!(rep.tenants.len(), n);
+            assert!(rep.tenants.iter().all(|t| t.applied.is_empty()), "{rep:?}");
+            QUERIES.load(std::sync::atomic::Ordering::SeqCst) - before
+        }
+    };
+    let all = run(8).await;
+    assert!(all > 0, "the counter saw no statement");
+    raw_execute_pool(
+        &f.registry(),
+        "UPDATE rustango_orgs SET active = FALSE WHERE slug <> 't0'",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let fo = FleetOptions {
+        active_only: true,
+        ..FleetOptions::default()
+    };
+    let before = QUERIES.load(std::sync::atomic::Ordering::SeqCst);
+    f.fleet(&fo).await.unwrap();
+    let one = QUERIES.load(std::sync::atomic::Ordering::SeqCst) - before;
+    let per_tenant = (all - one) / 7;
+    eprintln!("no-op fleet: {all} statements for 8 tenants, {one} for 1, {per_tenant} per tenant");
+    assert!(
+        per_tenant <= 12,
+        "{per_tenant} statements per up-to-date tenant"
+    );
+}
+
+/// PG database mode with a separate migrator follows the schema-mode model:
+/// objects the tenant login made move to the migrator, the login keeps rows
+/// (also in tables the migrator makes later), the ledger REVOKE holds, and
+/// the login can create nothing the migrator would run.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn pg_database_tenant_under_a_migrator_keeps_rows_only() {
+    let _g = serial().lock().await;
+    let Some(admin) = crate::testkit::matrix::live_url("DATABASE_URL", "postgres") else {
+        return;
+    };
+    let (r, mut a) = (
+        Scratch::create(&admin, "pmr").await,
+        Scratch::create(&admin, "pma").await,
+    );
+    let login = format!("rv5t_{}", std::process::id());
+    a.roles.push(login.clone());
+    let root = Pool::connect(&a.url).await.unwrap();
+    for sql in [
+        format!("CREATE ROLE {login} LOGIN PASSWORD 'pw'"),
+        format!("REVOKE ALL ON DATABASE {} FROM PUBLIC", a.name),
+        format!("GRANT ALL PRIVILEGES ON DATABASE {} TO {login}", a.name),
+        format!("GRANT ALL ON SCHEMA public TO {login}"),
+    ] {
+        raw_execute_pool(&root, &sql, Vec::new()).await.unwrap();
+    }
+    let (scheme_user, rest) = admin.split_once('@').unwrap();
+    let user = scheme_user
+        .strip_prefix("postgres://")
+        .or_else(|| scheme_user.strip_prefix("postgresql://"))
+        .unwrap();
+    let (mig_user, mig_pw) = user.split_once(':').unwrap();
+    let host = rest.split_once('/').unwrap().0;
+    let tenant_url = format!("postgres://{login}:pw@{host}/{}", a.name);
+    let raw = sqlx::PgPool::connect(&r.url).await.unwrap();
+    let registry: Pool = raw.clone().into();
+    let pools = TenantPools::new(raw);
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("migrations");
+    std::fs::create_dir_all(&dir).unwrap();
+    run_fleet(&pools, &dir, &r.url, &FleetOptions::default())
+        .await
+        .unwrap();
+    let mut org = crate::testkit::org_with(|o| {
+        o.id = crate::sql::Auto::default();
+        o.slug = "pm".into();
+        o.display_name = "pm".into();
+        o.storage_mode = StorageMode::Database;
+        o.backend_kind = crate::tenancy::BackendKind::Postgres;
+        o.database_url = Some(tenant_url.clone());
+        o.schema_name = None;
+        o.host_pattern = None;
+        o.port = None;
+        o.path_prefix = None;
+    });
+    org.insert(&registry).await.unwrap();
+    put(
+        &dir,
+        "0001_items",
+        &file("0001_items", &[], "tenant", items()),
+    );
+    // Before the migrator is configured: the tenant login owns what it made.
+    let rep = run_fleet(&pools, &dir, &r.url, &FleetOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(rep.failed().count(), 0, "{rep:?}");
+    let owner = |t: &str| {
+        format!("SELECT COUNT(*) FROM pg_tables WHERE tablename = '{t}' AND tableowner = '{login}'")
+    };
+    assert_eq!(count(&root, &owner("items")).await, 1);
+    let fo = FleetOptions {
+        migrator: Some(MigratorLogin {
+            user: mig_user.to_owned(),
+            password: mig_pw.to_owned(),
+        }),
+        ..FleetOptions::default()
+    };
+    put(
+        &dir,
+        "0002_more",
+        &file(
+            "0002_more",
+            &["0001_items"],
+            "tenant",
+            json!([{"op": "create_table", "v": 1,
+            "table": {"name": "more", "scope": "tenant",
+            "fields": [{"column": "id", "ty": "i64", "primary_key": true, "nullable": false}]}}]),
+        ),
+    );
+    let rep = run_fleet(&pools, &dir, &r.url, &fo).await.unwrap();
+    assert_eq!(rep.failed().count(), 0, "{rep:?}");
+    let ledger = Ledger::default_names();
+    for t in ["items", "more", ledger.table.as_str()] {
+        assert_eq!(count(&root, &owner(t)).await, 0, "{t} still tenant-owned");
+    }
+    let as_tenant = Pool::connect(&tenant_url).await.unwrap();
+    for sql in [
+        "INSERT INTO items (id, code) VALUES (1, 'a')",
+        "INSERT INTO more (id) VALUES (1)",
+    ] {
+        raw_execute_pool(&as_tenant, sql, Vec::new()).await.unwrap();
+    }
+    assert!(
+        count(
+            &as_tenant,
+            &format!("SELECT COUNT(*) FROM {}", ledger.table)
+        )
+        .await
+            >= 2
+    );
+    for sql in [
+        format!("UPDATE {} SET pos = pos", ledger.table),
+        "CREATE TABLE planted (id int)".to_owned(),
+        "CREATE SCHEMA planted".to_owned(),
+        "CREATE FUNCTION public.f() RETURNS int LANGUAGE sql AS 'SELECT 1'".to_owned(),
+    ] {
+        let e = raw_execute_pool(&as_tenant, &sql, Vec::new())
+            .await
+            .expect_err("refused");
+        assert!(e.to_string().contains("permission denied"), "{sql}: {e}");
+    }
+    as_tenant.close().await;
+    root.close().await;
+    registry.close().await;
+}
+
+/// Provisioning on an engine v2 project runs the new tenant's v2 chain,
+/// in schema mode and in database mode.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn provisioning_runs_the_v2_chain_in_schema_mode() {
+    let _g = serial().lock().await;
+    let Some(f) = PgFleet::new("prov").await else {
+        return;
+    };
+    f.with_orgs(&[]).await;
+    put(
+        &f.dir(),
+        "0001_items",
+        &file("0001_items", &[], "tenant", items()),
+    );
+    f.add_org("p1").await;
+    crate::tenancy::migrate_one_tenant(&f.pools(), &f.org("p1").await, &f.dir(), &f.db.url, None)
+        .await
+        .unwrap();
+    assert!(exists_in(&f.registry(), "s_p1", "items").await);
+    // A second call finds it current.
+    crate::tenancy::migrate_one_tenant(&f.pools(), &f.org("p1").await, &f.dir(), &f.db.url, None)
+        .await
+        .unwrap();
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn provisioning_runs_the_v2_chain_in_database_mode() {
+    let _g = serial().lock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let url = |n: &str| format!("sqlite:{}?mode=rwc", tmp.path().join(n).display());
+    let registry_url = url("registry.db");
+    let raw = sqlx::SqlitePool::connect(&registry_url).await.unwrap();
+    let registry: Pool = raw.clone().into();
+    let pools = TenantPools::new(raw);
+    let dir = tmp.path().join("migrations");
+    std::fs::create_dir_all(&dir).unwrap();
+    run_fleet(&pools, &dir, &registry_url, &FleetOptions::default())
+        .await
+        .unwrap();
+    put(
+        &dir,
+        "0001_items",
+        &file("0001_items", &[], "tenant", items()),
+    );
+    let mut org = crate::testkit::org_with(|o| {
+        o.id = crate::sql::Auto::default();
+        o.slug = "p1".into();
+        o.display_name = "p1".into();
+        o.storage_mode = StorageMode::Database;
+        o.backend_kind = crate::tenancy::BackendKind::Sqlite;
+        o.database_url = Some(url("p1.db"));
+        o.schema_name = None;
+        o.host_pattern = None;
+        o.port = None;
+        o.path_prefix = None;
+    });
+    org.insert(&registry).await.unwrap();
+    crate::tenancy::migrate_one_tenant(&pools, &org, &dir, &registry_url, None)
+        .await
+        .unwrap();
+    let t = Pool::connect(&url("p1.db")).await.unwrap();
+    assert!(crate::migrate::v2::catalog::read_table(&t, "items")
+        .await
+        .unwrap()
+        .is_some());
+    t.close().await;
+    registry.close().await;
+}
+
+/// A schema tenant named as the engine's `extensions` schema is refused
+/// before the extension move, and provisioning refuses the name.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn a_tenant_schema_named_extensions_is_refused() {
+    let _g = serial().lock().await;
+    let Some(f) = PgFleet::new("extname").await else {
+        return;
+    };
+    f.with_orgs(&[]).await;
+    let mut org = crate::testkit::org_with(|o| {
+        o.id = crate::sql::Auto::default();
+        o.slug = "x1".into();
+        o.display_name = "x1".into();
+        o.storage_mode = StorageMode::Schema;
+        o.backend_kind = crate::tenancy::BackendKind::Postgres;
+        o.database_url = None;
+        o.schema_name = Some("extensions".into());
+        o.host_pattern = None;
+        o.port = None;
+        o.path_prefix = None;
+    });
+    org.insert(&f.registry()).await.unwrap();
+    let e = f
+        .fleet(&FleetOptions::default())
+        .await
+        .expect_err("refused");
+    assert!(e.to_string().contains("migration engine owns"), "{e}");
+    assert!(crate::tenancy::provision::validate_schema_name("extensions").is_err());
 }

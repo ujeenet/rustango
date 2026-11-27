@@ -223,10 +223,94 @@ pub(crate) async fn ensure(
     for sql in &stmts {
         run(&mut tx, sql, schema).await?;
     }
+    // The grants above took in the ledgers too: the tenant reads them only.
+    lock_ledgers(&mut tx, Some(schema), &role.name).await?;
     revoke_public_writes(&mut tx).await?;
-    refuse_writable(&mut *tx, &role.name).await?;
+    refuse_writable(&mut *tx, &role.name, "then `ensure-tenant-roles`").await?;
     tx.commit().await?;
     Ok(())
+}
+
+/// The engine's ledgers (project and system) stay read-only to `role` (8.1).
+async fn lock_ledgers(
+    conn: &mut sqlx::PgConnection,
+    schema: Option<&str>,
+    role: &str,
+) -> Result<(), TenancyError> {
+    use crate::migrate::v2::ledger::Ledger;
+    let (project, system) = (Ledger::default_names(), Ledger::system());
+    Ledger::pg_lock_down(&[&project, &system], conn, schema, role)
+        .await
+        .map_err(TenancyError::Migrate)
+}
+
+/// Database mode with a separate migrator login (this pool's): the schema
+/// mode model. The migrator owns every object (taking over what `login`
+/// made), `login` keeps rows only, now and for what the migrator creates
+/// later, and it can create nothing the migrator would run.
+pub(crate) async fn secure_database_login(pool: &PgPool, login: &str) -> Result<(), TenancyError> {
+    let mut conn = pool.acquire().await?;
+    let owns: Option<bool> = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class WHERE relowner = r.oid \
+                 UNION ALL SELECT 1 FROM pg_catalog.pg_proc WHERE proowner = r.oid \
+                 UNION ALL SELECT 1 FROM pg_catalog.pg_type WHERE typowner = r.oid \
+                 UNION ALL SELECT 1 FROM pg_catalog.pg_namespace WHERE nspowner = r.oid \
+                 UNION ALL SELECT 1 FROM pg_catalog.pg_database \
+                           WHERE datdba = r.oid AND datname = current_database()) \
+         FROM pg_catalog.pg_roles r WHERE r.rolname = $1",
+    )
+    .bind(login)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let l = q(login);
+    if owns == Some(true) {
+        let sql = format!("REASSIGN OWNED BY {l} TO CURRENT_USER");
+        if let Err(e) = sqlx::query(&sql).execute(&mut *conn).await {
+            return Err(TenancyError::Validation(format!(
+                "tenant login `{login}` owns objects in its database, which the migrator must \
+                 own before it runs anything there: grant it the login's rights (`GRANT {l} TO \
+                 <migrator>`) or run `{sql}` as a superuser, then migrate again ({e})"
+            )));
+        }
+    }
+    let db: String = sqlx::query_scalar("SELECT current_database()::text")
+        .fetch_one(&mut *conn)
+        .await?;
+    let d = q(&db);
+    let mut stmts = vec![
+        format!("REVOKE CREATE, TEMPORARY ON DATABASE {d} FROM {l}"),
+        format!("GRANT CONNECT ON DATABASE {d} TO {l}"),
+    ];
+    for s in creatable_schemas(&mut conn, login).await? {
+        stmts.push(format!("REVOKE CREATE ON SCHEMA {} FROM {l}", q(&s)));
+    }
+    let used: Vec<String> = sqlx::query_scalar(
+        "SELECT nspname::text FROM pg_catalog.pg_namespace \
+         WHERE nspname IN ('public', 'extensions') ORDER BY 1",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    for s in used.iter().map(|s| q(s)) {
+        stmts.push(format!("GRANT USAGE ON SCHEMA {s} TO {l}"));
+    }
+    if used.iter().any(|s| s == "public") {
+        stmts.extend([
+            format!("GRANT {TABLE_RIGHTS} ON ALL TABLES IN SCHEMA public TO {l}"),
+            format!("GRANT {SEQUENCE_RIGHTS} ON ALL SEQUENCES IN SCHEMA public TO {l}"),
+            format!("GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO {l}"),
+            format!("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT {TABLE_RIGHTS} ON TABLES TO {l}"),
+            format!(
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT {SEQUENCE_RIGHTS} ON SEQUENCES TO {l}"
+            ),
+            format!("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO {l}"),
+            format!("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE ON TYPES TO {l}"),
+        ]);
+    }
+    for sql in &stmts {
+        sqlx::query(sql).execute(&mut *conn).await?;
+    }
+    lock_ledgers(&mut conn, None, login).await?;
+    refuse_writable(&mut conn, login, "then migrate again").await
 }
 
 const TABLE_RIGHTS: &str = "SELECT, INSERT, UPDATE, DELETE";
@@ -273,6 +357,7 @@ async fn creatable_schemas(
 pub(crate) async fn refuse_writable(
     conn: &mut sqlx::PgConnection,
     grantee: &str,
+    then: &str,
 ) -> Result<(), TenancyError> {
     let (database, temp): (String, bool) = sqlx::query_as(
         "SELECT current_database()::text, has_database_privilege($1, current_database(), 'TEMP')",
@@ -301,7 +386,7 @@ pub(crate) async fn refuse_writable(
     };
     Err(TenancyError::Validation(format!(
         "{who} can create objects in this database, so tenant SQL could plant code \
-         the registry login runs; as the owner run: {}; then `ensure-tenant-roles`",
+         the migrating login runs; as the owner run: {}; {then}",
         fix.join("; ")
     )))
 }

@@ -939,7 +939,8 @@ pub(crate) async fn boot_checks<DB: Database>(pools: &TenantPools<DB>) -> Result
         }
         let mut conn = pg.registry().acquire().await?;
         super::schema_role::revoke_public_writes(&mut conn).await?;
-        super::schema_role::refuse_writable(&mut conn, "public").await?;
+        super::schema_role::refuse_writable(&mut conn, "public", "then `ensure-tenant-roles`")
+            .await?;
     }
     Ok(())
 }

@@ -60,6 +60,16 @@ pub(crate) struct Row {
     pub(crate) session: Option<super::session::Session>,
 }
 
+/// A ledger row's key, checksum and state ([`Ledger::applied`]).
+#[cfg(feature = "tenancy")]
+#[derive(Debug, Clone)]
+pub(crate) struct Brief {
+    pub(crate) app: String,
+    pub(crate) id: String,
+    pub(crate) checksum: String,
+    pub(crate) state: RowState,
+}
+
 /// Which way a batched unit walks its key range (6.2 `direction`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Walk {
@@ -263,7 +273,7 @@ fn tenant_cache_table() -> TableState {
 }
 
 /// One tenant's cached state: `(slug, state, head, error_class)`.
-#[cfg(all(test, feature = "tenancy", feature = "postgres"))]
+#[cfg(feature = "tenancy")]
 pub(crate) type CachedTenant = (String, String, Option<String>, Option<String>);
 
 /// Create the registry cache; once, before tenants run at once.
@@ -328,7 +338,7 @@ pub(crate) async fn cache_put(
 ///
 /// # Errors
 /// Driver failures.
-#[cfg(all(test, feature = "tenancy", feature = "postgres"))]
+#[cfg(feature = "tenancy")]
 pub(crate) async fn cache_all(registry: &Pool) -> Result<Vec<CachedTenant>, MigrateError> {
     if !crate::migrate::try_table_exists_here(registry, TENANT_CACHE).await? {
         return Ok(Vec::new());
@@ -635,25 +645,75 @@ impl Ledger {
     }
 
     async fn revoke_pg(&self, pool: &Pool, role: &str) -> Result<(), MigrateError> {
-        let d = pool.dialect();
-        let all: Vec<String> = [&self.table, &self.events, &self.progress, &self.undo]
-            .iter()
-            .map(|t| d.quote_ident(t))
-            .collect();
-        let role = d.quote_ident(role);
-        raw_execute_pool(
-            pool,
-            &format!("REVOKE ALL ON TABLE {} FROM {role}", all.join(", ")),
-            Vec::new(),
-        )
-        .await?;
-        raw_execute_pool(
-            pool,
-            &format!("GRANT SELECT ON TABLE {} TO {role}", all[0]),
-            Vec::new(),
-        )
-        .await?;
+        #[cfg(feature = "postgres")]
+        if let Pool::Postgres(pg) = pool {
+            let mut conn = pg.acquire().await?;
+            return Self::pg_lock_down(&[self], &mut conn, None, role).await;
+        }
+        let _ = (pool, role);
         Ok(())
+    }
+
+    /// PG: `role` keeps only SELECT on the tables of `ledgers` that exist
+    /// (in `schema`, or on the path), and the revoke is checked: an owner or
+    /// a right through another role would keep writing, so it refuses.
+    ///
+    /// # Errors
+    /// Driver failures, or `role` can still write a ledger table.
+    #[cfg(feature = "postgres")]
+    pub(crate) async fn pg_lock_down(
+        ledgers: &[&Self],
+        conn: &mut sqlx::PgConnection,
+        schema: Option<&str>,
+        role: &str,
+    ) -> Result<(), MigrateError> {
+        let q = |t: &str| crate::sql::quote_with(t, '"');
+        let name = |t: &str| schema.map_or_else(|| q(t), |s| format!("{}.{}", q(s), q(t)));
+        let all: Vec<String> = ledgers
+            .iter()
+            .flat_map(|l| [&l.table, &l.events, &l.progress, &l.undo])
+            .map(|t| name(t))
+            .collect();
+        let readable: Vec<String> = ledgers.iter().map(|l| name(&l.table)).collect();
+        let present: Vec<String> = sqlx::query_scalar(
+            "SELECT t FROM unnest($1::text[]) t WHERE to_regclass(t) IS NOT NULL",
+        )
+        .bind(&all)
+        .fetch_all(&mut *conn)
+        .await?;
+        if present.is_empty() {
+            return Ok(());
+        }
+        let r = q(role);
+        let mut stmts = vec![format!(
+            "REVOKE ALL ON TABLE {} FROM {r}",
+            present.join(", ")
+        )];
+        let read: Vec<&String> = readable.iter().filter(|t| present.contains(t)).collect();
+        if !read.is_empty() {
+            let list: Vec<&str> = read.iter().map(|t| t.as_str()).collect();
+            stmts.push(format!("GRANT SELECT ON TABLE {} TO {r}", list.join(", ")));
+        }
+        for sql in &stmts {
+            sqlx::query(sql).execute(&mut *conn).await?;
+        }
+        let writable: Vec<String> = sqlx::query_scalar(
+            "SELECT t FROM unnest($1::text[]) t \
+             WHERE has_table_privilege($2, t, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')",
+        )
+        .bind(&present)
+        .bind(role)
+        .fetch_all(&mut *conn)
+        .await?;
+        if writable.is_empty() {
+            return Ok(());
+        }
+        Err(MigrateError::Validation(format!(
+            "tenant login `{role}` can still write {} after the revoke: it owns them or holds \
+             rights through another role; make the migrator their owner (`ALTER TABLE .. OWNER \
+             TO <migrator>`) and drop the other grants, then migrate again",
+            writable.join(", ")
+        )))
     }
 
     /// MySQL cannot narrow a database-level grant by table (design item
@@ -695,6 +755,33 @@ impl Ledger {
             }
         }
         Ok(())
+    }
+
+    /// Every row's key, checksum and state, without bodies or plans.
+    ///
+    /// # Errors
+    /// Driver failures, or a state that does not decode.
+    #[cfg(feature = "tenancy")]
+    pub(crate) async fn applied(&self, pool: &Pool) -> Result<Vec<Brief>, MigrateError> {
+        if !crate::migrate::try_table_exists_here(pool, &self.table).await? {
+            return Ok(Vec::new());
+        }
+        let sql = format!(
+            "SELECT app, id, checksum, state FROM {} ORDER BY seq",
+            self.qt(pool)
+        );
+        let raw: Vec<(String, String, String, String)> =
+            raw_query_pool(&sql, Vec::new(), pool).await?;
+        raw.into_iter()
+            .map(|(app, id, checksum, state)| {
+                Ok(Brief {
+                    state: RowState::parse(&state)?,
+                    app,
+                    id,
+                    checksum,
+                })
+            })
+            .collect()
     }
 
     /// Every row.

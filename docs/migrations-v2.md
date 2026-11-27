@@ -55,7 +55,7 @@ register it with `rustango::databases::register` before migrating; an app's file
 `migrate-tenants` runs the registry chain once, then every tenant (inactive ones included) under one fleet lock.
 Flags: `--max-failures N`, `--fail-fast`, `--parallel K`, `--canary a,b`, `--active-only`, `--phase expand`, `--allow-mixed-heads`, `--abandon-fleet-run`.
 Contract files run only after every tenant reached its expand head.
-Set `RUSTANGO_TENANT_MIGRATOR=user:password` to migrate database-mode tenants as a separate login; the tenant login then cannot write the ledger.
+Set `RUSTANGO_TENANT_MIGRATOR=user:password` to migrate database-mode tenants as a separate login; the tenant login then cannot write the ledger. On Postgres the migrator owns every object in the tenant database and the tenant login keeps rows only, also in tables added later.
 
 ## Portable defaults
 

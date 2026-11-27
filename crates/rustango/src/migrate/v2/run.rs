@@ -63,6 +63,9 @@ pub(crate) struct Options {
     /// A registry run: tenant ids every tenant has applied, which
     /// `requires: "tenants:<id>"` checks; `None` refuses such a file.
     pub(crate) tenants_applied: Option<std::collections::BTreeSet<String>>,
+    /// A registry run: tenants the fleet could not read, so `tenants_applied`
+    /// may be wrong for them; a `requires: "tenants:<id>"` refuses, naming them.
+    pub(crate) tenants_unknown: Vec<String>,
     /// A tenant run: the tenant's login role, which gets no write access
     /// to the ledger tables (8.1). PG only.
     pub(crate) revoke_from: Option<String>,
@@ -239,45 +242,98 @@ pub(crate) async fn applied_ids(
     pool: &Pool,
     opts: &Options,
 ) -> Result<std::collections::BTreeSet<String>, RunError> {
+    Ok(ids_of(&Ledger::of(opts).applied(pool).await?))
+}
+
+#[cfg(feature = "tenancy")]
+fn ids_of(rows: &[super::ledger::Brief]) -> std::collections::BTreeSet<String> {
     let mut out = std::collections::BTreeSet::new();
-    for r in Ledger::of(opts).rows(pool).await? {
-        if r.state == RowState::Applied {
-            out.insert(format!("{}:{}", r.app, r.id));
-            out.insert(r.id);
-        }
+    for r in rows.iter().filter(|r| r.state == RowState::Applied) {
+        out.insert(format!("{}:{}", r.app, r.id));
+        out.insert(r.id.clone());
     }
-    Ok(out)
+    out
+}
+
+/// A target's ledgers read once: its applied ids, and whether every file of
+/// its chains (system and project) is applied as on disk, so a run would
+/// do nothing.
+#[cfg(feature = "tenancy")]
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Survey {
+    pub(crate) applied: std::collections::BTreeSet<String>,
+    pub(crate) current: bool,
+}
+
+/// [`Survey`] of `pool` for a run with `opts` over `project`.
+///
+/// # Errors
+/// Driver failures, or a broken system build.
+#[cfg(feature = "tenancy")]
+pub(crate) async fn survey(
+    pool: &Pool,
+    project: &Project,
+    opts: &Options,
+) -> Result<Survey, RunError> {
+    let rows = Ledger::of(opts).applied(pool).await?;
+    let mut current = up_to_date(project, opts.chains(), &rows);
+    if current {
+        let sys = super::load::system_project()?;
+        current = up_to_date(&sys, opts.chains(), &Ledger::system().applied(pool).await?);
+    }
+    Ok(Survey {
+        applied: ids_of(&rows),
+        current,
+    })
+}
+
+/// Every row applied and known, and every file of `chains` applied with its
+/// checksum.
+#[cfg(feature = "tenancy")]
+fn up_to_date(project: &Project, chains: &[Target], rows: &[super::ledger::Brief]) -> bool {
+    let files: HashMap<(&str, &str), &str> = chains
+        .iter()
+        .flat_map(|&c| super::load::chain(project, c, None))
+        .map(|i| {
+            let f = &project.files[i];
+            (
+                (f.file.app.as_str(), f.file.id.as_str()),
+                f.checksum.as_str(),
+            )
+        })
+        .collect();
+    let have: HashMap<(&str, &str), &str> = rows
+        .iter()
+        .map(|r| ((r.app.as_str(), r.id.as_str()), r.checksum.as_str()))
+        .collect();
+    rows.iter().all(|r| {
+        r.state == RowState::Applied
+            && (files.contains_key(&(r.app.as_str(), r.id.as_str()))
+                || project
+                    .replaced
+                    .contains_key(&(r.app.clone(), r.id.clone())))
+    }) && files.iter().all(|(k, sum)| have.get(k) == Some(sum))
 }
 
 /// The fleet's plan: every file of the project and its checksum, hashed,
 /// so a fleet run record names the release that started it (8.3).
-///
-/// # Errors
-/// A load error.
 #[cfg(feature = "tenancy")]
-pub(crate) fn plan_hash(dir: &Path) -> Result<String, RunError> {
+pub(crate) fn plan_hash(project: &Project) -> String {
     use sha2::Digest as _;
-    let mut parts: Vec<String> = load_project(dir)?
+    let mut parts: Vec<String> = project
         .files
         .iter()
         .map(|f| format!("{}:{}:{}", f.file.app, f.file.id, f.checksum))
         .collect();
     parts.sort();
-    Ok(super::checksum::hex(&sha2::Sha256::digest(
-        parts.join("\n").as_bytes(),
-    )))
+    super::checksum::hex(&sha2::Sha256::digest(parts.join("\n").as_bytes()))
 }
 
 /// The extensions the registry and `every_database` chains create in the
 /// registry database on PG (8.2).
-///
-/// # Errors
-/// A load error.
 #[cfg(all(feature = "tenancy", feature = "postgres"))]
-pub(crate) fn registry_extensions(
-    dir: &Path,
-) -> Result<std::collections::BTreeSet<String>, RunError> {
-    Ok(load_project(dir)?
+pub(crate) fn registry_extensions(project: &Project) -> std::collections::BTreeSet<String> {
+    project
         .files
         .iter()
         .filter(|f| matches!(f.file.target, Target::Registry | Target::EveryDatabase))
@@ -288,28 +344,23 @@ pub(crate) fn registry_extensions(
             } if !skipped_on.contains(&Backend::Postgres) => Some(name.clone()),
             _ => None,
         })
-        .collect())
+        .collect()
 }
 
-/// Whether `pool`'s chain has a contract file pending (8.3).
-///
-/// # Errors
-/// A load error or driver failures.
+/// Whether `target`'s chain has a contract file not in `done` (8.3).
 #[cfg(feature = "tenancy")]
-pub(crate) async fn contract_pending(
-    pool: &Pool,
-    dir: &Path,
-    opts: &Options,
-) -> Result<bool, RunError> {
-    let project = load_project(dir)?;
-    let done = applied_ids(pool, opts).await?;
-    Ok(project
+pub(crate) fn contract_pending(
+    project: &Project,
+    target: Target,
+    done: &std::collections::BTreeSet<String>,
+) -> bool {
+    project
         .order
-        .get(&opts.run_as.target())
+        .get(&target)
         .into_iter()
         .flatten()
         .map(|&i| &project.files[i].file)
-        .any(|f| f.phase == Phase::Contract && !done.contains(&format!("{}:{}", f.app, f.id))))
+        .any(|f| f.phase == Phase::Contract && !done.contains(&format!("{}:{}", f.app, f.id)))
 }
 
 /// What a run migrates (8.1). Registry and tenant runs exist under tenancy.
@@ -326,15 +377,6 @@ pub(crate) enum RunAs {
 }
 
 impl RunAs {
-    /// The DAG it runs.
-    pub(crate) fn target(self) -> Target {
-        if self == Self::Registry {
-            Target::Registry
-        } else {
-            Target::Tenant
-        }
-    }
-
     /// The chains it runs, in order: `every_database` first on a database
     /// of its own (design item 20); a schema-mode tenant shares the registry's.
     fn chains(self) -> &'static [Target] {
@@ -461,6 +503,19 @@ async fn run_system(pool: &Pool, run_id: &str, opts: &Options) -> Result<Vec<Str
 pub(crate) async fn migrate(pool: &Pool, dir: &Path, opts: &Options) -> Result<Report, RunError> {
     let project = load_project(dir)?;
     migrate_project(pool, &project, true, opts).await
+}
+
+/// [`migrate`] over a project loaded once, as a fleet run does.
+///
+/// # Errors
+/// As [`migrate`].
+#[cfg(feature = "tenancy")]
+pub(crate) async fn migrate_loaded(
+    pool: &Pool,
+    project: &Project,
+    opts: &Options,
+) -> Result<Report, RunError> {
+    migrate_project(pool, project, true, opts).await
 }
 
 /// [`migrate`] for `embed_migrations!` entries: no system chain, as engine
@@ -2145,6 +2200,16 @@ impl Runner<'_> {
                     ))
                 }
             };
+            if side == "tenants" && !self.opts.tenants_unknown.is_empty() {
+                return Err(refused(
+                    Code::State,
+                    &f.at,
+                    format!(
+                        "`requires: {req}` cannot be checked while these tenants are not read: {}",
+                        self.opts.tenants_unknown.join(", ")
+                    ),
+                ));
+            }
             if !set.as_ref().is_some_and(|s| s.contains(id)) {
                 return Err(refused(
                     Code::State,
