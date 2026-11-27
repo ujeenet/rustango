@@ -919,7 +919,9 @@ impl Ledger {
         Ok(())
     }
 
-    /// Take over a crashed run's row: fenced on its old `run_id`.
+    /// Take over a crashed or failed run's row: fenced on its old `run_id`.
+    /// A failed row runs again (`running`, its old error class gone), so its
+    /// heartbeat counts; a rolling-back row stays rolling back.
     ///
     /// # Errors
     /// Driver failures, or the row moved meanwhile.
@@ -931,7 +933,9 @@ impl Ledger {
         new: &str,
     ) -> Result<(), MigrateError> {
         let sql = format!(
-            "UPDATE {} SET run_id = {}, heartbeat_at = {} WHERE app = {} AND id = {} AND run_id = {}",
+            "UPDATE {} SET run_id = {}, heartbeat_at = {}, error_class = NULL, \
+             state = CASE WHEN state = 'rolling_back' THEN state ELSE 'running' END \
+             WHERE app = {} AND id = {} AND run_id = {}",
             self.qt(pool),
             p(pool, 1),
             pool.dialect().utc_now_sql(),
@@ -1182,45 +1186,59 @@ impl Ledger {
         .await?;
         fenced(n)
     }
-
-    /// Delete a rolled-back row (fenced) and record the event.
+    /// The statements that forget a rolled-back row, in one transaction:
+    /// its progress and undo rows, then the row itself (fenced on `run_id`,
+    /// the third bind), then the `rolled_back` event. `(sql, binds, fenced)`.
     ///
     /// # Errors
-    /// Driver failures, or the lock was lost.
-    pub(crate) async fn remove(
+    /// Driver failures reading which tables exist.
+    pub(crate) async fn remove_stmts(
         &self,
         pool: &Pool,
         key: (&str, &str),
         run_id: &str,
-    ) -> Result<(), MigrateError> {
-        let sql = format!(
-            "DELETE FROM {} WHERE app = {} AND id = {} AND run_id = {}",
-            self.qt(pool),
-            p(pool, 1),
-            p(pool, 2),
-            p(pool, 3),
-        );
-        let n = raw_execute_pool(pool, &sql, vec![s(key.0), s(key.1), s(run_id)]).await?;
-        fenced(n)?;
+        checksum: &str,
+    ) -> Result<Vec<(String, Vec<SqlValue>, bool)>, MigrateError> {
+        let d = pool.dialect();
+        let mut out = Vec::new();
         if crate::migrate::try_table_exists_here(pool, &self.progress).await? {
-            let del = format!(
-                "DELETE FROM {} WHERE app = {} AND id = {}",
-                self.qp(pool),
-                p(pool, 1),
-                p(pool, 2),
-            );
-            raw_execute_pool(pool, &del, vec![s(key.0), s(key.1)]).await?;
+            out.push((
+                format!(
+                    "DELETE FROM {} WHERE app = {} AND id = {}",
+                    self.qp(pool),
+                    p(pool, 1),
+                    p(pool, 2),
+                ),
+                vec![s(key.0), s(key.1)],
+                false,
+            ));
         }
         if crate::migrate::try_table_exists_here(pool, &self.undo).await? {
-            let del = format!(
-                "DELETE FROM {} WHERE app = {} AND mig = {}",
-                pool.dialect().quote_ident(&self.undo),
+            out.push((
+                format!(
+                    "DELETE FROM {} WHERE app = {} AND mig = {}",
+                    d.quote_ident(&self.undo),
+                    p(pool, 1),
+                    p(pool, 2),
+                ),
+                vec![s(key.0), s(key.1)],
+                false,
+            ));
+        }
+        out.push((
+            format!(
+                "DELETE FROM {} WHERE app = {} AND id = {} AND run_id = {}",
+                self.qt(pool),
                 p(pool, 1),
                 p(pool, 2),
-            );
-            raw_execute_pool(pool, &del, vec![s(key.0), s(key.1)]).await?;
-        }
-        Ok(())
+                p(pool, 3),
+            ),
+            vec![s(key.0), s(key.1), s(run_id)],
+            true,
+        ));
+        let (sql, binds) = self.event_stmt(d, "rolled_back", key, Some(checksum), run_id, None);
+        out.push((sql, binds, false));
+        Ok(out)
     }
 
     /// The INSERT of one undo row; binds: app, mig, op_index, kind, tbl,

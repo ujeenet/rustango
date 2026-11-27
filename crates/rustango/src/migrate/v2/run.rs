@@ -129,6 +129,10 @@ pub(crate) enum Crash {
     /// killed client's DDL keeps running (6.3).
     DdlLeftRunning(usize),
     AfterStatement(usize),
+    /// Between a rollback's began event and its row turning `rolling_back`.
+    BeforeRollbackBegins,
+    /// After a rolled-back row's delete, before its transaction commits.
+    MidForget,
 }
 
 /// What a run did.
@@ -1153,22 +1157,27 @@ fn cursor_value(json: &str, ty: &str) -> Result<crate::core::SqlValue, String> {
     crate::migrate::manage::fixtures::json_to_sql_value_of(&v, ty)
 }
 
-/// `next` is above `prev` for a key of `ty`. Strings compare as Rust
-/// strings here; the database's collation decides the batches themselves.
-fn advances(prev: &crate::core::SqlValue, next: &crate::core::SqlValue, ty: &str) -> bool {
-    use crate::core::SqlValue as V;
-    let int = |v: &V| match v {
-        V::I16(n) => Some(i64::from(*n)),
-        V::I32(n) => Some(i64::from(*n)),
-        V::I64(n) => Some(*n),
-        _ => None,
-    };
-    match (prev, next) {
-        (V::String(a), V::String(b)) => b > a,
-        (V::Uuid(a), V::Uuid(b)) => b > a,
-        _ if ty.starts_with('i') => int(prev).zip(int(next)).is_some_and(|(a, b)| b > a),
-        _ => false,
-    }
+/// `next` is above `prev` in the key column's own order (its collation, its
+/// type), as the keyset query walks it: a row lies in `(prev, next]`.
+async fn advances(
+    tx: &mut crate::sql::PoolTx<'_>,
+    bp: &super::render::BatchPlan,
+    prev: &crate::core::SqlValue,
+    next: &crate::core::SqlValue,
+) -> Result<bool, RunError> {
+    let d = tx.dialect();
+    let k = d.quote_ident(&bp.key);
+    let mut sql = format!(
+        "SELECT COUNT(*) FROM (SELECT 1 AS one FROM {} WHERE {k} > ",
+        d.quote_ident(&bp.table)
+    );
+    d.push_placeholder(&mut sql, 1);
+    sql.push_str(&format!(" AND {k} <= "));
+    d.push_placeholder(&mut sql, 2);
+    sql.push_str(" LIMIT 1) moved");
+    let rows: Vec<(i64,)> =
+        crate::sql::raw_query_tx(tx, &sql, vec![prev.clone(), next.clone()]).await?;
+    Ok(rows.first().is_some_and(|r| r.0 > 0))
 }
 
 /// Session timeouts of the runner's data connection (5.4); PG sets its own
@@ -2548,18 +2557,23 @@ impl Runner<'_> {
                     None => super::step::Batch::whole(),
                 };
                 let (mut tx, r) = super::step::run_step(tx, scope, rust_step(f, batch)).await;
+                // Strict progress, judged by the database's own key order.
+                let moved = match (&r, &u.batch, &lo) {
+                    (Ok(super::step::Progress::Next(v)), Some(bp), Some(prev)) => {
+                        advances(&mut tx, bp, prev, v).await.map_err(fatal)?
+                    }
+                    _ => true,
+                };
                 let r = match (r, &u.batch) {
-                    (Ok(super::step::Progress::Next(v)), Some(bp)) => {
+                    (Ok(super::step::Progress::Next(v)), Some(_)) => {
                         // Strict progress: the cursor moves up, or the step is wrong.
                         match &lo {
-                            Some(prev) if !advances(prev, &v, &bp.key_ty) => {
-                                Err(super::step::UnitError::Step(
-                                    super::step::StepError::Message(format!(
-                                        "the batch ended at {v:?}, not above the last cursor \
+                            Some(prev) if !moved => Err(super::step::UnitError::Step(
+                                super::step::StepError::Message(format!(
+                                    "the batch ended at {v:?}, not above the last cursor \
                                          {prev:?}: a batch must advance"
-                                    )),
-                                ))
-                            }
+                                )),
+                            )),
                             _ => Ok((0, Some(v), false)),
                         }
                     }
@@ -3192,9 +3206,14 @@ impl Runner<'_> {
             .iter()
             .flat_map(|f: &File| f.replaces.iter().map(|id| (f.app.clone(), id.clone())))
             .collect();
+        // A half-finished rollback finishes first and counts as a step.
+        let resuming = rows.len() - applied.len();
         // Rows come in `seq` order; the chosen ones newest first.
         let chosen: Vec<usize> = match back {
-            Back::Steps(n) => (0..applied.len()).rev().take(n).collect(),
+            Back::Steps(n) => (0..applied.len())
+                .rev()
+                .take(n.saturating_sub(resuming))
+                .collect(),
             Back::To(to) => {
                 let pos = applied
                     .iter()
@@ -3327,10 +3346,8 @@ impl Runner<'_> {
         }
         for ((row, units), ops) in plan.into_iter().zip(in_effect_ops) {
             let k = (row.app.as_str(), row.id.as_str());
-            self.ledger
-                .begin_rollback(self.pool, k, &row.run_id, self.run_id, &units)
-                .await?;
             // How many forward ops were in effect: `--resume-forward` needs it.
+            // Written first, so a rolling_back row never meets an older count.
             self.ledger
                 .event(
                     self.pool,
@@ -3340,6 +3357,13 @@ impl Runner<'_> {
                     self.run_id,
                     Some(&ops.to_string()),
                 )
+                .await?;
+            #[cfg(test)]
+            if matches!(self.opts.crash, Some(Crash::BeforeRollbackBegins)) {
+                return Err(RunError::Db(MigrateError::Validation("crash".into())));
+            }
+            self.ledger
+                .begin_rollback(self.pool, k, &row.run_id, self.run_id, &units)
                 .await?;
             let mine = Row {
                 run_id: self.run_id.to_owned(),
@@ -3376,17 +3400,29 @@ impl Runner<'_> {
         }
         let from = self.take_resume(k, at).await?;
         self.run_units(k, units, from).await?;
-        self.ledger.remove(self.pool, k, self.run_id).await?;
-        self.ledger
-            .event(
-                self.pool,
-                "rolled_back",
-                k,
-                Some(&row.checksum),
-                self.run_id,
-                None,
-            )
+        self.forget(k, &row.checksum).await
+    }
+
+    /// Drop a rolled-back row with its progress, undo rows and event, all
+    /// or nothing: a crash leaves the row, so no orphan undo row outlives it.
+    async fn forget(&self, k: (&str, &str), checksum: &str) -> Result<(), RunError> {
+        let stmts = self
+            .ledger
+            .remove_stmts(self.pool, k, self.run_id, checksum)
             .await?;
+        let mut conn = self.pool.acquire().await?;
+        let mut tx = conn.begin_write().await?;
+        for (sql, binds, fenced) in stmts {
+            let n = raw_execute_tx(&mut tx, &sql, binds).await?;
+            if fenced {
+                super::ledger::fenced(n)?;
+                #[cfg(test)]
+                if self.opts.crash == Some(Crash::MidForget) {
+                    return Err(RunError::Db(MigrateError::Validation("crash".into())));
+                }
+            }
+        }
+        tx.commit().await?;
         Ok(())
     }
 

@@ -1615,13 +1615,107 @@ async fn a_cut_off_rollback_resumes_by_probe(b: B) {
     // CONCURRENTLY), where the cut lands; SQLite has none.
     assert_eq!(cut.is_err(), b != B::Lite, "{cut:?}");
     if cut.is_err() {
-        // Zero more steps: only the half-finished rollback finishes.
+        // The natural retry, one step: the half-finished rollback is that step.
         assert_eq!(
-            downgrade(pool, &dir, 0, &opts()).await.unwrap().rolled_back,
+            downgrade(pool, &dir, 1, &opts()).await.unwrap().rolled_back,
             ["0002_bio"]
         );
     }
     assert_eq!(columns(pool, "rv_author").await, ["id", "name"]);
+    assert_eq!(rows(pool).await.len(), 1);
+}
+
+/// Resuming a failed row marks it running with no stale error class, so
+/// its heartbeat counts and a crash mid-resume shows no old failure.
+async fn a_resumed_failed_row_runs(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let (_root, dir) = author_only();
+    crashed_bio(pool, &dir).await;
+    let l = Ledger::default_names();
+    let row = l
+        .rows(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.id == "0002_bio")
+        .unwrap();
+    assert_eq!(row.state, RowState::Failed, "{b:?}");
+    assert!(row.error_class.is_some());
+    l.claim(pool, ("project", "0002_bio"), &row.run_id, "resumer")
+        .await
+        .unwrap();
+    let row = l
+        .rows(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.id == "0002_bio")
+        .unwrap();
+    assert_eq!(row.state, RowState::Running, "{b:?}");
+    assert_eq!(row.error_class, None);
+}
+
+/// Forgetting a rolled-back row is all or nothing: a crash after its
+/// delete keeps the row, and the next `down` finishes it as its step.
+async fn a_crash_while_forgetting_keeps_the_row(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let (_root, dir) = project();
+    migrate(pool, &dir, &opts()).await.unwrap();
+    let crashing = Options {
+        crash: Some(Crash::MidForget),
+        ..Options::default()
+    };
+    downgrade(pool, &dir, 1, &crashing)
+        .await
+        .expect_err("crashed");
+    assert_eq!(
+        rows(pool).await.len(),
+        2,
+        "{b:?}: the row went without its event"
+    );
+    assert_eq!(
+        downgrade(pool, &dir, 1, &opts()).await.unwrap().rolled_back,
+        ["0002_bio"]
+    );
+    assert_eq!(rows(pool).await.len(), 1);
+}
+
+/// A rollback cut before its row turns `rolling_back` leaves no stale
+/// op count from an earlier rollback for `--resume-forward` to trust.
+async fn a_cut_before_rollback_begins_keeps_its_count(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let (_root, dir) = author_only();
+    crashed_bio(pool, &dir).await;
+    // A full cycle first: its began event counts every op.
+    migrate(pool, &dir, &opts()).await.unwrap();
+    downgrade(pool, &dir, 1, &opts()).await.unwrap();
+    let partial = Options {
+        crash: Some(Crash::BeforeUnit(1)),
+        ..Options::default()
+    };
+    migrate(pool, &dir, &partial).await.expect_err("crashed");
+    let cut = Options {
+        crash: Some(Crash::BeforeRollbackBegins),
+        ..Options::default()
+    };
+    downgrade(pool, &dir, 1, &cut).await.expect_err("crashed");
+    let forward = Options {
+        resume_forward: true,
+        ..Options::default()
+    };
+    migrate(pool, &dir, &forward).await.unwrap();
+    assert_eq!(columns(pool, "rv_author").await, ["id", "name", "bio"]);
+    let live = crate::migrate::v2::catalog::read_table(pool, "rv_author")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        live.indexes.iter().any(|i| i.name == "rv_author_name_idx"),
+        "{b:?}: the index never ran"
+    );
 }
 
 /// Every inverse and blocker is planned before the first statement
@@ -2553,6 +2647,69 @@ async fn sparse_keys_take_two_batches(b: B) {
     assert_eq!(
         count(pool, "SELECT COUNT(*) FROM ed_user WHERE street = 'moved'").await,
         2
+    );
+}
+
+/// Walks `cw_t` by its string key in the database's order, marking rows.
+#[crate::data_step(app = "steps", id = "code_walk_v1")]
+impl CodeWalkV1 {
+    async fn up(ctx: &mut StepCtx<'_>, batch: Batch) -> StepResult {
+        use crate::core::SqlValue as V;
+        let t = ctx.table("cw_t")?;
+        let mut q = t.query().order_by("code", false);
+        if let Some(lo) = batch.lo() {
+            q = q.filter_gt("code", lo.clone());
+        }
+        let rows = q
+            .limit(i64::try_from(batch.size()).unwrap_or(i64::MAX))
+            .fetch(ctx)
+            .await?;
+        for r in &rows {
+            t.query()
+                .filter_eq("code", r.key("code").unwrap())
+                .update(ctx, &[("seen", V::I64(1))])
+                .await?;
+        }
+        Ok(batch.advance_to(rows.last().and_then(|r| r.key("code"))))
+    }
+}
+
+/// A string key advances by the database's collation, not byte order:
+/// `a` then `B` moves up under a case-insensitive or linguistic order.
+async fn a_string_key_advances_by_collation(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    let table = json!({"op": "create_table", "v": 1, "table": {"name": "cw_t", "scope": "tenant",
+        "fields": [{"column": "code", "ty": "string", "max_length": 20, "primary_key": true,
+                    "nullable": false},
+                   {"column": "seen", "ty": "i64", "nullable": true}]}});
+    put(&dir, "0001_cw", &vs("0001_cw", &[], json!([table])));
+    migrate(pool, &dir, &opts()).await.unwrap();
+    raw_execute_pool(
+        pool,
+        "INSERT INTO cw_t (code) VALUES ('a'), ('B'), ('c'), ('D')",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let walk = json!({"op": "data_rust", "v": 1, "id": "code_walk_v1",
+        "tables": {"read": ["cw_t"], "write": ["cw_t.seen"]},
+        "batch": {"table": "cw_t", "key": "code", "size": 1},
+        "down": {"noop": "test"}, "allow": [{"code": "MV2-E028", "reason": "test"}]});
+    put(
+        &dir,
+        "0002_walk",
+        &vs("0002_walk", &["0001_cw"], json!([walk])),
+    );
+    migrate(pool, &dir, &opts())
+        .await
+        .unwrap_or_else(|e| panic!("{b:?}: {e}"));
+    assert_eq!(
+        count(pool, "SELECT COUNT(*) FROM cw_t WHERE seen = 1").await,
+        4,
+        "{b:?}"
     );
 }
 
@@ -4216,6 +4373,9 @@ per_backend!(
     dry_runs_never_write,
     down_to_follows_the_ledger,
     a_cut_off_rollback_resumes_by_probe,
+    a_cut_before_rollback_begins_keeps_its_count,
+    a_crash_while_forgetting_keeps_the_row,
+    a_resumed_failed_row_runs,
     rollback_is_planned_up_front,
     custom_ledgers_keep_their_names,
     an_invalid_index_left_by_a_drop_is_dropped_again,
@@ -4232,6 +4392,7 @@ per_backend!(
     example_d_lost_acks,
     sparse_keys_take_two_batches,
     a_batch_must_advance,
+    a_string_key_advances_by_collation,
     max_duration_stops_between_batches,
     a_shutdown_stops_between_batches,
     a_lost_unit_ack_counts_as_done,
