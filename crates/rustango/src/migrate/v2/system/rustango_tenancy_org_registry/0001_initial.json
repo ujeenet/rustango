@@ -1,0 +1,141 @@
+{
+  "app": "rustango_tenancy_org_registry",
+  "engine": 2,
+  "format": 1,
+  "id": "0001_initial",
+  "operations": [
+    {
+      "indexes": [
+        {
+          "columns": [
+            "slug"
+          ],
+          "constraint": true,
+          "name": "rustango_orgs_slug_key",
+          "unique": true
+        },
+        {
+          "columns": [
+            "path_prefix"
+          ],
+          "name": "rustango_orgs_path_prefix_idx"
+        }
+      ],
+      "op": "adopt_table",
+      "table": {
+        "fields": [
+          {
+            "column": "active",
+            "nullable": false,
+            "ty": "bool"
+          },
+          {
+            "column": "backend_kind",
+            "default": "'postgres'",
+            "max_length": 16,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "brand_name",
+            "max_length": 80,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "brand_tagline",
+            "max_length": 200,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "created_at",
+            "nullable": false,
+            "ty": "datetime"
+          },
+          {
+            "column": "database_url",
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "display_name",
+            "max_length": 255,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "favicon_path",
+            "max_length": 120,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "host_pattern",
+            "max_length": 255,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "auto": true,
+            "column": "id",
+            "nullable": false,
+            "primary_key": true,
+            "ty": "i64"
+          },
+          {
+            "column": "logo_path",
+            "max_length": 120,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "path_prefix",
+            "max_length": 255,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "port",
+            "nullable": true,
+            "ty": "i32"
+          },
+          {
+            "column": "primary_color",
+            "max_length": 7,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "schema_name",
+            "max_length": 64,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "slug",
+            "max_length": 64,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "storage_mode",
+            "max_length": 16,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "theme_mode",
+            "max_length": 8,
+            "nullable": true,
+            "ty": "string"
+          }
+        ],
+        "name": "rustango_orgs",
+        "scope": "registry"
+      },
+      "v": 1
+    }
+  ],
+  "target": "registry"
+}

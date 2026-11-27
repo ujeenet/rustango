@@ -1,0 +1,336 @@
+{
+  "app": "rustango_sso_policy_models",
+  "engine": 2,
+  "format": 1,
+  "id": "0001_initial",
+  "operations": [
+    {
+      "indexes": [
+        {
+          "columns": [
+            "target"
+          ],
+          "name": "rustango_sso_invites_target_idx"
+        }
+      ],
+      "op": "adopt_table",
+      "table": {
+        "fields": [
+          {
+            "column": "created_at",
+            "nullable": false,
+            "portable_default": "now",
+            "ty": "datetime"
+          },
+          {
+            "column": "expires_at",
+            "nullable": true,
+            "ty": "datetime"
+          },
+          {
+            "auto": true,
+            "column": "id",
+            "nullable": false,
+            "primary_key": true,
+            "ty": "i64"
+          },
+          {
+            "column": "invited_by",
+            "nullable": true,
+            "ty": "i64"
+          },
+          {
+            "column": "link_key",
+            "max_length": 64,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "link_user_id",
+            "nullable": true,
+            "ty": "i64"
+          },
+          {
+            "column": "max_uses",
+            "nullable": true,
+            "ty": "i32"
+          },
+          {
+            "column": "provider_slug",
+            "max_length": 64,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "roles",
+            "max_length": 1000,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "target",
+            "max_length": 254,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "used_at",
+            "nullable": true,
+            "ty": "datetime"
+          },
+          {
+            "column": "used_by",
+            "nullable": true,
+            "ty": "i64"
+          },
+          {
+            "column": "uses",
+            "default": "0",
+            "nullable": false,
+            "ty": "i32"
+          }
+        ],
+        "name": "rustango_sso_invites",
+        "scope": "tenant"
+      },
+      "v": 1
+    },
+    {
+      "indexes": [
+        {
+          "columns": [
+            "position"
+          ],
+          "name": "rustango_sso_landing_rules_position_idx"
+        }
+      ],
+      "op": "adopt_table",
+      "table": {
+        "fields": [
+          {
+            "auto": true,
+            "column": "id",
+            "nullable": false,
+            "primary_key": true,
+            "ty": "i64"
+          },
+          {
+            "column": "landing_url",
+            "max_length": 500,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "match_kind",
+            "max_length": 16,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "match_name",
+            "max_length": 128,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "match_value",
+            "max_length": 254,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "position",
+            "default": "0",
+            "nullable": false,
+            "ty": "i32"
+          }
+        ],
+        "name": "rustango_sso_landing_rules",
+        "scope": "tenant"
+      },
+      "v": 1
+    },
+    {
+      "indexes": [
+        {
+          "columns": [
+            "shared_provider_id"
+          ],
+          "constraint": true,
+          "name": "rustango_sso_shared_overrides_shared_provider_id_key",
+          "unique": true
+        },
+        {
+          "columns": [
+            "shared_slug"
+          ],
+          "name": "rustango_sso_shared_overrides_shared_slug_idx"
+        }
+      ],
+      "op": "adopt_table",
+      "table": {
+        "fields": [
+          {
+            "column": "allow_email_link",
+            "nullable": true,
+            "ty": "bool"
+          },
+          {
+            "column": "allow_email_link_staff",
+            "nullable": true,
+            "ty": "bool"
+          },
+          {
+            "column": "allowed_email_domains",
+            "max_length": 2000,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "allowed_hosted_domains",
+            "max_length": 1000,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "allowed_idp_tenants",
+            "max_length": 1000,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "allowed_roles",
+            "max_length": 1000,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "blocked_email_domains",
+            "max_length": 2000,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "auto": true,
+            "column": "id",
+            "nullable": false,
+            "primary_key": true,
+            "ty": "i64"
+          },
+          {
+            "column": "required_claims",
+            "nullable": false,
+            "portable_default": "empty_object",
+            "ty": "json"
+          },
+          {
+            "column": "session_ttl_secs",
+            "nullable": true,
+            "ty": "i64"
+          },
+          {
+            "column": "shared_issuer",
+            "max_length": 300,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "shared_provider_id",
+            "nullable": true,
+            "ty": "i64"
+          },
+          {
+            "column": "shared_slug",
+            "max_length": 64,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "signup_mode",
+            "max_length": 16,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "sso_only",
+            "nullable": true,
+            "ty": "bool"
+          },
+          {
+            "column": "superuser_session_ttl_secs",
+            "nullable": true,
+            "ty": "i64"
+          }
+        ],
+        "name": "rustango_sso_shared_overrides",
+        "scope": "tenant"
+      },
+      "v": 1
+    },
+    {
+      "indexes": [
+        {
+          "columns": [
+            "name"
+          ],
+          "constraint": true,
+          "name": "rustango_sso_tenant_policy_name_key",
+          "unique": true
+        }
+      ],
+      "op": "adopt_table",
+      "table": {
+        "fields": [
+          {
+            "column": "access_denied_message",
+            "max_length": 500,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "default_provider",
+            "max_length": 64,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "auto": true,
+            "column": "id",
+            "nullable": false,
+            "primary_key": true,
+            "ty": "i64"
+          },
+          {
+            "column": "name",
+            "default": "'default'",
+            "max_length": 16,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "password_login",
+            "default": "'on'",
+            "max_length": 16,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "signups_per_hour",
+            "nullable": true,
+            "ty": "i32"
+          },
+          {
+            "column": "sso_only",
+            "nullable": false,
+            "portable_default": "false",
+            "ty": "bool"
+          }
+        ],
+        "name": "rustango_sso_tenant_policy",
+        "scope": "tenant"
+      },
+      "v": 1
+    }
+  ],
+  "target": "tenant"
+}

@@ -30,6 +30,7 @@ pub(crate) mod session;
 pub(crate) mod squash;
 pub(crate) mod state;
 pub(crate) mod step;
+pub(crate) mod system;
 pub mod testing;
 
 pub use step::{

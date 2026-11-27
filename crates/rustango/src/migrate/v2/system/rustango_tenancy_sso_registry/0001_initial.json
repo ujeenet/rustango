@@ -1,0 +1,215 @@
+{
+  "app": "rustango_tenancy_sso_registry",
+  "engine": 2,
+  "format": 1,
+  "id": "0001_initial",
+  "operations": [
+    {
+      "indexes": [
+        {
+          "columns": [
+            "slug"
+          ],
+          "constraint": true,
+          "name": "rustango_shared_sso_providers_slug_key",
+          "unique": true
+        }
+      ],
+      "op": "adopt_table",
+      "table": {
+        "fields": [
+          {
+            "column": "allow_email_link",
+            "nullable": false,
+            "portable_default": "false",
+            "ty": "bool"
+          },
+          {
+            "column": "allow_email_link_staff",
+            "nullable": false,
+            "portable_default": "false",
+            "ty": "bool"
+          },
+          {
+            "column": "allowed_email_domains",
+            "max_length": 2000,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "allowed_hosted_domains",
+            "max_length": 1000,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "allowed_idp_tenants",
+            "max_length": 1000,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "auto_deactivate_after_days",
+            "nullable": true,
+            "ty": "i32"
+          },
+          {
+            "column": "blocked_email_domains",
+            "max_length": 2000,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "client_id",
+            "max_length": 255,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "client_secret",
+            "max_length": 1024,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "created_at",
+            "nullable": false,
+            "portable_default": "now",
+            "ty": "datetime"
+          },
+          {
+            "column": "default_roles",
+            "max_length": 1000,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "enabled",
+            "nullable": false,
+            "portable_default": "true",
+            "ty": "bool"
+          },
+          {
+            "auto": true,
+            "column": "id",
+            "nullable": false,
+            "primary_key": true,
+            "ty": "i64"
+          },
+          {
+            "column": "issuer_url",
+            "max_length": 255,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "kind",
+            "max_length": 32,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "label",
+            "max_length": 150,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "required_claims",
+            "nullable": false,
+            "portable_default": "empty_object",
+            "ty": "json"
+          },
+          {
+            "column": "role_claims",
+            "max_length": 255,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "role_map",
+            "nullable": false,
+            "portable_default": "empty_object",
+            "ty": "json"
+          },
+          {
+            "column": "scopes",
+            "max_length": 255,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "session_ttl_secs",
+            "nullable": true,
+            "ty": "i64"
+          },
+          {
+            "column": "signup_mode",
+            "max_length": 16,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "slug",
+            "max_length": 64,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "sort_order",
+            "default": "0",
+            "nullable": false,
+            "ty": "i32"
+          },
+          {
+            "column": "sso_only",
+            "nullable": false,
+            "portable_default": "false",
+            "ty": "bool"
+          },
+          {
+            "column": "superuser_session_ttl_secs",
+            "nullable": true,
+            "ty": "i64"
+          },
+          {
+            "column": "sync_profile",
+            "nullable": false,
+            "portable_default": "false",
+            "ty": "bool"
+          },
+          {
+            "column": "sync_roles_on_login",
+            "nullable": false,
+            "portable_default": "false",
+            "ty": "bool"
+          },
+          {
+            "column": "updated_at",
+            "nullable": false,
+            "portable_default": "now",
+            "ty": "datetime"
+          },
+          {
+            "column": "username_clash",
+            "default": "'suffix'",
+            "max_length": 16,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "username_from",
+            "default": "'email_local'",
+            "max_length": 24,
+            "nullable": false,
+            "ty": "string"
+          }
+        ],
+        "name": "rustango_shared_sso_providers",
+        "scope": "registry"
+      },
+      "v": 1
+    }
+  ],
+  "target": "registry"
+}

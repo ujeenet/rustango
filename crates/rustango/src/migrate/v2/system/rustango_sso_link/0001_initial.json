@@ -1,0 +1,109 @@
+{
+  "app": "rustango_sso_link",
+  "engine": 2,
+  "format": 1,
+  "id": "0001_initial",
+  "operations": [
+    {
+      "indexes": [
+        {
+          "columns": [
+            "provider_source",
+            "provider_id",
+            "key_sha256"
+          ],
+          "name": "rustango_sso_links_provider_source_provider_id_key_sha256_idx",
+          "unique": true
+        },
+        {
+          "columns": [
+            "provider_source",
+            "provider_id",
+            "subject"
+          ],
+          "name": "rustango_sso_links_provider_source_provider_id_subject_idx"
+        },
+        {
+          "columns": [
+            "provisioned",
+            "created_at"
+          ],
+          "name": "rustango_sso_links_provisioned_created_at_idx"
+        },
+        {
+          "columns": [
+            "user_id"
+          ],
+          "name": "rustango_sso_links_user_id_idx"
+        }
+      ],
+      "op": "adopt_table",
+      "table": {
+        "fields": [
+          {
+            "column": "created_at",
+            "nullable": false,
+            "portable_default": "now",
+            "ty": "datetime"
+          },
+          {
+            "auto": true,
+            "column": "id",
+            "nullable": false,
+            "primary_key": true,
+            "ty": "i64"
+          },
+          {
+            "column": "issuer",
+            "max_length": 300,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "key_sha256",
+            "max_length": 64,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "last_used_at",
+            "nullable": true,
+            "ty": "datetime"
+          },
+          {
+            "column": "provider_id",
+            "nullable": false,
+            "ty": "i64"
+          },
+          {
+            "column": "provider_source",
+            "max_length": 16,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "provisioned",
+            "nullable": false,
+            "portable_default": "false",
+            "ty": "bool"
+          },
+          {
+            "column": "subject",
+            "max_length": 255,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "user_id",
+            "nullable": false,
+            "ty": "i64"
+          }
+        ],
+        "name": "rustango_sso_links",
+        "scope": "tenant"
+      },
+      "v": 1
+    }
+  ],
+  "target": "tenant"
+}

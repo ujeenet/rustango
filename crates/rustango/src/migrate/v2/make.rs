@@ -765,7 +765,7 @@ fn op(kind: &str, mut payload: Value) -> Value {
     payload
 }
 
-fn field_json(c: &ColumnDef, fk: Option<&FkDef>) -> Value {
+pub(crate) fn field_json(c: &ColumnDef, fk: Option<&FkDef>) -> Value {
     let mut v = serde_json::to_value(c).expect("column");
     if let Some(fk) = fk {
         v["fk"] = inline_fk(fk);
@@ -773,7 +773,7 @@ fn field_json(c: &ColumnDef, fk: Option<&FkDef>) -> Value {
     v
 }
 
-fn inline_fk(fk: &FkDef) -> Value {
+pub(crate) fn inline_fk(fk: &FkDef) -> Value {
     let mut v = json!({"name": fk.name, "to": fk.to, "on": fk.on[0]});
     if fk.on_delete != OnDelete::NoAction {
         v["on_delete"] = serde_json::to_value(fk.on_delete).expect("on_delete");

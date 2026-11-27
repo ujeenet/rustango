@@ -1,0 +1,187 @@
+{
+  "app": "rustango_tenancy_provision_store_registry",
+  "engine": 2,
+  "format": 1,
+  "id": "0001_initial",
+  "operations": [
+    {
+      "indexes": [
+        {
+          "columns": [
+            "run_id"
+          ],
+          "name": "rustango_provisioning_events_run_id_idx"
+        }
+      ],
+      "op": "adopt_table",
+      "table": {
+        "fields": [
+          {
+            "column": "at",
+            "nullable": false,
+            "portable_default": "now",
+            "ty": "datetime"
+          },
+          {
+            "auto": true,
+            "column": "id",
+            "nullable": false,
+            "primary_key": true,
+            "ty": "i64"
+          },
+          {
+            "column": "message",
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "run_id",
+            "fk": {
+              "name": "rustango_provisioning_events_run_id_fkey",
+              "on": "id",
+              "to": "rustango_provisioning_runs"
+            },
+            "nullable": false,
+            "ty": "i64"
+          },
+          {
+            "column": "seq",
+            "nullable": false,
+            "ty": "i64"
+          },
+          {
+            "column": "status",
+            "max_length": 16,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "step",
+            "max_length": 32,
+            "nullable": false,
+            "ty": "string"
+          }
+        ],
+        "name": "rustango_provisioning_events",
+        "scope": "registry"
+      },
+      "v": 1
+    },
+    {
+      "indexes": [
+        {
+          "columns": [
+            "idempotency_key"
+          ],
+          "constraint": true,
+          "name": "rustango_provisioning_runs_idempotency_key_key",
+          "unique": true
+        },
+        {
+          "columns": [
+            "kind"
+          ],
+          "name": "rustango_provisioning_runs_kind_idx"
+        },
+        {
+          "columns": [
+            "slug"
+          ],
+          "name": "rustango_provisioning_runs_slug_idx"
+        },
+        {
+          "columns": [
+            "state"
+          ],
+          "name": "rustango_provisioning_runs_state_idx"
+        }
+      ],
+      "op": "adopt_table",
+      "table": {
+        "fields": [
+          {
+            "column": "backend_kind",
+            "max_length": 16,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "database_url",
+            "max_length": 500,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "error",
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "finished_at",
+            "nullable": true,
+            "ty": "datetime"
+          },
+          {
+            "auto": true,
+            "column": "id",
+            "nullable": false,
+            "primary_key": true,
+            "ty": "i64"
+          },
+          {
+            "column": "idempotency_key",
+            "max_length": 200,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "kind",
+            "default": "'provision'",
+            "max_length": 16,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "org_id",
+            "nullable": true,
+            "ty": "i64"
+          },
+          {
+            "column": "requested_by",
+            "max_length": 150,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "slug",
+            "max_length": 100,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "started_at",
+            "nullable": false,
+            "portable_default": "now",
+            "ty": "datetime"
+          },
+          {
+            "column": "state",
+            "max_length": 16,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "storage_mode",
+            "max_length": 16,
+            "nullable": false,
+            "ty": "string"
+          }
+        ],
+        "name": "rustango_provisioning_runs",
+        "scope": "registry"
+      },
+      "v": 1
+    }
+  ],
+  "target": "registry"
+}
