@@ -237,6 +237,9 @@ pub(crate) fn squash(
     if irreversible {
         body["irreversible_below"] = json!(to);
     }
+    if let Some(db) = &project.files[to_i].file.database {
+        body["database"] = json!(db);
+    }
     let path = folder.join(format!("{id}.json"));
     if path.exists() {
         return Err(err(Code::Io, path.display().to_string(), "the file exists"));

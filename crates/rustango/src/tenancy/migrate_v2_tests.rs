@@ -264,11 +264,7 @@ async fn schema_tenants_stay_apart() {
     )
     .await;
     assert!(stray.is_err(), "{stray:?}");
-    let back = Options {
-        run_as: RunAs::Tenant,
-        lock_scope: t1.scope.clone(),
-        ..Options::default()
-    };
+    let back = super::tenant_opts(&t1);
     assert_eq!(
         run::downgrade(&t1.pool, &f.dir(), 1, &back)
             .await
@@ -705,10 +701,7 @@ async fn db_mode_tenants_stay_apart<DB: sqlx::Database>(
         .unwrap()
         .remove(0);
     let t0 = target(&pools, &d0, &registry_url).await.unwrap();
-    let back = Options {
-        run_as: RunAs::Tenant,
-        ..Options::default()
-    };
+    let back = super::tenant_opts(&t0);
     assert_eq!(
         run::downgrade(&t0.pool, &dir, 1, &back)
             .await
@@ -1498,6 +1491,133 @@ async fn a_tenancy_project_switches_and_behind_tenants_block() {
         .await,
         1
     );
+    // The 0.69.0 upgrade (13.1 row 7): every framework table taken over
+    // with no DDL, in the registry and in each tenant schema.
+    no_system_ddl(&reg).await;
+    for slug in ["t1", "t2", "t3"] {
+        let t = target(&pools, &f.org(slug).await, &f.db.url).await.unwrap();
+        no_system_ddl(&t.pool).await;
+    }
+}
+
+/// The system ledger here took over its framework tables: rows, and no
+/// unit in any of them.
+async fn no_system_ddl(pool: &Pool) {
+    let rows = Ledger::system().rows(pool).await.unwrap();
+    assert!(!rows.is_empty(), "no system rows");
+    let ran: Vec<String> = rows
+        .iter()
+        .filter(|r| !r.unit_plan.is_empty())
+        .map(|r| r.app.clone())
+        .collect();
+    assert!(ran.is_empty(), "system apps ran DDL: {ran:?}");
+}
+
+/// The 0.69.0 upgrade under tenancy in DB mode on `DB`: v1 registry and
+/// tenant chains, adopt, then the fleet takes over every framework table
+/// in the registry and in each tenant database with no DDL.
+async fn upgrade_from_0_69_db_mode<DB: sqlx::Database>(
+    registry_url: String,
+    tenants: [String; 2],
+    kind: crate::tenancy::BackendKind,
+) where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let raw = sqlx::Pool::<DB>::connect(&registry_url).await.unwrap();
+    let registry: Pool = raw.clone().into();
+    let pools = TenantPools::new(raw);
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    crate::migrate::v2::run::live_tests::v1_tenancy_project(&dir, false);
+    crate::tenancy::migrate::migrate_registry(&pools, &dir)
+        .await
+        .unwrap();
+    for (i, url) in tenants.iter().enumerate() {
+        let slug = format!("u{i}");
+        let mut org = crate::testkit::org_with(|o| {
+            o.id = crate::sql::Auto::default();
+            o.slug = slug.clone();
+            o.display_name = slug.clone();
+            o.storage_mode = StorageMode::Database;
+            o.backend_kind = kind;
+            o.database_url = Some(url.clone());
+            o.schema_name = None;
+            o.host_pattern = None;
+            o.port = None;
+            o.path_prefix = None;
+        });
+        org.insert(&registry).await.unwrap();
+    }
+    let v1 = crate::tenancy::migrate::migrate_tenants_dyn(&pools, &dir, &registry_url)
+        .await
+        .unwrap();
+    assert!(v1.tenants.iter().all(|t| t.error.is_none()), "{v1:?}");
+    crate::migrate::v2::adopt::adopt(&dir, crate::migrate::v2::run::backend_of(&registry)).unwrap();
+    let rep = run_fleet(&pools, &dir, &registry_url, &FleetOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(rep.failed().count(), 0, "{rep:?}");
+    no_system_ddl(&registry).await;
+    for url in &tenants {
+        let c = Pool::connect(url).await.unwrap();
+        no_system_ddl(&c).await;
+        c.close().await;
+    }
+    registry.close().await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn upgrade_from_0_69_db_mode_postgres() {
+    let _g = serial().lock().await;
+    let Some(admin) = crate::testkit::matrix::live_url("DATABASE_URL", "postgres") else {
+        return;
+    };
+    let (r, a, b) = (
+        Scratch::create(&admin, "upr").await,
+        Scratch::create(&admin, "upa").await,
+        Scratch::create(&admin, "upb").await,
+    );
+    upgrade_from_0_69_db_mode::<sqlx::Postgres>(
+        r.url.clone(),
+        [a.url.clone(), b.url.clone()],
+        crate::tenancy::BackendKind::Postgres,
+    )
+    .await;
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn upgrade_from_0_69_db_mode_mysql() {
+    let _g = serial().lock().await;
+    let Some(admin) = crate::testkit::matrix::live_url("MYSQL_TEST_URL", "mysql") else {
+        return;
+    };
+    let (r, a, b) = (
+        Scratch::create(&admin, "upr").await,
+        Scratch::create(&admin, "upa").await,
+        Scratch::create(&admin, "upb").await,
+    );
+    upgrade_from_0_69_db_mode::<sqlx::MySql>(
+        r.url.clone(),
+        [a.url.clone(), b.url.clone()],
+        crate::tenancy::BackendKind::MySql,
+    )
+    .await;
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn upgrade_from_0_69_db_mode_sqlite() {
+    let _g = serial().lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let url = |n: &str| format!("sqlite:{}?mode=rwc", dir.path().join(n).display());
+    upgrade_from_0_69_db_mode::<sqlx::Sqlite>(
+        url("registry.db"),
+        [url("a.db"), url("b.db")],
+        crate::tenancy::BackendKind::Sqlite,
+    )
+    .await;
 }
 
 /// The extension move (8.2): citext installed in `public` moves to
@@ -1811,11 +1931,7 @@ async fn prune_waits_for_tenants<DB: sqlx::Database>(
         let o = org(slug);
         async move {
             let t = target(pools, &o.await, registry_url).await.unwrap();
-            let opts = Options {
-                run_as: RunAs::Tenant,
-                lock_scope: t.scope.clone(),
-                ..Options::default()
-            };
+            let opts = super::tenant_opts(&t);
             run::migrate(&t.pool, &d, &opts).await.unwrap();
         }
     };
@@ -1884,4 +2000,197 @@ async fn prune_waits_for_a_behind_database_tenant() {
         org.insert(&Pool::from(raw.clone())).await.unwrap();
     }
     prune_waits_for_tenants(&pools, &registry_url, &dir, ["d0", "d1"]).await;
+}
+
+/// An `every_database` file: a table and, on PG, an extension.
+fn marks() -> Value {
+    json!([
+        {"op": "create_extension", "v": 1, "name": "citext", "skipped_on": ["mysql", "sqlite"]},
+        {"op": "create_table", "v": 1, "table": {"name": "marks", "scope": "every_database",
+            "fields": [{"column": "id", "ty": "i64", "primary_key": true, "nullable": false}]}}])
+}
+
+async fn ledger_ids(pool: &Pool) -> Vec<String> {
+    Ledger::default_names()
+        .rows(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.id)
+        .collect()
+}
+
+/// `every_database` (design item 20) in DB mode on `DB`: once on the
+/// registry and once on each tenant database, before the tenant chain,
+/// with each database's ledger recording it; PG tenants get the extension.
+async fn every_database_runs_on_each_database<DB: sqlx::Database>(
+    registry_url: String,
+    tenants: [String; 2],
+    kind: crate::tenancy::BackendKind,
+) where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let raw = sqlx::Pool::<DB>::connect(&registry_url).await.unwrap();
+    let registry: Pool = raw.clone().into();
+    let pools = TenantPools::new(raw);
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    std::fs::create_dir_all(&dir).unwrap();
+    run_fleet(&pools, &dir, &registry_url, &FleetOptions::default())
+        .await
+        .unwrap();
+    for (i, url) in tenants.iter().enumerate() {
+        let slug = format!("e{i}");
+        let mut org = crate::testkit::org_with(|o| {
+            o.id = crate::sql::Auto::default();
+            o.slug = slug.clone();
+            o.display_name = slug.clone();
+            o.storage_mode = StorageMode::Database;
+            o.backend_kind = kind;
+            o.database_url = Some(url.clone());
+            o.schema_name = None;
+            o.host_pattern = None;
+            o.port = None;
+            o.path_prefix = None;
+        });
+        org.insert(&registry).await.unwrap();
+    }
+    put(
+        &dir,
+        "0001_marks",
+        &file("0001_marks", &[], "every_database", marks()),
+    );
+    put(
+        &dir,
+        "0002_items",
+        &file("0002_items", &[], "tenant", items()),
+    );
+    let rep = run_fleet(&pools, &dir, &registry_url, &FleetOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(rep.failed().count(), 0, "{rep:?}");
+    assert_eq!(rep.registry, ["0001_marks"], "{rep:?}");
+    assert!(
+        rep.tenants
+            .iter()
+            .all(|t| t.applied == ["0001_marks", "0002_items"]),
+        "{rep:?}"
+    );
+    assert_eq!(ledger_ids(&registry).await, ["0001_marks"]);
+    let pg = kind == crate::tenancy::BackendKind::Postgres;
+    for url in &tenants {
+        let c = Pool::connect(url).await.unwrap();
+        assert!(crate::migrate::v2::catalog::read_table(&c, "marks")
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(ledger_ids(&c).await, ["0001_marks", "0002_items"]);
+        if pg {
+            let n = count(
+                &c,
+                "SELECT COUNT(*) FROM pg_extension WHERE extname = 'citext'",
+            )
+            .await;
+            assert_eq!(n, 1, "the tenant database got the extension");
+        }
+        c.close().await;
+    }
+    // A second fleet run changes nothing.
+    let again = run_fleet(&pools, &dir, &registry_url, &FleetOptions::default())
+        .await
+        .unwrap();
+    assert!(again.registry.is_empty() && again.tenants.iter().all(|t| t.applied.is_empty()));
+    registry.close().await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn every_database_runs_on_each_database_postgres() {
+    let _g = serial().lock().await;
+    let Some(admin) = crate::testkit::matrix::live_url("DATABASE_URL", "postgres") else {
+        return;
+    };
+    let (r, a, b) = (
+        Scratch::create(&admin, "edr").await,
+        Scratch::create(&admin, "eda").await,
+        Scratch::create(&admin, "edb").await,
+    );
+    every_database_runs_on_each_database::<sqlx::Postgres>(
+        r.url.clone(),
+        [a.url.clone(), b.url.clone()],
+        crate::tenancy::BackendKind::Postgres,
+    )
+    .await;
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn every_database_runs_on_each_database_mysql() {
+    let _g = serial().lock().await;
+    let Some(admin) = crate::testkit::matrix::live_url("MYSQL_TEST_URL", "mysql") else {
+        return;
+    };
+    let (r, a, b) = (
+        Scratch::create(&admin, "edr").await,
+        Scratch::create(&admin, "eda").await,
+        Scratch::create(&admin, "edb").await,
+    );
+    every_database_runs_on_each_database::<sqlx::MySql>(
+        r.url.clone(),
+        [a.url.clone(), b.url.clone()],
+        crate::tenancy::BackendKind::MySql,
+    )
+    .await;
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn every_database_runs_on_each_database_sqlite() {
+    let _g = serial().lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let url = |n: &str| format!("sqlite:{}?mode=rwc", dir.path().join(n).display());
+    every_database_runs_on_each_database::<sqlx::Sqlite>(
+        url("registry.db"),
+        [url("a.db"), url("b.db")],
+        crate::tenancy::BackendKind::Sqlite,
+    )
+    .await;
+}
+
+/// Schema mode: tenants share the registry database, so an `every_database`
+/// file runs once there, its extension in `extensions`, and never in a
+/// tenant schema or a tenant ledger.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn every_database_runs_once_for_schema_tenants() {
+    let _g = serial().lock().await;
+    let Some(f) = PgFleet::new("edschema").await else {
+        return;
+    };
+    f.with_orgs(&["t1", "t2"]).await;
+    put(
+        &f.dir(),
+        "0001_marks",
+        &file("0001_marks", &[], "every_database", marks()),
+    );
+    put(
+        &f.dir(),
+        "0002_items",
+        &file("0002_items", &[], "tenant", items()),
+    );
+    let rep = f.fleet(&FleetOptions::default()).await.unwrap();
+    assert_eq!(rep.failed().count(), 0, "{rep:?}");
+    assert_eq!(rep.registry, ["0001_marks"], "{rep:?}");
+    assert!(
+        rep.tenants.iter().all(|t| t.applied == ["0002_items"]),
+        "{rep:?}"
+    );
+    let reg = f.registry();
+    assert!(exists_in(&reg, "public", "marks").await);
+    for s in ["s_t1", "s_t2"] {
+        assert!(!exists_in(&reg, s, "marks").await, "{s}");
+    }
+    let home = "SELECT COUNT(*) FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace \
+                WHERE e.extname = 'citext' AND n.nspname = 'extensions'";
+    assert_eq!(count(&reg, home).await, 1);
 }

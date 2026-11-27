@@ -81,6 +81,8 @@ struct Header {
     requires: Vec<String>,
     target: Target,
     #[serde(default)]
+    database: Option<String>,
+    #[serde(default)]
     base: Option<Base>,
     #[serde(default)]
     phase: Phase,
@@ -115,6 +117,8 @@ pub(crate) struct File {
     pub(crate) depends_on: Vec<(String, String)>,
     pub(crate) requires: Vec<String>,
     pub(crate) target: Target,
+    /// The configured database a `database` file runs on.
+    pub(crate) database: Option<String>,
     pub(crate) base: Option<Base>,
     pub(crate) phase: Phase,
     pub(crate) offline: bool,
@@ -773,6 +777,7 @@ pub(crate) fn decode(raw: &Value, at: &str) -> Result<File, LoadError> {
         depends_on,
         requires: header.requires,
         target: header.target,
+        database: header.database,
         base: header.base,
         phase: header.phase,
         offline: header.offline,
@@ -974,9 +979,37 @@ fn validate(file: &File, at: &str) -> Result<(), LoadError> {
             ));
         }
     }
+    match (file.target, file.database.as_deref()) {
+        (Target::Database, Some(db)) if !db.is_empty() => {}
+        (Target::Database, _) => {
+            return Err(LoadError::new(
+                Code::File,
+                at,
+                "a `database` file names the configured database in `database`",
+            ))
+        }
+        (_, Some(_)) => {
+            return Err(LoadError::new(
+                Code::File,
+                format!("{at}#/database"),
+                "`database` belongs on a file with `target: \"database\"`",
+            ))
+        }
+        _ => {}
+    }
     let prefix = match file.target {
         Target::Tenant => "registry:",
         Target::Registry => "tenants:",
+        Target::EveryDatabase | Target::Database => {
+            if !file.requires.is_empty() {
+                return Err(LoadError::new(
+                    Code::File,
+                    format!("{at}#/requires"),
+                    format!("a {} file has no `requires`", file.target.as_str()),
+                ));
+            }
+            ""
+        }
     };
     for (i, r) in file.requires.iter().enumerate() {
         if !r.strip_prefix(prefix).is_some_and(|rest| !rest.is_empty()) {

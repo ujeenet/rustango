@@ -3,6 +3,7 @@
     ("rustango_admin_user", "0001_initial", include_str!("rustango_admin_user/0001_initial.json")),
     ("rustango_audit", "0001_initial", include_str!("rustango_audit/0001_initial.json")),
     ("rustango_contenttypes", "0001_initial", include_str!("rustango_contenttypes/0001_initial.json")),
+    ("rustango_contenttypes_natural_key", "0001_initial", include_str!("rustango_contenttypes_natural_key/0001_initial.json")),
     ("rustango_media", "0001_initial", include_str!("rustango_media/0001_initial.json")),
     ("rustango_media_collection", "0001_initial", include_str!("rustango_media_collection/0001_initial.json")),
     ("rustango_media_tag", "0001_initial", include_str!("rustango_media_tag/0001_initial.json")),

@@ -274,10 +274,30 @@ fn remap_replaced(project: &mut Project) {
     }
 }
 
-/// One DAG per target, each in canonical order.
+/// One DAG per target, each in canonical order. An app's `database` files
+/// name one database, so each database's chain is its apps' files.
 fn order_targets(files: &[Loaded]) -> Result<BTreeMap<Target, Vec<usize>>, LoadError> {
+    let mut db_of: BTreeMap<&str, &str> = BTreeMap::new();
+    for l in files.iter().filter(|l| l.file.target == Target::Database) {
+        let db = l.file.database.as_deref().unwrap_or_default();
+        if let Some(other) = db_of.insert(&l.file.app, db).filter(|o| *o != db) {
+            return Err(LoadError::new(
+                Code::File,
+                format!("{}#/database", l.at),
+                format!(
+                    "app `{}` runs on database `{other}` and `{db}`; one database per app",
+                    l.file.app
+                ),
+            ));
+        }
+    }
     let mut out = BTreeMap::new();
-    for target in [Target::Registry, Target::Tenant] {
+    for target in [
+        Target::EveryDatabase,
+        Target::Registry,
+        Target::Tenant,
+        Target::Database,
+    ] {
         let idx: Vec<usize> = (0..files.len())
             .filter(|&i| files[i].file.target == target)
             .collect();
@@ -397,16 +417,14 @@ fn check_name(stem: &str, at: &str) -> Result<(), LoadError> {
 pub(crate) fn replay(project: &Project) -> Result<Replayed, LoadError> {
     let mut memo = HashMemo::default();
     let mut hashes = BTreeMap::new();
-    let mut last: Option<(Target, String)> = None;
+    let mut last: BTreeMap<(Target, Option<&str>), String> = BTreeMap::new();
     let empty = State::default().hash(&mut memo);
     let states = replay_with(project, |target, i, after| {
-        let prev = match &last {
-            Some((t, h)) if *t == target => h.clone(),
-            _ => empty.clone(),
-        };
+        let chain = (target, project.files[i].file.database.as_deref());
+        let prev = last.get(&chain).cloned().unwrap_or_else(|| empty.clone());
         let now = after.hash(&mut memo);
         hashes.insert(i, (prev, now.clone()));
-        last = Some((target, now));
+        last.insert(chain, now);
     })?;
     Ok(Replayed { states, hashes })
 }
@@ -422,19 +440,48 @@ pub(crate) fn replay_with(
 ) -> Result<BTreeMap<Target, State>, LoadError> {
     let mut states: BTreeMap<Target, State> = BTreeMap::new();
     for (&target, idx) in &project.order {
-        let mut state = State::default();
+        // Each configured database has a state of its own.
+        let mut by_db: BTreeMap<Option<&str>, State> = BTreeMap::new();
         for &i in idx {
             let ctx = Ctx {
                 target,
                 registry: states.get(&Target::Registry),
             };
             let f = &project.files[i];
-            apply_file(&mut state, &f.file, &f.at, &ctx)?;
-            each(target, i, &state);
+            let state = by_db.entry(f.file.database.as_deref()).or_default();
+            apply_file(state, &f.file, &f.at, &ctx)?;
+            each(target, i, state);
         }
-        states.insert(target, state);
+        if let Some((_, state)) = by_db.pop_last() {
+            states.insert(target, state);
+        }
     }
     Ok(states)
+}
+
+/// The files of `target`'s chain that run on configured database `db`
+/// (`None` for the other targets), in canonical order.
+pub(crate) fn chain<'p>(
+    project: &'p Project,
+    target: Target,
+    db: Option<&'p str>,
+) -> impl Iterator<Item = usize> + 'p {
+    project
+        .order
+        .get(&target)
+        .into_iter()
+        .flatten()
+        .copied()
+        .filter(move |&i| project.files[i].file.database.as_deref() == db)
+}
+
+/// The configured databases `database` files name.
+pub(crate) fn databases(project: &Project) -> std::collections::BTreeSet<&str> {
+    project
+        .files
+        .iter()
+        .filter_map(|l| l.file.database.as_deref())
+        .collect()
 }
 
 #[cfg(test)]
@@ -569,6 +616,81 @@ mod tests {
         write(&dir, "0001_a", &file("project", "0001_a", &[], json!([])));
         write(&dir, "0002_b", &file("other", "0002_b", &[], json!([])));
         assert_eq!(load_project(&dir).unwrap_err().code, Code::AppLabel);
+    }
+
+    /// `every_database` and `database` files (design item 20): each target
+    /// is a chain of its own, each configured database a state of its own.
+    #[test]
+    fn every_database_and_database_chains() {
+        let on = |app: &str, id: &str, target: &str, db: Option<&str>, t: &str| {
+            let mut v = file(app, id, &[], json!([table(t)]));
+            v["target"] = json!(target);
+            v["operations"][0]["table"]["scope"] = json!(target);
+            if let Some(db) = db {
+                v["database"] = json!(db);
+            }
+            v
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("migrations");
+        write(
+            &dir,
+            "0001_marks",
+            &on("project", "0001_marks", "every_database", None, "marks"),
+        );
+        write(
+            &dir,
+            "0002_a",
+            &file("project", "0002_a", &[], json!([table("a")])),
+        );
+        // The same table name in two databases: separate states.
+        let x = tmp.path().join("x/migrations");
+        write(
+            &x,
+            "0001_t",
+            &on("x", "0001_t", "database", Some("one"), "t"),
+        );
+        let y = tmp.path().join("y/migrations");
+        write(
+            &y,
+            "0001_t",
+            &on("y", "0001_t", "database", Some("two"), "t"),
+        );
+        let p = load_project(&dir).unwrap();
+        let ids = |t: Target, db: Option<&str>| -> Vec<String> {
+            chain(&p, t, db)
+                .map(|i| format!("{}:{}", p.files[i].file.app, p.files[i].file.id))
+                .collect()
+        };
+        assert_eq!(ids(Target::EveryDatabase, None), ["project:0001_marks"]);
+        assert_eq!(ids(Target::Tenant, None), ["project:0002_a"]);
+        assert_eq!(ids(Target::Database, Some("one")), ["x:0001_t"]);
+        assert_eq!(ids(Target::Database, Some("two")), ["y:0001_t"]);
+        let r = replay(&p).unwrap();
+        let empty = State::default().hash(&mut HashMemo::default());
+        for i in chain(&p, Target::Database, Some("two")) {
+            assert_eq!(r.hashes[&i].0, empty, "a database's chain starts empty");
+        }
+        // Each rule, one file at a time.
+        let bad = |v: Value, want: &str| {
+            let e = load_file(Path::new("0003_z.json"), &v.to_string()).unwrap_err();
+            assert!(e.msg.contains(want), "{e}");
+        };
+        bad(
+            on("project", "0003_z", "database", None, "z"),
+            "names the configured database",
+        );
+        let mut tenant_db = file("project", "0003_z", &[], json!([]));
+        tenant_db["database"] = json!("one");
+        bad(tenant_db, "belongs on a file with `target: \"database\"`");
+        let mut req = on("project", "0003_z", "every_database", None, "z");
+        req["requires"] = json!(["registry:0001_a"]);
+        bad(req, "has no `requires`");
+        let mut v2 = on("x", "0002_u", "database", Some("two"), "u");
+        v2["parents"] = json!(["0001_t"]);
+        write(&x, "0002_u", &v2);
+        let e = load_project(&dir).unwrap_err();
+        assert!(e.msg.contains("one database per app"), "{e}");
     }
 
     /// A key written twice is a load error, not "the last one wins".

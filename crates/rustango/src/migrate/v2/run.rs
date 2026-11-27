@@ -19,11 +19,6 @@ use super::{Code, LoadError};
 use crate::migrate::MigrateError;
 use crate::sql::{raw_execute_pool, raw_execute_tx, Pool};
 
-/// Proof the caller is the v2 runner: only this module builds one, so the
-/// v1 system chain skips its switched-DB refusal for v2 alone.
-#[derive(Clone, Copy)]
-pub(crate) struct V2Token(());
-
 /// Run options.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct Options {
@@ -93,9 +88,23 @@ pub(crate) struct Options {
     pub(crate) fast_fresh: bool,
     /// How often a run holding the lock refreshes its heartbeat; `None` = 30 s.
     pub(crate) heartbeat_every: Option<std::time::Duration>,
+    /// Run only the chain of this configured database (target `database`);
+    /// `pool` is that database.
+    pub(crate) database: Option<String>,
     /// Test failpoint: stop as if the process died.
     #[cfg(test)]
     pub(crate) crash: Option<Crash>,
+}
+
+impl Options {
+    /// The chains a run on its pool runs, in order.
+    fn chains(&self) -> &'static [Target] {
+        if self.database.is_some() {
+            &[Target::Database]
+        } else {
+            self.run_as.chains()
+        }
+    }
 }
 
 /// Where a test run stops as if killed, counted in units this run ran.
@@ -216,13 +225,8 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<R, MigrateError>>,
 {
-    crate::migrate::with_migrate_lock_held_v2(
-        V2Token(()),
-        registry,
-        &crate::migrate::LockScope::Fleet,
-        |_| body(),
-    )
-    .await
+    crate::migrate::with_migrate_lock_held_v2(registry, &crate::migrate::LockScope::Fleet, body)
+        .await
 }
 
 /// The ids applied on `pool`'s ledger, as `id` and `app:id`: what a
@@ -264,7 +268,8 @@ pub(crate) fn plan_hash(dir: &Path) -> Result<String, RunError> {
     )))
 }
 
-/// The extensions the registry chain creates on PG (8.2).
+/// The extensions the registry and `every_database` chains create in the
+/// registry database on PG (8.2).
 ///
 /// # Errors
 /// A load error.
@@ -275,7 +280,7 @@ pub(crate) fn registry_extensions(
     Ok(load_project(dir)?
         .files
         .iter()
-        .filter(|f| f.file.target == Target::Registry)
+        .filter(|f| matches!(f.file.target, Target::Registry | Target::EveryDatabase))
         .flat_map(|f| &f.file.operations)
         .filter_map(|env| match &env.op {
             Op::CreateExtension {
@@ -316,8 +321,8 @@ pub(crate) enum RunAs {
     Single,
     /// The registry chain, once, on the registry database.
     Registry,
-    /// One tenant's chain, on its schema or database.
-    Tenant,
+    /// One tenant's chain, on its schema or, `own_database`, its database.
+    Tenant { own_database: bool },
 }
 
 impl RunAs {
@@ -330,13 +335,32 @@ impl RunAs {
         }
     }
 
+    /// The chains it runs, in order: `every_database` first on a database
+    /// of its own (design item 20); a schema-mode tenant shares the registry's.
+    fn chains(self) -> &'static [Target] {
+        match self {
+            Self::Single | Self::Tenant { own_database: true } => {
+                &[Target::EveryDatabase, Target::Tenant]
+            }
+            Self::Registry => &[Target::EveryDatabase, Target::Registry],
+            Self::Tenant {
+                own_database: false,
+            } => &[Target::Tenant],
+        }
+    }
+
+    /// Whether it also runs the `database` chains: once, never per tenant.
+    fn runs_databases(self) -> bool {
+        matches!(self, Self::Single | Self::Registry)
+    }
+
     /// The model scopes of its framework system chain and bootstrap tables.
     fn scopes(self) -> &'static [crate::core::ModelScope] {
         use crate::core::ModelScope;
         match self {
             Self::Single => &[ModelScope::Registry, ModelScope::Tenant],
             Self::Registry => &[ModelScope::Registry],
-            Self::Tenant => &[ModelScope::Tenant],
+            Self::Tenant { .. } => &[ModelScope::Tenant],
         }
     }
 }
@@ -356,7 +380,7 @@ where
 {
     use crate::core::ModelScope;
     let scopes = run_as.scopes();
-    crate::migrate::with_migrate_lock_held_v2(V2Token(()), pool, scope, |_| async move {
+    crate::migrate::with_migrate_lock_held_v2(pool, scope, || async move {
         let result = body().await;
         if write && result.is_ok() {
             if scopes.contains(&ModelScope::Registry) {
@@ -397,20 +421,6 @@ async fn run_system(pool: &Pool, run_id: &str, opts: &Options) -> Result<Vec<Str
             ledger.revoke(pool, role).await?;
         }
     }
-    let mut runner = Runner {
-        pool,
-        ledger: &ledger,
-        run_id,
-        b: backend_of(pool),
-        opts: &sys,
-        units_run: 0,
-        batches_run: 0,
-        warnings: Vec::new(),
-        started: std::time::Instant::now(),
-        planned: Vec::new(),
-        sweep: None,
-        adopted_later: Vec::new(),
-    };
     let done = |rows: Vec<Row>| -> std::collections::BTreeSet<String> {
         rows.into_iter()
             .filter(|r| r.state == RowState::Applied)
@@ -418,7 +428,24 @@ async fn run_system(pool: &Pool, run_id: &str, opts: &Options) -> Result<Vec<Str
             .collect()
     };
     let before = done(ledger.rows(pool).await?);
-    runner.apply_project(&project).await?;
+    for &chain in sys.chains() {
+        let mut runner = Runner {
+            pool,
+            ledger: &ledger,
+            run_id,
+            b: backend_of(pool),
+            opts: &sys,
+            chain,
+            units_run: 0,
+            batches_run: 0,
+            warnings: Vec::new(),
+            started: std::time::Instant::now(),
+            planned: Vec::new(),
+            sweep: None,
+            adopted_later: Vec::new(),
+        };
+        runner.apply_project(&project).await?;
+    }
     Ok(done(ledger.rows(pool).await?)
         .into_iter()
         .filter(|k| !before.contains(k))
@@ -496,16 +523,18 @@ async fn migrate_project(
     let run_id = new_run_id();
     let got_lock = std::sync::atomic::AtomicBool::new(false);
     // A dry run writes nothing: no system chain, no ledger table.
+    // A configured database's run holds none of the framework's tables.
+    let own = opts.database.is_none();
     let run = locked(
         pool,
-        !opts.dry_run,
+        !opts.dry_run && own,
         &opts.lock_scope,
         opts.run_as,
         || async {
             got_lock.store(true, std::sync::atomic::Ordering::SeqCst);
             // The framework's system apps first, on their own ledger (design
             // item 23): the project's ledger never holds them.
-            let system = if with_system {
+            let system = if with_system && own {
                 run_system(pool, &run_id, opts).await?
             } else {
                 Vec::new()
@@ -516,37 +545,57 @@ async fn migrate_project(
                     ledger.revoke(pool, role).await?;
                 }
             }
-            let mut runner = Runner {
-                pool,
-                ledger: &ledger,
-                run_id: &run_id,
-                b: backend_of(pool),
-                opts,
-                units_run: 0,
-                batches_run: 0,
-                warnings: Vec::new(),
-                started: std::time::Instant::now(),
-                planned: Vec::new(),
-                sweep: Some(sweep),
-                adopted_later: Vec::new(),
-            };
-            // A long unit keeps its heartbeat fresh, so boot waiters wait on it.
-            let applying = runner.apply_project(project);
-            let result = tokio::select! {
-                r = applying => r,
-                never = heartbeats(
+            let (mut applied, mut planned, mut warnings) = (Vec::new(), Vec::new(), Vec::new());
+            let mut sweep = Some(sweep);
+            for &chain in opts.chains() {
+                let mut runner = Runner {
                     pool,
-                    &ledger,
-                    &run_id,
-                    opts.heartbeat_every.unwrap_or(HEARTBEAT_EVERY),
-                ) => match never {},
-            };
-            let (applied, stopped) = match result {
-                Ok(applied) => (applied, None),
-                Err(RunError::Stopped(why)) => (Vec::new(), Some(why)),
-                Err(e) => return Err(e),
-            };
-            Ok((applied, runner.planned, stopped, runner.warnings, system))
+                    ledger: &ledger,
+                    run_id: &run_id,
+                    b: backend_of(pool),
+                    opts,
+                    chain,
+                    units_run: 0,
+                    batches_run: 0,
+                    warnings: Vec::new(),
+                    started: std::time::Instant::now(),
+                    planned: Vec::new(),
+                    sweep: sweep.take(),
+                    adopted_later: Vec::new(),
+                };
+                // A long unit keeps its heartbeat fresh, so boot waiters wait on it.
+                let applying = runner.apply_project(project);
+                let result = tokio::select! {
+                    r = applying => r,
+                    never = heartbeats(
+                        pool,
+                        &ledger,
+                        &run_id,
+                        opts.heartbeat_every.unwrap_or(HEARTBEAT_EVERY),
+                    ) => match never {},
+                };
+                planned.append(&mut runner.planned);
+                warnings.append(&mut runner.warnings);
+                sweep = runner.sweep.take();
+                match result {
+                    Ok(ids) => applied.extend(ids),
+                    Err(RunError::Stopped(why)) => {
+                        return Ok((applied, planned, Some(why), warnings, system))
+                    }
+                    Err(e) => return Err(e),
+                }
+                // `apply <id>` stops at its file, in whichever chain it is.
+                let up_to_here = opts.up_to.as_deref().is_some_and(|t| {
+                    super::load::chain(project, chain, opts.database.as_deref()).any(|i| {
+                        let f = &project.files[i].file;
+                        names(t, &f.app, &f.id)
+                    })
+                });
+                if up_to_here {
+                    break;
+                }
+            }
+            Ok((applied, planned, None, warnings, system))
         },
     );
     let (applied, planned, stopped, long_moves, system) = match opts.stale_after {
@@ -558,6 +607,52 @@ async fn migrate_project(
     };
     let mut warnings = warnings;
     warnings.extend(long_moves);
+    let mut applied = applied;
+    let mut planned = planned;
+    let reached = opts.up_to.as_deref().is_some_and(|t| {
+        opts.chains().iter().any(|&c| {
+            super::load::chain(project, c, None).any(|i| {
+                let f = &project.files[i].file;
+                names(t, &f.app, &f.id)
+            })
+        })
+    });
+    // Each configured database's chain, once, after this database's run.
+    if own && opts.run_as.runs_databases() && stopped.is_none() && !reached {
+        for db in super::load::databases(project) {
+            let Some(other) = crate::databases::get(db) else {
+                return Err(refused(
+                    Code::State,
+                    db,
+                    format!(
+                        "database `{db}` is not configured: register it with \
+                         `rustango::databases::register(\"{db}\", pool)` before migrating"
+                    ),
+                ));
+            };
+            let one = Options {
+                database: Some(db.to_owned()),
+                lock_scope: crate::migrate::LockScope::Session,
+                revoke_from: None,
+                plan: None,
+                ..opts.clone()
+            };
+            let rep = Box::pin(migrate_project(&other, project, false, &one)).await?;
+            applied.extend(rep.applied);
+            planned.extend(rep.planned);
+            warnings.extend(rep.warnings);
+            if rep.stopped.is_some() {
+                return Ok(Report {
+                    planned,
+                    system,
+                    applied,
+                    rolled_back: Vec::new(),
+                    warnings,
+                    stopped: rep.stopped,
+                });
+            }
+        }
+    }
     let leaked = super::step::leaked_bytes() - leaked_before;
     if leaked > 0 {
         tracing::info!(
@@ -697,7 +792,8 @@ async fn rollback(
     load_project(dir)?;
     let ledger = Ledger::of(opts);
     let run_id = new_run_id();
-    let rolled_back = locked(pool, true, &opts.lock_scope, opts.run_as, || async {
+    let own = opts.database.is_none();
+    let rolled_back = locked(pool, own, &opts.lock_scope, opts.run_as, || async {
         ledger.ensure(pool).await?;
         let mut runner = Runner {
             pool,
@@ -705,6 +801,7 @@ async fn rollback(
             run_id: &run_id,
             b: backend_of(pool),
             opts,
+            chain: opts.chains().last().copied().unwrap_or_default(),
             units_run: 0,
             batches_run: 0,
             warnings: Vec::new(),
@@ -1143,6 +1240,8 @@ struct Runner<'a> {
     run_id: &'a str,
     b: Backend,
     opts: &'a Options,
+    /// The chain this pass runs.
+    chain: Target,
     /// Units run so far in this run, for the test failpoints.
     units_run: usize,
     /// Batches committed in this run, for the test failpoints and stops.
@@ -1185,6 +1284,7 @@ impl Runner<'_> {
     fn refuse_unknown_rows(
         &mut self,
         project: &Project,
+        order: &[usize],
         rows: &HashMap<(String, String), Row>,
     ) -> Result<(), RunError> {
         let known: std::collections::HashSet<(&str, &str)> = project
@@ -1207,9 +1307,9 @@ impl Runner<'_> {
             return Ok(());
         }
         unknown.sort();
-        let pending: Vec<String> = project
-            .files
+        let pending: Vec<String> = order
             .iter()
+            .map(|&i| &project.files[i])
             .filter(|f| !rows.contains_key(&(f.file.app.clone(), f.file.id.clone())))
             .map(|f| format!("{}:{}", f.file.app, f.file.id))
             .collect();
@@ -1240,7 +1340,9 @@ impl Runner<'_> {
             .into_iter()
             .map(|r| ((r.app.clone(), r.id.clone()), r))
             .collect();
-        self.refuse_unknown_rows(project, &rows)?;
+        let order: Vec<usize> =
+            super::load::chain(project, self.chain, self.opts.database.as_deref()).collect();
+        self.refuse_unknown_rows(project, &order, &rows)?;
         self.adopted_later = project
             .files
             .iter()
@@ -1255,19 +1357,19 @@ impl Runner<'_> {
                 _ => None,
             })
             .collect();
-        if self.opts.fast_fresh && rows.is_empty() && self.opts.up_to.is_none() {
-            if let Some(applied) = self.fast_fresh(project).await? {
+        // Fresh: no row of this chain (an earlier chain's rows may exist).
+        let fresh = order.iter().all(|&i| {
+            let f = &project.files[i].file;
+            !rows.contains_key(&(f.app.clone(), f.id.clone()))
+        });
+        if self.opts.fast_fresh && fresh && self.opts.up_to.is_none() {
+            if let Some(applied) = self.fast_fresh(project, &order).await? {
                 return Ok(applied);
             }
         }
         let mut state = State::default();
         let mut memo = HashMemo::default();
         let mut applied = Vec::new();
-        let order = project
-            .order
-            .get(&self.opts.run_as.target())
-            .cloned()
-            .unwrap_or_default();
         let applied_set: std::collections::BTreeSet<usize> = order
             .iter()
             .copied()
@@ -1281,7 +1383,8 @@ impl Runner<'_> {
         // at that set stands for replaying them.
         let planned = match &self.opts.plan {
             Some(p)
-                if p.serves(project)
+                if self.chain == Target::Tenant
+                    && p.serves(project)
                     && order
                         .iter()
                         .skip_while(|i| applied_set.contains(i))
@@ -1363,12 +1466,12 @@ impl Runner<'_> {
 
     /// The fresh fast path (8.5): `None` when the target is not fresh or a
     /// fresh data step would run on a shape a later op changes.
-    async fn fast_fresh(&mut self, project: &Project) -> Result<Option<Vec<String>>, RunError> {
-        let order = project
-            .order
-            .get(&self.opts.run_as.target())
-            .cloned()
-            .unwrap_or_default();
+    async fn fast_fresh(
+        &mut self,
+        project: &Project,
+        order: &[usize],
+    ) -> Result<Option<Vec<String>>, RunError> {
+        let order = order.to_vec();
         if order.is_empty() {
             return Ok(None);
         }
@@ -1519,8 +1622,17 @@ impl Runner<'_> {
                         {
                             if t.column(&c.column).is_none() && live_has(&c.column) {
                                 t.columns.push(c.clone());
-                                t.indexes
-                                    .extend(ixs.iter().filter(|i| live_index(&i.name)).cloned());
+                            }
+                            if t.column(&c.column).is_some() {
+                                let fresh: Vec<_> = ixs
+                                    .iter()
+                                    .filter(|i| {
+                                        live_index(&i.name)
+                                            && !t.indexes.iter().any(|x| x.name == i.name)
+                                    })
+                                    .cloned()
+                                    .collect();
+                                t.indexes.extend(fresh);
                             }
                         }
                     }
@@ -1556,6 +1668,11 @@ impl Runner<'_> {
                 let has_col = live
                     .as_ref()
                     .is_some_and(|l| l.columns.iter().any(|c| c.name == *name));
+                // A column state holds came with its table: never added here.
+                let in_state = before
+                    .tables
+                    .get(table.as_str())
+                    .is_some_and(|t| t.column(name).is_some());
                 let has_ix = |n: &str| {
                     live.as_ref()
                         .is_some_and(|l| l.indexes.iter().any(|x| x.name == n))
@@ -1573,7 +1690,10 @@ impl Runner<'_> {
                 let diff: Vec<String> = drift(self.pool, &one)
                     .await?
                     .iter()
-                    .filter(|m| (has_col && m.object == obj) || mine.contains(&m.object.as_str()))
+                    .filter(|m| {
+                        ((has_col || in_state) && m.object == obj)
+                            || mine.contains(&m.object.as_str())
+                    })
                     .map(ToString::to_string)
                     .collect();
                 if !diff.is_empty() {
@@ -1588,7 +1708,7 @@ impl Runner<'_> {
                 }
                 // What is missing is made: the column, then its indexes.
                 let mut made = Vec::new();
-                if !has_col {
+                if !has_col && !in_state {
                     made.push(Op::AddColumn {
                         table: table.clone(),
                         column: column.clone(),
@@ -1996,8 +2116,14 @@ impl Runner<'_> {
     /// session may take to go.
     /// Replay context of this run's target.
     fn ctx(&self) -> Ctx<'static> {
+        // On the registry database an `every_database` file renders as a
+        // registry file does: extensions go to their own schema (8.2).
+        let target = match (self.chain, self.opts.run_as) {
+            (Target::EveryDatabase, RunAs::Registry) => Target::Registry,
+            (chain, _) => chain,
+        };
         Ctx {
-            target: self.opts.run_as.target(),
+            target,
             registry: None,
         }
     }

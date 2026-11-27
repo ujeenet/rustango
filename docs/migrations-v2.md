@@ -40,6 +40,15 @@ A project switches once with `adopt`; after that the engine v1 verbs refuse it.
 | `--max-duration <secs>` | `apply` | Stop between batches after this long; the next run resumes. |
 | `--offline` | `check` | Skip the checks that need a database. |
 | `--assume-all-applied` | `squash --prune` | Prune without checking the databases. |
+| `--database <alias>` | `apply`, `down`, `status` | Work on that configured database's `database` chain. |
+
+## Targets
+
+A file's `target` picks where it runs. `tenant` runs on the single database or on every tenant; `registry` runs once
+on the tenancy registry. `every_database` runs once per physical database, before the tenant chain: the single or
+registry database and each database-mode tenant database (schema-mode tenants share the registry's). Use it for
+extensions a database-mode tenant needs. `database` runs once on the configured database named by `"database"`:
+register it with `rustango::databases::register` before migrating; an app's files name one database.
 
 ## Under tenancy
 
@@ -59,3 +68,5 @@ model default maps to one.
 The framework's system chain owns every `rustango_*` table. A project file may declare one with `extern_table`
 and write its rows, but a file that creates, alters, drops or renames one is refused (`MV2-E034`).
 `adopt_table` takes over an existing table: it verifies the full definition and runs no DDL, or creates the table on a fresh database.
+`adopt_column` takes over one column the same way, and its `indexes` list takes over indexes on it: each is verified if present and created if missing.
+The system apps run before your project, on their own ledger `__rustango_system_v2`.

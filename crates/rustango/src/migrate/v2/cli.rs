@@ -78,6 +78,21 @@ fn positional<'a>(args: &'a [String], with_value: &[&str]) -> Option<&'a str> {
     None
 }
 
+/// `--database <alias>`: that configured database, whose `database` chain
+/// the verb works on.
+fn database(args: &[String]) -> Result<Option<(String, Pool)>, MigrateError> {
+    let Some(db) = value(args, "--database")? else {
+        return Ok(None);
+    };
+    let pool = crate::databases::get(db).ok_or_else(|| {
+        usage(format!(
+            "database `{db}` is not configured: register it with \
+             `rustango::databases::register(\"{db}\", pool)`"
+        ))
+    })?;
+    Ok(Some((db.to_owned(), pool)))
+}
+
 fn backend_named(s: &str) -> Result<Backend, MigrateError> {
     Ok(match s {
         "postgres" | "pg" | "postgresql" => Backend::Postgres,
@@ -117,7 +132,7 @@ pub(crate) async fn run<W: Write + Send>(
         "make" => make(pool, dir, rest, w),
         "apply" => apply(pool, dir, rest, w).await,
         "down" => down(pool, dir, rest, w).await,
-        "status" => status(pool, dir, w).await,
+        "status" => status(pool, dir, rest, w).await,
         "check" => check(pool, dir, rest, w).await,
         "sql" => sql(pool, dir, rest, w),
         "adopt" => adopt(pool, dir, w),
@@ -332,9 +347,13 @@ async fn apply<W: Write>(
             "--max-duration",
             "--accept-drift",
             "--accept-failover",
+            "--database",
         ],
     );
+    let db = database(args)?;
+    let pool = db.as_ref().map_or(pool, |(_, p)| p);
     let opts = super::run::Options {
+        database: db.as_ref().map(|(d, _)| d.clone()),
         max_duration,
         per_run_limits: true,
         accept_step_change,
@@ -397,9 +416,12 @@ async fn down<W: Write>(
     args: &[String],
     w: &mut W,
 ) -> Result<(), MigrateError> {
+    let db = database(args)?;
+    let pool = db.as_ref().map_or(pool, |(_, p)| p);
     let opts = super::run::Options {
         accept_data_loss: args.iter().any(|a| a == "--accept-data-loss"),
         cascade: args.iter().any(|a| a == "--cascade"),
+        database: db.as_ref().map(|(d, _)| d.clone()),
         ..super::run::Options::default()
     };
     let steps = match value(args, "--to")? {
@@ -412,7 +434,7 @@ async fn down<W: Write>(
             }
             return Ok(());
         }
-        None => match positional(args, &["--to"]) {
+        None => match positional(args, &["--to", "--database"]) {
             Some(n) => n
                 .parse()
                 .map_err(|_| usage(format!("`{n}` is not a number of steps")))?,
@@ -428,13 +450,26 @@ async fn down<W: Write>(
     Ok(())
 }
 
-async fn status<W: Write>(pool: &Pool, dir: &Path, w: &mut W) -> Result<(), MigrateError> {
+async fn status<W: Write>(
+    pool: &Pool,
+    dir: &Path,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), MigrateError> {
     use super::ledger::RowState;
     let project = super::load::load_project(dir).map_err(load)?;
+    let db = database(args)?;
+    let pool = db.as_ref().map_or(pool, |(_, p)| p);
     let rows = super::ledger::Ledger::of(&super::run::Options::default())
         .rows(pool)
         .await?;
-    for &i in project.order.get(&Target::Tenant).into_iter().flatten() {
+    let files: Vec<usize> = match &db {
+        Some((d, _)) => super::load::chain(&project, Target::Database, Some(d)).collect(),
+        None => super::load::chain(&project, Target::EveryDatabase, None)
+            .chain(super::load::chain(&project, Target::Tenant, None))
+            .collect(),
+    };
+    for i in files {
         let f = &project.files[i].file;
         let row = rows.iter().find(|r| r.app == f.app && r.id == f.id);
         let mark = match row.map(|r| &r.state) {

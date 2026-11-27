@@ -1067,16 +1067,8 @@ pub async fn ensure_ledger_pool_with_ledger(
 ///
 /// Every v1 ledger write starts here, so a database switched to engine v2
 /// is refused here.
-async fn create_ledger_locked(
-    pool: &crate::sql::Pool,
-    ledger: &str,
-    gate: Gate,
-) -> Result<(), MigrateError> {
-    // Engine v2 owns a switched database; it reaches the v1 system chain
-    // only through `Gate::V2`, which only it can mint.
-    if gate == Gate::V1 {
-        refuse_switched_db(pool, ledger).await?;
-    }
+async fn create_ledger_locked(pool: &crate::sql::Pool, ledger: &str) -> Result<(), MigrateError> {
+    refuse_switched_db(pool, ledger).await?;
     // Was a three-arm match on the dialect name with a hand-written
     // type + DEFAULT each, whose SQLite arm carried a copy of #1464's
     // canonical `strftime`. `Dialect` answers both halves now, so the
@@ -1094,11 +1086,11 @@ async fn create_ledger_locked(
 /// `ledger`'s names, creating it first: on PG a read before a tenant schema
 /// has its ledger finds `public`'s, and the cached plan keeps it (#2143).
 pub(crate) async fn ledger_names(
-    held: LockHeld,
+    _: LockHeld,
     pool: &crate::sql::Pool,
     ledger: &str,
 ) -> Result<HashSet<String>, MigrateError> {
-    create_ledger_locked(pool, ledger, held.0).await?;
+    create_ledger_locked(pool, ledger).await?;
     applied_set_pool_with_ledger(pool, ledger).await
 }
 
@@ -1275,25 +1267,25 @@ pub(crate) enum ChainOrigin {
 /// As [`migrate_pool_with_ledger_fake_initial`], plus catalog reads and
 /// what a [`ChainOrigin::Regenerated`] chain could not converge.
 pub(crate) async fn migrate_system_chain(
-    held: LockHeld,
+    _: LockHeld,
     pool: &crate::sql::Pool,
     chain: &super::make::SystemChain,
     run_dir: &Path,
     observer: Option<&dyn MigrationObserver>,
 ) -> Result<Vec<Migration>, MigrateError> {
     let origin = chain.origin();
-    create_ledger_locked(pool, SYSTEM_LEDGER_TABLE, held.0).await?;
+    create_ledger_locked(pool, SYSTEM_LEDGER_TABLE).await?;
     migrate_pool_body(pool, run_dir, SYSTEM_LEDGER_TABLE, true, origin, observer).await
 }
 
 /// [`migrate_pool_with_progress`] for a caller that holds the migrate lock.
 pub(crate) async fn migrate_pool_locked(
-    held: LockHeld,
+    _: LockHeld,
     pool: &crate::sql::Pool,
     dir: &Path,
     observer: Option<&dyn MigrationObserver>,
 ) -> Result<Vec<Migration>, MigrateError> {
-    create_ledger_locked(pool, LEDGER_TABLE, held.0).await?;
+    create_ledger_locked(pool, LEDGER_TABLE).await?;
     migrate_pool_body(
         pool,
         dir,
@@ -1445,6 +1437,10 @@ async fn reconcile_and_apply(
                     std::borrow::Cow::Owned(outside_tables(mig, &existing)),
                     Outcome::RanPartial { skipped: existing },
                 ),
+                ReconcileAction::RunWithoutIndexes(made) => (
+                    std::borrow::Cow::Owned(without_indexes(mig, &made)),
+                    Outcome::Ran,
+                ),
                 _ => (std::borrow::Cow::Borrowed(mig), Outcome::Ran),
             };
             let before = snapshot_before(all, mig)?;
@@ -1496,6 +1492,9 @@ enum ReconcileAction {
     /// Apply only the schema ops on other tables: a squash whose tables
     /// already exist still carries changes to tables it does not create.
     RunOutside(Vec<String>),
+    /// Apply it without creating the listed indexes, which exist already.
+    /// Only the framework's own system chain uses this.
+    RunWithoutIndexes(Vec<String>),
 }
 
 /// Decide whether a pending migration should run or be reconciled.
@@ -1665,6 +1664,12 @@ async fn reconcile(
                 );
                 return Ok(ReconcileAction::RunPartial(existing));
             }
+        }
+        // An index the framework made before its model declared it: MySQL
+        // has no `CREATE INDEX IF NOT EXISTS`, so skip it here instead.
+        let made = made_indexes(pool, mig).await?;
+        if !made.is_empty() {
+            return Ok(ReconcileAction::RunWithoutIndexes(made));
         }
     }
     Ok(ReconcileAction::Run)
@@ -1869,6 +1874,7 @@ pub(crate) async fn preview_pending(
             ReconcileAction::Run => mig,
             ReconcileAction::RunPartial(existing) => without_tables(&mig, &existing),
             ReconcileAction::RunOutside(existing) => outside_tables(&mig, &existing),
+            ReconcileAction::RunWithoutIndexes(made) => without_indexes(&mig, &made),
         };
         out.push(preview_migration(
             &effective,
@@ -1941,6 +1947,47 @@ fn create_table_targets(mig: &Migration) -> Vec<String> {
 /// Everything else (a column add, an alter, a drop, a data backfill, a
 /// callback) disqualifies the migration, so a genuine side effect is never
 /// faked away.
+/// The indexes `mig` creates that the database already has, by name.
+async fn made_indexes(
+    pool: &crate::sql::Pool,
+    mig: &Migration,
+) -> Result<Vec<String>, MigrateError> {
+    use super::diff::SchemaChange as SC;
+    let mut made = Vec::new();
+    let mut schema = None;
+    for op in &mig.forward {
+        if let Operation::Schema(SC::CreateIndex { name, table, .. }) = op {
+            if schema.is_none() {
+                schema = Some(
+                    super::ensure::creation_schema(pool)
+                        .await?
+                        .unwrap_or_default(),
+                );
+            }
+            let s = schema.as_deref().unwrap_or_default();
+            if super::inspectdb::index_exists(pool, s, table, name).await? {
+                made.push(name.clone());
+            }
+        }
+    }
+    Ok(made)
+}
+
+/// `mig` without its `CreateIndex` ops for `made`.
+fn without_indexes(mig: &Migration, made: &[String]) -> Migration {
+    use super::diff::SchemaChange as SC;
+    let forward = mig
+        .forward
+        .iter()
+        .filter(|op| !matches!(op, Operation::Schema(SC::CreateIndex { name, .. }) if made.contains(name)))
+        .cloned()
+        .collect();
+    Migration {
+        forward,
+        ..mig.clone()
+    }
+}
+
 fn create_only_tables(mig: &Migration) -> Option<Vec<String>> {
     use super::diff::SchemaChange as SC;
     let mut tables: Vec<String> = Vec::new();
@@ -2315,7 +2362,7 @@ where
         pool,
         &LockScope::Session,
         Box::pin(async {
-            create_ledger_locked(pool, ledger, Gate::V1).await?;
+            create_ledger_locked(pool, ledger).await?;
             body.await
         }),
     )
@@ -2323,20 +2370,9 @@ where
 }
 
 /// Proof the caller holds the migrate lock; only [`with_migrate_lock_held`]
-/// and [`with_migrate_lock_held_v2`] mint one, so the `*_locked` runners
-/// can't run unlocked. It carries which engine took the lock.
+/// mints one, so the `*_locked` runners can't run unlocked.
 #[derive(Clone, Copy)]
-pub(crate) struct LockHeld(Gate);
-
-/// Which engine holds the lock. `V2` needs a [`V2Token`], which only the v2
-/// runner can build, so no v1 caller can skip the switched-DB refusal.
-///
-/// [`V2Token`]: super::v2::run::V2Token
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Gate {
-    V1,
-    V2,
-}
+pub(crate) struct LockHeld(());
 
 /// Run `body` under one migrate lock. Locks don't nest across pooled
 /// connections, so `body` must call the `LockHeld` runners, not re-lock.
@@ -2348,28 +2384,21 @@ where
     F: FnOnce(LockHeld) -> Fut,
     Fut: std::future::Future<Output = Result<R, MigrateError>>,
 {
-    hold_migrate_lock(
-        pool,
-        &LockScope::Session,
-        Box::pin(body(LockHeld(Gate::V1))),
-    )
-    .await
+    hold_migrate_lock(pool, &LockScope::Session, Box::pin(body(LockHeld(())))).await
 }
 
-/// [`with_migrate_lock_held`] for the engine v2 runner: the same lock key,
-/// so v1 and v2 runs exclude each other, and a [`LockHeld`] that lets the v1
-/// system chain run on a database switched to v2.
+/// The migrate lock for the engine v2 runner: the same key, so v1 and v2
+/// runs exclude each other. It mints no [`LockHeld`]: v2 runs no v1 chain.
 pub(crate) async fn with_migrate_lock_held_v2<F, Fut, R>(
-    _: super::v2::run::V2Token,
     pool: &crate::sql::Pool,
     scope: &LockScope,
     body: F,
 ) -> Result<R, MigrateError>
 where
-    F: FnOnce(LockHeld) -> Fut,
+    F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<R, MigrateError>>,
 {
-    hold_migrate_lock(pool, scope, Box::pin(body(LockHeld(Gate::V2)))).await
+    hold_migrate_lock(pool, scope, Box::pin(body())).await
 }
 
 /// Which lock a run takes (6.6). Built from the target, never from the
@@ -5390,9 +5419,14 @@ mod tests {
         let v2 = super::v2_ledger(super::LEDGER_TABLE);
         assert_eq!(v2, "__rustango_migrations_v2");
         let mut want = vec![super::LEDGER_TABLE, super::SYSTEM_LEDGER_TABLE];
-        let derived: Vec<String> = ["", "_progress", "_undo", "_events"]
+        let system = crate::migrate::v2::ledger::SYSTEM_LEDGER;
+        let derived: Vec<String> = [v2.as_str(), system]
             .iter()
-            .map(|s| format!("{v2}{s}"))
+            .flat_map(|t| {
+                ["", "_progress", "_undo", "_events"]
+                    .iter()
+                    .map(move |s| format!("{t}{s}"))
+            })
             .collect();
         want.extend(derived.iter().map(String::as_str));
         assert_eq!(names, want);

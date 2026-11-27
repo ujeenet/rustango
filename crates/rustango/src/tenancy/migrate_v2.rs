@@ -23,6 +23,13 @@ pub(crate) struct Target {
     owned: bool,
 }
 
+impl Target {
+    /// A database-mode tenant: its database is not the registry's.
+    pub(crate) fn own_database(&self) -> bool {
+        !matches!(self.scope, LockScope::Schema(_))
+    }
+}
+
 /// The login the fleet migrates database-mode tenants as, from
 /// `RUSTANGO_TENANT_MIGRATOR=user:password`. When it differs from a
 /// tenant's own login, that login gets no write access to the ledger (8.1).
@@ -333,9 +340,11 @@ async fn fleet_orgs(
 }
 
 /// A tenant run's options.
-fn tenant_opts(t: &Target) -> Options {
+pub(crate) fn tenant_opts(t: &Target) -> Options {
     Options {
-        run_as: RunAs::Tenant,
+        run_as: RunAs::Tenant {
+            own_database: t.own_database(),
+        },
         lock_scope: t.scope.clone(),
         ..Options::default()
     }

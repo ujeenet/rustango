@@ -329,10 +329,9 @@ async fn runs_exclude_each_other(b: B) {
     let holder_pool = pool.clone();
     let holder = tokio::spawn(async move {
         crate::migrate::with_migrate_lock_held_v2(
-            V2Token(()),
             &holder_pool,
             &crate::migrate::LockScope::Session,
-            |_| async move {
+            || async move {
                 let _ = tx.send(());
                 let _ = go_rx.await;
                 Ok(())
@@ -1844,10 +1843,9 @@ async fn a_dropped_run_frees_the_lock(b: B) {
     let lock = crate::migrate::with_lock_timeout(
         Duration::from_secs(if lite { 12 } else { 3 }),
         crate::migrate::with_migrate_lock_held_v2(
-            V2Token(()),
             pool,
             &crate::migrate::LockScope::Session,
-            |_| async { Ok(()) },
+            || async { Ok(()) },
         ),
     )
     .await;
@@ -2984,10 +2982,9 @@ async fn a_waiter_exits_when_the_holders_heartbeat_is_stale(b: B) {
         let hpool = Pool::connect(&db.url).await.unwrap();
         let holder = tokio::spawn(async move {
             crate::migrate::with_migrate_lock_held_v2(
-                V2Token(()),
                 &hpool,
                 &crate::migrate::LockScope::Session,
-                |_| async move {
+                || async move {
                     held_tx.send(()).unwrap();
                     let _ = tokio::time::timeout(Duration::from_secs(20), go).await;
                     Ok(())
@@ -4037,10 +4034,9 @@ async fn schema_scopes_on_one_pool_lock_apart(b: B) {
     let hpool = Pool::connect(&db.url).await.unwrap();
     let holder = tokio::spawn(async move {
         crate::migrate::with_migrate_lock_held_v2(
-            V2Token(()),
             &hpool,
             &crate::migrate::LockScope::Schema("t1".into()),
-            |_| async move {
+            || async move {
                 held_tx.send(()).unwrap();
                 tokio::time::sleep(Duration::from_millis(1500)).await;
                 Ok(())
@@ -4052,20 +4048,16 @@ async fn schema_scopes_on_one_pool_lock_apart(b: B) {
     });
     held.await.unwrap();
     let started = std::time::Instant::now();
-    crate::migrate::with_migrate_lock_held_v2(V2Token(()), &db.pool, &scope("t2"), |_| async {
-        Ok(())
-    })
-    .await
-    .unwrap();
+    crate::migrate::with_migrate_lock_held_v2(&db.pool, &scope("t2"), || async { Ok(()) })
+        .await
+        .unwrap();
     assert!(
         started.elapsed() < Duration::from_millis(1000),
         "t2 waited on t1"
     );
     let again = crate::migrate::with_lock_timeout(
         Duration::from_millis(300),
-        crate::migrate::with_migrate_lock_held_v2(V2Token(()), &db.pool, &scope("t1"), |_| async {
-            Ok(())
-        }),
+        crate::migrate::with_migrate_lock_held_v2(&db.pool, &scope("t1"), || async { Ok(()) }),
     )
     .await;
     assert!(again.is_err(), "a second t1 run did not wait");
@@ -4276,6 +4268,9 @@ per_backend!(
     portable_defaults_render_per_backend,
     v1_framework_tables_adopt_cleanly,
     adopt_column_verifies_adds_or_refuses,
+    adopt_column_indexes_verify_or_create,
+    every_database_and_database_targets,
+    upgrade_from_0_69_runs_no_ddl,
 );
 
 /// Legacy SQLite datetime text is swept before the first data unit, so a
@@ -4999,4 +4994,304 @@ async fn adopt_column_verifies_adds_or_refuses(b: B) {
         code(migrate(&late.pool, &adopt, &opts()).await),
         Code::Drift
     );
+}
+
+/// `adopt_column` with `indexes` (design items 23-24): on a column the base
+/// `adopt_table` already took over, an index that exists is verified with no
+/// DDL, a missing one is created, and one that differs is refused.
+async fn adopt_column_indexes_verify_or_create(b: B) {
+    let fields = json!([
+        {"column": "id", "ty": "i64", "primary_key": true, "nullable": false},
+        {"column": "a", "ty": "string", "max_length": 50, "nullable": false},
+        {"column": "b", "ty": "string", "max_length": 50, "nullable": false}]);
+    let a = fields[1].clone();
+    let uq = json!({"name": "ai_t_ab", "columns": ["a", "b"], "unique": true});
+    let root = tempfile::tempdir().unwrap();
+    let adopt = root.path().join("adopt").join("migrations");
+    let base = json!([{"op": "adopt_table", "v": 1,
+        "table": {"name": "ai_t", "scope": "tenant", "fields": fields.clone()}}]);
+    put(&adopt, "0001_base", &v2("0001_base", &[], base.clone()));
+    let side = |column: Value| {
+        json!([{"op": "adopt_column", "v": 1, "table": "ai_t", "column": column,
+            "indexes": [uq.clone()]}])
+    };
+    put(
+        &adopt,
+        "0002_key",
+        &v2("0002_key", &["0001_base"], side(a.clone())),
+    );
+    let made = |tag: &str, indexes: Value| {
+        let d = root.path().join(tag).join("migrations");
+        put(
+            &d,
+            "0001_t",
+            &v2(
+                "0001_t",
+                &[],
+                json!([{"op": "create_table", "v": 1, "indexes": indexes,
+                    "table": {"name": "ai_t", "scope": "tenant", "fields": fields.clone()}}]),
+            ),
+        );
+        d
+    };
+    let other = Options {
+        ledger: Some("__made_migrations__".into()),
+        ..opts()
+    };
+    let index_names = |pool: &Pool| {
+        let pool = pool.clone();
+        async move {
+            super::super::catalog::read_table(&pool, "ai_t")
+                .await
+                .unwrap()
+                .map(|l| l.indexes.into_iter().map(|i| i.name).collect::<Vec<_>>())
+                .unwrap_or_default()
+        }
+    };
+    // Present and the same: recorded, no units at all.
+    let Some(with) = fresh(b).await else { return };
+    migrate(&with.pool, &made("with", json!([uq.clone()])), &other)
+        .await
+        .unwrap();
+    migrate(&with.pool, &adopt, &opts())
+        .await
+        .unwrap_or_else(|e| panic!("{b:?}: {e}"));
+    let rows = Ledger::default_names().rows(&with.pool).await.unwrap();
+    assert!(
+        rows.iter().all(|r| r.unit_plan.is_empty()),
+        "{b:?}: {rows:?}"
+    );
+    // Absent: created; rolling the side app back forgets it.
+    let without = fresh(b).await.unwrap();
+    migrate(&without.pool, &made("without", json!([])), &other)
+        .await
+        .unwrap();
+    migrate(&without.pool, &adopt, &opts())
+        .await
+        .unwrap_or_else(|e| panic!("{b:?}: {e}"));
+    assert!(index_names(&without.pool)
+        .await
+        .contains(&"ai_t_ab".to_owned()));
+    downgrade(&without.pool, &adopt, 1, &opts()).await.unwrap();
+    assert!(index_names(&without.pool)
+        .await
+        .contains(&"ai_t_ab".to_owned()));
+    // Present but not unique: refused.
+    let differs = fresh(b).await.unwrap();
+    let plain = json!([{"name": "ai_t_ab", "columns": ["a", "b"]}]);
+    migrate(&differs.pool, &made("differs", plain), &other)
+        .await
+        .unwrap();
+    assert_eq!(
+        code(migrate(&differs.pool, &adopt, &opts()).await),
+        Code::Drift,
+        "{b:?}"
+    );
+    // A column already in state is taken over only as it is.
+    let wide = root.path().join("wide").join("migrations");
+    put(&wide, "0001_base", &v2("0001_base", &[], base));
+    let mut a_wide = a;
+    a_wide["max_length"] = json!(80);
+    put(
+        &wide,
+        "0002_key",
+        &v2("0002_key", &["0001_base"], side(a_wide)),
+    );
+    let e = super::super::load::load_project(&wide)
+        .and_then(|p| super::super::load::replay(&p).map(drop))
+        .expect_err("a different column");
+    assert!(
+        e.to_string().contains("differs from the column in state"),
+        "{e}"
+    );
+}
+
+/// `every_database` and `database` targets (design item 20): the first runs
+/// on this database before the tenant chain, in the same ledger, and rolls
+/// back with it; the second runs once on the configured database it names,
+/// in that database's ledger, and an unconfigured name is refused.
+async fn every_database_and_database_targets(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let other = fresh(b).await.unwrap();
+    let alias = format!("mv2_other_{b:?}").to_lowercase();
+    crate::databases::register(alias.clone(), other.pool.clone());
+    let table = |name: &str, target: &str| {
+        json!([{"op": "create_table", "v": 1, "table": {"name": name, "scope": target,
+            "fields": [{"column": "id", "ty": "i64", "primary_key": true, "nullable": false}]}}])
+    };
+    let on = |id: &str, target: &str, ops: Value| {
+        let mut v = v2(id, &[], ops);
+        v["target"] = json!(target);
+        v
+    };
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    put(
+        &dir,
+        "0001_marks",
+        &on(
+            "0001_marks",
+            "every_database",
+            table("ed_marks", "every_database"),
+        ),
+    );
+    put(
+        &dir,
+        "0002_items",
+        &v2("0002_items", &[], table("ed_items", "tenant")),
+    );
+    let elsewhere = root.path().join("reports").join("migrations");
+    let mut far = on("0001_far", "database", table("ed_far", "database"));
+    far["app"] = json!("reports");
+    far["database"] = json!(alias);
+    put(&elsewhere, "0001_far", &far);
+    let rep = migrate(&db.pool, &dir, &opts())
+        .await
+        .unwrap_or_else(|e| panic!("{b:?}: {e}"));
+    assert_eq!(
+        rep.applied,
+        ["0001_marks", "0002_items", "0001_far"],
+        "{b:?}"
+    );
+    let has = |pool: &Pool, t: &'static str| {
+        let pool = pool.clone();
+        async move {
+            super::super::catalog::read_table(&pool, t)
+                .await
+                .unwrap()
+                .is_some()
+        }
+    };
+    assert!(has(&db.pool, "ed_marks").await && has(&db.pool, "ed_items").await);
+    assert!(!has(&db.pool, "ed_far").await, "{b:?}");
+    assert!(has(&other.pool, "ed_far").await && !has(&other.pool, "ed_items").await);
+    let ids = |rows: Vec<Row>| rows.into_iter().map(|r| r.id).collect::<Vec<_>>();
+    let ledger = Ledger::default_names();
+    assert_eq!(
+        ids(ledger.rows(&db.pool).await.unwrap()),
+        ["0001_marks", "0002_items"]
+    );
+    assert_eq!(ids(ledger.rows(&other.pool).await.unwrap()), ["0001_far"]);
+    // A second run applies nothing anywhere.
+    assert!(migrate(&db.pool, &dir, &opts())
+        .await
+        .unwrap()
+        .applied
+        .is_empty());
+    // Rollback on each database, as a single database rolls back.
+    let far_opts = Options {
+        database: Some(alias.clone()),
+        ..opts()
+    };
+    let back = downgrade(&other.pool, &dir, 1, &far_opts).await.unwrap();
+    assert_eq!(back.rolled_back, ["0001_far"], "{b:?}");
+    assert!(!has(&other.pool, "ed_far").await);
+    let back = downgrade(&db.pool, &dir, 2, &opts()).await.unwrap();
+    assert_eq!(back.rolled_back, ["0002_items", "0001_marks"], "{b:?}");
+    // A database nobody configured is refused.
+    let mut lost = far;
+    lost["database"] = json!("mv2_nowhere");
+    put(&elsewhere, "0001_far", &lost);
+    assert_eq!(code(migrate(&db.pool, &dir, &opts()).await), Code::State);
+}
+
+/// A database as 0.69.0 left it: its v1 system chain (built without the
+/// `sso` and `admin-sso` columns when `email` is false), the boot-time
+/// bootstrap tables and content-type index, and the project's v1 files.
+/// The framework models are unchanged since 0.69.0, so today's v1 chain
+/// is that release's.
+async fn v069_database(pool: &Pool, root: &Path, dir: &Path, email: bool) {
+    rustango_v1_system_chain(root, email);
+    let sys = root.join("system").join("migrations");
+    let chain = crate::migrate::make::SystemChain::shipped(sys.clone());
+    super::super::super::runner::with_migrate_lock_held(pool, |held| async move {
+        super::super::super::runner::migrate_system_chain(held, pool, &chain, &sys, None).await
+    })
+    .await
+    .unwrap();
+    crate::migrate::manage::ensure_bootstrap_tables(pool)
+        .await
+        .unwrap();
+    crate::migrate::manage::ensure_tenant_bootstrap_tables(pool)
+        .await
+        .unwrap();
+    crate::contenttypes::ensure_table(pool).await.unwrap();
+    v1_project(dir);
+    crate::migrate::migrate_pool(pool, dir).await.unwrap();
+}
+
+/// Today's tenant-scope v1 system chain under `root`, without the
+/// feature-gated `email` columns unless `email`.
+fn rustango_v1_system_chain(root: &Path, email: bool) {
+    crate::migrate::make_migrations_system(root, crate::core::ModelScope::Tenant, None).unwrap();
+    if email {
+        return;
+    }
+    let sys = root.join("system").join("migrations");
+    for e in std::fs::read_dir(&sys).unwrap() {
+        let p = e.unwrap().path();
+        let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        for t in v["snapshot"]["tables"].as_array_mut().unwrap() {
+            if matches!(
+                t["name"].as_str(),
+                Some("rustango_users" | "rustango_admin_users")
+            ) {
+                t["fields"]
+                    .as_array_mut()
+                    .unwrap()
+                    .retain(|f| f["column"] != "email");
+            }
+        }
+        std::fs::write(&p, v.to_string()).unwrap();
+    }
+}
+
+/// The 0.69.0 upgrade (13.1 row 7): adopt, then the first v2 run takes over
+/// every framework table with no DDL on a database built with every
+/// feature; one built without `sso`/`admin-sso` gets just those columns
+/// and their indexes.
+async fn upgrade_from_0_69_runs_no_ddl(b: B) {
+    for email in [true, false] {
+        let Some(db) = fresh(b).await else { return };
+        let pool = &db.pool;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("migrations");
+        v069_database(pool, root.path(), &dir, email).await;
+        super::super::adopt::adopt(&dir, backend_of(pool)).unwrap();
+        let rep = migrate(pool, &dir, &opts())
+            .await
+            .unwrap_or_else(|e| panic!("{b:?} email={email}: {e}"));
+        assert!(!rep.system.is_empty(), "{b:?}");
+        let ran: Vec<String> = Ledger::system()
+            .rows(pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|r| !r.unit_plan.is_empty())
+            .map(|r| r.app)
+            .collect();
+        let want: &[&str] = if email {
+            &[]
+        } else {
+            &["rustango_admin_sso", "rustango_sso"]
+        };
+        assert_eq!(ran, want, "{b:?} email={email}");
+        // MySQL renames the project's v1 check to its v2 name, nothing else.
+        let project = Ledger::default_names().rows(pool).await.unwrap();
+        assert!(
+            project
+                .iter()
+                .flat_map(|r| &r.unit_plan)
+                .all(|u| b == B::My && u.sql.iter().all(|s| s.contains("DROP CHECK"))),
+            "{b:?}: {project:?}"
+        );
+        for t in ["rustango_users", "rustango_admin_users"] {
+            assert!(
+                columns(pool, t).await.contains(&"email".to_owned()),
+                "{b:?} {t}"
+            );
+        }
+        let again = migrate(pool, &dir, &opts()).await.unwrap();
+        assert!(again.system.is_empty() && again.applied.is_empty(), "{b:?}");
+    }
 }

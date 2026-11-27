@@ -235,7 +235,20 @@ pub(crate) fn apply(
             column,
             indexes,
         } => {
-            add_column(s, at, table, column, None, created_here)?;
+            // A column state holds is taken over as it is, so it must match.
+            match get(s, at, table)?.column(&column.column.column) {
+                Some(have) if *have == column.column && column.fk.is_none() => {}
+                Some(_) => {
+                    return Err(fail(
+                        at,
+                        format!(
+                            "adopt_column `{table}.{}` differs from the column in state",
+                            column.column.column
+                        ),
+                    ))
+                }
+                None => add_column(s, at, table, column, None, created_here)?,
+            }
             for index in indexes {
                 apply(
                     s,

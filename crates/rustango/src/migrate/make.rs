@@ -539,8 +539,8 @@ pub fn make_migrations_system(
     make_system_step(project_root, scope, name_override)
 }
 
-/// [`make_migrations_system`] without the project check: the system chain
-/// stays engine v1 in an engine v2 project too, and both engines generate it.
+/// [`make_migrations_system`] without the project check, for the v1 runner's
+/// catch-up step (engine v2 ships its system apps in the crate).
 fn make_system_step(
     project_root: &Path,
     scope: crate::core::ModelScope,

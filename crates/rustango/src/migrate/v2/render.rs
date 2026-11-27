@@ -4,7 +4,7 @@
 //! only its own statements, in place; defaults go out exactly as written;
 //! no `IF [NOT] EXISTS` except `create_extension`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::format::{File, Kind, Op, OpTx, Probe as FileProbe, ProbeKind};
@@ -405,19 +405,21 @@ pub(crate) fn render_project(
     let mut out = Vec::new();
     let mut registry: Option<State> = None;
     for (&target, idx) in &project.order {
-        let mut state = State::default();
+        // Each configured database has a state of its own.
+        let mut by_db: BTreeMap<Option<&str>, State> = BTreeMap::new();
         for &i in idx {
             let f = &project.files[i];
             let ctx = Ctx {
                 target,
                 registry: registry.as_ref(),
             };
-            let (units, after) = render_plan(&state, &f.file, &f.at, &ctx, b)?;
+            let state = by_db.entry(f.file.database.as_deref()).or_default();
+            let (units, after) = render_plan(state, &f.file, &f.at, &ctx, b)?;
             out.push((i, units));
-            state = after;
+            *state = after;
         }
         if target == super::state::Target::Registry {
-            registry = Some(state);
+            registry = by_db.pop_last().map(|(_, s)| s);
         }
     }
     Ok(out)

@@ -278,7 +278,12 @@ pub(crate) fn keys(op: &Op, at: &str) -> Result<Keys, LoadError> {
 /// # Errors
 /// [`Code::Conflict`] on the first conflict.
 pub(crate) fn refuse_conflicts(project: &Project) -> Result<(), LoadError> {
-    for target in [Target::Registry, Target::Tenant] {
+    for target in [
+        Target::EveryDatabase,
+        Target::Registry,
+        Target::Tenant,
+        Target::Database,
+    ] {
         let Some(order) = project.order.get(&target) else {
             continue;
         };

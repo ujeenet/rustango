@@ -170,6 +170,7 @@ untouched.
 - Loading an engine v2 project now refuses a merge file whose branches do not commute (`MV2-E033`); rebase one branch instead.
 - On SQLite, a migrate run that is dropped mid-statement now keeps the migrate lock until that statement ends (up to 10 s): SQLite runs it in-process, and the next run must not race its late write.
 - An engine v2 project file that creates, alters, drops or renames a `rustango_*` table is refused at load (`MV2-E034`): the framework's system chain owns them. Declare one with `extern_table` to point an FK at it.
+- `ContentType` now declares its `(app_label, model_name)` unique index, so on engine v1 the next `migrate` writes a system step that adds it (an index already there is kept), and `ContentType::upsert` targets that pair instead of the primary key.
 
 ## 0.70.0
 

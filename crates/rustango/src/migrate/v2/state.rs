@@ -19,20 +19,27 @@ fn is_false(b: &bool) -> bool {
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
 )]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum Target {
+    /// Once per physical database: the single or registry database and
+    /// each database-mode tenant (design item 20).
+    EveryDatabase,
     /// Once, on the registry database.
     Registry,
     /// Every tenant (or the single database).
     #[default]
     Tenant,
+    /// One configured database, named by the file's `database`.
+    Database,
 }
 
 impl Target {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
+            Self::EveryDatabase => "every_database",
             Self::Registry => "registry",
             Self::Tenant => "tenant",
+            Self::Database => "database",
         }
     }
 }

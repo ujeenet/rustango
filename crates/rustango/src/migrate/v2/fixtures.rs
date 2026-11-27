@@ -34,6 +34,11 @@ pub(super) const CHECKSUM_GOLDENS: &[(&str, &str, &str)] = &[
         include_str!("fixtures/0014_adopt_column.json"),
         "a7779609726e6218dc183f145c022c92683b66e9d787a5a4a2406098aab30702",
     ),
+    (
+        "0015_adopt_column_indexes.json",
+        include_str!("fixtures/0015_adopt_column_indexes.json"),
+        "98cfd0ab92ed9a3993bac50e647be34a9e9607ffe8295b2276a56a757006a161",
+    ),
 ];
 
 /// Every fixture is a valid v2 file, and the loader records the golden checksum.

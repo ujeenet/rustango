@@ -129,8 +129,9 @@ impl ProjectEngine {
     }
 
     /// The project around the migrations dir `dir`, by its app folders. The
-    /// `system` folder is the framework's chain: it stays engine v1 until it
-    /// moves to v2, so it never decides the engine and a v2 file there is refused.
+    /// `system` folder is an engine v1 project's framework chain (engine v2
+    /// ships its own in the crate), so it never decides the engine and a v2
+    /// file there is refused.
     ///
     /// # Errors
     /// As [`Self::detect`], or [`MigrateError::SystemChainV2`].

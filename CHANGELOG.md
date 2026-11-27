@@ -26,6 +26,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `make` puts contract ops (drops, renames, NOT NULL on an existing column) in a `phase: contract` file of their own (`--no-split` keeps one file). `check` warns (`MV2-W012`) when a contract file and its expand file are both pending, and refuses a batched data op next to a contract op unless the file is `offline`.
 - `check --drift` compares the database with the state at its applied migrations.
 - Engine v2 `adopt_column` takes over a column: verified if it exists, added if not; rollback forgets it. An `adopt_table` earlier in the same run accepts a live column that a pending `adopt_column` takes over.
+- Engine v2 `adopt_column` takes an `indexes` list: each index is verified if present and created if not; rollback forgets them. A column already in state is taken over as it is.
+- Engine v2 runs the framework's system apps first, on their own ledger `__rustango_system_v2` in each database; project ledgers never hold them.
+- Engine v2 targets `every_database` (once on the single or registry database and on each database-mode tenant database, before the tenant chain, in that database's ledger) and `database` (`"database": "<alias>"`: once on that configured database). `apply`, `down` and `status` take `--database <alias>`.
+- `ContentType` declares its natural-key unique index (`rustango_content_types_natural_key`); engine v2 verifies or creates it in a system app of its own.
 - Engine v2 typed `portable_default` (`now`, `true`, `false`, `empty_object`, `empty_array`): one file, each backend's own spelling. `make` writes it for model defaults that map to it instead of refusing them.
 - Engine v2 `adopt_table` verifies an existing table's full definition and runs no DDL, or creates the table on a fresh database. `adopt` lists every framework table a v1 chain touched as `extern_table`.
 - Fresh tenants in a fleet run install the latest state in one step and run the fresh seeds, when every seed comes after the last change to its tables.
@@ -33,6 +37,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Fixed
 
 - `runserver` on Postgres migrates through the same boot route as the other backends.
+- An engine v1 system step on MySQL skips an index the database already has, as `IF NOT EXISTS` does on Postgres and SQLite.
 - A tenant schema holding only an engine v2 ledger is not taken for a foreign schema.
 
 ## [0.70.0] — 2026-11-22

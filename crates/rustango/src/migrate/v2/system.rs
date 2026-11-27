@@ -22,6 +22,14 @@ const GATED_COLUMNS: &[(&str, &str, &str)] = &[
     ("rustango_users", "email", "rustango_sso"),
 ];
 
+/// Indexes the framework made outside its models before they were declared
+/// (design item 24): `(index, app)`. Each ships as an `adopt_column` of its
+/// first column, so it is verified if present and created if not.
+const SIDE_INDEXES: &[(&str, &str)] = &[(
+    "rustango_content_types_natural_key",
+    "rustango_contenttypes_natural_key",
+)];
+
 /// Whether the compiled models hold `table` (and `column` of it).
 fn compiled(table: &str, column: Option<&str>) -> bool {
     let Some(e) = crate::core::ModelEntry::for_table(table) else {
@@ -132,11 +140,30 @@ pub(crate) fn generate() -> Result<Vec<(String, String, String)>, LoadError> {
         }
         let mut op = json!({"op": "adopt_table", "v": 1, "table": table});
         let gated_cols: Vec<&str> = gated.iter().map(|g| g.1).collect();
-        let indexes: Vec<&super::state::IndexDef> = state
-            .indexes
-            .iter()
-            .filter(|i| !(i.columns.len() == 1 && gated_cols.contains(&i.columns[0].as_str())))
-            .collect();
+        let mut indexes: Vec<&super::state::IndexDef> = Vec::new();
+        for i in &state.indexes {
+            if i.columns.len() == 1 && gated_cols.contains(&i.columns[0].as_str()) {
+                continue;
+            }
+            let Some((_, side)) = SIDE_INDEXES.iter().find(|s| s.0 == i.name) else {
+                indexes.push(i);
+                continue;
+            };
+            let first = &i.columns[0];
+            let c = state
+                .columns
+                .iter()
+                .find(|c| c.column == *first)
+                .expect("an index column is in its table");
+            let entry = ops
+                .entry((*side).to_owned())
+                .or_insert_with(|| (target, Vec::new(), BTreeSet::new()));
+            entry
+                .1
+                .push(json!({"op": "adopt_column", "v": 1, "table": t.name,
+                "column": super::make::field_json(c, None), "indexes": [i]}));
+            entry.2.insert(format!("{app}:0001_initial"));
+        }
         if !indexes.is_empty() {
             op["indexes"] = serde_json::to_value(&indexes).expect("indexes");
         }
