@@ -381,6 +381,8 @@ async fn run_system(pool: &Pool, run_id: &str, opts: &Options) -> Result<Vec<Str
     let ledger = Ledger::system();
     // Only the project's own run knobs stay; failpoints and targets are its.
     let sys = Options {
+        // A shutdown stops the project pass; the system pass is short.
+        stop: None,
         up_to: None,
         stop_before_contract: false,
         plan: None,
