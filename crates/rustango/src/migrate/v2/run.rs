@@ -101,7 +101,7 @@ pub(crate) struct Options {
 
 impl Options {
     /// The chains a run on its pool runs, in order.
-    fn chains(&self) -> &'static [Target] {
+    pub(crate) fn chains(&self) -> &'static [Target] {
         if self.database.is_some() {
             &[Target::Database]
         } else {
@@ -554,8 +554,8 @@ async fn migrate_project(
             return Err(refused(
                 Code::State,
                 &f.at,
-                "a registry migration runs under tenancy: `manage migrate-registry` (or \
-                 `migrate-tenants`)",
+                "a registry migration runs under tenancy: `manage dbmigrate apply` from the \
+                 tenancy CLI migrates the registry, then every tenant",
             ));
         }
     }
@@ -578,6 +578,9 @@ async fn migrate_project(
         .collect();
     super::data::refuse_misses(&misses, "plan")?;
     let warnings = step_changes(pool, &ledger, project, &rows, opts).await?;
+    // Before the system chain and the ledger: a refused switch leaves the
+    // database as engine v1 can still migrate it.
+    refuse_behind(pool, project, &done, opts).await?;
     let leaked_before = super::step::leaked_bytes();
     let sweep = sweep_targets(project)?;
     let run_id = new_run_id();
@@ -732,6 +735,64 @@ async fn migrate_project(
     })
 }
 
+/// The v1 ledger an adopt checkpoint reads (9.2): the run's custom one, else
+/// the default; empty when absent.
+async fn legacy_applied(
+    pool: &Pool,
+    opts: &Options,
+) -> Result<std::collections::HashSet<String>, RunError> {
+    let v1 = opts
+        .ledger
+        .as_deref()
+        .unwrap_or(crate::migrate::LEDGER_TABLE);
+    if crate::migrate::try_table_exists_here(pool, v1).await? {
+        Ok(crate::migrate::applied_set_pool_with_ledger(pool, v1).await?)
+    } else {
+        Ok(Default::default())
+    }
+}
+
+/// A database whose v1 ledger stops short of an adopt checkpoint's base.
+fn behind(at: &str, legacy: &str) -> RunError {
+    refused(
+        Code::Behind,
+        at,
+        format!(
+            "this database is behind the engine v1 head: run `manage migrate` from the commit \
+             before `dbmigrate adopt` to reach `{legacy}`, then `manage dbmigrate apply`"
+        ),
+    )
+}
+
+/// Each pending adopt checkpoint whose v1 base this database has not
+/// reached, refused before anything is written.
+async fn refuse_behind(
+    pool: &Pool,
+    project: &Project,
+    done: &std::collections::HashSet<(String, String)>,
+    opts: &Options,
+) -> Result<(), RunError> {
+    let pending: Vec<&Loaded> = opts
+        .chains()
+        .iter()
+        .flat_map(|&c| super::load::chain(project, c, opts.database.as_deref()))
+        .map(|i| &project.files[i])
+        .filter(|f| f.file.base.is_some())
+        .filter(|f| !done.contains(&(f.file.app.clone(), f.file.id.clone())))
+        .collect();
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let legacy = legacy_applied(pool, opts).await?;
+    for f in pending {
+        let base = f.file.base.as_ref().expect("filtered");
+        if !legacy.is_empty() && !legacy.contains(&base.legacy) {
+            return Err(behind(&f.at, &base.legacy));
+        }
+    }
+    Ok(())
+}
+
 /// Roll back the last `steps` applied migrations, newest first, from their
 /// stored bodies. Stops at the adopt checkpoint.
 ///
@@ -853,8 +914,11 @@ async fn rollback(
     let ledger = Ledger::of(opts);
     let run_id = new_run_id();
     let own = opts.database.is_none();
-    let rolled_back = locked(pool, own, &opts.lock_scope, opts.run_as, || async {
-        ledger.ensure(pool).await?;
+    let write = own && !opts.dry_run;
+    let (rolled_back, planned) = locked(pool, write, &opts.lock_scope, opts.run_as, || async {
+        if !opts.dry_run {
+            ledger.ensure(pool).await?;
+        }
         let mut runner = Runner {
             pool,
             ledger: &ledger,
@@ -870,11 +934,12 @@ async fn rollback(
             sweep: None,
             adopted_later: Vec::new(),
         };
-        runner.downgrade(back).await
+        let done = runner.downgrade(back).await?;
+        Ok((done, runner.planned))
     })
     .await?;
     Ok(Report {
-        planned: Vec::new(),
+        planned,
         system: Vec::new(),
         applied: Vec::new(),
         rolled_back,
@@ -1708,7 +1773,11 @@ impl Runner<'_> {
                             Code::Drift,
                             &at,
                             format!(
-                                "`{}` differs from the table it adopts: {}",
+                                "`{}` differs from the table it adopts: {}. Bring the \
+                                 framework tables to the engine v1 head first: run \
+                                 `manage migrate` from the commit before `dbmigrate adopt` \
+                                 (it also repairs old FK `on_delete` actions), then \
+                                 `manage dbmigrate apply` again",
                                 table.name,
                                 list.join("; ")
                             ),
@@ -2949,17 +3018,7 @@ impl Runner<'_> {
         apply_file(&mut after, &f.file, &f.at, &self.ctx())?;
         let doc = f.file.state.clone().unwrap_or_default();
         let checkpoint = State::from_doc(doc.clone());
-        let v1 = self
-            .opts
-            .ledger
-            .as_deref()
-            .unwrap_or(crate::migrate::LEDGER_TABLE);
-        let legacy: std::collections::HashSet<String> =
-            if crate::migrate::try_table_exists_here(self.pool, v1).await? {
-                crate::migrate::applied_set_pool_with_ledger(self.pool, v1).await?
-            } else {
-                Default::default()
-            };
+        let legacy = legacy_applied(self.pool, self.opts).await?;
         let k = key(&f.file);
         let hashes = (state.hash(memo), after.hash(memo));
         if legacy.contains(&base.legacy) {
@@ -3040,14 +3099,7 @@ impl Runner<'_> {
             return Ok(after);
         }
         if !legacy.is_empty() {
-            return Err(refused(
-                Code::Behind,
-                &f.at,
-                format!(
-                    "migrate this database with the pre-switch release (engine v1) to `{}` first",
-                    base.legacy
-                ),
-            ));
+            return Err(behind(&f.at, &base.legacy));
         }
         for t in checkpoint.tables.keys() {
             if crate::migrate::try_table_exists_here(self.pool, t).await? {
@@ -3338,6 +3390,16 @@ impl Runner<'_> {
                     ),
                 ));
             }
+        }
+        // `--plan`: every blocker above was checked; nothing runs.
+        if self.opts.dry_run {
+            for row in rows.iter().filter(|r| r.state == RowState::RollingBack) {
+                self.plan(&row.id, &row.unit_plan);
+            }
+            for (row, units) in &plan {
+                self.plan(&row.id, units);
+            }
+            return Ok(Vec::new());
         }
         let mut done = Vec::new();
         // A half-finished rollback finishes first, from its frozen plan.

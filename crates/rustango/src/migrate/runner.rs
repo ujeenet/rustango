@@ -1437,10 +1437,9 @@ async fn reconcile_and_apply(
                     std::borrow::Cow::Owned(outside_tables(mig, &existing)),
                     Outcome::RanPartial { skipped: existing },
                 ),
-                ReconcileAction::RunWithoutIndexes(made) => (
-                    std::borrow::Cow::Owned(without_indexes(mig, &made)),
-                    Outcome::Ran,
-                ),
+                ReconcileAction::RunWithout(made) => {
+                    (std::borrow::Cow::Owned(made.without(mig)), Outcome::Ran)
+                }
                 _ => (std::borrow::Cow::Borrowed(mig), Outcome::Ran),
             };
             let before = snapshot_before(all, mig)?;
@@ -1492,9 +1491,46 @@ enum ReconcileAction {
     /// Apply only the schema ops on other tables: a squash whose tables
     /// already exist still carries changes to tables it does not create.
     RunOutside(Vec<String>),
-    /// Apply it without creating the listed indexes, which exist already.
-    /// Only the framework's own system chain uses this.
-    RunWithoutIndexes(Vec<String>),
+    /// Apply it without what the database already shows. Only the
+    /// framework's own system chain uses this.
+    RunWithout(Made),
+}
+
+/// Ops of a system step already in effect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Made {
+    /// `CreateIndex` names whose index exists.
+    indexes: Vec<String>,
+    /// `AlterFkOnDelete` `(table, column)` whose FK has that action already.
+    fk_actions: Vec<(String, String)>,
+}
+
+impl Made {
+    fn is_empty(&self) -> bool {
+        self.indexes.is_empty() && self.fk_actions.is_empty()
+    }
+
+    /// `mig` without these ops.
+    fn without(&self, mig: &Migration) -> Migration {
+        use super::diff::SchemaChange as SC;
+        let forward = mig
+            .forward
+            .iter()
+            .filter(|op| match op {
+                Operation::Schema(SC::CreateIndex { name, .. }) => !self.indexes.contains(name),
+                Operation::Schema(SC::AlterFkOnDelete { table, column, .. }) => !self
+                    .fk_actions
+                    .iter()
+                    .any(|(t, c)| t == table && c == column),
+                _ => true,
+            })
+            .cloned()
+            .collect();
+        Migration {
+            forward,
+            ..mig.clone()
+        }
+    }
 }
 
 /// Decide whether a pending migration should run or be reconciled.
@@ -1666,10 +1702,17 @@ async fn reconcile(
             }
         }
         // An index the framework made before its model declared it: MySQL
-        // has no `CREATE INDEX IF NOT EXISTS`, so skip it here instead.
-        let made = made_indexes(pool, mig).await?;
+        // has no `CREATE INDEX IF NOT EXISTS`, so skip it here instead. An
+        // `ON DELETE` already in effect is skipped too: no DDL for a repair.
+        let made = Made {
+            indexes: made_indexes(pool, mig).await?,
+            fk_actions: set_fk_actions(pool, mig).await?,
+        };
         if !made.is_empty() {
-            return Ok(ReconcileAction::RunWithoutIndexes(made));
+            if made.without(mig).forward.is_empty() {
+                return Ok(ReconcileAction::Fake);
+            }
+            return Ok(ReconcileAction::RunWithout(made));
         }
     }
     Ok(ReconcileAction::Run)
@@ -1874,7 +1917,7 @@ pub(crate) async fn preview_pending(
             ReconcileAction::Run => mig,
             ReconcileAction::RunPartial(existing) => without_tables(&mig, &existing),
             ReconcileAction::RunOutside(existing) => outside_tables(&mig, &existing),
-            ReconcileAction::RunWithoutIndexes(made) => without_indexes(&mig, &made),
+            ReconcileAction::RunWithout(made) => made.without(&mig),
         };
         out.push(preview_migration(
             &effective,
@@ -1973,19 +2016,33 @@ async fn made_indexes(
     Ok(made)
 }
 
-/// `mig` without its `CreateIndex` ops for `made`.
-fn without_indexes(mig: &Migration, made: &[String]) -> Migration {
+/// The `AlterFkOnDelete` ops of `mig` whose live FK already has that
+/// action: the repair step on a database that never needed it.
+async fn set_fk_actions(
+    pool: &crate::sql::Pool,
+    mig: &Migration,
+) -> Result<Vec<(String, String)>, MigrateError> {
     use super::diff::SchemaChange as SC;
-    let forward = mig
-        .forward
-        .iter()
-        .filter(|op| !matches!(op, Operation::Schema(SC::CreateIndex { name, .. }) if made.contains(name)))
-        .cloned()
-        .collect();
-    Migration {
-        forward,
-        ..mig.clone()
+    let mut set = Vec::new();
+    for op in &mig.forward {
+        let Operation::Schema(SC::AlterFkOnDelete {
+            table, column, to, ..
+        }) = op
+        else {
+            continue;
+        };
+        let live = super::v2::catalog::read_table(pool, table)
+            .await
+            .map_err(|e| MigrateError::Validation(e.to_string()))?;
+        let has = live.iter().flat_map(|t| &t.fks).any(|f| {
+            f.columns == [column.as_str()]
+                && super::diff::same_on_delete(Some(&f.on_delete), to.as_deref())
+        });
+        if has {
+            set.push((table.clone(), column.clone()));
+        }
     }
+    Ok(set)
 }
 
 fn create_only_tables(mig: &Migration) -> Option<Vec<String>> {
@@ -4182,7 +4239,7 @@ async fn atomic_mysql(
     }
     for op in ops {
         match op {
-            Operation::Schema(_) => {
+            Operation::Schema(change) => {
                 let step = steps.next_step();
                 // A refusal after DDL committed still says what survived it.
                 let stmts = mysql_statements(&mut tx, &step, &mut dropped)
@@ -4194,6 +4251,22 @@ async fn atomic_mysql(
                             partial => partial,
                         },
                     })?;
+                // An FK whose action changes over a live one: swapped under a lock.
+                let lock = replaced_fk_lock(change, &stmts, after, schema);
+                if let Some(lock) = lock {
+                    if !ddl_sent {
+                        tx.commit().await?;
+                        ddl_sent = true;
+                        tx = my.begin().await.map_err(|e| stuck!(e))?;
+                    }
+                    let adds = &step.batch.deferred_fks;
+                    replace_fk_locked(&mut tx, &lock, &stmts, adds, std::future::ready(()))
+                        .await
+                        .map_err(|e| stuck!(e))?;
+                    ddl_applied += stmts.len() + adds.len();
+                    applied += 1;
+                    continue;
+                }
                 // Counted per *statement*, not per operation:
                 // one operation can render several, and each
                 // auto-commits on its own, so an operation
@@ -4252,6 +4325,68 @@ async fn atomic_mysql(
             .map_err(|e| stuck!(e))?,
     };
     tx.commit().await.map_err(|e| stuck!(e))?;
+    Ok(())
+}
+
+/// `LOCK TABLES` for an `AlterFkOnDelete` that drops a live FK (`drops`):
+/// its table for writing, the FK's target for reading.
+#[cfg(feature = "mysql")]
+fn replaced_fk_lock(
+    change: &super::diff::SchemaChange,
+    drops: &[String],
+    after: &SchemaSnapshot,
+    schema: Option<&str>,
+) -> Option<String> {
+    let super::diff::SchemaChange::AlterFkOnDelete { table, column, .. } = change else {
+        return None;
+    };
+    let to = &after.table(table)?.field(column)?.fk.as_ref()?.to;
+    if drops.is_empty() {
+        return None;
+    }
+    let q = |t: &str| super::diff::target(schema, t).quoted(&crate::sql::MySql);
+    Some(if to == table {
+        format!("LOCK TABLES {} WRITE", q(table))
+    } else {
+        format!("LOCK TABLES {} WRITE, {} READ", q(table), q(to))
+    })
+}
+
+/// Replace a live FK: `drops`, then `adds`, under `lock` so no write reaches
+/// its table in between. FK checks are off meanwhile (the old FK checked the
+/// rows), so MySQL adds it in place, not by copying the table. Checks and
+/// locks go back even on failure: the connection is pooled.
+#[cfg(feature = "mysql")]
+pub(crate) async fn replace_fk_locked(
+    conn: &mut sqlx::MySqlConnection,
+    lock: &str,
+    drops: &[String],
+    adds: &[String],
+    between: impl std::future::Future<Output = ()>,
+) -> Result<(), sqlx::Error> {
+    // LOCK and UNLOCK TABLES do not run as prepared statements.
+    sqlx::Executor::execute(&mut *conn, sqlx::raw_sql(lock)).await?;
+    let ran = async {
+        sqlx::query("SET foreign_key_checks = 0")
+            .execute(&mut *conn)
+            .await?;
+        for s in drops {
+            sqlx::query(s).execute(&mut *conn).await?;
+        }
+        between.await;
+        for s in adds {
+            sqlx::query(s).execute(&mut *conn).await?;
+        }
+        Ok::<(), sqlx::Error>(())
+    }
+    .await;
+    let checks = sqlx::query("SET foreign_key_checks = 1")
+        .execute(&mut *conn)
+        .await;
+    let unlock = sqlx::Executor::execute(&mut *conn, sqlx::raw_sql("UNLOCK TABLES")).await;
+    ran?;
+    checks?;
+    unlock?;
     Ok(())
 }
 

@@ -78,16 +78,18 @@ pub enum MigrateError {
         source: Box<sqlx::Error>,
     },
 
-    /// Migration files written for engine v2, which this release cannot run.
+    /// Migration files written for engine v2, which the engine v1 verbs
+    /// and runners do not run.
     #[error(
-        "{origin} holds engine v2 migrations, and rustango {version} runs engine v1 only. \
-         It needs a newer rustango with migrations engine v2: use `manage dbmigrate` there.",
-        version = env!("CARGO_PKG_VERSION")
+        "{origin} holds engine v2 migrations, so this project runs on migrations engine v2 \
+         and the engine v1 verbs refuse it: use `{instead}`"
     )]
     #[non_exhaustive]
     EngineV2 {
         /// The folder, file or embedded entry that holds them.
         origin: String,
+        /// The engine v2 command to run instead.
+        instead: String,
     },
 
     /// Engine v1 and engine v2 migration files in one project.
@@ -119,9 +121,8 @@ pub enum MigrateError {
 
     /// The database was switched to engine v2: it holds the v2 ledger.
     #[error(
-        "this database was switched to migrations engine v2 (table `{table}` exists), and \
-         rustango {version} runs engine v1 only; migrate it with the newer release",
-        version = env!("CARGO_PKG_VERSION")
+        "this database was switched to migrations engine v2 (table `{table}` exists), so \
+         the engine v1 runner refuses it: migrate it with `manage dbmigrate apply`"
     )]
     #[non_exhaustive]
     SwitchedToV2 {

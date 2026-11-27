@@ -22,10 +22,6 @@ pub(super) async fn migrate_tenants_cmd<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    if is_v2(dir)? {
-        let fo = fleet_flags(args)?;
-        return v2_fleet(pools, registry_url, dir, &fo, w).await;
-    }
     // No `--dry-run` here: refusing it beats migrating every tenant (#1909).
     super::args::parse(
         args,
@@ -367,165 +363,6 @@ pub(super) fn tenant_failures(failed: usize, total: usize) -> Result<(), Tenancy
     )))
 }
 
-/// A project on migrations engine v2 runs through the v2 fleet (8.3).
-fn is_v2(dir: &Path) -> Result<bool, TenancyError> {
-    Ok(matches!(
-        crate::migrate::ProjectEngine::of_project(dir)?,
-        crate::migrate::ProjectEngine::V2 { .. }
-    ))
-}
-
-/// `migrate-tenants` rollout flags for an engine v2 project (8.3).
-fn fleet_flags(args: &[String]) -> Result<crate::tenancy::migrate_v2::FleetOptions, TenancyError> {
-    let parsed = super::args::parse(
-        args,
-        &super::args::Spec {
-            verb: "migrate-tenants",
-            usage: "migrate-tenants [--max-failures N | --fail-fast] [--parallel K] \
-                    [--canary a,b] [--active-only | --include-inactive] [--phase expand] \
-                    [--allow-mixed-heads] [--abandon-fleet-run]   the registry chain, then every \
-                    tenant",
-            switches: &[
-                "--fail-fast",
-                "--active-only",
-                "--include-inactive",
-                "--allow-mixed-heads",
-                "--abandon-fleet-run",
-            ],
-            valued: &["--max-failures", "--parallel", "--canary", "--phase"],
-            max_positionals: 0,
-        },
-    )?;
-    let number = |flag: &str| -> Result<Option<usize>, TenancyError> {
-        parsed
-            .value(flag)?
-            .map(|v| {
-                v.parse::<usize>()
-                    .map_err(|_| TenancyError::Validation(format!("{flag} {v}: a number")))
-            })
-            .transpose()
-    };
-    if parsed.has("--active-only") && parsed.has("--include-inactive") {
-        return Err(TenancyError::Validation(
-            "--active-only and --include-inactive: pick one".into(),
-        ));
-    }
-    let expand_only = match parsed.value("--phase")? {
-        None => false,
-        Some("expand") => true,
-        Some(v) => {
-            return Err(TenancyError::Validation(format!(
-                "--phase {v}: only `expand`; a plain run applies contract files"
-            )))
-        }
-    };
-    let max_failures = match (number("--max-failures")?, parsed.has("--fail-fast")) {
-        (Some(_), true) => {
-            return Err(TenancyError::Validation(
-                "--max-failures and --fail-fast: pick one".into(),
-            ))
-        }
-        (m, fast) => m.or(fast.then_some(0)),
-    };
-    Ok(crate::tenancy::migrate_v2::FleetOptions {
-        max_failures,
-        parallel: number("--parallel")?.unwrap_or(1),
-        canaries: parsed
-            .value("--canary")?
-            .map(|v| {
-                v.split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default(),
-        active_only: parsed.has("--active-only"),
-        expand_only,
-        allow_mixed_heads: parsed.has("--allow-mixed-heads"),
-        abandon: parsed.has("--abandon-fleet-run"),
-        migrator: crate::tenancy::migrate_v2::MigratorLogin::from_env(),
-    })
-}
-
-/// `dbmigrate squash --prune <id>` under tenancy: refused while the registry
-/// or a tenant still needs the replaced files. Without `--prune` it writes
-/// the checkpoint as the single-database CLI does.
-pub(super) async fn v2_prune<W: Write + Send, DB: Database>(
-    pools: &TenantPools<DB>,
-    registry_url: &str,
-    dir: &Path,
-    args: &[String],
-    w: &mut W,
-) -> Result<(), TenancyError>
-where
-    crate::sql::Pool: From<sqlx::Pool<DB>>,
-{
-    let id = match args.iter().position(|a| a == "--prune") {
-        Some(i) => args
-            .get(i + 1)
-            .ok_or_else(|| TenancyError::Validation("--prune needs a checkpoint id".into()))?,
-        None => {
-            let mut full = vec!["squash".to_owned()];
-            full.extend(args.iter().cloned());
-            let registry = pools.registry_pool();
-            return Ok(crate::migrate::v2::cli::run(&registry, dir, &full, w).await?);
-        }
-    };
-    let gate = crate::tenancy::migrate_v2::prune_gate(pools, dir, registry_url, id).await?;
-    Ok(crate::migrate::v2::cli::prune_with(
-        dir, args, id, &gate, w,
-    )?)
-}
-
-/// The registry chain, then every tenant's, and the report. Failed
-/// tenants are listed with their error class; any failure exits non-zero.
-async fn v2_fleet<W: Write + Send, DB: Database>(
-    pools: &TenantPools<DB>,
-    registry_url: &str,
-    dir: &Path,
-    fo: &crate::tenancy::migrate_v2::FleetOptions,
-    w: &mut W,
-) -> Result<(), TenancyError>
-where
-    crate::sql::Pool: From<sqlx::Pool<DB>>,
-{
-    let report = crate::tenancy::migrate_v2::run_fleet(pools, dir, registry_url, fo).await?;
-    writeln!(
-        w,
-        "registry: applied {} migration(s)",
-        report.registry.len()
-    )?;
-    for id in &report.registry {
-        writeln!(w, "  + {id}")?;
-    }
-    for t in &report.tenants {
-        match &t.error_class {
-            Some(class) => writeln!(w, "tenant {}: failed ({class})", t.slug)?,
-            None => writeln!(
-                w,
-                "tenant {}: applied {} migration(s)",
-                t.slug,
-                t.applied.len()
-            )?,
-        }
-    }
-    if report.stopped {
-        writeln!(
-            w,
-            "stopped: a canary failed or the failure limit was passed"
-        )?;
-    }
-    let failed = report.failed().count();
-    if failed > 0 {
-        return Err(TenancyError::Validation(format!(
-            "{failed} of {} tenant(s) failed; see the report above",
-            report.tenants.len()
-        )));
-    }
-    Ok(())
-}
-
 // ---------- migrate-registry ----------
 
 pub(super) async fn migrate_registry_cmd<W: Write + Send, DB: Database>(
@@ -547,24 +384,6 @@ where
             max_positionals: 0,
         },
     )?;
-    if is_v2(dir)? {
-        let opts = crate::migrate::v2::run::Options {
-            run_as: crate::migrate::v2::run::RunAs::Registry,
-            dry_run: parsed.has("--dry-run"),
-            ..crate::migrate::v2::run::Options::default()
-        };
-        let report = crate::migrate::v2::run::migrate(&pools.registry_pool(), dir, &opts)
-            .await
-            .map_err(|e| TenancyError::Migrate(e.into()))?;
-        for line in &report.planned {
-            writeln!(w, "{line}")?;
-        }
-        writeln!(w, "registry: applied {} migration(s)", report.applied.len())?;
-        for id in &report.applied {
-            writeln!(w, "  + {id}")?;
-        }
-        return Ok(());
-    }
     if parsed.has("--dry-run") {
         return run_registry_scoped(pools, dir, &["--dry-run".to_owned()], w).await;
     }
@@ -689,13 +508,6 @@ where
         return run_registry_scoped(pools, dir, args, w).await;
     }
 
-    if is_v2(dir)? {
-        let fo = crate::tenancy::migrate_v2::FleetOptions {
-            migrator: crate::tenancy::migrate_v2::MigratorLogin::from_env(),
-            ..Default::default()
-        };
-        return v2_fleet(pools, registry_url, dir, &fo, w).await;
-    }
     // As boot does: the registry, then the tenants through the one
     // dispatch seam (see `migrate_tenants_dyn_with_progress`); each walks
     // the app folders itself.

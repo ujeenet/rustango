@@ -155,6 +155,31 @@ pub(crate) async fn target_as<DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
+    target_with(pools, org, registry_url, migrator, Setup::Create)
+        .await?
+        .ok_or_else(|| TenancyError::Validation(format!("org `{}`: no schema", org.slug)))
+}
+
+/// Whether reaching a schema tenant may create its schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Setup {
+    Create,
+    /// A plan or a read: a missing schema is `None`, never created.
+    ReadOnly,
+}
+
+/// [`target_as`] with `setup`; `None` for a schema tenant whose schema is
+/// missing under [`Setup::ReadOnly`].
+async fn target_with<DB: Database>(
+    pools: &TenantPools<DB>,
+    org: &Org,
+    registry_url: &str,
+    migrator: Option<&MigratorLogin>,
+    setup: Setup,
+) -> Result<Option<Target>, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     if org.storage_mode == StorageMode::Schema {
         #[cfg(feature = "postgres")]
         {
@@ -169,7 +194,16 @@ where
             let schema = org.effective_schema().to_owned();
             refuse_engine_schema(&org.slug, &schema)?;
             let timeout = pg.pool_config().database_pool_acquire_timeout;
-            super::migrate::ensure_tenant_schema(registry_url, &schema, timeout).await?;
+            match setup {
+                Setup::Create => {
+                    super::migrate::ensure_tenant_schema(registry_url, &schema, timeout).await?;
+                }
+                Setup::ReadOnly => {
+                    if !super::migrate::tenant_schema_exists(registry_url, &schema).await? {
+                        return Ok(None);
+                    }
+                }
+            }
             // The schema, then schemas holding only extension objects (8.2).
             let path = super::pools::probe_path(
                 registry_url,
@@ -180,7 +214,7 @@ where
             .await?;
             // Named only: [`prepare`] sets it up for a tenant with work.
             let role = pg.tenant_role(&schema).await?.map(|r| r.name);
-            return Ok(Target {
+            return Ok(Some(Target {
                 slug: org.slug.clone(),
                 scope: LockScope::Schema(schema),
                 role,
@@ -189,7 +223,7 @@ where
                     path,
                     timeout,
                 },
-            });
+            }));
         }
         #[cfg(not(feature = "postgres"))]
         return Err(TenancyError::Validation(format!(
@@ -197,11 +231,11 @@ where
             org.slug
         )));
     }
-    let _ = registry_url;
+    let _ = (registry_url, setup);
     if let Some(m) = migrator {
         let url = pools.resolved_database_url(org).await?;
         if let Some(tenant_login) = other_login(&url, m)? {
-            return Ok(Target {
+            return Ok(Some(Target {
                 slug: org.slug.clone(),
                 scope: LockScope::Session,
                 role: Some(tenant_login),
@@ -209,7 +243,7 @@ where
                     url,
                     login: m.clone(),
                 },
-            });
+            }));
         }
     }
     let pool = match pools.database_pool_for_org(org).await? {
@@ -219,12 +253,12 @@ where
             unreachable!("database_pool_for_org refuses schema mode")
         }
     };
-    Ok(Target {
+    Ok(Some(Target {
         slug: org.slug.clone(),
         scope: LockScope::Session,
         role: None,
         conn: Conn::Shared(pool),
-    })
+    }))
 }
 
 /// The tenant's own login at `url` when `m` is another one; `None` when
@@ -1226,6 +1260,156 @@ impl Fleet<'_> {
             .and_then(|ids| head_of(&ids));
         Ok((rep.applied, head))
     }
+}
+
+/// Which tenants a per-database `dbmigrate` verb works on.
+pub(crate) enum Tenants<'a> {
+    All,
+    One(&'a str),
+}
+
+/// A tenant as a per-database verb finds it, writing nothing.
+pub(crate) enum Reached {
+    Target(Target),
+    /// A schema tenant whose schema does not exist yet.
+    MissingSchema,
+    Unreachable(TenancyError),
+}
+
+/// The tenants' targets in slug order, inactive ones too, each reached as
+/// the fleet reaches it but read-only: a missing schema is not created.
+///
+/// # Errors
+/// Reading the orgs, or `One` naming no tenant.
+pub(crate) async fn targets<DB: Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    which: Tenants<'_>,
+) -> Result<Vec<(String, Reached)>, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let (mut orgs, _) = fleet_orgs(&pools.registry_pool(), &FleetOptions::default()).await?;
+    if let Tenants::One(slug) = which {
+        orgs.retain(|o| o.slug == slug);
+        if orgs.is_empty() {
+            return Err(TenancyError::Validation(format!("no tenant `{slug}`")));
+        }
+    }
+    let migrator = MigratorLogin::from_env();
+    let mut out = Vec::new();
+    for org in &orgs {
+        let t =
+            match target_with(pools, org, registry_url, migrator.as_ref(), Setup::ReadOnly).await {
+                Ok(Some(t)) => Reached::Target(t),
+                Ok(None) => Reached::MissingSchema,
+                Err(e) => Reached::Unreachable(e),
+            };
+        out.push((org.slug.clone(), t));
+    }
+    Ok(out)
+}
+
+/// The backends of the registry and of every tenant, once each.
+///
+/// # Errors
+/// Reading the orgs.
+pub(crate) async fn backends(
+    registry: &crate::sql::Pool,
+) -> Result<Vec<crate::migrate::v2::state::Backend>, TenancyError> {
+    use crate::migrate::v2::state::Backend;
+    let mut out = vec![run::backend_of(registry)];
+    for org in fleet_orgs(registry, &FleetOptions::default()).await?.0 {
+        let b = match org.backend_kind {
+            super::BackendKind::Postgres => Backend::Postgres,
+            super::BackendKind::MySql => Backend::Mysql,
+            super::BackendKind::Sqlite => Backend::Sqlite,
+        };
+        if !out.contains(&b) {
+            out.push(b);
+        }
+    }
+    Ok(out)
+}
+
+/// After a tenant's rollback: the registry cache holds its new head.
+///
+/// # Errors
+/// Writing the cache.
+pub(crate) async fn record_head(
+    registry: &crate::sql::Pool,
+    t: &Target,
+    pool: &crate::sql::Pool,
+) -> Result<(), TenancyError> {
+    let head = run::applied_ids(pool, &tenant_opts(t))
+        .await
+        .map_err(migrate_err)?;
+    crate::migrate::v2::ledger::cache_ensure(registry).await?;
+    crate::migrate::v2::ledger::cache_put(
+        registry,
+        &t.slug,
+        "applied",
+        head_of(&head).as_deref(),
+        None,
+        &run::new_run_id(),
+    )
+    .await?;
+    Ok(())
+}
+
+/// What a fleet run would run, with nothing written: the registry's plan,
+/// then each tenant's against the registry's applied set (or why it is
+/// refused).
+///
+/// # Errors
+/// The registry's dry run, a load error, or reading the orgs.
+pub(crate) async fn plan_fleet<DB: Database>(
+    pools: &TenantPools<DB>,
+    dir: &Path,
+    registry_url: &str,
+) -> Result<Vec<(String, Result<Vec<String>, String>)>, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let registry = pools.registry_pool();
+    let project = crate::migrate::v2::load::load_project(dir)
+        .map_err(|e| migrate_err(run::RunError::Load(e)))?;
+    let reg = Options {
+        run_as: RunAs::Registry,
+        dry_run: true,
+        ..Options::default()
+    };
+    let mut out = vec![(
+        "registry".to_owned(),
+        Ok(run::migrate_loaded(&registry, &project, &reg)
+            .await
+            .map_err(migrate_err)?
+            .planned),
+    )];
+    let applied = run::applied_ids(&registry, &reg)
+        .await
+        .map_err(migrate_err)?;
+    for (slug, t) in targets(pools, registry_url, Tenants::All).await? {
+        let planned = match t {
+            Reached::Unreachable(e) => Err(e.to_string()),
+            Reached::MissingSchema => Ok(vec!["schema missing, would create".to_owned()]),
+            Reached::Target(t) => match t.open().await {
+                Err(e) => Err(e.to_string()),
+                Ok(open) => {
+                    let opts = Options {
+                        dry_run: true,
+                        registry_applied: Some(applied.clone()),
+                        ..tenant_opts(&t)
+                    };
+                    let r = run::migrate_loaded(&open.pool, &project, &opts).await;
+                    open.close().await;
+                    r.map(|r| r.planned).map_err(|e| e.to_string())
+                }
+            },
+        };
+        out.push((format!("tenant {slug}"), planned));
+    }
+    Ok(out)
 }
 
 /// Engine v2 for one tenant outside a fleet run (provisioning): the

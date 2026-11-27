@@ -8,12 +8,12 @@ A project switches once with `adopt`; after that the engine v1 verbs refuse it.
 | Verb | What it does |
 |---|---|
 | `make [name]` | Writes the next file from your models. Contract ops (drops, renames, NOT NULL on an existing column) go in a second `phase: contract` file. |
-| `apply [<id>]` | Applies pending files, resuming a run that stopped. With an id, stops after it. |
-| `down [N]` / `down --to <id>` | Rolls back the last N files, or the descendants of `<id>`. Planned in full before anything runs. |
+| `apply [<id>]` | Applies pending files, resuming a run that stopped. With an id, stops after it. `--plan` prints the SQL and runs nothing. |
+| `down [N]` / `down --to <id>` | Rolls back the last N files, or the descendants of `<id>`. Planned in full before anything runs; `--plan` prints that plan and runs nothing. |
 | `status` | Lists applied, pending and partial files. |
 | `check` | Checks files, defaults and data steps; online it also warns about long moves and a contract file shipped with its expand file (`MV2-W012`). |
 | `check --drift` | Compares the database with the state at its applied files. |
-| `sql <id>` | Prints the SQL a file runs, per backend. |
+| `sql <id>` | Prints the SQL a file runs on this database's backend (under tenancy, on each backend in use); `--dialect pg\|mysql\|sqlite\|all` picks others. |
 | `adopt` | Switches an engine v1 project: one checkpoint per app and target, then the v1 files go. |
 | `squash <app> <from>..<to>` | Replaces an app's chain from its root with one checkpoint. |
 | `squash --prune <checkpoint>` | Deletes the replaced files once every database (every tenant, under tenancy) ran the checkpoint. |
@@ -30,6 +30,7 @@ A project switches once with `adopt`; after that the engine v1 verbs refuse it.
 | `--rebase <id> [--force]` | `make` | Move a leaf on top of the other one. Refused once a database ran it or a remote branch has it. |
 | `--data-rust <name>` | `make` | Write a `data_rust` op, its step stub and a test. |
 | `--check` | `make` | Fail when the models have changes no file has. |
+| `--plan` / `--dry-run` | `apply`, `down` | Print what would run; write nothing. |
 | `--allow-rollback` | `apply` | Allow `apply <earlier id>` to roll back. |
 | `--resume-forward` | `apply` | Take a half rolled back file forward again. |
 | `--accept-drift <reason>` | `apply` | Record an adopt checkpoint over a database that differs from it. |
@@ -41,6 +42,9 @@ A project switches once with `adopt`; after that the engine v1 verbs refuse it.
 | `--offline` | `check` | Skip the checks that need a database. |
 | `--assume-all-applied` | `squash --prune` | Prune without checking the databases. |
 | `--database <alias>` | `apply`, `down`, `status` | Work on that configured database's `database` chain. |
+| `--registry`, `--tenant <slug>`, `--all-tenants` | `down` (tenancy) | What to roll back; one is required. Tenants roll back before the registry. |
+
+A flag a verb does not know is refused; nothing runs.
 
 ## Targets
 
@@ -52,9 +56,16 @@ register it with `rustango::databases::register` before migrating; an app's file
 
 ## Under tenancy
 
-`migrate-tenants` runs the registry chain once, then every tenant (inactive ones included) under one fleet lock.
-Flags: `--max-failures N`, `--fail-fast`, `--parallel K`, `--canary a,b`, `--active-only`, `--phase expand`, `--allow-mixed-heads`, `--abandon-fleet-run`.
-Contract files run only after every tenant reached its expand head.
+Run `dbmigrate` from the tenancy CLI (`Cli::tenancy()`). There `apply`, `down`, `status`, `check --drift` and `sql`
+work per database: the registry first, then every tenant (inactive ones included). The engine v1 verbs
+(`migrate`, `migrate-tenants`, `migrate-registry`, `downgrade`) refuse a v2 project and name the `dbmigrate` verb.
+
+- `apply` runs the registry chain once, then each tenant's, under one fleet lock. Flags: `--max-failures N`,
+  `--fail-fast`, `--parallel K`, `--canary a,b`, `--active-only`, `--phase expand`, `--allow-mixed-heads`,
+  `--abandon-fleet-run`, `--plan`. Contract files run only after every tenant reached its expand head.
+- `down` needs `--registry`, `--tenant <slug>` or `--all-tenants`. With both tenants and `--registry`, the tenants
+  roll back first; the first failure stops it, so the registry is never rolled back past a tenant.
+- `status` and `check --drift` list the registry, then each tenant.
 Set `RUSTANGO_TENANT_MIGRATOR=user:password` to migrate database-mode tenants as a separate login; the tenant login then cannot write the ledger. On Postgres the migrator owns every object in the tenant database and the tenant login keeps rows only, also in tables added later.
 
 ## Portable defaults
@@ -70,3 +81,14 @@ and write its rows, but a file that creates, alters, drops or renames one is ref
 `adopt_table` takes over an existing table: it verifies the full definition and runs no DDL, or creates the table on a fresh database.
 `adopt_column` takes over one column the same way, and its `indexes` list takes over indexes on it: each is verified if present and created if missing.
 The system apps run before your project, on their own ledger `__rustango_system_v2`.
+
+## Switching from engine v1
+
+1. Bring every database to the engine v1 head with `manage migrate` on 0.71.0. It also repairs framework FKs that
+   older releases created without their `ON DELETE CASCADE`.
+2. Run `manage dbmigrate adopt` once and commit the result.
+3. Run `manage dbmigrate apply` on each database (under tenancy, once: it covers the registry and every tenant).
+
+The switch is one way: v2 rollback stops at the adopt checkpoint. A database behind the v1 head is refused before
+anything is written; migrate it with `manage migrate` from the commit before `adopt`, then apply again. After
+`adopt`, the `system/migrations` folder and the v1 ledger table stay as they were; engine v2 does not read them.

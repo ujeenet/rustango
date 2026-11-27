@@ -784,11 +784,9 @@ fn fk_identity(r: &RelationSnapshot) -> (&str, &str, &str) {
 
 /// Same action as the database applies it: no clause is `NO ACTION` on all
 /// three backends, and SQL keywords ignore case (#1573).
-fn same_on_delete(p: &RelationSnapshot, c: &RelationSnapshot) -> bool {
-    fn effective(r: &RelationSnapshot) -> &str {
-        r.on_delete.as_deref().unwrap_or("NO ACTION")
-    }
-    effective(p).eq_ignore_ascii_case(effective(c))
+pub(crate) fn same_on_delete(p: Option<&str>, c: Option<&str>) -> bool {
+    p.unwrap_or("NO ACTION")
+        .eq_ignore_ascii_case(c.unwrap_or("NO ACTION"))
 }
 
 pub(crate) fn push_alter_changes(
@@ -858,7 +856,9 @@ pub(crate) fn push_alter_changes(
     }
     // Same FK, new action; `None → Some` included, or an upgrade never gets it (#1557).
     if let (Some(p), Some(c)) = (&pf.fk, &cf.fk) {
-        if fk_identity(p) == fk_identity(c) && !same_on_delete(p, c) {
+        if fk_identity(p) == fk_identity(c)
+            && !same_on_delete(p.on_delete.as_deref(), c.on_delete.as_deref())
+        {
             out.push(SchemaChange::AlterFkOnDelete {
                 table: table.to_owned(),
                 column: cf.column.clone(),

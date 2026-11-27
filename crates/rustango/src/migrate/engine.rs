@@ -1,8 +1,8 @@
 //! Which migrations engine a project's files were written for.
 //!
-//! This release runs engine v1 only. A file written for engine v2 carries
-//! a top-level `engine` or `format` key; v1 files never do. Every v1 entry
-//! point refuses a folder or project holding one instead of misreading it.
+//! A file written for engine v2 carries a top-level `engine` or `format`
+//! key; v1 files never do. Every v1 entry point refuses a folder or project
+//! holding one instead of misreading it, and names the `dbmigrate` verb.
 
 use std::path::{Path, PathBuf};
 
@@ -140,7 +140,7 @@ impl ProjectEngine {
         Self::detect(super::file::project_migration_dirs(dir))
     }
 
-    /// Refuse anything but [`Self::V1`]: this release runs engine v1 only.
+    /// Refuse anything but [`Self::V1`], as every engine v1 entry does.
     ///
     /// # Errors
     /// [`MigrateError::EngineV2`] or [`MigrateError::MixedEngine`].
@@ -149,11 +149,15 @@ impl ProjectEngine {
             Self::V1 => Ok(()),
             Self::V2 { files } => Err(MigrateError::EngineV2 {
                 origin: folders_of(&files),
+                instead: DBMIGRATE.to_owned(),
             }),
             Self::Mixed { v1, v2 } => Err(MigrateError::MixedEngine { v1, v2 }),
         }
     }
 }
+
+/// The engine v2 command group, named by every engine v1 refusal.
+pub(crate) const DBMIGRATE: &str = "manage dbmigrate";
 
 /// Refuse an engine v2 file in the project's `system` folder.
 ///
@@ -249,6 +253,22 @@ mod tests {
     fn write(dir: &Path, name: &str, body: &str) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join(name), body).unwrap();
+    }
+
+    /// The refusals name the command to run, never a release that runs
+    /// "engine v1 only" (QA B6): this release runs both engines.
+    #[test]
+    fn refusals_name_the_v2_command() {
+        let e = MigrateError::SwitchedToV2 { table: "t".into() }.to_string();
+        assert!(e.contains("`manage dbmigrate apply`"), "{e}");
+        let e = super::super::file::parse(V2).unwrap_err().to_string();
+        assert!(e.contains("use `manage dbmigrate`"), "{e}");
+        for e in [
+            MigrateError::SwitchedToV2 { table: "t".into() }.to_string(),
+            e,
+        ] {
+            assert!(!e.contains("engine v1 only") && !e.contains("newer"), "{e}");
+        }
     }
 
     /// The per-folder guard: every v1 reader ends in `list_dir`, `load` or `parse`.

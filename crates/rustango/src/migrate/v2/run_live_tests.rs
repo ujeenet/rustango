@@ -507,6 +507,21 @@ async fn adopt_switch_cases(b: B) {
         code(migrate(&behind.pool, &dir, &opts()).await),
         Code::Behind
     );
+    // Refused before any write, so engine v1 can still take it to the head.
+    for t in [Ledger::system().table, Ledger::default_names().table] {
+        assert!(
+            !crate::migrate::try_table_exists_here(&behind.pool, &t)
+                .await
+                .unwrap(),
+            "{b:?}: the refused switch left `{t}`"
+        );
+    }
+    crate::migrate::migrate_pool(&behind.pool, &v1_copy.path().join("migrations"))
+        .await
+        .unwrap_or_else(|e| panic!("{b:?}: {e}"));
+    migrate(&behind.pool, &dir, &opts())
+        .await
+        .unwrap_or_else(|e| panic!("{b:?}: {e}"));
     assert_eq!(
         code(migrate(&drifted.pool, &dir, &opts()).await),
         Code::Drift
@@ -565,7 +580,11 @@ async fn registry_files_are_refused() {
     put(&dir, "0001_org", &f);
     let e = migrate(&db.pool, &dir, &opts()).await.expect_err("refused");
     assert_eq!(e.code(), Some(Code::State), "{e}");
-    assert!(e.to_string().contains("migrate-registry"), "{e}");
+    assert!(
+        e.to_string()
+            .contains("`manage dbmigrate apply` from the tenancy CLI"),
+        "{e}"
+    );
 }
 
 /// The catalog's view of `t`, with what engine v1 and a fresh install may
@@ -4498,6 +4517,7 @@ per_backend!(
     adopt_table_verifies_or_creates,
     portable_defaults_render_per_backend,
     v1_framework_tables_adopt_cleanly,
+    old_framework_fks_repair_then_switch,
     adopt_column_verifies_adds_or_refuses,
     adopt_column_indexes_verify_or_create,
     every_database_and_database_targets,
@@ -5111,6 +5131,198 @@ async fn v1_framework_tables_adopt_cleanly(b: B) {
     );
 }
 
+/// The system chain a release before 0.61.4 wrote: 0001 makes the tenant
+/// framework tables with no FK actions, 0002 moves the snapshot to today's
+/// models with no op. Returns the FKs it left without their action.
+fn old_system_chain(sys: &Path) -> Vec<(String, String)> {
+    use crate::migrate::file::{Migration, Operation};
+    use crate::migrate::SchemaSnapshot;
+    let current = SchemaSnapshot::from_registry_system_for_scope(crate::core::ModelScope::Tenant);
+    let mut old = current.clone();
+    let mut fks = Vec::new();
+    for t in &mut old.tables {
+        for f in &mut t.fields {
+            let acts = |r: &crate::migrate::RelationSnapshot| {
+                r.on_delete
+                    .as_deref()
+                    .is_some_and(|a| !a.eq_ignore_ascii_case("NO ACTION"))
+            };
+            if let Some(r) = f.fk.as_mut().filter(|r| acts(r)) {
+                r.on_delete = None;
+                fks.push((t.name.clone(), f.column.clone()));
+            }
+        }
+    }
+    let create = crate::migrate::detect_changes(&SchemaSnapshot::default(), &old);
+    let step = |name: &str, prev: Option<&str>, snapshot, forward| Migration {
+        name: name.into(),
+        created_at: String::new(),
+        prev: prev.map(Into::into),
+        atomic: true,
+        scope: crate::migrate::MigrationScope::Tenant,
+        replaces: Vec::new(),
+        merges: Vec::new(),
+        snapshot,
+        forward,
+    };
+    std::fs::create_dir_all(sys).unwrap();
+    let made = step(
+        "0001_initial",
+        None,
+        old,
+        create.into_iter().map(Operation::Schema).collect(),
+    );
+    let moved = step("0002_auto", Some("0001_initial"), current, Vec::new());
+    for m in [made, moved] {
+        crate::migrate::file::write(&sys.join(format!("{}.json", m.name)), &m).unwrap();
+    }
+    fks
+}
+
+/// The live `ON DELETE` of `table.column`'s FK.
+async fn on_delete_of(pool: &Pool, table: &str, column: &str) -> String {
+    let live = super::super::catalog::read_table(pool, table)
+        .await
+        .unwrap()
+        .unwrap_or_else(|| panic!("no table {table}"));
+    live.fks
+        .iter()
+        .find(|f| f.columns == [column])
+        .unwrap_or_else(|| panic!("no FK on {table}.{column}"))
+        .on_delete
+        .clone()
+}
+
+/// What changes when DDL touches `table`'s FKs: PG constraint oids, the
+/// SQLite root page (a rebuild), the InnoDB table id (a copy).
+async fn fk_identity(pool: &Pool, table: &str) -> String {
+    let sql = match pool.dialect().kind() {
+        crate::sql::DialectKind::Postgres => format!(
+            "SELECT CAST(string_agg(CAST(oid AS TEXT), ',' ORDER BY oid) AS TEXT) FROM pg_constraint \
+             WHERE conrelid = CAST('{table}' AS regclass) AND contype = 'f'"
+        ),
+        crate::sql::DialectKind::Mysql => format!(
+            "SELECT CAST(TABLE_ID AS CHAR) FROM information_schema.INNODB_TABLES \
+             WHERE NAME = CONCAT(DATABASE(), '/{table}')"
+        ),
+        _ => format!("SELECT CAST(rootpage AS TEXT) FROM sqlite_master WHERE name = '{table}'"),
+    };
+    let rows: Vec<(String,)> = crate::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    rows.into_iter().next().map(|r| r.0).unwrap_or_default()
+}
+
+async fn fk_identities(pool: &Pool, fks: &[(String, String)]) -> Vec<String> {
+    let mut v = Vec::new();
+    for (t, _) in fks {
+        v.push(format!("{t}={}", fk_identity(pool, t).await));
+    }
+    v
+}
+
+/// A database an older release left (QA B1): framework FKs with no action
+/// where the models say CASCADE. The v2 switch refuses it, naming the FK;
+/// engine v1 `migrate` repairs it; then the switch passes. A database that
+/// already has the action gets no DDL from the repair step.
+async fn old_framework_fks_repair_then_switch(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let v1 = tempfile::tempdir().unwrap();
+    let dir = v1.path().join("migrations");
+    std::fs::create_dir_all(&dir).unwrap();
+    let sys = v1.path().join("system").join("migrations");
+    let fks = old_system_chain(&sys);
+    if fks.is_empty() {
+        // Narrow builds (plain `sqlite`) compile no framework model with an FK.
+        eprintln!("skip: no framework FK with an action in this build");
+        return;
+    }
+    // What the older release ran: that chain as shipped, no catch-up step.
+    let shipped = crate::migrate::make::SystemChain::shipped(sys.clone());
+    crate::migrate::runner::with_migrate_lock_held(pool, |held| {
+        crate::migrate::runner::migrate_system_chain(held, pool, &shipped, &sys, None)
+    })
+    .await
+    .unwrap_or_else(|e| panic!("{b:?}: {e}"));
+    for (t, c) in &fks {
+        assert_eq!(
+            on_delete_of(pool, t, c).await,
+            "NO ACTION",
+            "{b:?}: {t}.{c}"
+        );
+    }
+    let shipped = fk_identities(pool, &fks).await;
+    let v2root = tempfile::tempdir().unwrap();
+    let v2dir = v2root.path().join("migrations");
+    put(
+        &v2dir,
+        "0001_author",
+        &v2("0001_author", &[], json!([author()])),
+    );
+    let e = migrate(pool, &v2dir, &opts())
+        .await
+        .expect_err("drifted FKs");
+    assert_eq!(e.code(), Some(Code::Drift), "{b:?}: {e}");
+    let msg = e.to_string();
+    assert!(
+        msg.contains("on_delete") && msg.contains("manage migrate"),
+        "{b:?}: {msg}"
+    );
+    let mut out = Vec::new();
+    crate::migrate::manage::run_with_writer(pool, &dir, vec!["migrate".to_owned()], &mut out)
+        .await
+        .unwrap_or_else(|e| panic!("{b:?}: {e}"));
+    for (t, c) in &fks {
+        assert_eq!(on_delete_of(pool, t, c).await, "CASCADE", "{b:?}: {t}.{c}");
+    }
+    // Safe on large tables: MySQL re-adds each FK in place, never copying the table.
+    if b == B::My {
+        assert_eq!(
+            fk_identities(pool, &fks).await,
+            shipped,
+            "a table was copied"
+        );
+    }
+    // The repair is idempotent: on a database that has the actions, the
+    // pending step is recorded with no DDL.
+    let repair = crate::migrate::file::list_dir(&sys)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.name.ends_with("_repair_on_delete"))
+        .unwrap_or_else(|| panic!("{b:?}: no repair step written"));
+    let before = fk_identities(pool, &fks).await;
+    let ledger = crate::migrate::runner::SYSTEM_LEDGER_TABLE;
+    raw_execute_pool(
+        pool,
+        &format!("DELETE FROM {ledger} WHERE name = '{}'", repair.name),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let mut plan = Vec::new();
+    let dry = vec!["migrate".to_owned(), "--dry-run".to_owned()];
+    crate::migrate::manage::run_with_writer(pool, &dir, dry, &mut plan)
+        .await
+        .unwrap_or_else(|e| panic!("{b:?}: {e}"));
+    let plan = String::from_utf8(plan).unwrap();
+    assert!(
+        plan.contains("its end state is already present") && !plan.contains("FOREIGN KEY"),
+        "{b:?}: {plan}"
+    );
+    crate::migrate::manage::run_with_writer(pool, &dir, vec!["migrate".to_owned()], &mut out)
+        .await
+        .unwrap_or_else(|e| panic!("{b:?}: {e}"));
+    assert!(crate::migrate::runner::applied_or_empty(pool, ledger)
+        .await
+        .unwrap()
+        .contains(&repair.name));
+    assert_eq!(fk_identities(pool, &fks).await, before, "{b:?}: DDL ran");
+    migrate(pool, &v2dir, &opts())
+        .await
+        .unwrap_or_else(|e| panic!("{b:?}: {e}"));
+}
+
 /// `adopt_column` (design item 22): a base `adopt_table` and a feature
 /// app's `adopt_column`. A table that already has the column is adopted
 /// with no DDL, the column checked by its own definition; one without it
@@ -5554,4 +5766,92 @@ async fn upgrade_from_0_69_runs_no_ddl(b: B) {
         let again = migrate(pool, &dir, &opts()).await.unwrap();
         assert!(again.system.is_empty() && again.applied.is_empty(), "{b:?}");
     }
+}
+
+/// FK checks are on and no table is locked on `conn`.
+#[cfg(feature = "mysql")]
+async fn checks_and_locks_back(conn: &mut sqlx::MySqlConnection) {
+    let checks: i64 = sqlx::query_scalar("SELECT CAST(@@foreign_key_checks AS SIGNED)")
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    assert_eq!(checks, 1, "FK checks left off");
+    // A table outside the lock reads only once the lock is released.
+    sqlx::query("SELECT COUNT(*) FROM rl_x")
+        .execute(&mut *conn)
+        .await
+        .expect("tables left locked");
+}
+
+/// A replaced MySQL FK is swapped with writes to its table held off: an
+/// insert from another session waits instead of slipping an orphan in, and
+/// FK checks and table locks come back, also after a failed swap.
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn a_replaced_mysql_fk_holds_writes_off() {
+    bounded(async {
+        use sqlx::Connection as _;
+        let Some(db) = fresh(B::My).await else { return };
+        let pool = &db.pool;
+        for sql in [
+            "CREATE TABLE rl_p (id BIGINT PRIMARY KEY)",
+            "CREATE TABLE rl_x (id BIGINT PRIMARY KEY)",
+            "CREATE TABLE rl_c (id BIGINT PRIMARY KEY, p_id BIGINT NOT NULL, \
+             CONSTRAINT rl_c_p_id_fkey FOREIGN KEY (p_id) REFERENCES rl_p (id))",
+            "INSERT INTO rl_p VALUES (1)",
+        ] {
+            raw_execute_pool(pool, sql, Vec::new()).await.unwrap();
+        }
+        #[allow(irrefutable_let_patterns)] // One variant in MySQL-only builds.
+        let crate::sql::Pool::Mysql(my) = pool
+        else {
+            unreachable!("a MySQL database")
+        };
+        let mut conn = my.acquire().await.unwrap();
+        let lock = "LOCK TABLES `rl_c` WRITE, `rl_p` READ";
+        let drop = ["ALTER TABLE `rl_c` DROP FOREIGN KEY `rl_c_p_id_fkey`".to_owned()];
+        let add = [
+            "ALTER TABLE `rl_c` ADD CONSTRAINT `rl_c_p_id_fkey` FOREIGN KEY (`p_id`) \
+                    REFERENCES `rl_p` (`id`) ON DELETE CASCADE"
+                .to_owned(),
+        ];
+        let url = db.url.clone();
+        let insert_waits = async move {
+            let mut other = sqlx::MySqlConnection::connect(&url).await.unwrap();
+            sqlx::query("SET SESSION lock_wait_timeout = 1")
+                .execute(&mut other)
+                .await
+                .unwrap();
+            let r = sqlx::query("INSERT INTO rl_c (id, p_id) VALUES (9, 99)")
+                .execute(&mut other)
+                .await;
+            let _ = other.close().await;
+            let e = r.expect_err("an orphan slipped in while the FK was off");
+            assert!(e.to_string().contains("Lock wait timeout"), "{e}");
+        };
+        crate::migrate::runner::replace_fk_locked(&mut conn, lock, &drop, &add, insert_waits)
+            .await
+            .unwrap();
+        checks_and_locks_back(&mut conn).await;
+        let orphan = raw_execute_pool(
+            pool,
+            "INSERT INTO rl_c (id, p_id) VALUES (8, 98)",
+            Vec::new(),
+        )
+        .await;
+        assert!(orphan.is_err(), "the FK is enforced again");
+        // A failed swap still puts checks and locks back.
+        let bad = ["ALTER TABLE `rl_c` ADD CONSTRAINT nope".to_owned()];
+        let e = crate::migrate::runner::replace_fk_locked(
+            &mut conn,
+            lock,
+            &drop,
+            &bad,
+            std::future::ready(()),
+        )
+        .await;
+        assert!(e.is_err());
+        checks_and_locks_back(&mut conn).await;
+    })
+    .await;
 }

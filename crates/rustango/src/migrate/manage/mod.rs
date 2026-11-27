@@ -161,7 +161,7 @@ pub async fn run_with_writer<W: Write + Send>(
     writer: &mut W,
 ) -> Result<(), MigrateError> {
     run_with_writer_for(
-        pool,
+        crate::migrate::v2::cli::Route::<crate::migrate::v2::cli::NoFleet>::Single(pool),
         dir,
         args,
         writer,
@@ -171,9 +171,9 @@ pub async fn run_with_writer<W: Write + Send>(
 }
 
 /// [`run_with_writer`], hinting an unknown verb from `verbs`: the tenancy
-/// CLI falls through here with its own verbs too.
-pub(crate) async fn run_with_writer_for<W: Write + Send>(
-    pool: &Pool,
+/// CLI falls through here with its own verbs too, and its fleet as `route`.
+pub(crate) async fn run_with_writer_for<W: Write + Send, F: crate::migrate::v2::cli::Fleet>(
+    route: crate::migrate::v2::cli::Route<'_, F>,
     dir: &Path,
     args: impl IntoIterator<Item = String>,
     writer: &mut W,
@@ -182,8 +182,9 @@ pub(crate) async fn run_with_writer_for<W: Write + Send>(
     let args: Vec<String> = args.into_iter().collect();
     let cmd = args.first().map_or("", String::as_str);
     if crate::cli_verbs::ENGINE_V1_VERBS.contains(&cmd) {
-        crate::migrate::require_v1_project(dir)?;
+        crate::cli_verbs::require_v1_for(cmd, dir)?;
     }
+    let pool = &route.pool();
 
     match cmd {
         "" | "--help" | "-h" | "help" => {
@@ -191,7 +192,7 @@ pub(crate) async fn run_with_writer_for<W: Write + Send>(
             Ok(())
         }
         "makemigrations" => makemigrations(dir, &args[1..], writer),
-        "dbmigrate" => crate::migrate::v2::cli::run(pool, dir, &args[1..], writer).await,
+        "dbmigrate" => crate::migrate::v2::cli::run(route, dir, &args[1..], writer).await,
         "migrate" => migrate(pool, dir, &args[1..], writer).await,
         "downgrade" => downgrade(pool, dir, &args[1..], writer).await,
         "showmigrations" | "status" => showmigrations(pool, dir, writer).await,
@@ -301,6 +302,12 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
         w,
         "      writes. Reads the ledger so the preview is accurate.\n"
     )?;
+    writeln!(w, "  dbmigrate <verb>")?;
+    writeln!(
+        w,
+        "      Migrations engine v2 (make, apply, down, status, check, sql,"
+    )?;
+    writeln!(w, "      adopt, squash); `dbmigrate --help` lists them.\n")?;
     writeln!(w, "  migrate --squash")?;
     writeln!(
         w,

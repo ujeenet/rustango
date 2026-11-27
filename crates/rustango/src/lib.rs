@@ -496,6 +496,7 @@ macro_rules! __text_column_impls_sqlite {
 }
 
 pub mod audit;
+pub(crate) mod cli_args;
 /// The built-in `manage` verbs and the did-you-mean hint, for both CLIs.
 pub(crate) mod cli_verbs;
 /// ContentType framework — a runtime handle for "any registered model".

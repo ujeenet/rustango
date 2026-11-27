@@ -180,6 +180,7 @@ pub(crate) fn parse_from(raw: &str, origin: &str) -> Result<Migration, MigrateEr
     if super::engine::FileEngine::of(raw) == super::engine::FileEngine::V2 {
         return Err(MigrateError::EngineV2 {
             origin: origin.to_owned(),
+            instead: super::engine::DBMIGRATE.to_owned(),
         });
     }
     parse_v1(raw)

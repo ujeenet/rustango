@@ -391,9 +391,7 @@ async fn v1_refuses_v2_cli_add_data_op(backend: Backend) {
 }
 
 async fn v1_refuses_v2_tenancy_migrate(backend: Backend) {
-    refuses(
-        backend,
-        PROJECT,
+    let entries = || {
         vec![
             ("migrate", tenancy_cli(&["migrate"])),
             ("fake", tenancy_cli(&["migrate", "--fake", "0001_initial"])),
@@ -401,9 +399,36 @@ async fn v1_refuses_v2_tenancy_migrate(backend: Backend) {
             ("all-tenants", tenancy_cli(&["migrate", "--all-tenants"])),
             ("migrate-tenants", tenancy_cli(&["migrate-tenants"])),
             ("migrate-registry", tenancy_cli(&["migrate-registry"])),
-        ],
+        ]
+    };
+    refuses(backend, PROJECT, entries()).await;
+    points_to(backend, entries(), "manage dbmigrate apply").await;
+    points_to(
+        backend,
+        vec![("downgrade", tenancy_cli(&["downgrade", "--all-tenants"]))],
+        "manage dbmigrate down",
     )
     .await;
+}
+
+/// Each call on an engine v2 project names the `dbmigrate` verb to run.
+async fn points_to(backend: Backend, entries: Vec<(&str, Call)>, instead: &str) {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((pool, url, _guard)) = fresh(backend, tmp.path()).await else {
+        return;
+    };
+    for (label, call) in &entries {
+        let root = tmp.path().join(label.replace(' ', "_"));
+        let dir = lay_out(&root, Shape::V2);
+        let ctx = Ctx {
+            pool: pool.clone(),
+            url: url.clone(),
+            root: root.clone(),
+            dir,
+        };
+        let err = call(&ctx).await.expect_err(label);
+        assert!(err.contains(&format!("use `{instead}`")), "{label}: {err}");
+    }
 }
 
 async fn v1_refuses_v2_tenancy_verbs(backend: Backend) {
