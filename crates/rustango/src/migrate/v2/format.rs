@@ -509,6 +509,9 @@ pub(crate) enum Op {
     AdoptColumn {
         table: String,
         column: Field,
+        /// Indexes on the column, taken over the same way (design item 23).
+        #[serde(default)]
+        indexes: Vec<IndexDef>,
     },
     DropColumn {
         table: String,

@@ -8,14 +8,6 @@
       "indexes": [
         {
           "columns": [
-            "email"
-          ],
-          "constraint": true,
-          "name": "rustango_admin_users_email_key",
-          "unique": true
-        },
-        {
-          "columns": [
             "username"
           ],
           "constraint": true,

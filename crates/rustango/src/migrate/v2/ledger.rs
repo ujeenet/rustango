@@ -96,12 +96,26 @@ impl Ledger {
     }
 
     /// The ledger `opts` names, else the default.
+    /// The framework system chain's ledger (design item 23), one per database.
+    pub(crate) fn system() -> Self {
+        let table = SYSTEM_LEDGER.to_owned();
+        Self {
+            events: format!("{table}_events"),
+            progress: format!("{table}_progress"),
+            undo: format!("{table}_undo"),
+            table,
+        }
+    }
+
     pub(crate) fn of(opts: &super::run::Options) -> Self {
         opts.ledger
             .as_deref()
             .map_or_else(Self::default_names, Self::for_base)
     }
 }
+
+/// The system chain's v2 ledger table.
+pub(crate) const SYSTEM_LEDGER: &str = "__rustango_system_v2";
 
 fn col(name: &str, ty: &str, nullable: bool, max_length: Option<u32>) -> ColumnDef {
     ColumnDef {

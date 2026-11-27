@@ -14,6 +14,16 @@
         "nullable": true,
         "ty": "string"
       },
+      "indexes": [
+        {
+          "columns": [
+            "email"
+          ],
+          "constraint": true,
+          "name": "rustango_users_email_key",
+          "unique": true
+        }
+      ],
       "op": "adopt_column",
       "table": "rustango_users",
       "v": 1

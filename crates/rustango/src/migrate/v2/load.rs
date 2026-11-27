@@ -100,52 +100,19 @@ pub(crate) fn load_project(dir: &Path) -> Result<Project, LoadError> {
     load_folders(raw)
 }
 
-/// [`load_project`] with the framework's system apps first: the project a
-/// migrate run applies (design item 20).
+/// The framework's system apps this build runs (design items 20-23), as
+/// a project of their own: their ledger is the system ledger.
 ///
 /// # Errors
-/// As [`load_project`], and a shipped system file that does not load.
-pub(crate) fn load_for_run(dir: &Path) -> Result<Project, LoadError> {
-    with_system(load_project(dir)?)
-}
-
-/// The framework's system apps first, then the project (design item 20):
-/// each target runs the system files before any project file.
-///
-/// # Errors
-/// A shipped system file that does not load.
-fn with_system(project: Project) -> Result<Project, LoadError> {
-    let system = super::system::files()?;
-    if system.is_empty() {
-        return Ok(project);
-    }
-    let base = system.len();
-    let sys_order = order_targets(&system)?;
-    let Project {
+/// A shipped system file that does not load or order.
+pub(crate) fn system_project() -> Result<Project, LoadError> {
+    let files = super::system::files()?;
+    let order = order_targets(&files)?;
+    Ok(Project {
         files,
         order,
-        replaced,
-    } = project;
-    let mut all = system;
-    all.extend(files);
-    let mut merged: BTreeMap<Target, Vec<usize>> = BTreeMap::new();
-    for target in [Target::Registry, Target::Tenant] {
-        let mut ids: Vec<usize> = sys_order.get(&target).cloned().unwrap_or_default();
-        ids.extend(order.get(&target).into_iter().flatten().map(|i| i + base));
-        if !ids.is_empty() {
-            merged.insert(target, ids);
-        }
-    }
-    Ok(Project {
-        files: all,
-        order: merged,
-        replaced,
+        replaced: BTreeMap::new(),
     })
-}
-
-/// Whether `app` is one of the framework's system apps.
-pub(crate) fn is_system_app(app: &str) -> bool {
-    app.starts_with(super::make::FRAMEWORK_PREFIX)
 }
 
 /// Load `embed_migrations!` entries (`(stem, text)`) as one v2 folder.

@@ -399,7 +399,7 @@ where
     crate::migrate::v2::ledger::cache_ensure(registry).await?;
     let run_id = report.run_id.clone();
     // One tip for every tenant: each distinct applied set plans once (4.4).
-    let project = crate::migrate::v2::load::load_for_run(dir)
+    let project = crate::migrate::v2::load::load_project(dir)
         .map_err(|e| migrate_err(run::RunError::Load(e)))?;
     let plan = crate::migrate::v2::plan::TipPlanner::new(
         &project,

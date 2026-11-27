@@ -82,6 +82,22 @@ pub(crate) const LEDGER_TABLES: &[LedgerTable] = &[
         name: "__rustango_migrations_v2_events",
         legacy_datetime: None,
     },
+    LedgerTable {
+        name: "__rustango_system_v2",
+        legacy_datetime: None,
+    },
+    LedgerTable {
+        name: "__rustango_system_v2_progress",
+        legacy_datetime: None,
+    },
+    LedgerTable {
+        name: "__rustango_system_v2_undo",
+        legacy_datetime: None,
+    },
+    LedgerTable {
+        name: "__rustango_system_v2_events",
+        legacy_datetime: None,
+    },
 ];
 
 /// The engine v2 ledger that goes with the v1 ledger `ledger`.

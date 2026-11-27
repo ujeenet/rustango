@@ -341,9 +341,8 @@ impl RunAs {
     }
 }
 
-/// The lock around `body` (the system apps run inside it, first, as files
-/// of the project), then the framework's bootstrap tables. Without `write`
-/// (a dry run) only `body` runs.
+/// The lock around `body`, then the framework's bootstrap tables. Without
+/// `write` (a dry run) only `body` runs.
 async fn locked<F, Fut, R>(
     pool: &Pool,
     write: bool,
@@ -372,6 +371,58 @@ where
     .await?
 }
 
+/// The system pass of a run: the shipped system apps for this target, on
+/// the system ledger, before the project. Returns them as `app:id`.
+async fn run_system(pool: &Pool, run_id: &str, opts: &Options) -> Result<Vec<String>, RunError> {
+    let project = super::load::system_project()?;
+    if project.files.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ledger = Ledger::system();
+    // Only the project's own run knobs stay; failpoints and targets are its.
+    let sys = Options {
+        up_to: None,
+        stop_before_contract: false,
+        plan: None,
+        fast_fresh: false,
+        #[cfg(test)]
+        crash: None,
+        ..opts.clone()
+    };
+    if !sys.dry_run {
+        ledger.ensure(pool).await?;
+        if let Some(role) = &sys.revoke_from {
+            ledger.revoke(pool, role).await?;
+        }
+    }
+    let mut runner = Runner {
+        pool,
+        ledger: &ledger,
+        run_id,
+        b: backend_of(pool),
+        opts: &sys,
+        units_run: 0,
+        batches_run: 0,
+        warnings: Vec::new(),
+        started: std::time::Instant::now(),
+        planned: Vec::new(),
+        sweep: None,
+        adopted_later: Vec::new(),
+    };
+    let done = |rows: Vec<Row>| -> std::collections::BTreeSet<String> {
+        rows.into_iter()
+            .filter(|r| r.state == RowState::Applied)
+            .map(|r| format!("{}:{}", r.app, r.id))
+            .collect()
+    };
+    let before = done(ledger.rows(pool).await?);
+    runner.apply_project(&project).await?;
+    Ok(done(ledger.rows(pool).await?)
+        .into_iter()
+        .filter(|k| !before.contains(k))
+        .collect())
+}
+
 /// Apply every pending migration of the engine v2 project around `dir`,
 /// resuming a crashed one from its frozen plan.
 ///
@@ -379,8 +430,8 @@ where
 /// A load error, a refusal (edited applied file, drift, behind the v1
 /// head, unowned tables), a failed unit, or a lost lock.
 pub(crate) async fn migrate(pool: &Pool, dir: &Path, opts: &Options) -> Result<Report, RunError> {
-    let project = super::load::load_for_run(dir)?;
-    migrate_project(pool, &project, opts).await
+    let project = load_project(dir)?;
+    migrate_project(pool, &project, true, opts).await
 }
 
 /// [`migrate`] for `embed_migrations!` entries: no system chain, as engine
@@ -394,12 +445,13 @@ pub(crate) async fn migrate_embedded(
     opts: &Options,
 ) -> Result<Report, RunError> {
     let project = super::load::load_embedded(entries)?;
-    migrate_project(pool, &project, opts).await
+    migrate_project(pool, &project, false, opts).await
 }
 
 async fn migrate_project(
     pool: &Pool,
     project: &Project,
+    with_system: bool,
     opts: &Options,
 ) -> Result<Report, RunError> {
     super::step::refuse_duplicates().map_err(|e| refused(Code::Unresolved, "data steps", e))?;
@@ -408,7 +460,7 @@ async fn migrate_project(
         if let Some(f) = project
             .files
             .iter()
-            .find(|f| f.file.target == Target::Registry && !super::load::is_system_app(&f.file.app))
+            .find(|f| f.file.target == Target::Registry)
         {
             return Err(refused(
                 Code::State,
@@ -449,6 +501,13 @@ async fn migrate_project(
         opts.run_as,
         || async {
             got_lock.store(true, std::sync::atomic::Ordering::SeqCst);
+            // The framework's system apps first, on their own ledger (design
+            // item 23): the project's ledger never holds them.
+            let system = if with_system {
+                run_system(pool, &run_id, opts).await?
+            } else {
+                Vec::new()
+            };
             if !opts.dry_run {
                 ledger.ensure(pool).await?;
                 if let Some(role) = &opts.revoke_from {
@@ -468,7 +527,6 @@ async fn migrate_project(
                 planned: Vec::new(),
                 sweep: Some(sweep),
                 adopted_later: Vec::new(),
-                system_applied: Vec::new(),
             };
             // A long unit keeps its heartbeat fresh, so boot waiters wait on it.
             let applying = runner.apply_project(project);
@@ -486,13 +544,7 @@ async fn migrate_project(
                 Err(RunError::Stopped(why)) => (Vec::new(), Some(why)),
                 Err(e) => return Err(e),
             };
-            Ok((
-                applied,
-                runner.planned,
-                stopped,
-                runner.warnings,
-                runner.system_applied,
-            ))
+            Ok((applied, runner.planned, stopped, runner.warnings, system))
         },
     );
     let (applied, planned, stopped, long_moves, system) = match opts.stale_after {
@@ -639,7 +691,7 @@ async fn rollback(
     back: Back<'_>,
     opts: &Options,
 ) -> Result<Report, RunError> {
-    // A project that does not load is refused before the lock, as a forward run is.
+    // A project that does not load is refused before the lock.
     load_project(dir)?;
     let ledger = Ledger::of(opts);
     let run_id = new_run_id();
@@ -658,7 +710,6 @@ async fn rollback(
             planned: Vec::new(),
             sweep: None,
             adopted_later: Vec::new(),
-            system_applied: Vec::new(),
         };
         runner.downgrade(back).await
     })
@@ -1101,11 +1152,9 @@ struct Runner<'a> {
     planned: Vec<String>,
     /// SQLite datetime columns to sweep before the first data unit; taken then.
     sweep: Option<Vec<(String, String)>>,
-    /// System app files applied this run, as `app:id`.
-    system_applied: Vec<String>,
     /// `(table, column)` a pending `adopt_column` takes over: an
     /// `adopt_table` before it accepts that live column (design item 22).
-    adopted_later: Vec<(String, ColumnDef)>,
+    adopted_later: Vec<(String, ColumnDef, Vec<super::state::IndexDef>)>,
 }
 
 fn renamed_name(r: &super::probe::Renamed) -> &str {
@@ -1196,7 +1245,11 @@ impl Runner<'_> {
             .filter(|f| !rows.contains_key(&(f.file.app.clone(), f.file.id.clone())))
             .flat_map(|f| &f.file.operations)
             .filter_map(|e| match &e.op {
-                Op::AdoptColumn { table, column } => Some((table.clone(), column.column.clone())),
+                Op::AdoptColumn {
+                    table,
+                    column,
+                    indexes,
+                } => Some((table.clone(), column.column.clone(), indexes.clone())),
                 _ => None,
             })
             .collect();
@@ -1261,7 +1314,7 @@ impl Runner<'_> {
                         RowState::Applied => {}
                         RowState::RollingBack if self.opts.resume_forward => {
                             self.resume_forward(f, row, &state).await?;
-                            self.record(&mut applied, f);
+                            applied.push(f.file.id.clone());
                         }
                         RowState::RollingBack => {
                             return Err(refused(
@@ -1277,7 +1330,7 @@ impl Runner<'_> {
                         }
                         RowState::Running | RowState::Failed => {
                             self.resume(f, row).await?;
-                            self.record(&mut applied, f);
+                            applied.push(f.file.id.clone());
                         }
                     }
                     if !(planned && applied_row) {
@@ -1286,12 +1339,12 @@ impl Runner<'_> {
                 }
                 None if f.file.kind == Kind::Checkpoint => {
                     state = self.adopt(f, state, &mut memo).await?;
-                    self.record(&mut applied, f);
+                    applied.push(f.file.id.clone());
                 }
                 None => {
                     self.check_requires(f)?;
                     state = self.forward(f, state, &mut memo).await?;
-                    self.record(&mut applied, f);
+                    applied.push(f.file.id.clone());
                 }
             }
             if self
@@ -1304,16 +1357,6 @@ impl Runner<'_> {
             }
         }
         Ok(applied)
-    }
-
-    /// A file this run applied: a system app's goes to the system list.
-    fn record(&mut self, applied: &mut Vec<String>, f: &Loaded) {
-        if super::load::is_system_app(&f.file.app) {
-            self.system_applied
-                .push(format!("{}:{}", f.file.app, f.file.id));
-        } else {
-            applied.push(f.file.id.clone());
-        }
     }
 
     /// The fresh fast path (8.5): `None` when the target is not fresh or a
@@ -1422,7 +1465,7 @@ impl Runner<'_> {
                     .await?;
             }
             self.finish(f, mine, 0).await?;
-            self.record(&mut applied, f);
+            applied.push(f.file.id.clone());
         }
         Ok(Some(applied))
     }
@@ -1440,6 +1483,7 @@ impl Runner<'_> {
         }
         let mut file = f.file.clone();
         let mut before = state.clone();
+        let mut replace: Vec<(usize, Vec<Op>)> = Vec::new();
         for (i, env) in f.file.operations.iter().enumerate() {
             let at = format!("{}#/operations/{i}", f.at);
             let mut after = before.clone();
@@ -1462,9 +1506,19 @@ impl Runner<'_> {
                     };
                     if let Some(t) = one.tables.get_mut(table.name.as_str()) {
                         let t = std::sync::Arc::make_mut(t);
-                        for (_, c) in self.adopted_later.iter().filter(|(n, _)| *n == table.name) {
+                        let live_index = |n: &str| {
+                            live.as_ref()
+                                .is_some_and(|l| l.indexes.iter().any(|x| x.name == n))
+                        };
+                        for (_, c, ixs) in self
+                            .adopted_later
+                            .iter()
+                            .filter(|(n, _, _)| *n == table.name)
+                        {
                             if t.column(&c.column).is_none() && live_has(&c.column) {
                                 t.columns.push(c.clone());
+                                t.indexes
+                                    .extend(ixs.iter().filter(|i| live_index(&i.name)).cloned());
                             }
                         }
                     }
@@ -1489,39 +1543,85 @@ impl Runner<'_> {
                     };
                 }
             }
-            if let Op::AdoptColumn { table, column } = &env.op {
+            if let Op::AdoptColumn {
+                table,
+                column,
+                indexes,
+            } = &env.op
+            {
                 let name = &column.column.column;
                 let live = super::catalog::read_table(self.pool, table).await?;
-                if live.is_some_and(|l| l.columns.iter().any(|c| c.name == *name)) {
-                    // The column's own definition: type, nullability, default.
-                    let mut one = after.clone();
-                    one.tables.retain(|k, _| **k == **table);
-                    let obj = format!("{table}.{name}");
-                    let diff: Vec<String> = drift(self.pool, &one)
-                        .await?
-                        .iter()
-                        .filter(|m| m.object == obj)
-                        .map(ToString::to_string)
-                        .collect();
-                    if !diff.is_empty() {
-                        return Err(refused(
-                            Code::Drift,
-                            &at,
-                            format!(
-                                "`{obj}` differs from the column it adopts: {}",
-                                diff.join("; ")
-                            ),
-                        ));
-                    }
-                } else {
-                    file.operations[i].op = Op::AddColumn {
+                let has_col = live
+                    .as_ref()
+                    .is_some_and(|l| l.columns.iter().any(|c| c.name == *name));
+                let has_ix = |n: &str| {
+                    live.as_ref()
+                        .is_some_and(|l| l.indexes.iter().any(|x| x.name == n))
+                };
+                // What is there is checked by its own definition.
+                let mut one = after.clone();
+                one.tables.retain(|k, _| **k == **table);
+                if let Some(t) = one.tables.get_mut(table.as_str()) {
+                    let t = std::sync::Arc::make_mut(t);
+                    t.indexes
+                        .retain(|i| !indexes.iter().any(|x| x.name == i.name) || has_ix(&i.name));
+                }
+                let obj = format!("{table}.{name}");
+                let mine: Vec<&str> = indexes.iter().map(|i| i.name.as_str()).collect();
+                let diff: Vec<String> = drift(self.pool, &one)
+                    .await?
+                    .iter()
+                    .filter(|m| (has_col && m.object == obj) || mine.contains(&m.object.as_str()))
+                    .map(ToString::to_string)
+                    .collect();
+                if !diff.is_empty() {
+                    return Err(refused(
+                        Code::Drift,
+                        &at,
+                        format!(
+                            "`{obj}` differs from the column it adopts: {}",
+                            diff.join("; ")
+                        ),
+                    ));
+                }
+                // What is missing is made: the column, then its indexes.
+                let mut made = Vec::new();
+                if !has_col {
+                    made.push(Op::AddColumn {
                         table: table.clone(),
                         column: column.clone(),
                         fill: None,
-                    };
+                    });
+                }
+                made.extend(
+                    indexes
+                        .iter()
+                        .filter(|i| !has_ix(&i.name))
+                        .map(|i| Op::AddIndex {
+                            table: table.clone(),
+                            index: i.clone(),
+                            concurrently: None,
+                        }),
+                );
+                if !made.is_empty() {
+                    replace.push((i, made));
                 }
             }
             before = after;
+        }
+        // An op made of several (a column and its indexes) takes its place.
+        for (i, made) in replace.into_iter().rev() {
+            let env = file.operations.remove(i);
+            for (k, op) in made.into_iter().enumerate() {
+                file.operations.insert(
+                    i + k,
+                    OpEnvelope {
+                        op,
+                        tx: env.tx,
+                        allow: env.allow.clone(),
+                    },
+                );
+            }
         }
         Ok(file)
     }
@@ -2949,16 +3049,6 @@ impl Runner<'_> {
             let row = applied[idx];
             let at = format!("ledger:{}:{}", row.app, row.id);
             let file = bodies[idx].clone();
-            if super::load::is_system_app(&row.app) {
-                return Err(refused(
-                    Code::Floor,
-                    &at,
-                    format!(
-                        "`{}:{}` is the framework's system chain: it does not roll back",
-                        row.app, row.id
-                    ),
-                ));
-            }
             if file.kind == Kind::Checkpoint {
                 return Err(refused(
                     Code::Floor,

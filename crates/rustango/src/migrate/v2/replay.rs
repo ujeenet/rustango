@@ -221,7 +221,26 @@ pub(crate) fn apply(
             column,
             fill,
         } => add_column(s, at, table, column, fill.as_deref(), created_here)?,
-        Op::AdoptColumn { table, column } => add_column(s, at, table, column, None, created_here)?,
+        Op::AdoptColumn {
+            table,
+            column,
+            indexes,
+        } => {
+            add_column(s, at, table, column, None, created_here)?;
+            for index in indexes {
+                apply(
+                    s,
+                    &Op::AddIndex {
+                        table: table.clone(),
+                        index: index.clone(),
+                        concurrently: None,
+                    },
+                    at,
+                    ctx,
+                    created_here,
+                )?;
+            }
+        }
         Op::DropColumn {
             table,
             column,
@@ -353,24 +372,6 @@ pub(crate) fn apply(
             owner,
         } => {
             ident(at, table)?;
-            // A framework table the system chain already holds: the
-            // declaration must agree with it, and changes nothing.
-            if table.starts_with(super::make::FRAMEWORK_PREFIX) {
-                if let Some(t) = s.tables.get(table.as_str()) {
-                    for c in columns {
-                        if t.column(&c.name).is_none_or(|have| have.ty != c.ty) {
-                            return Err(fail(
-                                at,
-                                format!(
-                                    "extern `{table}.{}` does not match the framework's table",
-                                    c.name
-                                ),
-                            ));
-                        }
-                    }
-                    return Ok(());
-                }
-            }
             if taken(s, table) {
                 return Err(fail(at, format!("`{table}` already exists")));
             }

@@ -48,7 +48,9 @@ pub(crate) fn files() -> Result<Vec<Loaded>, LoadError> {
         let runs = files.iter().all(|l| {
             l.file.operations.iter().all(|e| match &e.op {
                 Op::AdoptTable { table, .. } => compiled(&table.name, None),
-                Op::AdoptColumn { table, column } => compiled(table, Some(&column.column.column)),
+                Op::AdoptColumn { table, column, .. } => {
+                    compiled(table, Some(&column.column.column))
+                }
                 _ => true,
             })
         });
@@ -98,9 +100,18 @@ pub(crate) fn generate() -> Result<Vec<(String, String, String)>, LoadError> {
                 let col = ops
                     .entry(g.2.to_owned())
                     .or_insert_with(|| (target, Vec::new(), BTreeSet::new()));
-                col.1
-                    .push(json!({"op": "adopt_column", "v": 1, "table": t.name,
-                    "column": super::make::field_json(c, None)}));
+                // The column's own indexes go with it.
+                let own: Vec<&super::state::IndexDef> = state
+                    .indexes
+                    .iter()
+                    .filter(|i| i.columns == [c.column.clone()])
+                    .collect();
+                let mut op = json!({"op": "adopt_column", "v": 1, "table": t.name,
+                    "column": super::make::field_json(c, None)});
+                if !own.is_empty() {
+                    op["indexes"] = serde_json::to_value(&own).expect("indexes");
+                }
+                col.1.push(op);
                 col.2.insert(format!("{app}:0001_initial"));
                 continue;
             }
@@ -120,8 +131,14 @@ pub(crate) fn generate() -> Result<Vec<(String, String, String)>, LoadError> {
             table["comment"] = json!(c);
         }
         let mut op = json!({"op": "adopt_table", "v": 1, "table": table});
-        if !state.indexes.is_empty() {
-            op["indexes"] = serde_json::to_value(&state.indexes).expect("indexes");
+        let gated_cols: Vec<&str> = gated.iter().map(|g| g.1).collect();
+        let indexes: Vec<&super::state::IndexDef> = state
+            .indexes
+            .iter()
+            .filter(|i| !(i.columns.len() == 1 && gated_cols.contains(&i.columns[0].as_str())))
+            .collect();
+        if !indexes.is_empty() {
+            op["indexes"] = serde_json::to_value(&indexes).expect("indexes");
         }
         if !state.checks.is_empty() {
             op["checks"] = serde_json::to_value(&state.checks).expect("checks");
