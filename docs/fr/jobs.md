@@ -33,6 +33,7 @@ en Rust.
 - [Étape 2 — Démarrer une file](#étape-2--démarrer-une-file)
 - [Étape 3 — Dispatcher depuis un handler](#étape-3--dispatcher-depuis-un-handler)
 - [Étape 4 — Câbler dans votre application](#étape-4--câbler-dans-votre-application) — l'exemple complet
+- [Tâches différées, annulables et uniques](#tâches-différées-annulables-et-uniques)
 - [Faire tourner les workers (CLI + production)](#faire-tourner-les-workers-cli--production)
 - [Nouvelles tentatives et backoff](#nouvelles-tentatives-et-backoff)
 - [Le contexte de la tâche : id, tentative, arrêt](#le-contexte-de-la-tâche--id-tentative-arrêt)
@@ -161,6 +162,49 @@ for to in ["a@example.com", "b@example.com", "c@example.com"] {
 }
 // → all three WelcomeEmail::run() calls execute on the worker pool
 ```
+
+---
+
+## Tâches différées, annulables et uniques
+
+`dispatch_at` met une tâche en file pour plus tard et renvoie son `JobId`.
+Conservez l'identifiant (`id.to_string()`), et `cancel` retire la tâche tant
+qu'un worker ne l'a pas démarrée :
+
+```rust
+use rustango::jobs::{Dispatch, JobId, JobQueue, UniqueKey};
+
+let when = chrono::Utc::now() + chrono::Duration::days(7);
+let id = queue.dispatch_at(&DeleteAccount { user_id: 42 }, when).await?;
+account.deletion_job = Some(id.to_string());
+
+// Later, maybe from another process:
+let id: JobId = stored.parse()?;
+let dropped = queue.cancel(&id).await?;   // false once the job runs or ran
+```
+
+`enqueue` accepte toutes les options. Une `UniqueKey` garde une seule tâche d'un
+type donné avec cette clé en file ou en cours ; un second dispatch renvoie
+`Enqueued::Duplicate` avec l'identifiant de la première tâche et ne met rien en
+file :
+
+```rust
+let key = UniqueKey::new(format!("delete-account:{}", user.id))?;
+let queued = queue
+    .enqueue(&DeleteAccount { user_id: user.id }, Dispatch::at(when).unique(key))
+    .await?;
+let id = queued.id();   // the new job, or the one already queued
+```
+
+- `cancel` retire aussi une tâche en attente d'une nouvelle tentative. Il
+  n'arrête jamais une tâche en cours d'exécution.
+- Une clé fait de 1 à 200 caractères, sans espace au début ni à la fin, et se
+  compare exactement (la casse compte) sur tous les backends. Elle est de
+  nouveau libre une fois sa tâche terminée, envoyée en dead-letter ou annulée.
+- Sur la file en base de données, une clé demande la colonne `unique_key`, que
+  `ensure_table_pool` ajoute ; d'ici là, un dispatch unique est refusé.
+- Dans un bloc `atomic`, les deux files retiennent la clé dès l'`enqueue` : un
+  second dans le bloc renvoie `Duplicate`, et un rollback la libère.
 
 ---
 

@@ -261,6 +261,54 @@ fn every_locale_has_every_published_page() {
     );
 }
 
+/// `## ` headings outside code fences.
+fn section_count(text: &str) -> usize {
+    let mut in_fence = false;
+    text.lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            if t.starts_with("```") || t.starts_with("~~~") {
+                in_fence = !in_fence;
+            }
+            !in_fence && t.starts_with("## ")
+        })
+        .count()
+}
+
+/// A translation must keep every English section: a page that is present
+/// but lost a section passes the coverage check above.
+#[test]
+fn every_locale_page_has_every_english_section() {
+    let root = repo_root();
+    let mut problems = Vec::new();
+    let mut pages: Vec<String> = published_pages(&root).into_iter().collect();
+    pages.sort();
+
+    for page in &pages {
+        let Ok(en) = std::fs::read_to_string(root.join("docs").join(page)) else {
+            continue;
+        };
+        let want = section_count(&en);
+        for locale in ["de", "es", "fr"] {
+            let Ok(t) = std::fs::read_to_string(root.join("docs").join(locale).join(page)) else {
+                continue;
+            };
+            let have = section_count(&t);
+            if have != want {
+                problems.push(format!(
+                    "docs/{locale}/{page}: {have} sections, English has {want}"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        problems.is_empty(),
+        "translations out of step with English:\n  {}",
+        problems.join("\n  "),
+    );
+}
+
 /// #1305 — a repo link naming a path that is not in the tree.
 ///
 /// A reader hit three 404s here. They resolved on their own, which is

@@ -34,6 +34,8 @@ Beide fächern sich über denselben In-Process-**Broadcast-Bus** ([`EventBus`]) 
 - [Server-Sent Events](#server-sent-events)
 - [WebSockets](#websockets)
 - [Von anderswo senden](#von-anderswo-senden)
+- [Ereignisse pro Benutzer](#ereignisse-pro-benutzer)
+- [Über Prozesse hinweg](#über-prozesse-hinweg)
 - [Auth & Mandantenfähigkeit](#auth--mandantenfähigkeit)
 - [Skalierungshinweise](#skalierungshinweise)
 - [Feature-Flags](#feature-flags)
@@ -195,6 +197,78 @@ zu jedem verbundenen Client pushen kann, indem er einen Klon hält und
 Ein `EventBus` kann **sowohl** eine SSE-Route als auch eine WebSocket-Route zugleich unterlegen —
 `WsHub::bus()` reicht dir den zugrunde liegenden Bus, um ihn mit einem SSE-Handler zu teilen, sodass
 Clients auf beiden Transporten denselben Stream sehen.
+
+## Ereignisse pro Benutzer
+
+`KeyedEventBus<K, T>` gibt jedem Key, etwa einer Benutzer- oder Konto-ID, ein
+eigenes Topic: `send(&key, event)` erreicht nur die Abonnenten dieses Keys, und
+ein Topic lebt nur, solange jemand abonniert. Eine `Subscription` liest mit
+`recv()`:
+
+```rust
+use rustango::sse::{KeyedEventBus, Recv};
+
+let bus: KeyedEventBus<i64, Notification> = KeyedEventBus::new(100);
+
+// In the SSE handler, after auth:
+let mut sub = bus.subscribe(user.id);
+let stream = async_stream::stream! {
+    while let Some(got) = sub.recv().await {
+        let event = match got {
+            Recv::Event(n) => Event::default().event("notification")
+                .data(serde_json::to_string(&n).unwrap_or_default()),
+            // Events were missed: tell the client to reload its state.
+            Recv::Resync => Event::default().event("resync").data(""),
+            _ => continue,
+        };
+        yield Ok::<_, Infallible>(event);
+    }
+};
+
+// Anywhere else:
+bus.send(&user.id, Notification { kind: "info".into(), message: "Saved".into() });
+```
+
+**Lag-Vertrag.** `Recv::Resync` bedeutet, dass Ereignisse verpasst wurden: Der
+Abonnent lag mehr als `capacity` zurück, oder (bei `PgEventBus`) die
+Datenbankverbindung ist abgerissen. Nichts wird nachgeliefert; der Client lädt
+daher neu, was er anzeigt, und hört weiter zu. `recv()` gibt `None`, sobald der
+Bus weg ist.
+
+## Über Prozesse hinweg
+
+`PgEventBus<K, T>` (Features `sse` + `postgres`) ist der Keyed-Bus über
+PostgreSQL `LISTEN`/`NOTIFY`, sodass ein Worker in einem anderen Prozess
+publizieren kann:
+
+```rust
+use rustango::session::SessionSecret;
+use rustango::sse::PgEventBus;
+
+// In every process, on the same channel name and secret:
+let secret = SessionSecret::require_from_env()?;
+let bus: PgEventBus<i64, Notification> =
+    PgEventBus::connect(&pool, "notifications", 100, &secret).await?;
+
+let mut sub = bus.subscribe(user.id);            // web process
+bus.publish(&user.id, &notification).await?;      // any process
+```
+
+- `K` und `T` reisen als JSON; ein Ereignis über PostgreSQLs 8000-Byte-Grenze
+  wird abgelehnt (`BusError::TooLarge`). Sende eine ID und lass den Client den
+  Rest abholen.
+- In einem `atomic`-Block auf demselben Pool geht `publish` beim Commit hinaus
+  und bei einem Rollback gar nicht.
+- Eine verlorene Verbindung wird neu geöffnet, und jeder Abonnent bekommt
+  `Recv::Resync`.
+- `LISTEN` und `NOTIFY` brauchen keine Berechtigung und gelten datenbankweit;
+  der Kanal auf der Leitung ist daher ein HMAC aus dem Namen und dem Schema des
+  Pools unter `secret`. SQL ohne das Secret, etwa die Rolle eines
+  Schema-Tenants, kann weder mithören noch etwas einschleusen, und ein Bus auf
+  einem schema-gescopten Pool hört nur sein eigenes Schema. Tenants mit eigener
+  Datenbank sind ohnehin getrennt.
+- Jeder Bus hält eine Verbindung seines Pools für `LISTEN`: Baue einen pro
+  Prozess (er ist `Clone`), nicht einen pro Request.
 
 ## Auth & Mandantenfähigkeit
 
