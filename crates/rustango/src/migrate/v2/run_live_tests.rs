@@ -5312,7 +5312,7 @@ async fn old_framework_fks_repair_then_switch(b: B) {
     crate::migrate::manage::run_with_writer(pool, &dir, vec!["migrate".to_owned()], &mut out)
         .await
         .unwrap_or_else(|e| panic!("{b:?}: {e}"));
-    assert!(crate::migrate::applied_or_empty(pool, ledger)
+    assert!(crate::migrate::runner::applied_or_empty(pool, ledger)
         .await
         .unwrap()
         .contains(&repair.name));

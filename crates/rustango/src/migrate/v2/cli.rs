@@ -29,7 +29,7 @@ const HELP: &str = "manage dbmigrate <verb>   migrations engine v2
 ";
 
 /// Whether `args` (after `dbmigrate`) needs no connection.
-#[cfg(any(feature = "manage", feature = "tenancy"))]
+#[cfg(any(feature = "manage", all(feature = "tenancy", feature = "postgres")))]
 pub(crate) fn pool_free(args: &[String]) -> bool {
     match args.first().map(String::as_str) {
         Some("make" | "sql" | "help" | "--help" | "-h") | None => true,
