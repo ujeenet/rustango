@@ -4274,6 +4274,7 @@ per_backend!(
     random_ops_render_to_their_state,
     adopt_table_verifies_or_creates,
     portable_defaults_render_per_backend,
+    v1_framework_tables_adopt_cleanly,
 );
 
 /// Legacy SQLite datetime text is swept before the first data unit, so a
@@ -4829,4 +4830,56 @@ async fn portable_defaults_render_per_backend(b: B) {
     .unwrap();
     assert_eq!(n[0].0, 1, "{b:?}");
     downgrade(pool, &dir, 2, &opts()).await.unwrap();
+}
+
+/// Every framework table as engine v2 state, from today's models: what the
+/// shipped system files hold.
+fn framework_state(b: B) -> State {
+    let snap = crate::migrate::snapshot::SchemaSnapshot::from_registry();
+    let backends = [Backend::Postgres, Backend::Mysql, Backend::Sqlite];
+    let _ = b;
+    let mut st = State::default();
+    // A single database holds the tenant-scoped ones; registry ones live
+    // in a tenancy registry.
+    let tenant = |name: &str| {
+        crate::core::ModelEntry::for_table(name)
+            .map_or(true, |e| e.schema.scope == crate::core::ModelScope::Tenant)
+    };
+    for t in snap
+        .tables
+        .iter()
+        .filter(|t| t.name.starts_with(super::super::make::FRAMEWORK_PREFIX) && tenant(&t.name))
+    {
+        let ts = super::super::make::table_of(t, &snap, &backends, "framework").unwrap();
+        st.tables.insert(
+            std::sync::Arc::from(ts.name.as_str()),
+            std::sync::Arc::new(ts),
+        );
+    }
+    st
+}
+
+/// The 0.69 upgrade premise (design item 20): framework tables the v1
+/// system chain made match today's definitions, so `adopt_table` takes
+/// them over with no DDL.
+async fn v1_framework_tables_adopt_cleanly(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut out = Vec::new();
+    crate::migrate::manage::run_with_writer(pool, &dir, vec!["migrate".to_owned()], &mut out)
+        .await
+        .unwrap_or_else(|e| panic!("{b:?}: {e}"));
+    let state = framework_state(b);
+    assert!(!state.tables.is_empty());
+    let diff = super::super::probe::drift(pool, &state).await.unwrap();
+    let list: Vec<String> = diff.iter().map(ToString::to_string).collect();
+    assert!(
+        list.is_empty(),
+        "{b:?}: {} differences:\n{}",
+        list.len(),
+        list.join("\n")
+    );
 }

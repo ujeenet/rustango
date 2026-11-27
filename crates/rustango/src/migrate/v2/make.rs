@@ -579,7 +579,7 @@ fn on_delete(raw: Option<&str>, at: &str) -> Result<OnDelete, LoadError> {
     })
 }
 
-pub(super) fn table_of(
+pub(crate) fn table_of(
     t: &TableSnapshot,
     snap: &SchemaSnapshot,
     backends: &[Backend],

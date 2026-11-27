@@ -168,6 +168,7 @@ untouched.
 - Engine v2 database-mode tenants can be migrated as a separate login: set `RUSTANGO_TENANT_MIGRATOR=user:password`. The tenant's own login then loses its table-level grants on the ledger tables (SELECT on the ledger stays). On MySQL a tenant login with database-level writes refuses the fleet run: grant it table-level privileges instead. The migrator needs `SELECT` on the `mysql` schema and `GRANT OPTION`. Without a separate login, the tenant login can still write the ledger on MySQL.
 - Engine v2 `make` now writes contract ops in a second file with `phase: contract`; under tenancy those wait until every tenant reached its expand head. Pass `--no-split` for the old single file.
 - Loading an engine v2 project now refuses a merge file whose branches do not commute (`MV2-E033`); rebase one branch instead.
+- On SQLite, a migrate run that is dropped mid-statement now keeps the migrate lock until that statement ends (up to 10 s): SQLite runs it in-process, and the next run must not race its late write.
 - An engine v2 project file that creates, alters, drops or renames a `rustango_*` table is refused at load (`MV2-E034`): the framework's system chain owns them. Declare one with `extern_table` to point an FK at it.
 
 ## 0.70.0

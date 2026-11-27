@@ -453,7 +453,14 @@ impl Cmp<'_> {
         }
         if self.names == Names::Shape {
             for li in live.indexes.iter().filter(|i| !i.primary) {
-                let known = wanted.iter().any(|ix| self.same_index(li, ix));
+                // MySQL makes an index for an FK nothing covers, named after
+                // the FK: part of the FK, not an index of its own.
+                let fk_index = self.d == DialectKind::Mysql
+                    && !li.unique
+                    && t.fks
+                        .iter()
+                        .any(|f| f.name == li.name && f.columns == li.columns);
+                let known = fk_index || wanted.iter().any(|ix| self.same_index(li, ix));
                 if !known {
                     out.push(mm(
                         &li.name,
