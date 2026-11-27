@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.71.0] — 2026-11-27
+
+Migrations engine v2: `manage dbmigrate`, data steps, batched moves with resume, planned rollback, tenancy fleets, squash and merge, and the framework's system tables on v2. See `docs/migrations-v2.md` and UPGRADING.
+
 ### Added
 
 - Migration files written for engine v2 are recognised: every v1 verb, boot path, and runner refuses them with a clear error instead of a parse failure, and a v1 migrate refuses a database switched to engine v2 (boot warns and serves).
