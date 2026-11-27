@@ -4901,7 +4901,7 @@ async fn adopt_column_verifies_adds_or_refuses(b: B) {
         &v2(
             "0001_base",
             &[],
-            json!([{"op": "adopt_table", "v": 1, "table": base}]),
+            json!([{"op": "adopt_table", "v": 1, "table": base.clone()}]),
         ),
     );
     put(
@@ -4971,6 +4971,32 @@ async fn adopt_column_verifies_adds_or_refuses(b: B) {
         .unwrap();
     assert_eq!(
         code(migrate(&differs.pool, &adopt, &opts()).await),
+        Code::Drift
+    );
+    // The base app ran first; a column made by hand since differs: the
+    // `adopt_column` check alone refuses it.
+    let late = fresh(b).await.unwrap();
+    migrate(&late.pool, &made(json!([])), &other).await.unwrap();
+    let base_only = root.path().join("base_only").join("migrations");
+    put(
+        &base_only,
+        "0001_base",
+        &v2(
+            "0001_base",
+            &[],
+            json!([{"op": "adopt_table", "v": 1, "table": base}]),
+        ),
+    );
+    migrate(&late.pool, &base_only, &opts()).await.unwrap();
+    raw_execute_pool(
+        &late.pool,
+        "ALTER TABLE ac_t ADD COLUMN email VARCHAR(254) NOT NULL DEFAULT ''",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        code(migrate(&late.pool, &adopt, &opts()).await),
         Code::Drift
     );
 }
