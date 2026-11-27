@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [0.71.0] — 2026-11-27
 
-MariaDB is not supported by the 0.71 migrations engine (MySQL 8.0.16+ only); MariaDB projects stay on 0.70.
+Migrations engine v2 does not support MariaDB (MySQL 8.0.16+ only); MariaDB projects keep using engine v1.
 
 Migrations engine v2: `manage dbmigrate`, data steps, batched moves with resume, planned rollback, tenancy fleets, squash and merge, and the framework's system tables on v2. See `docs/migrations-v2.md` and UPGRADING.
 
