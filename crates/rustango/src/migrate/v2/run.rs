@@ -260,6 +260,129 @@ fn ids_of(rows: &[super::ledger::Brief]) -> std::collections::BTreeSet<String> {
     out
 }
 
+/// The ids a registry run with `opts` leaves applied when it ends well:
+/// those applied now and every file of its chains. Tenants are planned
+/// against it before the registry chain writes anything (8.3).
+///
+/// # Errors
+/// Driver failures.
+#[cfg(feature = "tenancy")]
+pub(crate) async fn registry_after(
+    pool: &Pool,
+    project: &Project,
+    opts: &Options,
+) -> Result<std::collections::BTreeSet<String>, RunError> {
+    let mut ids = applied_ids(pool, opts).await?;
+    for &c in opts.chains() {
+        for i in super::load::chain(project, c, None) {
+            let f = &project.files[i].file;
+            ids.insert(format!("{}:{}", f.app, f.id));
+            ids.insert(f.id.clone());
+        }
+    }
+    Ok(ids)
+}
+
+/// The newest ledger row `down <steps>` keeps on `pool` (`app:id`); `None`
+/// when it rolls back every row. A row half rolled back counts as a step,
+/// as [`downgrade`] counts it.
+///
+/// # Errors
+/// Driver failures.
+#[cfg(feature = "tenancy")]
+pub(crate) async fn head_after_down(
+    pool: &Pool,
+    opts: &Options,
+    steps: usize,
+) -> Result<Option<String>, RunError> {
+    let rows = Ledger::of(opts).rows(pool).await?;
+    Ok(rows
+        .len()
+        .checked_sub(steps + 1)
+        .map(|i| format!("{}:{}", rows[i].app, rows[i].id)))
+}
+
+/// The steps [`downgrade`] takes on `pool` to leave `head` the newest row
+/// (`None`: no row); `0` once it is, or once `head` is gone.
+///
+/// # Errors
+/// Driver failures.
+#[cfg(feature = "tenancy")]
+pub(crate) async fn steps_to_head(
+    pool: &Pool,
+    opts: &Options,
+    head: Option<&str>,
+) -> Result<usize, RunError> {
+    let rows = Ledger::of(opts).rows(pool).await?;
+    Ok(match head {
+        None => rows.len(),
+        Some(h) => rows
+            .iter()
+            .position(|r| names(h, &r.app, &r.id))
+            .map_or(0, |at| rows.len() - at - 1),
+    })
+}
+
+/// A file's `requires` (8.4): `registry:<id>` from a tenant run needs that
+/// registry migration applied; `tenants:<id>` from a registry run needs
+/// every tenant past it.
+fn requires_met(f: &Loaded, opts: &Options) -> Result<(), RunError> {
+    for req in &f.file.requires {
+        let (side, id) = req.split_once(':').unwrap_or(("", req));
+        let (set, verb) = match side {
+            "registry" => (&opts.registry_applied, "manage migrate-registry"),
+            "tenants" => (&opts.tenants_applied, "manage migrate-tenants"),
+            _ => {
+                return Err(refused(
+                    Code::File,
+                    &f.at,
+                    format!("`requires: {req}` is not `registry:<id>` or `tenants:<id>`"),
+                ))
+            }
+        };
+        if side == "tenants" && !opts.tenants_unknown.is_empty() {
+            return Err(refused(
+                Code::State,
+                &f.at,
+                format!(
+                    "`requires: {req}` cannot be checked while these tenants are not read: {}",
+                    opts.tenants_unknown.join(", ")
+                ),
+            ));
+        }
+        if !set.as_ref().is_some_and(|s| s.contains(id)) {
+            return Err(refused(
+                Code::State,
+                &f.at,
+                format!("apply {side} `{id}` first (`{verb}`)"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// What refuses a run with `opts` on a target where nothing is applied,
+/// read from the files alone: a data step this binary lacks, or an unmet
+/// `requires`. The fleet plans a tenant whose schema is not made yet so.
+///
+/// # Errors
+/// That refusal.
+#[cfg(feature = "tenancy")]
+pub(crate) fn fresh_refusal(project: &Project, opts: &Options, b: Backend) -> Result<(), RunError> {
+    let files: Vec<&Loaded> = opts
+        .chains()
+        .iter()
+        .flat_map(|&c| super::load::chain(project, c, None))
+        .map(|i| &project.files[i])
+        .collect();
+    let misses: Vec<String> = files
+        .iter()
+        .flat_map(|f| super::data::misses(&f.file, b, false))
+        .collect();
+    super::data::refuse_misses(&misses, "plan")?;
+    files.into_iter().try_for_each(|f| requires_met(f, opts))
+}
+
 /// A target's ledgers read once: its applied ids, and whether every file of
 /// its chains (system and project) is applied as on disk, so a run would
 /// do nothing.
@@ -1277,7 +1400,7 @@ async fn session_timeouts(
 pub(crate) const LONG_MOVE_ROWS: u64 = 1_000_000;
 
 /// How often a run holding the lock refreshes its heartbeat.
-const HEARTBEAT_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+pub(crate) const HEARTBEAT_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Refresh this run's heartbeat every `every`; never returns.
 async fn heartbeats(
@@ -2266,38 +2389,7 @@ impl Runner<'_> {
     /// needs that registry migration applied; `tenants:<id>` from a registry
     /// run needs every tenant past it.
     fn check_requires(&self, f: &Loaded) -> Result<(), RunError> {
-        for req in &f.file.requires {
-            let (side, id) = req.split_once(':').unwrap_or(("", req));
-            let (set, verb) = match side {
-                "registry" => (&self.opts.registry_applied, "manage migrate-registry"),
-                "tenants" => (&self.opts.tenants_applied, "manage migrate-tenants"),
-                _ => {
-                    return Err(refused(
-                        Code::File,
-                        &f.at,
-                        format!("`requires: {req}` is not `registry:<id>` or `tenants:<id>`"),
-                    ))
-                }
-            };
-            if side == "tenants" && !self.opts.tenants_unknown.is_empty() {
-                return Err(refused(
-                    Code::State,
-                    &f.at,
-                    format!(
-                        "`requires: {req}` cannot be checked while these tenants are not read: {}",
-                        self.opts.tenants_unknown.join(", ")
-                    ),
-                ));
-            }
-            if !set.as_ref().is_some_and(|s| s.contains(id)) {
-                return Err(refused(
-                    Code::State,
-                    &f.at,
-                    format!("apply {side} `{id}` first (`{verb}`)"),
-                ));
-            }
-        }
-        Ok(())
+        requires_met(f, self.opts)
     }
 
     fn lock_timeout(&self) -> std::time::Duration {

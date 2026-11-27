@@ -250,6 +250,23 @@ async fn lock_ledgers(
 /// later, and it can create nothing the migrator would run.
 pub(crate) async fn secure_database_login(pool: &PgPool, login: &str) -> Result<(), TenancyError> {
     let mut conn = pool.acquire().await?;
+    // Taking a database over needs superuser or CREATEDB; say so before trying.
+    let (db, owner, can_take): (String, String, bool) = sqlx::query_as(
+        "SELECT d.datname::text, pg_catalog.pg_get_userbyid(d.datdba)::text, \
+                (r.rolsuper OR r.rolcreatedb) \
+         FROM pg_catalog.pg_database d, pg_catalog.pg_roles r \
+         WHERE d.datname = current_database() AND r.rolname = current_user",
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    if owner == login && !can_take {
+        return Err(TenancyError::Validation(format!(
+            "tenant login `{login}` owns its database `{db}`, which the migrator cannot take \
+             over: make the migrator own it (`ALTER DATABASE {} OWNER TO <migrator>` as a \
+             superuser) or run the fleet as a superuser",
+            q(&db)
+        )));
+    }
     let owns: Option<bool> = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class WHERE relowner = r.oid \
                  UNION ALL SELECT 1 FROM pg_catalog.pg_proc WHERE proowner = r.oid \
@@ -273,9 +290,6 @@ pub(crate) async fn secure_database_login(pool: &PgPool, login: &str) -> Result<
             )));
         }
     }
-    let db: String = sqlx::query_scalar("SELECT current_database()::text")
-        .fetch_one(&mut *conn)
-        .await?;
     let d = q(&db);
     let mut stmts = vec![
         format!("REVOKE CREATE, TEMPORARY ON DATABASE {d} FROM {l}"),
@@ -336,6 +350,23 @@ pub(crate) async fn revoke_public_writes(
         sqlx::query(&sql).execute(&mut *conn).await?;
     }
     Ok(())
+}
+
+/// [`revoke_public_writes`] outside a transaction, where a replica booting
+/// beside this one may revoke the same grant: its "tuple concurrently
+/// updated" means it went first, so read the grants again and finish.
+pub(crate) async fn revoke_public_writes_beside_others(
+    conn: &mut sqlx::PgConnection,
+) -> Result<(), TenancyError> {
+    for _ in 0..3 {
+        match revoke_public_writes(&mut *conn).await {
+            Err(TenancyError::Driver(sqlx::Error::Database(e)))
+                if e.code().as_deref() == Some("XX000")
+                    && e.message().contains("tuple concurrently updated") => {}
+            other => return other,
+        }
+    }
+    revoke_public_writes(conn).await
 }
 
 /// Schemas `grantee` (a role, or `public` for PUBLIC) may create objects in.

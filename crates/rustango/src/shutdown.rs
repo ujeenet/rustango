@@ -68,6 +68,37 @@ pub async fn shutdown_signal() {
     }
 }
 
+/// A flag [`shutdown_signal`] sets: a migrate run reading it stops after
+/// the unit in flight (6.11). Dropping it stops listening.
+#[cfg_attr(not(any(feature = "manage", feature = "tenancy")), allow(dead_code))]
+pub(crate) struct StopOnSignal {
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+#[cfg_attr(not(any(feature = "manage", feature = "tenancy")), allow(dead_code))]
+impl StopOnSignal {
+    pub(crate) fn listen() -> Self {
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let set = flag.clone();
+        let task = tokio::spawn(async move {
+            shutdown_signal().await;
+            set.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        Self { flag, task }
+    }
+
+    pub(crate) fn flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.flag.clone()
+    }
+}
+
+impl Drop for StopOnSignal {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 /// The Windows console events that ask a process to stop, installed at once
 /// so one arriving before [`Self::recv`] is not lost.
 #[cfg(windows)]

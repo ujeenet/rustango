@@ -653,6 +653,18 @@ impl<'a> Back<'a> {
         self.dry_run
     }
 
+    /// `--to`'s id; `None` for a count of steps.
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+    pub(crate) fn to(&self) -> Option<&'a str> {
+        self.to
+    }
+
+    /// The count of steps, when no `--to` is given.
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+    pub(crate) fn steps(&self) -> usize {
+        self.steps
+    }
+
     /// The rollback on `pool`, with `opts` from [`Self::opts`].
     pub(crate) async fn run(
         &self,
@@ -660,9 +672,20 @@ impl<'a> Back<'a> {
         dir: &Path,
         opts: &super::run::Options,
     ) -> Result<super::run::Report, MigrateError> {
+        self.run_steps(pool, dir, opts, self.steps).await
+    }
+
+    /// [`Self::run`] with `steps` in place of the parsed count.
+    pub(crate) async fn run_steps(
+        &self,
+        pool: &Pool,
+        dir: &Path,
+        opts: &super::run::Options,
+        steps: usize,
+    ) -> Result<super::run::Report, MigrateError> {
         match self.to {
             Some(to) => super::run::downgrade_to(pool, dir, to, opts).await,
-            None => super::run::downgrade(pool, dir, self.steps, opts).await,
+            None => super::run::downgrade(pool, dir, steps, opts).await,
         }
         .map_err(run_err)
     }

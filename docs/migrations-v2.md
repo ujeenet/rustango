@@ -43,6 +43,7 @@ A project switches once with `adopt`; after that the engine v1 verbs refuse it.
 | `--assume-all-applied` | `squash --prune` | Prune without checking the databases. |
 | `--database <alias>` | `apply`, `down`, `status` | Work on that configured database's `database` chain. |
 | `--registry`, `--tenant <slug>`, `--all-tenants` | `down` (tenancy) | What to roll back; one is required. Tenants roll back before the registry. |
+| `--abandon-fleet-run` | `apply`, `down` (tenancy) | Replace an unfinished fleet run instead of refusing. |
 
 A flag a verb does not know is refused; nothing runs.
 
@@ -65,8 +66,47 @@ work per database: the registry first, then every tenant (inactive ones included
   `--abandon-fleet-run`, `--plan`. Contract files run only after every tenant reached its expand head.
 - `down` needs `--registry`, `--tenant <slug>` or `--all-tenants`. With both tenants and `--registry`, the tenants
   roll back first; the first failure stops it, so the registry is never rolled back past a tenant.
+- `down N` counts N in each database's own ledger, read once when the run starts. If it fails part way, run the
+  same command again: it stops at the same targets, so tenants already rolled back do not lose another file.
+  A different `down N` is refused until that run finishes; `--to <id>` or `--abandon-fleet-run` replaces it, and
+  `apply` abandons it.
+- Rolling back a `create_table` drops the table with its rows; `--accept-data-loss` only guards re-creating a
+  dropped table or column empty.
 - `status` and `check --drift` list the registry, then each tenant.
-Set `RUSTANGO_TENANT_MIGRATOR=user:password` to migrate database-mode tenants as a separate login; the tenant login then cannot write the ledger. On Postgres the migrator owns every object in the tenant database and the tenant login keeps rows only, also in tables added later.
+- A failed tenant is listed with its error. Every refusal (another plan's unfinished run, a blocker in any tenant,
+  an unknown `--canary`) comes before any write. Canaries run first, in the order given.
+- SIGTERM or Ctrl-C during `apply`: each tenant finishes its unit in flight, no other tenant starts, and the
+  command exits non-zero. The next run resumes.
+- Database-mode tenants are reached through short-lived connections, never the app's tenant pools: about three
+  per tenant in flight, so the peak follows `--parallel`.
+
+The registry keeps one row per fleet run in `__rustango_fleet_runs__` (direction, state, heartbeat; `down` runs
+also store their targets) and one row per tenant in `__rustango_tenant_migrations__` (state, head, error class).
+Query them to see a run's progress; the error text itself is only in the command output and the log.
+
+### Boot under tenancy
+
+Boot runs the registry chain, then the fleet, with `[migrate] fleet_parallel` tenants at once (1 by default; raise
+it so a long rollout fits your deploy timeout). Another replica booting meanwhile waits on the fleet lock as long
+as the run's heartbeat is fresh (refreshed every 30 s); it exits non-zero only when the heartbeat is older than
+`[migrate] boot_stale_after_secs` (120 s). `[server] migrate_lock_timeout_secs` does not apply here. A SIGTERM
+during the boot fleet stops it as above, and the server exits without opening `/ready`.
+
+A tenant that failed at boot answers 503 maintenance on every request that opens its database (a handler that
+never touches the tenant database still answers) until a run applies it. A server parks only the tenants that
+failed at its own boot: one that fails in a later CLI run is not parked on a running server.
+
+### Rights
+
+- The login that runs the fleet on the registry (Postgres) needs `CREATE` on the database, `CREATE` on schema
+  `public` (PG 15+) and `CREATEROLE` while schema tenant roles are on; the database owner runs
+  `REVOKE TEMPORARY ON DATABASE <db> FROM PUBLIC` once.
+- Set `RUSTANGO_TENANT_MIGRATOR=user:password` to migrate database-mode tenants as a separate login; the tenant
+  login then cannot write the ledger. On Postgres the migrator owns every object in the tenant database and the
+  tenant login keeps rows only, also in tables added later. The tenant login must not own its database: make the
+  migrator the owner (`ALTER DATABASE <db> OWNER TO <migrator>`) or run as a superuser, else the tenant is refused
+  with that fix. To take over objects the login made, the migrator needs its rights (`GRANT <login> TO <migrator>`).
+  On MySQL the migrator needs `SELECT` on the `mysql` schema and `GRANT OPTION`.
 
 ## Portable defaults
 

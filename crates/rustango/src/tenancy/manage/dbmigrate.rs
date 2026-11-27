@@ -144,6 +144,7 @@ fn fleet_flags(args: &[String]) -> Result<(FleetOptions, bool), TenancyError> {
         allow_mixed_heads: parsed.has("--allow-mixed-heads"),
         abandon: parsed.has("--abandon-fleet-run"),
         migrator: fleet::MigratorLogin::from_env(),
+        ..FleetOptions::default()
     };
     Ok((fo, parsed.has("--plan") || parsed.has("--dry-run")))
 }
@@ -160,7 +161,7 @@ async fn apply<DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    let (fo, plan) = fleet_flags(args)?;
+    let (mut fo, plan) = fleet_flags(args)?;
     if plan {
         let mut refused = 0;
         for (label, planned) in fleet::plan_fleet(f.pools, dir, f.registry_url).await? {
@@ -185,7 +186,11 @@ where
         }
         return Ok(());
     }
+    // SIGTERM or Ctrl-C: each tenant finishes its unit in flight, then it stops (6.11).
+    let on_signal = crate::shutdown::StopOnSignal::listen();
+    fo.stop = Some(on_signal.flag());
     let report = fleet::run_fleet(f.pools, dir, f.registry_url, &fo).await?;
+    drop(on_signal);
     writeln!(
         w,
         "registry: applied {} migration(s)",
@@ -195,9 +200,10 @@ where
         writeln!(w, "  + {id}")?;
     }
     for t in &report.tenants {
-        match &t.error_class {
-            Some(class) => writeln!(w, "tenant {}: failed ({class})", t.slug)?,
-            None => writeln!(
+        match (&t.error_class, &t.error) {
+            (Some(class), Some(e)) => writeln!(w, "tenant {}: failed ({class}): {e}", t.slug)?,
+            (Some(class), None) => writeln!(w, "tenant {}: failed ({class})", t.slug)?,
+            (None, _) => writeln!(
                 w,
                 "tenant {}: applied {} migration(s)",
                 t.slug,
@@ -205,17 +211,24 @@ where
             )?,
         }
     }
+    for slug in &report.skipped {
+        writeln!(w, "tenant {slug}: skipped, not run")?;
+    }
     if report.stopped {
         writeln!(
             w,
             "stopped: a canary failed or the failure limit was passed"
         )?;
     }
+    if let Some(e) = report.stop_error() {
+        return Err(e);
+    }
     let failed = report.failed().count();
     if failed > 0 {
         return Err(TenancyError::Validation(format!(
-            "{failed} of {} tenant(s) failed; see the report above",
-            report.tenants.len()
+            "{failed} of {} tenant(s) failed, {} skipped; see the report above",
+            report.tenants.len() + report.skipped.len(),
+            report.skipped.len()
         )));
     }
     Ok(())
@@ -224,8 +237,8 @@ where
 const DOWN: crate::cli_args::Spec<'static> = crate::cli_args::Spec {
     verb: "dbmigrate down",
     usage: "dbmigrate down [<n> | --to <id>] (--registry | --tenant <slug> | --all-tenants) \
-            [--plan | --dry-run] [--accept-data-loss] [--cascade]   tenants roll back before \
-            the registry",
+            [--plan | --dry-run] [--accept-data-loss] [--cascade] [--abandon-fleet-run]   \
+            tenants roll back before the registry",
     switches: &[
         "--registry",
         "--all-tenants",
@@ -233,6 +246,7 @@ const DOWN: crate::cli_args::Spec<'static> = crate::cli_args::Spec {
         "--dry-run",
         "--accept-data-loss",
         "--cascade",
+        "--abandon-fleet-run",
     ],
     valued: &["--to", "--tenant"],
     max_positionals: 1,
@@ -270,30 +284,220 @@ where
         )));
     }
     let registry = f.pools.registry_pool();
-    let (reg, back) = (&registry, &back);
-    let body =
-        move || async move { Ok(down_locked(f, dir, back, tenants, registry_too, reg, w).await) };
+    let cmd = DownCmd {
+        back: &back,
+        tenants,
+        registry_too,
+        abandon: p.has("--abandon-fleet-run"),
+    };
+    let (reg, cmd) = (&registry, &cmd);
+    // Boxed: inline, the down future overflowed a debug test thread's stack.
+    let body = move || async move { Ok(Box::pin(down_locked(f, dir, cmd, reg, w)).await) };
     run::fleet_locked(reg, body).await?
 }
+
+/// One `down` command under tenancy.
+struct DownCmd<'a> {
+    back: &'a Back<'a>,
+    tenants: Option<Tenants<'a>>,
+    registry_too: bool,
+    abandon: bool,
+}
+
+impl DownCmd<'_> {
+    /// The command as its fleet record names it: a rerun of the same one
+    /// resumes that record.
+    fn spec(&self) -> String {
+        let how = match self.back.to() {
+            Some(to) => format!("--to {to}"),
+            None => self.back.steps().to_string(),
+        };
+        let scope = match &self.tenants {
+            Some(Tenants::All) => " --all-tenants".to_owned(),
+            Some(Tenants::One(slug)) => format!(" --tenant {slug}"),
+            None => String::new(),
+        };
+        let reg = if self.registry_too { " --registry" } else { "" };
+        format!("down {how}{scope}{reg}")
+    }
+}
+
+/// A `down` run's record detail: the command, and for a count of steps the
+/// head each database keeps (8.4), resolved once.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct DownDetail {
+    spec: String,
+    /// Slug, or [`REGISTRY`], to the newest `app:id` it keeps (`None`: none).
+    heads: std::collections::BTreeMap<String, Option<String>>,
+}
+
+/// The registry's key in [`DownDetail::heads`]; no slug is empty.
+const REGISTRY: &str = "";
 
 async fn down_locked<DB: Database>(
     f: &FleetCli<'_, DB>,
     dir: &Path,
-    back: &Back<'_>,
-    tenants: Option<Tenants<'_>>,
-    registry_too: bool,
+    cmd: &DownCmd<'_>,
     registry: &crate::sql::Pool,
     w: Out<'_>,
 ) -> Result<(), TenancyError>
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
+    let spec = cmd.spec();
+    let reg_opts = || {
+        cmd.back.opts(Options {
+            run_as: RunAs::Registry,
+            ..Options::default()
+        })
+    };
+    // A `down N` rerun while that run is open goes to the same heads.
+    let open = crate::migrate::v2::ledger::fleet_open_down(registry).await?;
+    let resumed = match &open {
+        Some((id, detail)) => {
+            let d: DownDetail = detail
+                .as_deref()
+                .and_then(|d| serde_json::from_str(d).ok())
+                .unwrap_or_default();
+            if d.spec == spec {
+                Some((id.clone(), d))
+            } else if cmd.back.to().is_some() || cmd.abandon {
+                None
+            } else {
+                return Err(TenancyError::Validation(format!(
+                    "fleet run {id} (`{}`) did not finish: rerun that command to finish it, roll \
+                     back with `--to <id>`, or pass --abandon-fleet-run",
+                    d.spec
+                )));
+            }
+        }
+        None => None,
+    };
+    let heads = match &resumed {
+        Some((_, d)) => d.heads.clone(),
+        None if cmd.back.to().is_some() => std::collections::BTreeMap::default(),
+        None => resolve_heads(f, cmd, registry, &reg_opts()).await?,
+    };
+    if cmd.back.dry_run() {
+        return Box::pin(down_each(f, dir, cmd, &heads, registry, w)).await;
+    }
+    let run_id = if let Some((id, _)) = resumed {
+        crate::migrate::v2::ledger::fleet_reopen(registry, &id).await?;
+        id
+    } else {
+        if let Some((id, _)) = &open {
+            crate::migrate::v2::ledger::fleet_abandon(registry, id).await?;
+        }
+        let project = crate::migrate::v2::load::load_project(dir)
+            .map_err(|e| TenancyError::Migrate(MigrateError::Validation(e.to_string())))?;
+        let id = run::new_run_id();
+        let detail = DownDetail {
+            spec,
+            heads: heads.clone(),
+        };
+        crate::migrate::v2::ledger::fleet_open(
+            registry,
+            &id,
+            "down",
+            &run::plan_hash(&project),
+            cmd.abandon,
+            Some(&serde_json::to_string(&detail).map_err(MigrateError::from)?),
+        )
+        .await?;
+        id
+    };
+    let result = fleet::beating(
+        registry,
+        &run_id,
+        None,
+        Box::pin(down_each(f, dir, cmd, &heads, registry, w)),
+    )
+    .await;
+    let state = if result.is_ok() {
+        "succeeded"
+    } else {
+        "failed"
+    };
+    crate::migrate::v2::ledger::fleet_close(registry, &run_id, state).await?;
+    result
+}
+
+/// For a count of steps, the head each chosen database keeps, read once
+/// before anything rolls back.
+async fn resolve_heads<DB: Database>(
+    f: &FleetCli<'_, DB>,
+    cmd: &DownCmd<'_>,
+    registry: &crate::sql::Pool,
+    reg_opts: &Options,
+) -> Result<std::collections::BTreeMap<String, Option<String>>, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let steps = cmd.back.steps();
+    let mut heads = std::collections::BTreeMap::new();
+    if let Some(which) = &cmd.tenants {
+        for (slug, t) in fleet::targets(f.pools, f.registry_url, *which).await? {
+            let t = match t {
+                Reached::Target(t) => t,
+                Reached::MissingSchema => continue,
+                Reached::Unreachable(e) => {
+                    return Err(TenancyError::Validation(format!(
+                        "tenant `{slug}`: {e}; nothing was rolled back"
+                    )))
+                }
+            };
+            let open = t.open().await?;
+            let head = run::head_after_down(&open.pool, &fleet::tenant_opts(&t), steps).await;
+            open.close().await;
+            heads.insert(slug, head.map_err(|e| TenancyError::Migrate(e.into()))?);
+        }
+    }
+    if cmd.registry_too {
+        let head = run::head_after_down(registry, reg_opts, steps)
+            .await
+            .map_err(|e| TenancyError::Migrate(e.into()))?;
+        heads.insert(REGISTRY.to_owned(), head);
+    }
+    Ok(heads)
+}
+
+/// Roll each chosen tenant back, then the registry: to `--to`, or to its
+/// head in `heads` (one left out was not part of the run).
+async fn down_each<DB: Database>(
+    f: &FleetCli<'_, DB>,
+    dir: &Path,
+    cmd: &DownCmd<'_>,
+    heads: &std::collections::BTreeMap<String, Option<String>>,
+    registry: &crate::sql::Pool,
+    w: Out<'_>,
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let back = cmd.back;
     let dry = back.dry_run();
-    if let Some(which) = tenants {
-        for (slug, t) in fleet::targets(f.pools, f.registry_url, which).await? {
+    // How many steps reach `key`'s head on `pool`; `None` when it is not in the run.
+    let steps_on = |key: &str, pool: &crate::sql::Pool, opts: &Options| {
+        let head = heads.get(key).cloned();
+        let (pool, opts) = (pool.clone(), opts.clone());
+        async move {
+            if back.to().is_some() {
+                return Ok(Some(0));
+            }
+            let Some(head) = head else { return Ok(None) };
+            run::steps_to_head(&pool, &opts, head.as_deref())
+                .await
+                .map(Some)
+                .map_err(|e| TenancyError::Migrate(e.into()))
+        }
+    };
+    if let Some(which) = &cmd.tenants {
+        for (slug, t) in fleet::targets(f.pools, f.registry_url, *which).await? {
             let stop = |e: &dyn std::fmt::Display| {
                 TenancyError::Validation(format!(
-                    "tenant `{slug}`: {e}; later tenants and the registry were not rolled back"
+                    "tenant `{slug}`: {e}; later tenants and the registry were not rolled back: \
+                     rerun the same command to finish (it stops at the same targets), or use \
+                     `--to <id>`"
                 ))
             };
             let t = match t {
@@ -305,25 +509,39 @@ where
                 Reached::Unreachable(e) => return Err(stop(&e)),
             };
             let open = t.open().await.map_err(|e| stop(&e))?;
-            let r = back
-                .run(&open.pool, dir, &back.opts(fleet::tenant_opts(&t)))
-                .await;
+            let opts = back.opts(fleet::tenant_opts(&t));
+            let r = match steps_on(&slug, &open.pool, &opts).await {
+                Ok(None) => Ok(None),
+                Ok(Some(n)) if n == 0 && back.to().is_none() => Ok(Some(run::Report::default())),
+                Ok(Some(n)) => back
+                    .run_steps(&open.pool, dir, &opts, n)
+                    .await
+                    .map(Some)
+                    .map_err(TenancyError::Migrate),
+                Err(e) => Err(e),
+            };
             let recorded = match (&r, dry) {
-                (Ok(_), false) => fleet::record_head(registry, &t, &open.pool).await,
+                (Ok(Some(_)), false) => fleet::record_head(registry, &t, &open.pool).await,
                 _ => Ok(()),
             };
             open.close().await;
-            let report = r.map_err(|e| stop(&e))?;
+            let Some(report) = r.map_err(|e| stop(&e))? else {
+                continue;
+            };
             recorded?;
             crate::migrate::v2::cli::write_back(w, Some(&format!("tenant {slug}")), &report, dry)?;
         }
     }
-    if registry_too {
+    if cmd.registry_too {
         let opts = back.opts(Options {
             run_as: RunAs::Registry,
             ..Options::default()
         });
-        let report = back.run(registry, dir, &opts).await?;
+        let report = match steps_on(REGISTRY, registry, &opts).await? {
+            Some(0) if back.to().is_none() => run::Report::default(),
+            Some(n) => back.run_steps(registry, dir, &opts, n).await?,
+            None => back.run(registry, dir, &opts).await?,
+        };
         crate::migrate::v2::cli::write_back(w, Some("registry"), &report, dry)?;
     }
     Ok(())

@@ -409,18 +409,21 @@ fn fleet_runs_table() -> TableState {
             // up | down
             col("direction", "string", false, Some(8)),
             col("plan_hash", "string", false, Some(64)),
-            // running | succeeded | failed | abandoned | resumed
+            // running | succeeded | failed | stopped | abandoned | resumed
             col("state", "string", false, Some(16)),
             col("heartbeat_at", "datetime", true, None),
             col("started_at", "datetime", true, None),
             col("finished_at", "datetime", true, None),
+            // A `down` run's command and per-tenant targets (JSON).
+            col("detail", "string", true, None),
         ],
     )
 }
 
 /// Open a fleet run record. Called under the fleet lock, so a `running`
 /// row is a run that died: the same plan and direction resumes it,
-/// another one refuses unless `abandon`.
+/// another one refuses unless `abandon`. A `down` run that did not
+/// finish is abandoned: its targets no longer hold.
 ///
 /// # Errors
 /// Another plan's unfinished run, or driver failures.
@@ -431,6 +434,7 @@ pub(crate) async fn fleet_open(
     direction: &str,
     plan_hash: &str,
     abandon: bool,
+    detail: Option<&str>,
 ) -> Result<(), MigrateError> {
     let d = registry.dialect();
     if !crate::migrate::try_table_exists_here(registry, FLEET_RUNS).await? {
@@ -467,18 +471,131 @@ pub(crate) async fn fleet_open(
     raw_execute_pool(
         registry,
         &format!(
-            "INSERT INTO {t} (run_id, direction, plan_hash, state, heartbeat_at, started_at) \
-             VALUES ({}, {}, {}, {}, {now}, {now})",
+            "UPDATE {t} SET state = {} WHERE direction = {} AND state IN ({}, {})",
             p(registry, 1),
             p(registry, 2),
             p(registry, 3),
             p(registry, 4),
+        ),
+        vec![s("abandoned"), s("down"), s("failed"), s("stopped")],
+    )
+    .await?;
+    let opt = detail.map_or(SqlValue::Null, s);
+    raw_execute_pool(
+        registry,
+        &format!(
+            "INSERT INTO {t} (run_id, direction, plan_hash, state, heartbeat_at, started_at, \
+             detail) VALUES ({}, {}, {}, {}, {now}, {now}, {})",
+            p(registry, 1),
+            p(registry, 2),
+            p(registry, 3),
+            p(registry, 4),
+            p(registry, 5),
             now = d.utc_now_sql()
         ),
-        vec![s(run_id), s(direction), s(plan_hash), s("running")],
+        vec![s(run_id), s(direction), s(plan_hash), s("running"), opt],
     )
     .await?;
     Ok(())
+}
+
+/// The newest `down` run that did not finish (running, failed or
+/// stopped): `(run_id, detail)`.
+///
+/// # Errors
+/// Driver failures.
+#[cfg(feature = "tenancy")]
+pub(crate) async fn fleet_open_down(
+    registry: &Pool,
+) -> Result<Option<(String, Option<String>)>, MigrateError> {
+    if !crate::migrate::try_table_exists_here(registry, FLEET_RUNS).await? {
+        return Ok(None);
+    }
+    let rows: Vec<(String, Option<String>)> = raw_query_pool(
+        &format!(
+            "SELECT run_id, detail FROM {} WHERE direction = {} AND state IN ({}, {}, {}) \
+             ORDER BY started_at DESC, run_id DESC",
+            registry.dialect().quote_ident(FLEET_RUNS),
+            p(registry, 1),
+            p(registry, 2),
+            p(registry, 3),
+            p(registry, 4),
+        ),
+        vec![s("down"), s("running"), s("failed"), s("stopped")],
+        registry,
+    )
+    .await?;
+    Ok(rows.into_iter().next())
+}
+
+/// Take an unfinished run up again: `running`, its heartbeat now.
+///
+/// # Errors
+/// Driver failures.
+#[cfg(feature = "tenancy")]
+pub(crate) async fn fleet_reopen(registry: &Pool, run_id: &str) -> Result<(), MigrateError> {
+    let d = registry.dialect();
+    raw_execute_pool(
+        registry,
+        &format!(
+            "UPDATE {} SET state = {}, heartbeat_at = {}, finished_at = NULL WHERE run_id = {}",
+            d.quote_ident(FLEET_RUNS),
+            p(registry, 1),
+            d.utc_now_sql(),
+            p(registry, 2)
+        ),
+        vec![s("running"), s(run_id)],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Abandon an unfinished run another command replaces.
+///
+/// # Errors
+/// Driver failures.
+#[cfg(feature = "tenancy")]
+pub(crate) async fn fleet_abandon(registry: &Pool, run_id: &str) -> Result<(), MigrateError> {
+    fleet_set(registry, run_id, "abandoned").await
+}
+
+/// A `running` fleet record whose heartbeat is at least `stale` old, by
+/// the DB clock: `(run_id, age in seconds)`.
+///
+/// # Errors
+/// Driver failures.
+#[cfg(feature = "tenancy")]
+pub(crate) async fn fleet_stale(
+    registry: &Pool,
+    stale: std::time::Duration,
+) -> Result<Option<(String, i64)>, MigrateError> {
+    if !crate::migrate::try_table_exists_here(registry, FLEET_RUNS).await? {
+        return Ok(None);
+    }
+    let rows: Vec<(String, i64)> = raw_query_pool(
+        &format!(
+            "SELECT run_id, {} FROM {} WHERE state = {} AND heartbeat_at IS NOT NULL",
+            heartbeat_age_sql(registry),
+            registry.dialect().quote_ident(FLEET_RUNS),
+            p(registry, 1),
+        ),
+        vec![s("running")],
+        registry,
+    )
+    .await?;
+    let limit = i64::try_from(stale.as_secs()).unwrap_or(i64::MAX);
+    Ok(rows.into_iter().find(|r| r.1 >= limit))
+}
+
+/// Seconds since `heartbeat_at`, by the database clock.
+fn heartbeat_age_sql(pool: &Pool) -> &'static str {
+    match pool.dialect().kind() {
+        crate::sql::DialectKind::Postgres => {
+            "CAST(EXTRACT(EPOCH FROM (now() - heartbeat_at)) AS BIGINT)"
+        }
+        crate::sql::DialectKind::Mysql => "TIMESTAMPDIFF(SECOND, heartbeat_at, UTC_TIMESTAMP(6))",
+        _ => "CAST((julianday('now') - julianday(heartbeat_at)) * 86400 AS INTEGER)",
+    }
 }
 
 /// Refresh a fleet run's heartbeat.
@@ -1094,15 +1211,7 @@ impl Ledger {
         pool: &Pool,
         stale: std::time::Duration,
     ) -> Result<Option<(String, String, i64)>, MigrateError> {
-        let age = match pool.dialect().kind() {
-            crate::sql::DialectKind::Postgres => {
-                "CAST(EXTRACT(EPOCH FROM (now() - heartbeat_at)) AS BIGINT)"
-            }
-            crate::sql::DialectKind::Mysql => {
-                "TIMESTAMPDIFF(SECOND, heartbeat_at, UTC_TIMESTAMP(6))"
-            }
-            _ => "CAST((julianday('now') - julianday(heartbeat_at)) * 86400 AS INTEGER)",
-        };
+        let age = heartbeat_age_sql(pool);
         let sql = format!(
             "SELECT app, id, {age} FROM {} WHERE state = {} AND heartbeat_at IS NOT NULL",
             self.qt(pool),
