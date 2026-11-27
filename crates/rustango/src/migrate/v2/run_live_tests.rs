@@ -5087,6 +5087,27 @@ async fn adopt_column_indexes_verify_or_create(b: B) {
         Code::Drift,
         "{b:?}"
     );
+    // The base app ran first; an index made by hand since differs: the
+    // `adopt_column` check alone refuses it.
+    let late = fresh(b).await.unwrap();
+    migrate(&late.pool, &made("late", json!([])), &other)
+        .await
+        .unwrap();
+    let base_only = root.path().join("base_only").join("migrations");
+    put(&base_only, "0001_base", &v2("0001_base", &[], base.clone()));
+    migrate(&late.pool, &base_only, &opts()).await.unwrap();
+    raw_execute_pool(
+        &late.pool,
+        "CREATE INDEX ai_t_ab ON ai_t (a, b)",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        code(migrate(&late.pool, &adopt, &opts()).await),
+        Code::Drift,
+        "{b:?}"
+    );
     // A column already in state is taken over only as it is.
     let wide = root.path().join("wide").join("migrations");
     put(&wide, "0001_base", &v2("0001_base", &[], base));
