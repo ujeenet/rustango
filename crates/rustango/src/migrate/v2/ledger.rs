@@ -532,6 +532,7 @@ fn grantee_is(pool: &Pool, n: usize) -> String {
 ///
 /// # Errors
 /// Driver failures (reading grants needs `SELECT` on the `mysql` schema).
+#[cfg(feature = "tenancy")]
 pub(crate) async fn wide_grants(pool: &Pool, login: &str) -> Result<Option<String>, MigrateError> {
     const WRITES: &str = "('INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'CREATE')";
     if pool.dialect().kind() != crate::sql::DialectKind::Mysql {

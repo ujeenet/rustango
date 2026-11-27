@@ -368,6 +368,7 @@ pub(crate) enum PruneGate {
     Here { applied: bool },
     /// Under tenancy: the targets (registry or tenant slugs) that ran part
     /// of what the checkpoint replaces and not the checkpoint itself.
+    #[cfg(feature = "tenancy")]
     Fleet { behind: Vec<String> },
     /// `--assume-all-applied`.
     Assumed,
@@ -397,6 +398,7 @@ pub(crate) fn prune(
             "`{checkpoint}` is not applied here: prune after every database ran it, or pass \
              --assume-all-applied"
         )),
+        #[cfg(feature = "tenancy")]
         PruneGate::Fleet { behind } if !behind.is_empty() => Some(format!(
             "{} ran part of what `{checkpoint}` replaces and need those files: migrate them \
              first, or pass --assume-all-applied",
@@ -432,6 +434,7 @@ pub(crate) fn squash_checkpoint<'p>(
 
 /// Whether a ledger holding `applied` ids of the checkpoint's app still
 /// needs the replaced files: part of them ran, the checkpoint did not.
+#[cfg(feature = "tenancy")]
 pub(crate) fn needs_replaced(c: &super::format::File, applied: &HashSet<String>) -> bool {
     !applied.contains(&c.id)
         && c.replaces.iter().any(|r| applied.contains(r))
