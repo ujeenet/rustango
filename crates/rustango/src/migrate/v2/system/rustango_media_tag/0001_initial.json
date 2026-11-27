@@ -8,6 +8,51 @@
       "indexes": [
         {
           "columns": [
+            "slug"
+          ],
+          "constraint": true,
+          "name": "rustango_media_tags_slug_key",
+          "unique": true
+        }
+      ],
+      "op": "adopt_table",
+      "table": {
+        "fields": [
+          {
+            "column": "created_at",
+            "nullable": false,
+            "portable_default": "now",
+            "ty": "datetime"
+          },
+          {
+            "auto": true,
+            "column": "id",
+            "nullable": false,
+            "primary_key": true,
+            "ty": "i64"
+          },
+          {
+            "column": "name",
+            "max_length": 255,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "slug",
+            "max_length": 255,
+            "nullable": false,
+            "ty": "string"
+          }
+        ],
+        "name": "rustango_media_tags",
+        "scope": "tenant"
+      },
+      "v": 1
+    },
+    {
+      "indexes": [
+        {
+          "columns": [
             "media_id",
             "tag_id"
           ],
@@ -49,51 +94,6 @@
           }
         ],
         "name": "rustango_media_tag_links",
-        "scope": "tenant"
-      },
-      "v": 1
-    },
-    {
-      "indexes": [
-        {
-          "columns": [
-            "slug"
-          ],
-          "constraint": true,
-          "name": "rustango_media_tags_slug_key",
-          "unique": true
-        }
-      ],
-      "op": "adopt_table",
-      "table": {
-        "fields": [
-          {
-            "column": "created_at",
-            "nullable": false,
-            "portable_default": "now",
-            "ty": "datetime"
-          },
-          {
-            "auto": true,
-            "column": "id",
-            "nullable": false,
-            "primary_key": true,
-            "ty": "i64"
-          },
-          {
-            "column": "name",
-            "max_length": 255,
-            "nullable": false,
-            "ty": "string"
-          },
-          {
-            "column": "slug",
-            "max_length": 255,
-            "nullable": false,
-            "ty": "string"
-          }
-        ],
-        "name": "rustango_media_tags",
         "scope": "tenant"
       },
       "v": 1

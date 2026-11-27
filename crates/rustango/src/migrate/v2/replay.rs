@@ -353,6 +353,24 @@ pub(crate) fn apply(
             owner,
         } => {
             ident(at, table)?;
+            // A framework table the system chain already holds: the
+            // declaration must agree with it, and changes nothing.
+            if table.starts_with(super::make::FRAMEWORK_PREFIX) {
+                if let Some(t) = s.tables.get(table.as_str()) {
+                    for c in columns {
+                        if t.column(&c.name).is_none_or(|have| have.ty != c.ty) {
+                            return Err(fail(
+                                at,
+                                format!(
+                                    "extern `{table}.{}` does not match the framework's table",
+                                    c.name
+                                ),
+                            ));
+                        }
+                    }
+                    return Ok(());
+                }
+            }
             if taken(s, table) {
                 return Err(fail(at, format!("`{table}` already exists")));
             }

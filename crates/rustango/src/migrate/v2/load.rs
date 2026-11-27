@@ -31,65 +31,6 @@ pub(crate) struct Loaded {
     pub(crate) file: File,
 }
 
-impl crate::migrate::chains::ChainFacts for Loaded {
-    fn key(&self) -> String {
-        format!("{}:{}", self.file.app, self.file.id)
-    }
-
-    /// Schema ops only: raw SQL is opaque, as in engine v1.
-    fn facts(&self) -> Vec<crate::migrate::chains::Fact<'_>> {
-        use super::format::Op;
-        use crate::migrate::chains::Fact;
-        let mut out = Vec::new();
-        if let Some(doc) = &self.file.state {
-            out.extend(doc.tables.keys().map(|t| Fact::Created(t)));
-        }
-        for env in &self.file.operations {
-            if let Op::DataSql { tables, .. } | Op::DataRust { tables, .. } = &env.op {
-                out.extend(tables.write_tables().map(Fact::Written));
-                continue;
-            }
-            let written = match &env.op {
-                Op::CreateTable { table, .. } | Op::AdoptTable { table, .. } => {
-                    out.push(Fact::Created(&table.name));
-                    &table.name
-                }
-                Op::DropTable { table, .. } => {
-                    out.push(Fact::Dropped(table));
-                    table
-                }
-                Op::RenameTable { from, to } => {
-                    out.push(Fact::Renamed { from, to });
-                    to
-                }
-                Op::AlterTableComment { table, .. }
-                | Op::AddColumn { table, .. }
-                | Op::AdoptColumn { table, .. }
-                | Op::DropColumn { table, .. }
-                | Op::RenameColumn { table, .. }
-                | Op::AlterColumn { table, .. }
-                | Op::AddFk { table, .. }
-                | Op::DropFk { table, .. }
-                | Op::AddIndex { table, .. }
-                | Op::DropIndex { table, .. }
-                | Op::RenameIndex { table, .. }
-                | Op::AddCheck { table, .. }
-                | Op::DropCheck { table, .. } => table,
-                Op::RawSql { .. }
-                | Op::StateOnly { .. }
-                | Op::CreateExtension { .. }
-                | Op::ExternTable { .. }
-                | Op::DataSql { .. }
-                | Op::DataRust { .. }
-                | Op::ArchiveRestore { .. }
-                | Op::ArchiveDrop { .. } => continue,
-            };
-            out.push(Fact::Written(written));
-        }
-        out
-    }
-}
-
 /// A loaded project: its files and the canonical order of each target.
 #[derive(Debug, Default)]
 pub(crate) struct Project {
@@ -157,6 +98,54 @@ pub(crate) fn load_project(dir: &Path) -> Result<Project, LoadError> {
         _ => {}
     }
     load_folders(raw)
+}
+
+/// [`load_project`] with the framework's system apps first: the project a
+/// migrate run applies (design item 20).
+///
+/// # Errors
+/// As [`load_project`], and a shipped system file that does not load.
+pub(crate) fn load_for_run(dir: &Path) -> Result<Project, LoadError> {
+    with_system(load_project(dir)?)
+}
+
+/// The framework's system apps first, then the project (design item 20):
+/// each target runs the system files before any project file.
+///
+/// # Errors
+/// A shipped system file that does not load.
+fn with_system(project: Project) -> Result<Project, LoadError> {
+    let system = super::system::files()?;
+    if system.is_empty() {
+        return Ok(project);
+    }
+    let base = system.len();
+    let sys_order = order_targets(&system)?;
+    let Project {
+        files,
+        order,
+        replaced,
+    } = project;
+    let mut all = system;
+    all.extend(files);
+    let mut merged: BTreeMap<Target, Vec<usize>> = BTreeMap::new();
+    for target in [Target::Registry, Target::Tenant] {
+        let mut ids: Vec<usize> = sys_order.get(&target).cloned().unwrap_or_default();
+        ids.extend(order.get(&target).into_iter().flatten().map(|i| i + base));
+        if !ids.is_empty() {
+            merged.insert(target, ids);
+        }
+    }
+    Ok(Project {
+        files: all,
+        order: merged,
+        replaced,
+    })
+}
+
+/// Whether `app` is one of the framework's system apps.
+pub(crate) fn is_system_app(app: &str) -> bool {
+    app.starts_with(super::make::FRAMEWORK_PREFIX)
 }
 
 /// Load `embed_migrations!` entries (`(stem, text)`) as one v2 folder.

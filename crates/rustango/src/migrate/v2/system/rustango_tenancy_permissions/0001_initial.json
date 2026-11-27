@@ -57,50 +57,6 @@
       "indexes": [
         {
           "columns": [
-            "role_id",
-            "codename"
-          ],
-          "name": "rustango_role_permissions_role_id_codename_idx",
-          "unique": true
-        }
-      ],
-      "op": "adopt_table",
-      "table": {
-        "fields": [
-          {
-            "column": "codename",
-            "max_length": 100,
-            "nullable": false,
-            "ty": "string"
-          },
-          {
-            "auto": true,
-            "column": "id",
-            "nullable": false,
-            "primary_key": true,
-            "ty": "i64"
-          },
-          {
-            "column": "role_id",
-            "fk": {
-              "name": "rustango_role_permissions_role_id_fkey",
-              "on": "id",
-              "on_delete": "cascade",
-              "to": "rustango_roles"
-            },
-            "nullable": false,
-            "ty": "i64"
-          }
-        ],
-        "name": "rustango_role_permissions",
-        "scope": "tenant"
-      },
-      "v": 1
-    },
-    {
-      "indexes": [
-        {
-          "columns": [
             "name"
           ],
           "constraint": true,
@@ -138,6 +94,50 @@
           }
         ],
         "name": "rustango_roles",
+        "scope": "tenant"
+      },
+      "v": 1
+    },
+    {
+      "indexes": [
+        {
+          "columns": [
+            "role_id",
+            "codename"
+          ],
+          "name": "rustango_role_permissions_role_id_codename_idx",
+          "unique": true
+        }
+      ],
+      "op": "adopt_table",
+      "table": {
+        "fields": [
+          {
+            "column": "codename",
+            "max_length": 100,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "auto": true,
+            "column": "id",
+            "nullable": false,
+            "primary_key": true,
+            "ty": "i64"
+          },
+          {
+            "column": "role_id",
+            "fk": {
+              "name": "rustango_role_permissions_role_id_fkey",
+              "on": "id",
+              "on_delete": "cascade",
+              "to": "rustango_roles"
+            },
+            "nullable": false,
+            "ty": "i64"
+          }
+        ],
+        "name": "rustango_role_permissions",
         "scope": "tenant"
       },
       "v": 1

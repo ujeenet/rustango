@@ -8,69 +8,6 @@
       "indexes": [
         {
           "columns": [
-            "run_id"
-          ],
-          "name": "rustango_provisioning_events_run_id_idx"
-        }
-      ],
-      "op": "adopt_table",
-      "table": {
-        "fields": [
-          {
-            "column": "at",
-            "nullable": false,
-            "portable_default": "now",
-            "ty": "datetime"
-          },
-          {
-            "auto": true,
-            "column": "id",
-            "nullable": false,
-            "primary_key": true,
-            "ty": "i64"
-          },
-          {
-            "column": "message",
-            "nullable": false,
-            "ty": "string"
-          },
-          {
-            "column": "run_id",
-            "fk": {
-              "name": "rustango_provisioning_events_run_id_fkey",
-              "on": "id",
-              "to": "rustango_provisioning_runs"
-            },
-            "nullable": false,
-            "ty": "i64"
-          },
-          {
-            "column": "seq",
-            "nullable": false,
-            "ty": "i64"
-          },
-          {
-            "column": "status",
-            "max_length": 16,
-            "nullable": false,
-            "ty": "string"
-          },
-          {
-            "column": "step",
-            "max_length": 32,
-            "nullable": false,
-            "ty": "string"
-          }
-        ],
-        "name": "rustango_provisioning_events",
-        "scope": "registry"
-      },
-      "v": 1
-    },
-    {
-      "indexes": [
-        {
-          "columns": [
             "idempotency_key"
           ],
           "constraint": true,
@@ -178,6 +115,69 @@
           }
         ],
         "name": "rustango_provisioning_runs",
+        "scope": "registry"
+      },
+      "v": 1
+    },
+    {
+      "indexes": [
+        {
+          "columns": [
+            "run_id"
+          ],
+          "name": "rustango_provisioning_events_run_id_idx"
+        }
+      ],
+      "op": "adopt_table",
+      "table": {
+        "fields": [
+          {
+            "column": "at",
+            "nullable": false,
+            "portable_default": "now",
+            "ty": "datetime"
+          },
+          {
+            "auto": true,
+            "column": "id",
+            "nullable": false,
+            "primary_key": true,
+            "ty": "i64"
+          },
+          {
+            "column": "message",
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "run_id",
+            "fk": {
+              "name": "rustango_provisioning_events_run_id_fkey",
+              "on": "id",
+              "to": "rustango_provisioning_runs"
+            },
+            "nullable": false,
+            "ty": "i64"
+          },
+          {
+            "column": "seq",
+            "nullable": false,
+            "ty": "i64"
+          },
+          {
+            "column": "status",
+            "max_length": 16,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "step",
+            "max_length": 32,
+            "nullable": false,
+            "ty": "string"
+          }
+        ],
+        "name": "rustango_provisioning_events",
         "scope": "registry"
       },
       "v": 1

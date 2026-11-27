@@ -341,58 +341,25 @@ impl RunAs {
     }
 }
 
-/// The lock, the v1 system chain around `body` (it sees `project` through
-/// `ChainFacts`), then the framework's bootstrap tables. One lock for all
-/// of it. Without `write` (a dry run) only `body` runs.
-#[allow(clippy::too_many_arguments)]
+/// The lock around `body` (the system apps run inside it, first, as files
+/// of the project), then the framework's bootstrap tables. Without `write`
+/// (a dry run) only `body` runs.
 async fn locked<F, Fut, R>(
     pool: &Pool,
-    dir: Option<&Path>,
-    project: &Project,
-    ledger: &Ledger,
     write: bool,
     scope: &crate::migrate::LockScope,
     run_as: RunAs,
     body: F,
-) -> Result<(R, Vec<String>), RunError>
+) -> Result<R, RunError>
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<R, RunError>>,
 {
     use crate::core::ModelScope;
     let scopes = run_as.scopes();
-    let chain = match dir {
-        Some(dir) => Some(crate::migrate::make::SystemChain::for_migrations_dir(
-            dir, scopes,
-        )?),
-        None => None,
-    };
-    let chain_scope = if run_as == RunAs::Registry {
-        crate::migrate::MigrationScope::Registry
-    } else {
-        crate::migrate::MigrationScope::Tenant
-    };
-    crate::migrate::with_migrate_lock_held_v2(V2Token(()), pool, scope, |held| async move {
-        let Some(chain) = chain.filter(|_| write) else {
-            return Ok(body().await.map(|r| (r, Vec::new())));
-        };
-        let applied: std::collections::HashSet<String> = ledger
-            .rows(pool)
-            .await?
-            .into_iter()
-            .map(|r| format!("{}:{}", r.app, r.id))
-            .collect();
-        let result = crate::migrate::chains::system_chain_for_v2(
-            held,
-            pool,
-            &chain,
-            chain_scope,
-            &project.files,
-            &applied,
-            body,
-        )
-        .await;
-        if result.is_ok() {
+    crate::migrate::with_migrate_lock_held_v2(V2Token(()), pool, scope, |_| async move {
+        let result = body().await;
+        if write && result.is_ok() {
             if scopes.contains(&ModelScope::Registry) {
                 crate::migrate::manage::ensure_bootstrap_tables(pool).await?;
             }
@@ -400,7 +367,7 @@ where
                 crate::migrate::manage::ensure_tenant_bootstrap_tables(pool).await?;
             }
         }
-        Ok(result.map(|(system, r)| (r, system.into_iter().map(|m| m.name).collect())))
+        Ok(result)
     })
     .await?
 }
@@ -412,8 +379,8 @@ where
 /// A load error, a refusal (edited applied file, drift, behind the v1
 /// head, unowned tables), a failed unit, or a lost lock.
 pub(crate) async fn migrate(pool: &Pool, dir: &Path, opts: &Options) -> Result<Report, RunError> {
-    let project = load_project(dir)?;
-    migrate_project(pool, Some(dir), &project, opts).await
+    let project = super::load::load_for_run(dir)?;
+    migrate_project(pool, &project, opts).await
 }
 
 /// [`migrate`] for `embed_migrations!` entries: no system chain, as engine
@@ -427,12 +394,11 @@ pub(crate) async fn migrate_embedded(
     opts: &Options,
 ) -> Result<Report, RunError> {
     let project = super::load::load_embedded(entries)?;
-    migrate_project(pool, None, &project, opts).await
+    migrate_project(pool, &project, opts).await
 }
 
 async fn migrate_project(
     pool: &Pool,
-    dir: Option<&Path>,
     project: &Project,
     opts: &Options,
 ) -> Result<Report, RunError> {
@@ -442,7 +408,7 @@ async fn migrate_project(
         if let Some(f) = project
             .files
             .iter()
-            .find(|f| f.file.target == Target::Registry)
+            .find(|f| f.file.target == Target::Registry && !super::load::is_system_app(&f.file.app))
         {
             return Err(refused(
                 Code::State,
@@ -478,9 +444,6 @@ async fn migrate_project(
     // A dry run writes nothing: no system chain, no ledger table.
     let run = locked(
         pool,
-        dir,
-        project,
-        &ledger,
         !opts.dry_run,
         &opts.lock_scope,
         opts.run_as,
@@ -505,6 +468,7 @@ async fn migrate_project(
                 planned: Vec::new(),
                 sweep: Some(sweep),
                 adopted_later: Vec::new(),
+                system_applied: Vec::new(),
             };
             // A long unit keeps its heartbeat fresh, so boot waiters wait on it.
             let applying = runner.apply_project(project);
@@ -522,10 +486,16 @@ async fn migrate_project(
                 Err(RunError::Stopped(why)) => (Vec::new(), Some(why)),
                 Err(e) => return Err(e),
             };
-            Ok((applied, runner.planned, stopped, runner.warnings))
+            Ok((
+                applied,
+                runner.planned,
+                stopped,
+                runner.warnings,
+                runner.system_applied,
+            ))
         },
     );
-    let ((applied, planned, stopped, long_moves), system) = match opts.stale_after {
+    let (applied, planned, stopped, long_moves, system) = match opts.stale_after {
         None => run.await?,
         Some(stale) => tokio::select! {
             r = run => r?,
@@ -669,40 +639,33 @@ async fn rollback(
     back: Back<'_>,
     opts: &Options,
 ) -> Result<Report, RunError> {
-    let project = load_project(dir)?;
+    // A project that does not load is refused before the lock, as a forward run is.
+    load_project(dir)?;
     let ledger = Ledger::of(opts);
     let run_id = new_run_id();
-    let (rolled_back, system) = locked(
-        pool,
-        Some(dir),
-        &project,
-        &ledger,
-        true,
-        &opts.lock_scope,
-        opts.run_as,
-        || async {
-            ledger.ensure(pool).await?;
-            let mut runner = Runner {
-                pool,
-                ledger: &ledger,
-                run_id: &run_id,
-                b: backend_of(pool),
-                opts,
-                units_run: 0,
-                batches_run: 0,
-                warnings: Vec::new(),
-                started: std::time::Instant::now(),
-                planned: Vec::new(),
-                sweep: None,
-                adopted_later: Vec::new(),
-            };
-            runner.downgrade(back).await
-        },
-    )
+    let rolled_back = locked(pool, true, &opts.lock_scope, opts.run_as, || async {
+        ledger.ensure(pool).await?;
+        let mut runner = Runner {
+            pool,
+            ledger: &ledger,
+            run_id: &run_id,
+            b: backend_of(pool),
+            opts,
+            units_run: 0,
+            batches_run: 0,
+            warnings: Vec::new(),
+            started: std::time::Instant::now(),
+            planned: Vec::new(),
+            sweep: None,
+            adopted_later: Vec::new(),
+            system_applied: Vec::new(),
+        };
+        runner.downgrade(back).await
+    })
     .await?;
     Ok(Report {
         planned: Vec::new(),
-        system,
+        system: Vec::new(),
         applied: Vec::new(),
         rolled_back,
         warnings: Vec::new(),
@@ -1138,6 +1101,8 @@ struct Runner<'a> {
     planned: Vec<String>,
     /// SQLite datetime columns to sweep before the first data unit; taken then.
     sweep: Option<Vec<(String, String)>>,
+    /// System app files applied this run, as `app:id`.
+    system_applied: Vec<String>,
     /// `(table, column)` a pending `adopt_column` takes over: an
     /// `adopt_table` before it accepts that live column (design item 22).
     adopted_later: Vec<(String, ColumnDef)>,
@@ -1296,7 +1261,7 @@ impl Runner<'_> {
                         RowState::Applied => {}
                         RowState::RollingBack if self.opts.resume_forward => {
                             self.resume_forward(f, row, &state).await?;
-                            applied.push(f.file.id.clone());
+                            self.record(&mut applied, f);
                         }
                         RowState::RollingBack => {
                             return Err(refused(
@@ -1312,7 +1277,7 @@ impl Runner<'_> {
                         }
                         RowState::Running | RowState::Failed => {
                             self.resume(f, row).await?;
-                            applied.push(f.file.id.clone());
+                            self.record(&mut applied, f);
                         }
                     }
                     if !(planned && applied_row) {
@@ -1321,12 +1286,12 @@ impl Runner<'_> {
                 }
                 None if f.file.kind == Kind::Checkpoint => {
                     state = self.adopt(f, state, &mut memo).await?;
-                    applied.push(f.file.id.clone());
+                    self.record(&mut applied, f);
                 }
                 None => {
                     self.check_requires(f)?;
                     state = self.forward(f, state, &mut memo).await?;
-                    applied.push(f.file.id.clone());
+                    self.record(&mut applied, f);
                 }
             }
             if self
@@ -1339,6 +1304,16 @@ impl Runner<'_> {
             }
         }
         Ok(applied)
+    }
+
+    /// A file this run applied: a system app's goes to the system list.
+    fn record(&mut self, applied: &mut Vec<String>, f: &Loaded) {
+        if super::load::is_system_app(&f.file.app) {
+            self.system_applied
+                .push(format!("{}:{}", f.file.app, f.file.id));
+        } else {
+            applied.push(f.file.id.clone());
+        }
     }
 
     /// The fresh fast path (8.5): `None` when the target is not fresh or a
@@ -1447,7 +1422,7 @@ impl Runner<'_> {
                     .await?;
             }
             self.finish(f, mine, 0).await?;
-            applied.push(f.file.id.clone());
+            self.record(&mut applied, f);
         }
         Ok(Some(applied))
     }
@@ -2974,6 +2949,16 @@ impl Runner<'_> {
             let row = applied[idx];
             let at = format!("ledger:{}:{}", row.app, row.id);
             let file = bodies[idx].clone();
+            if super::load::is_system_app(&row.app) {
+                return Err(refused(
+                    Code::Floor,
+                    &at,
+                    format!(
+                        "`{}:{}` is the framework's system chain: it does not roll back",
+                        row.app, row.id
+                    ),
+                ));
+            }
             if file.kind == Kind::Checkpoint {
                 return Err(refused(
                     Code::Floor,

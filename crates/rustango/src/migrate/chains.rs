@@ -104,61 +104,6 @@ pub(crate) async fn migrate_chains_to(
     with_signals(run, pool, signals).await
 }
 
-/// The system chain for engine v2 around the v2 `project` body, under the
-/// v2 runner's lock: a pass before, the body, a pass after, as v1 does. The
-/// chain sees the v2 files through [`ChainFacts`]; `applied` holds the
-/// [`ChainFacts::key`]s the v2 ledger has.
-///
-/// # Errors
-/// As [`runner::migrate_system_chain`], and the body's own error.
-pub(crate) async fn system_chain_for_v2<M, F, Fut, R, E>(
-    held: LockHeld,
-    pool: &Pool,
-    chain: &SystemChain,
-    scope: MigrationScope,
-    files: &[M],
-    applied: &std::collections::HashSet<String>,
-    project: F,
-) -> Result<(Vec<Migration>, R), E>
-where
-    M: ChainFacts,
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<R, E>>,
-    E: From<MigrateError>,
-{
-    let tables = ProjectTables::of(files, applied);
-    let run = Run {
-        held,
-        pool,
-        chain,
-        scope,
-        owned: &tables.owned,
-        observer: None,
-    };
-    let first = Box::pin(run.system_pass(&tables.pending)).await?;
-    let out = project().await?;
-    let second = Box::pin(run.system_pass(&BTreeSet::new())).await?;
-    if let Some(table) = second.waiting {
-        return Err(MigrateError::Validation(format!(
-            "a system migration needs `{table}`, which the project's migrations \
-             claim but did not create"
-        ))
-        .into());
-    }
-    Box::pin(run.finish(&tables.claimed)).await?;
-    let mut system = first.applied;
-    system.extend(second.applied);
-    Ok((system, out))
-}
-
-/// What one project migration does to tables (4.9): engine v1 and v2 files
-/// both answer it, so the system chain reads either the same way.
-pub(crate) trait ChainFacts {
-    /// The ledger key the `applied` set holds.
-    fn key(&self) -> String;
-    fn facts(&self) -> Vec<Fact<'_>>;
-}
-
 /// One table effect of a migration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Fact<'a> {
@@ -168,31 +113,26 @@ pub(crate) enum Fact<'a> {
     Written(&'a str),
 }
 
-impl ChainFacts for Migration {
-    fn key(&self) -> String {
-        self.name.clone()
-    }
-
-    fn facts(&self) -> Vec<Fact<'_>> {
-        let mut out = Vec::new();
-        for c in schema_ops(self) {
-            match c {
-                SchemaChange::CreateTable(t) | SchemaChange::CreateM2MTable { through: t, .. } => {
-                    out.push(Fact::Created(t));
-                }
-                SchemaChange::DropTable(t) | SchemaChange::DropM2MTable { through: t } => {
-                    out.push(Fact::Dropped(t));
-                }
-                SchemaChange::RenameTable { old_name, new_name } => out.push(Fact::Renamed {
-                    from: old_name,
-                    to: new_name,
-                }),
-                _ => {}
+/// What one project migration does to tables (4.9).
+fn facts(m: &Migration) -> Vec<Fact<'_>> {
+    let mut out = Vec::new();
+    for c in schema_ops(m) {
+        match c {
+            SchemaChange::CreateTable(t) | SchemaChange::CreateM2MTable { through: t, .. } => {
+                out.push(Fact::Created(t));
             }
-            out.push(Fact::Written(c.table()));
+            SchemaChange::DropTable(t) | SchemaChange::DropM2MTable { through: t } => {
+                out.push(Fact::Dropped(t));
+            }
+            SchemaChange::RenameTable { old_name, new_name } => out.push(Fact::Renamed {
+                from: old_name,
+                to: new_name,
+            }),
+            _ => {}
         }
-        out
+        out.push(Fact::Written(c.table()));
     }
+    out
 }
 
 async fn with_signals(
@@ -312,15 +252,15 @@ impl ProjectTables {
         Ok(Self::of(&migs, applied))
     }
 
-    fn of<M: ChainFacts>(migs: &[M], applied: &std::collections::HashSet<String>) -> Self {
+    fn of(migs: &[Migration], applied: &std::collections::HashSet<String>) -> Self {
         let mut out = Self {
             owned: BTreeSet::new(),
             claimed: BTreeSet::new(),
             pending: BTreeSet::new(),
         };
         for m in migs {
-            let is_pending = !applied.contains(&m.key());
-            for f in m.facts() {
+            let is_pending = !applied.contains(&m.name);
+            for f in facts(m) {
                 match f {
                     Fact::Created(t) => {
                         out.owned.insert(t.to_owned());

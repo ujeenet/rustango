@@ -135,8 +135,7 @@ pub(crate) fn generate() -> Result<Vec<(String, String, String)>, LoadError> {
     Ok(ops
         .into_iter()
         .map(|(app, (target, mut list, deps))| {
-            // FK targets inside the app first.
-            list.sort_by_key(|o| o["table"]["name"].as_str().map(str::to_owned));
+            list = fk_order(list);
             let mut body = json!({"engine": 2, "format": 1, "id": "0001_initial", "app": app,
                 "target": target.as_str(), "operations": list});
             if !deps.is_empty() {
@@ -146,6 +145,34 @@ pub(crate) fn generate() -> Result<Vec<(String, String, String)>, LoadError> {
             (app, "0001_initial".to_owned(), text)
         })
         .collect())
+}
+
+/// The ops by name, each after the tables its FKs point at in this app.
+fn fk_order(mut list: Vec<Value>) -> Vec<Value> {
+    let name = |o: &Value| o["table"]["name"].as_str().unwrap_or_default().to_owned();
+    list.sort_by_key(name);
+    let mine: BTreeSet<String> = list.iter().map(name).collect();
+    let targets = |o: &Value| -> BTreeSet<String> {
+        o["table"]["fields"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|f| f["fk"]["to"].as_str().map(str::to_owned))
+            .filter(|t| mine.contains(t) && *t != name(o))
+            .collect()
+    };
+    let mut placed: BTreeSet<String> = BTreeSet::new();
+    let mut out = Vec::with_capacity(list.len());
+    while !list.is_empty() {
+        let at = list
+            .iter()
+            .position(|o| targets(o).is_subset(&placed))
+            .unwrap_or(0);
+        let o = list.remove(at);
+        placed.insert(name(&o));
+        out.push(o);
+    }
+    out
 }
 
 #[cfg(test)]
