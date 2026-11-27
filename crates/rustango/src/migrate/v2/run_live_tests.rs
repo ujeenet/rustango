@@ -5233,10 +5233,11 @@ async fn old_framework_fks_repair_then_switch(b: B) {
     std::fs::create_dir_all(&dir).unwrap();
     let sys = v1.path().join("system").join("migrations");
     let fks = old_system_chain(&sys);
-    assert!(
-        !fks.is_empty(),
-        "no framework FK with an action in this build"
-    );
+    if fks.is_empty() {
+        // Narrow builds (plain `sqlite`) compile no framework model with an FK.
+        eprintln!("skip: no framework FK with an action in this build");
+        return;
+    }
     // What the older release ran: that chain as shipped, no catch-up step.
     let shipped = crate::migrate::make::SystemChain::shipped(sys.clone());
     crate::migrate::runner::with_migrate_lock_held(pool, |held| {
