@@ -528,6 +528,8 @@ fn lib_test_prefixes(block: &str) -> Vec<String> {
                 .unwrap_or(rest.len());
             rest[..end].trim_end_matches(':').to_owned()
         })
+        // A clause with no literal prefix (an exclusion) selects no module.
+        .filter(|p| !p.is_empty())
         .collect()
 }
 

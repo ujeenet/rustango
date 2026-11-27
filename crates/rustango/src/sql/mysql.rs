@@ -276,8 +276,13 @@ impl Dialect for MySql {
         Some("SELECT VERSION()")
     }
 
+    /// `@@server_uuid`; MariaDB has none, so host, port and server id.
     fn database_identity_sql(&self, version: &str, db: Option<&str>) -> Option<CompiledStatement> {
-        let key = server_identity(version);
+        let key = if is_mariadb(version) {
+            "CONCAT(@@hostname, ':', @@port, ':', @@server_id)"
+        } else {
+            "@@server_uuid"
+        };
         let (name, params) = match db {
             Some(db) => {
                 let v = db.to_owned();
@@ -2318,12 +2323,8 @@ mod tests {
     }
 }
 
-/// The server's identity for `SELECT VERSION()` = `version`: `@@server_uuid`;
-/// MariaDB has none, so host, port and server id.
-pub(crate) fn server_identity(version: &str) -> &'static str {
-    if version.contains("MariaDB") {
-        "CONCAT(@@hostname, ':', @@port, ':', @@server_id)"
-    } else {
-        "@@server_uuid"
-    }
+/// Whether `SELECT VERSION()` = `version` names a MariaDB server (old
+/// ones report `5.5.5-10.x.y-MariaDB`).
+pub(crate) fn is_mariadb(version: &str) -> bool {
+    version.contains("MariaDB")
 }

@@ -1564,6 +1564,11 @@ jobs:
         partition: [1, 2, 3]
         # MariaDB speaks the same protocol, but not the same SQL.
         db: [mysql, mariadb]
+        # Migrations engine v2 supports MySQL 8 only: on MariaDB its lib tests
+        # are skipped, all but the one that checks it refuses the server.
+        include:
+          - db: mariadb
+            v2_skip: " - (binary(=rustango) & test(/^(migrate::v2|tenancy::migrate_v2)::/) & not test(/a_mariadb_server_is_refused/))"
     services:
       mysql:
         # GHCR mirror, see `postgres_test`.
@@ -1626,7 +1631,7 @@ jobs:
           --workspace-remap ${{ github.workspace }}
           --extract-to ${{ github.workspace }}
           --partition count:${{ matrix.partition }}/3
-          -E 'binary(=jobs_mysql_live) |
+          -E '(binary(=jobs_mysql_live) |
           binary(=jobs_worker_survives_tri) |
           binary(=mysql_live) |
           binary(=explain_pool_tri) |
@@ -1772,7 +1777,7 @@ jobs:
           binary(=orm_setops) |
           binary(=orm_json_dates) |
           binary(=orm_writes) |
-          binary(=orm_delta)'
+          binary(=orm_delta))${{ matrix.v2_skip }}'
       # These create databases and users, so they run as root. The archive
       # is already extracted by the step above.
       - run: >-

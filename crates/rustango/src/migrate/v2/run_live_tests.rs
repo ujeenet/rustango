@@ -1932,6 +1932,31 @@ async fn drift_sees_an_fk_on_update(b: B) {
     );
 }
 
+/// Engine v2 refuses MariaDB at its first contact, with one typed error.
+/// Runs only where `MYSQL_TEST_URL` is a MariaDB server (CI's mariadb shards).
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn a_mariadb_server_is_refused() {
+    let Some(url) = crate::testkit::matrix::live_url("MYSQL_TEST_URL", "mysql") else {
+        return;
+    };
+    let pool = Pool::connect(&url).await.unwrap();
+    let v: Vec<(String,)> =
+        crate::sql::raw_query_pool("SELECT CAST(VERSION() AS CHAR)", Vec::new(), &pool)
+            .await
+            .unwrap();
+    if !crate::sql::mysql::is_mariadb(&v[0].0) {
+        return;
+    }
+    let (_root, dir) = project();
+    let e = migrate(&pool, &dir, &opts()).await.expect_err("refused");
+    assert!(
+        matches!(e, RunError::Db(MigrateError::UnsupportedServer { .. })),
+        "{e:?}"
+    );
+    pool.close().await;
+}
+
 /// A run dropped mid-unit (SIGTERM, task abort, a timeout) frees the
 /// migrate lock: the next run takes it at once.
 async fn a_dropped_run_frees_the_lock(b: B) {

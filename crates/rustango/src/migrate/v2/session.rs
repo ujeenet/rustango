@@ -121,24 +121,15 @@ impl DdlConn {
     }
 }
 
-/// MySQL (or MariaDB) server identity and its start time (now - Uptime).
+/// MySQL server identity: `@@server_uuid` and its start time (now - Uptime).
 #[cfg(feature = "mysql")]
 async fn mysql_server(c: &mut sqlx::MySqlConnection) -> Result<(String, i64), sqlx::Error> {
-    let version: String = sqlx::query_scalar("SELECT VERSION()")
-        .fetch_one(&mut *c)
-        .await?;
-    let id = crate::sql::mysql::server_identity(&version);
-    let (id, now): (String, i64) = sqlx::query_as(&format!(
-        "SELECT CAST({id} AS CHAR), CAST(UNIX_TIMESTAMP() AS SIGNED)"
-    ))
-    .fetch_one(&mut *c)
-    .await?;
-    // SHOW, not performance_schema: MariaDB may run without it.
-    let (_, uptime): (String, String) = sqlx::query_as("SHOW GLOBAL STATUS LIKE 'Uptime'")
-        .fetch_one(&mut *c)
-        .await?;
-    let uptime: i64 = uptime.parse().unwrap_or(0);
-    Ok((id, now - uptime))
+    sqlx::query_as(
+        "SELECT @@server_uuid, CAST(UNIX_TIMESTAMP() - VARIABLE_VALUE AS SIGNED) \
+         FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Uptime'",
+    )
+    .fetch_one(c)
+    .await
 }
 
 /// Start times read twice can differ by the second that ticked between.

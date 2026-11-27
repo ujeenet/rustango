@@ -128,6 +128,16 @@ pub enum MigrateError {
         /// The v2 ledger table found.
         table: String,
     },
+
+    /// Engine v2 met a server it does not support.
+    #[error(
+        "migrations engine v2 supports MySQL 8.0.16+; MariaDB is not supported (server {server})"
+    )]
+    #[non_exhaustive]
+    UnsupportedServer {
+        /// What the server reports as its version.
+        server: String,
+    },
 }
 
 impl From<crate::sql::UnsavedRow> for MigrateError {

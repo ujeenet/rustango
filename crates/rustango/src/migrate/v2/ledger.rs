@@ -636,7 +636,40 @@ fn s(v: impl Into<String>) -> SqlValue {
     SqlValue::String(v.into())
 }
 
+/// Engine v2 refuses a server it does not support: MariaDB (design decision 9).
+///
+/// # Errors
+/// `version` names a MariaDB server.
+#[cfg(any(test, feature = "mysql"))]
+pub(crate) fn refuse_server(version: &str) -> Result<(), MigrateError> {
+    if crate::sql::mysql::is_mariadb(version) {
+        return Err(MigrateError::UnsupportedServer {
+            server: version.to_owned(),
+        });
+    }
+    Ok(())
+}
+
 impl Ledger {
+    /// Whether the ledger table exists. Every v2 contact reads the ledger
+    /// first, so an unsupported server is refused here, in the same query.
+    async fn present(&self, pool: &Pool) -> Result<bool, MigrateError> {
+        #[cfg(feature = "mysql")]
+        #[allow(irrefutable_let_patterns)] // MySQL-only builds
+        if let Pool::Mysql(my) = pool {
+            let (version, n): (String, i64) = sqlx::query_as(
+                "SELECT CAST(VERSION() AS CHAR), (SELECT COUNT(*) FROM information_schema.tables \
+                 WHERE table_schema = DATABASE() AND table_name = ?)",
+            )
+            .bind(&self.table)
+            .fetch_one(my)
+            .await?;
+            refuse_server(&version)?;
+            return Ok(n > 0);
+        }
+        Ok(crate::migrate::try_table_exists_here(pool, &self.table).await?)
+    }
+
     /// The ledger table's name, quoted: a configured base may need it.
     fn qt(&self, pool: &Pool) -> String {
         pool.dialect().quote_ident(&self.table)
@@ -808,7 +841,7 @@ impl Ledger {
     /// Driver failures, or a state that does not decode.
     #[cfg(feature = "tenancy")]
     pub(crate) async fn applied(&self, pool: &Pool) -> Result<Vec<Brief>, MigrateError> {
-        if !crate::migrate::try_table_exists_here(pool, &self.table).await? {
+        if !self.present(pool).await? {
             return Ok(Vec::new());
         }
         let sql = format!(
@@ -834,7 +867,7 @@ impl Ledger {
     /// # Errors
     /// Driver failures, or a row that does not decode.
     pub(crate) async fn rows(&self, pool: &Pool) -> Result<Vec<Row>, MigrateError> {
-        if !crate::migrate::try_table_exists_here(pool, &self.table).await? {
+        if !self.present(pool).await? {
             return Ok(Vec::new());
         }
         type Raw = (
@@ -1650,5 +1683,26 @@ pub(crate) fn fenced(n: u64) -> Result<(), MigrateError> {
         Err(MigrateError::Validation(
             "lock lost: another run owns this migration now; nothing more was written".into(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn mariadb_is_refused_with_one_typed_error() {
+        for v in ["11.4.2-MariaDB-ubu2404", "5.5.5-10.6.12-MariaDB-log"] {
+            let e = super::refuse_server(v).expect_err(v);
+            assert!(
+                matches!(&e, super::MigrateError::UnsupportedServer { server } if server == v),
+                "{e:?}"
+            );
+            assert!(
+                e.to_string().starts_with(
+                    "migrations engine v2 supports MySQL 8.0.16+; MariaDB is not supported"
+                ),
+                "{e}"
+            );
+        }
+        super::refuse_server("8.0.46").unwrap();
     }
 }

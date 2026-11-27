@@ -156,7 +156,7 @@ impl PrivilegeReport {
             && self
                 .server_version
                 .as_deref()
-                .is_some_and(|v| !v.contains("MariaDB") && mysql_at_least(v, (8, 0, 14)))
+                .is_some_and(|v| !crate::sql::mysql::is_mariadb(v) && mysql_at_least(v, (8, 0, 14)))
     }
 
     /// Logged in, rights read, none held.
@@ -278,7 +278,7 @@ const MARIADB_DB_PRIVILEGES: &[&str] = &["DELETE HISTORY"];
 /// MariaDB 10.3.4+ has `DELETE HISTORY`, which `ALL` on a database holds.
 /// Old servers report `5.5.5-10.x.y-MariaDB`.
 fn has_delete_history(version: &str) -> bool {
-    version.contains("MariaDB")
+    crate::sql::mysql::is_mariadb(version)
         && mysql_at_least(
             version.strip_prefix("5.5.5-").unwrap_or(version),
             (10, 3, 4),
