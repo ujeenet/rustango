@@ -710,7 +710,7 @@ impl SystemChain {
     }
 
     /// A shipped chain in `dir`, as is: no catch-up step from today's models.
-    #[cfg(all(test, feature = "sqlite"))]
+    #[cfg(test)]
     pub(crate) fn shipped(dir: std::path::PathBuf) -> Self {
         Self {
             dir,

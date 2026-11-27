@@ -1695,7 +1695,11 @@ jobs:
           binary(=system_chain_order_tri) |
           binary(=migrate_engine_v2_refusal_tri) |
           binary(=migrate_v2_hist_tri) |
-          (binary(=rustango) & test(/^migrate::v2::(render_live_tests|run::live_tests)::/)) |
+          (binary(=rustango) & test(/^migrate::v2::render_live_tests::/)) |
+          (binary(=rustango) & test(/^migrate::v2::run::live_tests::/)) |
+          (binary(=rustango) & test(/^tenancy::migrate_v2::tests::/)) |
+          (binary(=rustango) & test(/^migrate::chains::tests::regenerated_chain_refuses_column_drift$/)) |
+          (binary(=rustango) & test(/^migrate::runner::tests::a_failed_table_probe_is_an_error$/)) |
           binary(=agent_grants_unique_tri) |
           binary(=admin_totp_replay_tri) |
           binary(=operator_console_totp_tri) |

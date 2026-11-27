@@ -31,11 +31,13 @@ const SIDE_INDEXES: &[(&str, &str)] = &[(
 )];
 
 /// Whether the compiled models hold `table` (and `column` of it).
+/// Only managed models count: an unmanaged one may map the same table with
+/// fewer columns.
 fn compiled(table: &str, column: Option<&str>) -> bool {
-    let Some(e) = crate::core::ModelEntry::for_table(table) else {
-        return false;
-    };
-    column.is_none_or(|c| e.schema.fields.iter().any(|f| f.column == c))
+    inventory::iter::<crate::core::ModelEntry>
+        .into_iter()
+        .filter(|e| e.schema.table == table && e.schema.managed && !e.schema.is_view)
+        .any(|e| column.is_none_or(|c| e.schema.fields.iter().any(|f| f.column == c)))
 }
 
 /// The shipped system files this build runs: an app whose every adopted
