@@ -398,7 +398,10 @@ pub(crate) fn invert(op: &Op, after: &State, allow: Allow, at: &str) -> Result<V
         }
         // State-only ops and forgets: nothing runs, and the rollback recomputes state.
         Op::StateOnly { .. } => Vec::new(),
-        Op::ExternTable { .. } | Op::AdoptTable { .. } | Op::AdoptColumn { .. } => Vec::new(),
+        Op::ExternTable { .. }
+        | Op::AdoptTable { .. }
+        | Op::AdoptColumn { .. }
+        | Op::CreateAdopted { .. } => Vec::new(),
         Op::CreateExtension { name, .. } => {
             return Err(blocked(
                 at,

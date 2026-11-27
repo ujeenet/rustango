@@ -138,9 +138,14 @@ fn undo(s: &mut State, op: &Op, at: &str, target: Target) -> Result<(), LoadErro
     match op {
         Op::DataSql { .. } | Op::DataRust { .. } => Ok(()),
         // A forget has no state inverse here: forward replay decides.
-        Op::AdoptTable { .. } | Op::AdoptColumn { .. } | Op::ExternTable { .. } => Err(
-            LoadError::new(super::Code::State, at, "an adopt op has no state inverse"),
-        ),
+        Op::AdoptTable { .. }
+        | Op::AdoptColumn { .. }
+        | Op::ExternTable { .. }
+        | Op::CreateAdopted { .. } => Err(LoadError::new(
+            super::Code::State,
+            at,
+            "an adopt op has no state inverse",
+        )),
         Op::RawSql { .. } | Op::StateOnly { .. } => {
             for (i, nested) in op.nested(at)?.iter().enumerate().rev() {
                 undo(s, nested, &format!("{at}/state/{i}"), target)?;

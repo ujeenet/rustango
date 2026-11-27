@@ -344,7 +344,7 @@ pub(crate) fn render_file(
             units.push(u);
         }
         match &env.op {
-            Op::CreateTable { table, .. } => {
+            Op::CreateTable { table, .. } | Op::CreateAdopted { table, .. } => {
                 created.insert(table.name.clone());
             }
             Op::RenameTable { from, to } if created.remove(from) => {
@@ -990,7 +990,7 @@ impl Render<'_> {
             self.b == Backend::Sqlite,
         );
         Ok(match op {
-            Op::CreateTable { table, indexes, .. } => {
+            Op::CreateTable { table, indexes, .. } | Op::CreateAdopted { table, indexes, .. } => {
                 for ix in indexes {
                     self.index_supported(ix)?;
                 }
@@ -1548,7 +1548,7 @@ impl Render<'_> {
                     table: table.clone(),
                     name: name.clone(),
                 }),
-                Op::CreateTable { table, .. } => {
+                Op::CreateTable { table, .. } | Op::CreateAdopted { table, .. } => {
                     out.push(Expect::Table {
                         table: Box::new((*self.table(self.after, &table.name)?).clone()),
                     });
@@ -1839,7 +1839,7 @@ fn touched_table(op: &Op) -> Option<&str> {
         | Op::RenameColumn { table, .. }
         | Op::AlterColumn { table, .. }
         | Op::RenameIndex { table, .. } => Some(table),
-        Op::AdoptTable { table, .. } => Some(&table.name),
+        Op::AdoptTable { table, .. } | Op::CreateAdopted { table, .. } => Some(&table.name),
         _ => None,
     }
 }

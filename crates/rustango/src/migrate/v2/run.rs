@@ -1536,7 +1536,7 @@ impl Runner<'_> {
                         ));
                     }
                 } else {
-                    file.operations[i].op = Op::CreateTable {
+                    file.operations[i].op = Op::CreateAdopted {
                         table: table.clone(),
                         indexes: indexes.clone(),
                         checks: checks.clone(),

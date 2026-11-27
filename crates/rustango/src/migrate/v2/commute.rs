@@ -133,6 +133,11 @@ pub(crate) fn keys(op: &Op, at: &str) -> Result<Keys, LoadError> {
             table: t,
             indexes,
             checks,
+        }
+        | Op::CreateAdopted {
+            table: t,
+            indexes,
+            checks,
         } => {
             k.writes.insert(table(&t.name));
             for f in &t.fields {

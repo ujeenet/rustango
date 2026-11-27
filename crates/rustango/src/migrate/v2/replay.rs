@@ -95,6 +95,11 @@ pub(crate) fn apply(
             table,
             indexes,
             checks,
+        }
+        | Op::CreateAdopted {
+            table,
+            indexes,
+            checks,
         } => {
             ident(at, &table.name)?;
             if taken(s, &table.name) {
@@ -145,7 +150,11 @@ pub(crate) fn apply(
             // After the keys exist, so a self-reference and its index resolve.
             for f in &table.fields {
                 if let Some(fk) = &f.fk {
-                    add_fk(s, at, ctx, &table.name, fk.state(&f.column.column))?;
+                    // An adopted table keeps the indexes it has: a MySQL FK
+                    // index it lacks in state is the FK's own (the catalog
+                    // check counts it as part of the FK).
+                    let adopted = matches!(op, Op::AdoptTable { .. } | Op::CreateAdopted { .. });
+                    add_fk(s, at, ctx, &table.name, fk.state(&f.column.column), adopted)?;
                 }
             }
         }
@@ -299,7 +308,7 @@ pub(crate) fn apply(
         } => alter_column(s, at, table, column, changes)?,
         Op::AddFk { table, column, fk } => {
             get(s, at, table)?;
-            add_fk(s, at, ctx, table, fk.state(column))?;
+            add_fk(s, at, ctx, table, fk.state(column), false)?;
         }
         Op::DropFk { table, column, was } => {
             let want = was.state(column);
@@ -753,7 +762,14 @@ fn covered(t: &TableState, cols: &[String], except: Option<&str>) -> bool {
 
 /// The FK target is in this target's state and a unique key, each column
 /// pair has one type, and an index covers the FK columns.
-fn add_fk(s: &mut State, at: &str, ctx: &Ctx<'_>, table: &str, fk: FkDef) -> Result<(), LoadError> {
+fn add_fk(
+    s: &mut State,
+    at: &str,
+    ctx: &Ctx<'_>,
+    table: &str,
+    fk: FkDef,
+    adopted: bool,
+) -> Result<(), LoadError> {
     claim(s, at, &fk.name)?;
     let owned = s.tables.get(fk.to.as_str());
     let ext = s.externs.get(fk.to.as_str());
@@ -839,7 +855,7 @@ fn add_fk(s: &mut State, at: &str, ctx: &Ctx<'_>, table: &str, fk: FkDef) -> Res
             _ => return Err(fail(at, format!("FK `{}`: missing column", fk.name))),
         }
     }
-    if !covered(t, &fk.columns, None) {
+    if !adopted && !covered(t, &fk.columns, None) {
         return Err(coded(
             Code::FkIndex,
             at,

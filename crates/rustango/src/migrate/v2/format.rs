@@ -648,6 +648,14 @@ pub(crate) enum Op {
         archive: String,
         not_null: bool,
     },
+    /// An `adopt_table` whose table is missing, created as it declares;
+    /// never in a file. It keeps the adopted table's FK rules.
+    #[serde(skip_deserializing)]
+    CreateAdopted {
+        table: TableDef,
+        indexes: Vec<IndexDef>,
+        checks: Vec<CheckDef>,
+    },
     /// A rollback's drop of a consumed archive; never in a file.
     #[serde(skip_deserializing)]
     ArchiveDrop {
@@ -1166,6 +1174,7 @@ pub(crate) fn op_name(op: &Op) -> &'static str {
         Op::RenameTable { .. } => "rename_table",
         Op::AlterTableComment { .. } => "alter_table_comment",
         Op::AdoptTable { .. } => "adopt_table",
+        Op::CreateAdopted { .. } => "adopt_table",
         Op::AddColumn { .. } => "add_column",
         Op::AdoptColumn { .. } => "adopt_column",
         Op::DropColumn { .. } => "drop_column",
