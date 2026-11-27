@@ -66,6 +66,7 @@ pub use diff::{
 pub(crate) use engine::boot_skips_switched_db;
 pub(crate) use engine::require_v1_project;
 pub use engine::ProjectEngine;
+pub(crate) use engine::DBMIGRATE;
 #[cfg(all(feature = "admin", feature = "totp"))]
 pub(crate) use ensure::add_columns_idempotent;
 pub(crate) use ensure::apply_idempotent;

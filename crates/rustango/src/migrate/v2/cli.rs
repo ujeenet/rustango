@@ -14,11 +14,25 @@ pub(crate) const VERBS: &[&str] = &[
     "make", "apply", "down", "status", "check", "sql", "adopt", "squash",
 ];
 
+/// `dbmigrate --help`. Under tenancy `apply`, `down`, `status`,
+/// `check --drift` and `sql` work on the registry and every tenant.
+const HELP: &str = "manage dbmigrate <verb>   migrations engine v2
+  make [name] [--app <app>]        write the next migration from the models
+  apply [<id>] [--plan]            apply pending migrations (--plan: print, run nothing)
+  down [<n> | --to <id>] [--plan]  roll back; under tenancy add --registry,
+                                   --tenant <slug> or --all-tenants
+  status                           applied and pending migrations
+  check [--offline | --drift]      validate files; --drift compares the database
+  sql <id> [--dialect <db>|all]    print a migration's SQL
+  adopt                            switch an engine v1 project (one way)
+  squash <app> <from>..<to>        write a checkpoint; --prune <id> deletes files
+";
+
 /// Whether `args` (after `dbmigrate`) needs no connection.
-#[cfg(feature = "manage")]
+#[cfg(any(feature = "manage", feature = "tenancy"))]
 pub(crate) fn pool_free(args: &[String]) -> bool {
     match args.first().map(String::as_str) {
-        Some("make" | "sql") | None => true,
+        Some("make" | "sql" | "help" | "--help" | "-h") | None => true,
         Some("check") => args.iter().any(|a| a == "--offline"),
         _ => false,
     }
@@ -110,44 +124,150 @@ fn backends(args: &[String], pool: &Pool) -> Result<Vec<Backend>, MigrateError> 
     }
 }
 
+/// Where `dbmigrate` works: one database, or under tenancy the fleet, the
+/// registry and each tenant. The tenancy CLI passes `Fleet`, so a tenancy
+/// project never reaches the single-database runner.
+pub(crate) enum Route<'a, F: Fleet = NoFleet> {
+    Single(&'a Pool),
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+    Fleet(&'a F),
+}
+
+impl<F: Fleet> Clone for Route<'_, F> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<F: Fleet> Copy for Route<'_, F> {}
+
+impl<F: Fleet> Route<'_, F> {
+    /// The database of a verb with no per-database form: the registry
+    /// under tenancy.
+    pub(crate) fn pool(&self) -> Pool {
+        match self {
+            Self::Single(p) => (*p).clone(),
+            Self::Fleet(f) => f.registry(),
+        }
+    }
+}
+
+/// The verbs that work per database under tenancy, as the tenancy CLI runs them.
+pub(crate) trait Fleet: Sync {
+    fn registry(&self) -> Pool;
+    async fn apply(&self, dir: &Path, args: &[String], w: Out<'_>) -> Result<(), MigrateError>;
+    async fn down(&self, dir: &Path, args: &[String], w: Out<'_>) -> Result<(), MigrateError>;
+    async fn status(&self, dir: &Path, args: &[String], w: Out<'_>) -> Result<(), MigrateError>;
+    async fn drift(&self, dir: &Path, args: &[String], w: Out<'_>) -> Result<(), MigrateError>;
+    /// The registry's backend and each tenant's, for `sql` without `--dialect`.
+    async fn backends(&self) -> Result<Vec<Backend>, MigrateError>;
+    async fn prune_gate(
+        &self,
+        dir: &Path,
+        id: &str,
+    ) -> Result<super::squash::PruneGate, MigrateError>;
+}
+
+/// A verb's output under tenancy.
+pub(crate) type Out<'a> = &'a mut (dyn Write + Send);
+
+/// No fleet: the single-database CLI.
+pub(crate) enum NoFleet {}
+
+impl Fleet for NoFleet {
+    fn registry(&self) -> Pool {
+        match *self {}
+    }
+    async fn apply(&self, _: &Path, _: &[String], _: Out<'_>) -> Result<(), MigrateError> {
+        match *self {}
+    }
+    async fn down(&self, _: &Path, _: &[String], _: Out<'_>) -> Result<(), MigrateError> {
+        match *self {}
+    }
+    async fn status(&self, _: &Path, _: &[String], _: Out<'_>) -> Result<(), MigrateError> {
+        match *self {}
+    }
+    async fn drift(&self, _: &Path, _: &[String], _: Out<'_>) -> Result<(), MigrateError> {
+        match *self {}
+    }
+    async fn backends(&self) -> Result<Vec<Backend>, MigrateError> {
+        match *self {}
+    }
+    async fn prune_gate(
+        &self,
+        _: &Path,
+        _: &str,
+    ) -> Result<super::squash::PruneGate, MigrateError> {
+        match *self {}
+    }
+}
+
 /// Run `manage dbmigrate <args>` on the project around `dir`.
 ///
 /// # Errors
 /// A usage error, the refusal of an engine v1 project, and every load,
 /// check and run error.
-pub(crate) async fn run<W: Write + Send>(
-    pool: &Pool,
+pub(crate) async fn run<W: Write + Send, F: Fleet>(
+    route: Route<'_, F>,
     dir: &Path,
     args: &[String],
     w: &mut W,
 ) -> Result<(), MigrateError> {
     let verb = args.first().map_or("", String::as_str);
     let rest = args.get(1..).unwrap_or_default();
-    match verb {
-        "make" if value(rest, "--rebase")?.is_some() => rebase(pool, dir, rest, w).await,
-        "make" if rest.iter().any(|a| a == "--merge") => {
+    let pool = &route.pool();
+    match (verb, route) {
+        ("make", _) if value(rest, "--rebase")?.is_some() => rebase(pool, dir, rest, w).await,
+        ("make", _) if rest.iter().any(|a| a == "--merge") => {
             let path = super::merge::merge(dir, &app_folder(dir, rest)?).map_err(load)?;
             writeln!(w, "Wrote {}", path.display()).map_err(io)
         }
-        "make" => make(pool, dir, rest, w),
-        "apply" => apply(pool, dir, rest, w).await,
-        "down" => down(pool, dir, rest, w).await,
-        "status" => status(pool, dir, rest, w).await,
-        "check" => check(pool, dir, rest, w).await,
-        "sql" => sql(pool, dir, rest, w),
-        "adopt" => adopt(pool, dir, w),
-        "squash" => squash(pool, dir, rest, w).await,
-        "" | "help" | "--help" | "-h" => {
-            writeln!(w, "manage dbmigrate <{}>", VERBS.join("|")).map_err(io)
+        ("make", _) => make(pool, matches!(route, Route::Fleet(_)), dir, rest, w),
+        ("apply", Route::Single(pool)) => apply(pool, dir, rest, w).await,
+        ("down", Route::Single(pool)) => down(pool, dir, rest, w).await,
+        ("status", Route::Single(pool)) => status(pool, dir, rest, w).await,
+        ("check", Route::Single(pool)) if rest.iter().any(|a| a == "--drift") => {
+            drift(pool, dir, rest, w).await
         }
-        other => Err(usage(format!(
+        ("apply", Route::Fleet(f)) => f.apply(dir, rest, w).await,
+        ("down", Route::Fleet(f)) => f.down(dir, rest, w).await,
+        ("status", Route::Fleet(f)) => f.status(dir, rest, w).await,
+        ("check", Route::Fleet(f)) if rest.iter().any(|a| a == "--drift") => {
+            f.drift(dir, rest, w).await
+        }
+        ("check", _) => check(pool, dir, rest, w).await,
+        ("sql", _) => {
+            // `--dialect` reads nothing; the fleet's backends need the registry.
+            let defaults = match route {
+                _ if value(rest, "--dialect")?.is_some() => Vec::new(),
+                Route::Single(p) => vec![super::run::backend_of(p)],
+                Route::Fleet(f) => f.backends().await?,
+            };
+            sql(&defaults, dir, rest, w)
+        }
+        ("adopt", _) => adopt(pool, dir, w),
+        ("squash", _) => match value(rest, "--prune")? {
+            Some(id) => {
+                let gate = prune_gate(route, dir, rest, id).await?;
+                prune_with(dir, rest, id, &gate, w)
+            }
+            None => make_squash(dir, rest, w),
+        },
+        ("" | "help" | "--help" | "-h", _) => w.write_all(HELP.as_bytes()).map_err(io),
+        (other, _) => Err(usage(format!(
             "unknown verb `{other}`; one of: {}",
             VERBS.join(", ")
         ))),
     }
 }
 
-fn make<W: Write>(pool: &Pool, dir: &Path, args: &[String], w: &mut W) -> Result<(), MigrateError> {
+fn make<W: Write>(
+    pool: &Pool,
+    tenancy: bool,
+    dir: &Path,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), MigrateError> {
     if let Some(name) = value(args, "--data-rust")? {
         let list = |flag: &str| -> Result<Vec<String>, MigrateError> {
             Ok(value(args, flag)?
@@ -194,7 +314,7 @@ fn make<W: Write>(pool: &Pool, dir: &Path, args: &[String], w: &mut W) -> Result
         renames,
         no_rename: args.iter().any(|a| a == "--no-rename"),
         no_split: args.iter().any(|a| a == "--no-split"),
-        tenancy: args.iter().any(|a| a == "--tenancy"),
+        tenancy: tenancy || args.iter().any(|a| a == "--tenancy"),
     };
     crate::migrate::make::check_models()?;
     let (folder, models): (PathBuf, _) = match value(args, "--app")? {
@@ -225,35 +345,32 @@ fn make<W: Write>(pool: &Pool, dir: &Path, args: &[String], w: &mut W) -> Result
     }
 }
 
-/// `squash <app> <from>..<to>` writes the checkpoint; `squash --prune
-/// <checkpoint> [--app <app>] [--assume-all-applied]` deletes what it replaces.
-async fn squash<W: Write>(
-    pool: &Pool,
+/// What lets `squash --prune <checkpoint> [--app <app>] [--assume-all-applied]`
+/// delete the files it replaces: this database's ledger, or every one
+/// under tenancy.
+async fn prune_gate<F: Fleet>(
+    route: Route<'_, F>,
     dir: &Path,
     args: &[String],
-    w: &mut W,
-) -> Result<(), MigrateError> {
-    if let Some(id) = value(args, "--prune")? {
-        let gate = if args.iter().any(|a| a == "--assume-all-applied") {
-            super::squash::PruneGate::Assumed
-        } else {
-            super::squash::PruneGate::Here {
-                applied: super::ledger::Ledger::default_names()
-                    .rows(pool)
-                    .await?
-                    .iter()
-                    .any(|r| r.id == id && r.state == super::ledger::RowState::Applied),
-            }
-        };
-        prune_with(dir, args, id, &gate, w)
-    } else {
-        make_squash(dir, args, w)
+    id: &str,
+) -> Result<super::squash::PruneGate, MigrateError> {
+    if args.iter().any(|a| a == "--assume-all-applied") {
+        return Ok(super::squash::PruneGate::Assumed);
+    }
+    match route {
+        Route::Single(pool) => Ok(super::squash::PruneGate::Here {
+            applied: super::ledger::Ledger::default_names()
+                .rows(pool)
+                .await?
+                .iter()
+                .any(|r| r.id == id && r.state == super::ledger::RowState::Applied),
+        }),
+        Route::Fleet(f) => f.prune_gate(dir, id).await,
     }
 }
 
-/// `squash --prune` once its gate is known; the tenancy CLI reads the
-/// fleet's ledgers for it.
-pub(crate) fn prune_with<W: Write>(
+/// `squash --prune` once its gate is known.
+fn prune_with<W: Write>(
     dir: &Path,
     args: &[String],
     id: &str,
@@ -317,12 +434,77 @@ async fn rebase<W: Write>(
     writeln!(w, "Moved {id} to {}", path.display()).map_err(io)
 }
 
+/// `apply`'s flags; a typo is refused, never ignored.
+const APPLY: crate::cli_args::Spec<'static> = crate::cli_args::Spec {
+    verb: "dbmigrate apply",
+    usage: "dbmigrate apply [<id>] [--plan | --dry-run] [--allow-rollback] [--database <alias>] \
+            [--accept-drift <why>] [--accept-step-change <step> --reason <why>] \
+            [--max-duration <secs>] [--accept-archive-size] [--accept-failover <why>] \
+            [--resume-forward]",
+    switches: &[
+        "--plan",
+        "--dry-run",
+        "--allow-rollback",
+        "--accept-archive-size",
+        "--resume-forward",
+    ],
+    valued: &[
+        "--accept-step-change",
+        "--reason",
+        "--max-duration",
+        "--accept-drift",
+        "--accept-failover",
+        "--database",
+    ],
+    max_positionals: 1,
+};
+
+/// `down`'s flags.
+const DOWN: crate::cli_args::Spec<'static> = crate::cli_args::Spec {
+    verb: "dbmigrate down",
+    usage: "dbmigrate down [<n> | --to <id>] [--plan | --dry-run] [--accept-data-loss] \
+            [--cascade] [--database <alias>]",
+    switches: &["--plan", "--dry-run", "--accept-data-loss", "--cascade"],
+    valued: &["--to", "--database"],
+    max_positionals: 1,
+};
+
+/// Each planned statement, or each rolled-back id, under `label` when given.
+pub(crate) fn write_back<W: Write + ?Sized>(
+    w: &mut W,
+    label: Option<&str>,
+    report: &super::run::Report,
+    dry_run: bool,
+) -> Result<(), MigrateError> {
+    let head = label.map(|l| format!("{l}: ")).unwrap_or_default();
+    if dry_run {
+        if let Some(l) = label {
+            writeln!(w, "-- {l}").map_err(io)?;
+        }
+        for p in &report.planned {
+            writeln!(w, "{p}").map_err(io)?;
+        }
+        if report.planned.is_empty() {
+            writeln!(w, "{head}nothing to roll back").map_err(io)?;
+        }
+        return Ok(());
+    }
+    for id in &report.rolled_back {
+        writeln!(w, "{head}Rolled back {id}").map_err(io)?;
+    }
+    if report.rolled_back.is_empty() {
+        writeln!(w, "{head}nothing to roll back").map_err(io)?;
+    }
+    Ok(())
+}
+
 async fn apply<W: Write>(
     pool: &Pool,
     dir: &Path,
     args: &[String],
     w: &mut W,
 ) -> Result<(), MigrateError> {
+    crate::cli_args::parse(args, &APPLY)?;
     let accept_step_change = match value(args, "--accept-step-change")? {
         None => None,
         Some(id) => {
@@ -416,38 +598,74 @@ async fn down<W: Write>(
     args: &[String],
     w: &mut W,
 ) -> Result<(), MigrateError> {
+    let p = crate::cli_args::parse(args, &DOWN)?;
+    let back = Back::of(&p)?;
     let db = database(args)?;
     let pool = db.as_ref().map_or(pool, |(_, p)| p);
     let opts = super::run::Options {
-        accept_data_loss: args.iter().any(|a| a == "--accept-data-loss"),
-        cascade: args.iter().any(|a| a == "--cascade"),
         database: db.as_ref().map(|(d, _)| d.clone()),
-        ..super::run::Options::default()
+        ..back.opts(super::run::Options::default())
     };
-    let steps = match value(args, "--to")? {
-        Some(to) => {
-            let report = super::run::downgrade_to(pool, dir, to, &opts)
-                .await
-                .map_err(run_err)?;
-            for id in &report.rolled_back {
-                writeln!(w, "Rolled back {id}").map_err(io)?;
-            }
-            return Ok(());
-        }
-        None => match positional(args, &["--to", "--database"]) {
-            Some(n) => n
+    let report = back.run(pool, dir, &opts).await?;
+    write_back(w, None, &report, back.dry_run())
+}
+
+/// How far `down` goes and with which flags; the tenancy CLI parses its
+/// own flags around the same.
+pub(crate) struct Back<'a> {
+    to: Option<&'a str>,
+    steps: usize,
+    dry_run: bool,
+    accept_data_loss: bool,
+    cascade: bool,
+}
+
+impl<'a> Back<'a> {
+    pub(crate) fn of(p: &'a crate::cli_args::Parsed) -> Result<Self, MigrateError> {
+        let to = p.value("--to")?;
+        let steps = match (p.positional(0), to) {
+            (Some(n), Some(_)) => return Err(usage(format!("`{n}` and `--to`: pick one"))),
+            (Some(n), None) => n
                 .parse()
                 .map_err(|_| usage(format!("`{n}` is not a number of steps")))?,
-            None => 1,
-        },
-    };
-    let report = super::run::downgrade(pool, dir, steps, &opts)
-        .await
-        .map_err(run_err)?;
-    for id in &report.rolled_back {
-        writeln!(w, "Rolled back {id}").map_err(io)?;
+            (None, _) => 1,
+        };
+        Ok(Self {
+            to,
+            steps,
+            dry_run: p.has("--plan") || p.has("--dry-run"),
+            accept_data_loss: p.has("--accept-data-loss"),
+            cascade: p.has("--cascade"),
+        })
     }
-    Ok(())
+
+    /// `base` with these flags.
+    pub(crate) fn opts(&self, base: super::run::Options) -> super::run::Options {
+        super::run::Options {
+            dry_run: self.dry_run,
+            accept_data_loss: self.accept_data_loss,
+            cascade: self.cascade,
+            ..base
+        }
+    }
+
+    pub(crate) fn dry_run(&self) -> bool {
+        self.dry_run
+    }
+
+    /// The rollback on `pool`, with `opts` from [`Self::opts`].
+    pub(crate) async fn run(
+        &self,
+        pool: &Pool,
+        dir: &Path,
+        opts: &super::run::Options,
+    ) -> Result<super::run::Report, MigrateError> {
+        match self.to {
+            Some(to) => super::run::downgrade_to(pool, dir, to, opts).await,
+            None => super::run::downgrade(pool, dir, self.steps, opts).await,
+        }
+        .map_err(run_err)
+    }
 }
 
 async fn status<W: Write>(
@@ -456,37 +674,51 @@ async fn status<W: Write>(
     args: &[String],
     w: &mut W,
 ) -> Result<(), MigrateError> {
-    use super::ledger::RowState;
     let project = super::load::load_project(dir).map_err(load)?;
     let db = database(args)?;
     let pool = db.as_ref().map_or(pool, |(_, p)| p);
-    let rows = super::ledger::Ledger::of(&super::run::Options::default())
-        .rows(pool)
-        .await?;
-    let files: Vec<usize> = match &db {
-        Some((d, _)) => super::load::chain(&project, Target::Database, Some(d)).collect(),
-        None => super::load::chain(&project, Target::EveryDatabase, None)
-            .chain(super::load::chain(&project, Target::Tenant, None))
-            .collect(),
+    let opts = super::run::Options {
+        database: db.as_ref().map(|(d, _)| d.clone()),
+        ..super::run::Options::default()
     };
-    for i in files {
-        let f = &project.files[i].file;
-        let row = rows.iter().find(|r| r.app == f.app && r.id == f.id);
-        let mark = match row.map(|r| &r.state) {
-            None => " ",
-            Some(RowState::Applied) => "X",
-            Some(RowState::Running | RowState::RollingBack) => "~",
-            Some(RowState::Failed) => "!",
-        };
-        let note = match row {
-            Some(r) if r.error_class.as_deref() == Some("stopped") => {
-                format!(" ({})", super::run::STOPPED)
-            }
-            _ => String::new(),
-        };
-        writeln!(w, "[{mark}] {}:{}{note}", f.app, f.id).map_err(io)?;
+    for line in status_lines(pool, &project, &opts).await? {
+        writeln!(w, "{line}").map_err(io)?;
     }
     Ok(())
+}
+
+/// One `[X] app:id` line per migration a run with `opts` on `pool` covers.
+///
+/// # Errors
+/// Reading the ledger.
+pub(crate) async fn status_lines(
+    pool: &Pool,
+    project: &super::load::Project,
+    opts: &super::run::Options,
+) -> Result<Vec<String>, MigrateError> {
+    use super::ledger::RowState;
+    let rows = super::ledger::Ledger::of(opts).rows(pool).await?;
+    let mut out = Vec::new();
+    for &chain in opts.chains() {
+        for i in super::load::chain(project, chain, opts.database.as_deref()) {
+            let f = &project.files[i].file;
+            let row = rows.iter().find(|r| r.app == f.app && r.id == f.id);
+            let mark = match row.map(|r| &r.state) {
+                None => " ",
+                Some(RowState::Applied) => "X",
+                Some(RowState::Running | RowState::RollingBack) => "~",
+                Some(RowState::Failed) => "!",
+            };
+            let note = match row {
+                Some(r) if r.error_class.as_deref() == Some("stopped") => {
+                    format!(" ({})", super::run::STOPPED)
+                }
+                _ => String::new(),
+            };
+            out.push(format!("[{mark}] {}:{}{note}", f.app, f.id));
+        }
+    }
+    Ok(out)
 }
 
 async fn check<W: Write>(
@@ -533,6 +765,29 @@ async fn drift<W: Write>(
         Some(other) => return Err(usage(format!("--target {other}: `registry` or `tenant`"))),
     };
     let project = super::load::load_project(dir).map_err(load)?;
+    let found = drift_lines(pool, &project, target).await?;
+    for m in &found {
+        writeln!(w, "{m}").map_err(io)?;
+    }
+    if !found.is_empty() {
+        return Err(MigrateError::Validation(format!(
+            "dbmigrate check --drift: {} difference(s) from the migrations' state",
+            found.len()
+        )));
+    }
+    writeln!(w, "No drift.").map_err(io)
+}
+
+/// Each difference between `pool`'s catalog and `target`'s state at the
+/// migrations its ledger applied (S6).
+///
+/// # Errors
+/// A load error, or reading the ledger or catalog.
+pub(crate) async fn drift_lines(
+    pool: &Pool,
+    project: &super::load::Project,
+    target: Target,
+) -> Result<Vec<String>, MigrateError> {
     let done: std::collections::HashSet<(String, String)> = super::ledger::Ledger::default_names()
         .rows(pool)
         .await?
@@ -551,30 +806,28 @@ async fn drift<W: Write>(
             done.contains(&(f.app.clone(), f.id.clone()))
         })
         .collect();
-    let planner = super::plan::TipPlanner::new(&project, target).map_err(load)?;
-    let state = planner.state_at(&project, &applied).map_err(load)?;
+    let planner = super::plan::TipPlanner::new(project, target).map_err(load)?;
+    let state = planner.state_at(project, &applied).map_err(load)?;
     let found = super::probe::drift(pool, &state)
         .await
         .map_err(|e| MigrateError::Validation(e.to_string()))?;
-    for m in &found {
-        writeln!(w, "{m}").map_err(io)?;
-    }
-    if !found.is_empty() {
-        return Err(MigrateError::Validation(format!(
-            "dbmigrate check --drift: {} difference(s) from the migrations' state",
-            found.len()
-        )));
-    }
-    writeln!(w, "No drift.").map_err(io)
+    Ok(found.iter().map(ToString::to_string).collect())
 }
 
-fn sql<W: Write>(pool: &Pool, dir: &Path, args: &[String], w: &mut W) -> Result<(), MigrateError> {
+/// `sql <id> [--dialect pg|mysql|sqlite|all]`: by default the backend of
+/// each database it runs on (under tenancy the registry's and each tenant's).
+fn sql<W: Write>(
+    defaults: &[Backend],
+    dir: &Path,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), MigrateError> {
     let target = positional(args, &["--dialect"])
         .ok_or_else(|| usage("`sql` needs a migration id (`<id>` or `<app>:<id>`)"))?;
     let list = match value(args, "--dialect")? {
         Some("all") => vec![Backend::Postgres, Backend::Mysql, Backend::Sqlite],
         Some(d) => vec![backend_named(d)?],
-        None => vec![super::run::backend_of(pool)],
+        None => defaults.to_vec(),
     };
     let project = super::load::load_project(dir).map_err(load)?;
     let (app, id) = target
@@ -611,7 +864,13 @@ fn adopt<W: Write>(pool: &Pool, dir: &Path, w: &mut W) -> Result<(), MigrateErro
     }
     writeln!(
         w,
-        "Next: run `manage dbmigrate apply` on each database to switch it."
+        "Next: commit these files, then run `manage dbmigrate apply` on each database \
+         (under tenancy it migrates the registry, then every tenant).\n\
+         The switch is one way: v2 rollback stops at the adopt checkpoint. A database \
+         behind the engine v1 head must first run `manage migrate` from the commit \
+         before this one.\n\
+         The `system/migrations` folder and the v1 ledger stay as they are; engine v2 \
+         does not read them."
     )
     .map_err(io)
 }

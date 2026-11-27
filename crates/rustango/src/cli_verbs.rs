@@ -73,6 +73,36 @@ pub(crate) const ENGINE_V1_VERBS: &[&str] = &[
     "check",
 ];
 
+/// Refuse an engine v2 project for the engine v1 `verb`, naming the
+/// `dbmigrate` verb to run instead.
+///
+/// # Errors
+/// [`crate::migrate::MigrateError::EngineV2`] or `MixedEngine`.
+pub(crate) fn require_v1_for(
+    verb: &str,
+    dir: &std::path::Path,
+) -> Result<(), crate::migrate::MigrateError> {
+    use crate::migrate::MigrateError;
+    crate::migrate::require_v1_project(dir).map_err(|e| match e {
+        MigrateError::EngineV2 { origin, .. } => {
+            let v2 = match verb {
+                "migrate" | "migrate-tenants" | "migrate-registry" => " apply",
+                "downgrade" => " down",
+                "showmigrations" | "status" => " status",
+                "makemigrations" => " make",
+                "sqlmigrate" => " sql",
+                "check" => " check",
+                _ => "",
+            };
+            MigrateError::EngineV2 {
+                origin,
+                instead: format!("{}{v2}", crate::migrate::DBMIGRATE),
+            }
+        }
+        other => other,
+    })
+}
+
 /// Tenancy's own verbs of that kind; the others fall through to
 /// [`ENGINE_V1_VERBS`]. `init-tenancy` checks inside, for the wizard too.
 #[cfg(feature = "tenancy")]

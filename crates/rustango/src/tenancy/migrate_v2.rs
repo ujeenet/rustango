@@ -1228,6 +1228,142 @@ impl Fleet<'_> {
     }
 }
 
+/// Which tenants a per-database `dbmigrate` verb works on.
+pub(crate) enum Tenants<'a> {
+    All,
+    One(&'a str),
+}
+
+/// The tenants' targets in slug order, inactive ones too, each reached as
+/// the fleet reaches it; one that cannot be reached comes back as its error.
+///
+/// # Errors
+/// Reading the orgs, or `One` naming no tenant.
+pub(crate) async fn targets<DB: Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    which: Tenants<'_>,
+) -> Result<Vec<(String, Result<Target, TenancyError>)>, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let (mut orgs, _) = fleet_orgs(&pools.registry_pool(), &FleetOptions::default()).await?;
+    if let Tenants::One(slug) = which {
+        orgs.retain(|o| o.slug == slug);
+        if orgs.is_empty() {
+            return Err(TenancyError::Validation(format!("no tenant `{slug}`")));
+        }
+    }
+    let migrator = MigratorLogin::from_env();
+    let mut out = Vec::new();
+    for org in &orgs {
+        let t = target_as(pools, org, registry_url, migrator.as_ref()).await;
+        out.push((org.slug.clone(), t));
+    }
+    Ok(out)
+}
+
+/// The backends of the registry and of every tenant, once each.
+///
+/// # Errors
+/// Reading the orgs.
+pub(crate) async fn backends(
+    registry: &crate::sql::Pool,
+) -> Result<Vec<crate::migrate::v2::state::Backend>, TenancyError> {
+    use crate::migrate::v2::state::Backend;
+    let mut out = vec![run::backend_of(registry)];
+    for org in fleet_orgs(registry, &FleetOptions::default()).await?.0 {
+        let b = match org.backend_kind {
+            super::BackendKind::Postgres => Backend::Postgres,
+            super::BackendKind::MySql => Backend::Mysql,
+            super::BackendKind::Sqlite => Backend::Sqlite,
+        };
+        if !out.contains(&b) {
+            out.push(b);
+        }
+    }
+    Ok(out)
+}
+
+/// After a tenant's rollback: the registry cache holds its new head.
+///
+/// # Errors
+/// Writing the cache.
+pub(crate) async fn record_head(
+    registry: &crate::sql::Pool,
+    t: &Target,
+    pool: &crate::sql::Pool,
+) -> Result<(), TenancyError> {
+    let head = run::applied_ids(pool, &tenant_opts(t))
+        .await
+        .map_err(migrate_err)?;
+    crate::migrate::v2::ledger::cache_ensure(registry).await?;
+    crate::migrate::v2::ledger::cache_put(
+        registry,
+        &t.slug,
+        "applied",
+        head_of(&head).as_deref(),
+        None,
+        &run::new_run_id(),
+    )
+    .await?;
+    Ok(())
+}
+
+/// What a fleet run would run, with nothing written: the registry's plan,
+/// then each tenant's against the registry's applied set (or why it is
+/// refused).
+///
+/// # Errors
+/// The registry's dry run, a load error, or reading the orgs.
+pub(crate) async fn plan_fleet<DB: Database>(
+    pools: &TenantPools<DB>,
+    dir: &Path,
+    registry_url: &str,
+) -> Result<Vec<(String, Result<Vec<String>, String>)>, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let registry = pools.registry_pool();
+    let project = crate::migrate::v2::load::load_project(dir)
+        .map_err(|e| migrate_err(run::RunError::Load(e)))?;
+    let reg = Options {
+        run_as: RunAs::Registry,
+        dry_run: true,
+        ..Options::default()
+    };
+    let mut out = vec![(
+        "registry".to_owned(),
+        Ok(run::migrate_loaded(&registry, &project, &reg)
+            .await
+            .map_err(migrate_err)?
+            .planned),
+    )];
+    let applied = run::applied_ids(&registry, &reg)
+        .await
+        .map_err(migrate_err)?;
+    for (slug, t) in targets(pools, registry_url, Tenants::All).await? {
+        let planned = match t {
+            Err(e) => Err(e.to_string()),
+            Ok(t) => match t.open().await {
+                Err(e) => Err(e.to_string()),
+                Ok(open) => {
+                    let opts = Options {
+                        dry_run: true,
+                        registry_applied: Some(applied.clone()),
+                        ..tenant_opts(&t)
+                    };
+                    let r = run::migrate_loaded(&open.pool, &project, &opts).await;
+                    open.close().await;
+                    r.map(|r| r.planned).map_err(|e| e.to_string())
+                }
+            },
+        };
+        out.push((format!("tenant {slug}"), planned));
+    }
+    Ok(out)
+}
+
 /// Engine v2 for one tenant outside a fleet run (provisioning): the
 /// fleet's own per-tenant run, against the registry's applied set.
 ///

@@ -46,6 +46,7 @@ mod args;
 mod audit;
 mod data;
 mod db_servers;
+mod dbmigrate;
 mod edit;
 mod flush;
 mod hosts;
@@ -265,12 +266,20 @@ async fn dispatch_with<W: Write + Send, DB: sqlx::Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    #[cfg(feature = "postgres")]
-    crate::tenancy::boot_checks(pools).await?;
     let cmd = args.first().map_or("", String::as_str);
-    if crate::cli_verbs::TENANCY_ENGINE_V1_VERBS.contains(&cmd) {
-        crate::migrate::require_v1_project(dir)?;
+    // An offline `dbmigrate` verb (help, make) needs no registry yet.
+    #[cfg(feature = "postgres")]
+    if !(cmd == "dbmigrate" && crate::migrate::v2::cli::pool_free(&args[1..])) {
+        crate::tenancy::boot_checks(pools).await?;
     }
+    if crate::cli_verbs::TENANCY_ENGINE_V1_VERBS.contains(&cmd) {
+        crate::cli_verbs::require_v1_for(cmd, dir)?;
+    }
+    // `dbmigrate` works per database here: never the single-database runner.
+    let fleet = dbmigrate::FleetCli {
+        pools,
+        registry_url,
+    };
 
     match cmd {
         "" | "help" | "--help" | "-h" => {
@@ -324,13 +333,6 @@ where
                 report.total_active, report.warmed, report.failed, report.skipped_cap
             )?;
             migrations::tenant_failures(report.failed, report.total_active)
-        }
-        // A prune under tenancy reads every ledger, not just the registry's (9.6).
-        "dbmigrate"
-            if args.get(1).map(String::as_str) == Some("squash")
-                && !args.iter().any(|a| a == "--assume-all-applied") =>
-        {
-            migrations::v2_prune(pools, registry_url, dir, &args[2..], writer).await
         }
         "migrate-tenants" => {
             migrations::migrate_tenants_cmd(pools, registry_url, dir, &args[1..], writer).await
@@ -547,7 +549,7 @@ where
         // `registry_pool()` accessor that returns the backend-agnostic
         // enum form.
         _ => crate::migrate::manage::run_with_writer_for(
-            &pools.registry_pool(),
+            crate::migrate::v2::cli::Route::Fleet(&fleet),
             dir,
             args,
             writer,

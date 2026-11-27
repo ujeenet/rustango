@@ -1482,7 +1482,7 @@ async fn a_tenancy_project_switches_and_behind_tenants_block() {
         "{msg}"
     );
     assert!(
-        msg.contains("pre-switch release (engine v1) to `0003_total`"),
+        msg.contains("behind the engine v1 head") && msg.contains("to reach `0003_total`"),
         "{msg}"
     );
     for s in ["s_t2", "s_t3"] {
@@ -2680,4 +2680,274 @@ async fn requires_tenants_waits_for_an_unreachable_tenant() {
         .expect_err("t2 was never read");
     assert!(e.to_string().contains("t2 (unreachable)"), "{e}");
     registry.close().await;
+}
+
+/// `manage <args>` from the tenancy CLI; its output.
+async fn tenancy_cli<DB: sqlx::Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    dir: &Path,
+    args: &[&str],
+) -> Result<String, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let mut out = Vec::new();
+    let args = args.iter().map(|a| (*a).to_owned());
+    crate::tenancy::manage::run_with_writer(pools, registry_url, dir, args, &mut out).await?;
+    Ok(String::from_utf8(out).unwrap())
+}
+
+async fn has_table(pool: &Pool, table: &str) -> bool {
+    crate::migrate::v2::catalog::read_table(pool, table)
+        .await
+        .unwrap()
+        .is_some()
+}
+
+/// `dbmigrate` from the tenancy CLI works per database (QA B2/B3): `apply`
+/// puts tenant tables in each tenant and never in the registry; `status`
+/// and `check --drift` see every database; `down` needs a target and rolls
+/// tenants back before the registry; `--plan` writes nothing. `tenants`
+/// are `(slug, pool on that tenant)`, the registry chain already applied.
+async fn dbmigrate_routes_through_the_fleet<DB: sqlx::Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    dir: &Path,
+    tenants: &[(&str, Pool)],
+) where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let cli = |args: &'static [&'static str]| tenancy_cli(pools, registry_url, dir, args);
+    let registry = pools.registry_pool();
+    put(
+        dir,
+        "0001_items",
+        &file("0001_items", &[], "tenant", items()),
+    );
+    let flags = json!([{"op": "create_table", "v": 1, "table": {"name": "flags",
+        "scope": "registry", "fields": [
+            {"column": "id", "ty": "i64", "primary_key": true, "nullable": false}]}}]);
+    put(
+        dir,
+        "0002_flags",
+        &file("0002_flags", &[], "registry", flags),
+    );
+    let e = cli(&["dbmigrate", "down"]).await.expect_err("no target");
+    assert!(
+        e.to_string()
+            .contains("--registry, --tenant <slug> or --all-tenants"),
+        "{e}"
+    );
+    let e = cli(&["dbmigrate", "apply", "--bogus"])
+        .await
+        .expect_err("typo");
+    assert!(e.to_string().contains("--bogus"), "{e}");
+    // A plan of every database, nothing written.
+    let plan = cli(&["dbmigrate", "apply", "--plan"]).await.unwrap();
+    for (slug, _) in tenants {
+        assert!(plan.contains(&format!("-- tenant {slug}")), "{plan}");
+    }
+    assert!(plan.contains("-- registry"), "{plan}");
+    assert!(!has_table(&registry, "flags").await);
+    for (_, t) in tenants {
+        assert!(!has_table(t, "items").await);
+    }
+    let out = cli(&["dbmigrate", "apply"]).await.unwrap();
+    assert!(out.contains("registry: applied 1 migration(s)"), "{out}");
+    assert!(has_table(&registry, "flags").await);
+    assert!(
+        !has_table(&registry, "items").await,
+        "a tenant table in the registry"
+    );
+    for (slug, t) in tenants {
+        assert!(has_table(t, "items").await, "{slug}");
+        assert!(!has_table(t, "flags").await, "{slug}: a registry table");
+    }
+    let status = cli(&["dbmigrate", "status"]).await.unwrap();
+    assert!(
+        status.contains("registry:\n  [X] project:0002_flags"),
+        "{status}"
+    );
+    for (slug, _) in tenants {
+        assert!(
+            status.contains(&format!("tenant {slug}:\n  [X] project:0001_items")),
+            "{status}"
+        );
+    }
+    let drift = cli(&["dbmigrate", "check", "--drift"]).await.unwrap();
+    assert!(drift.contains("registry: No drift."), "{drift}");
+    let (first, rest) = tenants.split_first().unwrap();
+    // `--plan` lists the rollback and runs none of it.
+    let plan = tenancy_cli(
+        pools,
+        registry_url,
+        dir,
+        &["dbmigrate", "down", "--tenant", first.0, "--plan"],
+    )
+    .await
+    .unwrap();
+    assert!(plan.contains("DROP TABLE"), "{plan}");
+    assert!(has_table(&first.1, "items").await);
+    let out = tenancy_cli(
+        pools,
+        registry_url,
+        dir,
+        &["dbmigrate", "down", "--tenant", first.0],
+    )
+    .await
+    .unwrap();
+    assert!(out.contains("Rolled back 0001_items"), "{out}");
+    assert!(!has_table(&first.1, "items").await);
+    for (slug, t) in rest {
+        assert!(has_table(t, "items").await, "{slug} kept its table");
+    }
+    assert!(has_table(&registry, "flags").await);
+    let out = cli(&["dbmigrate", "down", "--all-tenants", "--registry"])
+        .await
+        .unwrap();
+    let reg_at = out.find("registry: Rolled back 0002_flags").expect(&out);
+    for (slug, t) in rest {
+        let at = out
+            .find(&format!("tenant {slug}: Rolled back 0001_items"))
+            .expect(&out);
+        assert!(at < reg_at, "tenants roll back before the registry: {out}");
+        assert!(!has_table(t, "items").await);
+    }
+    assert!(!has_table(&registry, "flags").await);
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn dbmigrate_routes_through_the_fleet_in_schema_mode() {
+    let _g = serial().lock().await;
+    let Some(f) = PgFleet::new("cli").await else {
+        return;
+    };
+    f.with_orgs(&["t1", "t2"]).await;
+    let pools = f.pools();
+    let mut tenants = Vec::new();
+    for slug in ["t1", "t2"] {
+        let t = target(&pools, &f.org(slug).await, &f.db.url).await.unwrap();
+        tenants.push((slug, t.pool().await));
+    }
+    dbmigrate_routes_through_the_fleet(&pools, &f.db.url, &f.dir(), &tenants).await;
+    let reg = f.registry();
+    assert!(!exists_in(&reg, "public", "items").await);
+}
+
+/// The DB-mode set-up of [`dbmigrate_routes_through_the_fleet`].
+async fn dbmigrate_routes_in_db_mode<DB: sqlx::Database>(
+    registry_url: String,
+    urls: [String; 2],
+    kind: crate::tenancy::BackendKind,
+) where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let raw = sqlx::Pool::<DB>::connect(&registry_url).await.unwrap();
+    let registry: Pool = raw.clone().into();
+    let pools = TenantPools::new(raw);
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    std::fs::create_dir_all(&dir).unwrap();
+    run_fleet(&pools, &dir, &registry_url, &FleetOptions::default())
+        .await
+        .unwrap();
+    let mut tenants = Vec::new();
+    for (slug, url) in ["d0", "d1"].into_iter().zip(&urls) {
+        let mut org = crate::testkit::org_with(|o| {
+            o.id = crate::sql::Auto::default();
+            o.slug = slug.into();
+            o.display_name = slug.into();
+            o.storage_mode = StorageMode::Database;
+            o.backend_kind = kind;
+            o.database_url = Some(url.clone());
+            o.schema_name = None;
+            o.host_pattern = None;
+            o.port = None;
+            o.path_prefix = None;
+        });
+        org.insert(&registry).await.unwrap();
+        tenants.push((slug, Pool::connect(url).await.unwrap()));
+    }
+    dbmigrate_routes_through_the_fleet(&pools, &registry_url, &dir, &tenants).await;
+    for (_, c) in tenants {
+        c.close().await;
+    }
+    registry.close().await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn dbmigrate_routes_through_the_fleet_in_db_mode_postgres() {
+    let _g = serial().lock().await;
+    let Some(admin) = crate::testkit::matrix::live_url("DATABASE_URL", "postgres") else {
+        return;
+    };
+    let (r, a, b) = (
+        Scratch::create(&admin, "clr").await,
+        Scratch::create(&admin, "cla").await,
+        Scratch::create(&admin, "clb").await,
+    );
+    dbmigrate_routes_in_db_mode::<sqlx::Postgres>(
+        r.url.clone(),
+        [a.url.clone(), b.url.clone()],
+        crate::tenancy::BackendKind::Postgres,
+    )
+    .await;
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn dbmigrate_routes_through_the_fleet_in_db_mode_mysql() {
+    let _g = serial().lock().await;
+    let Some(admin) = crate::testkit::matrix::live_url("MYSQL_TEST_URL", "mysql") else {
+        return;
+    };
+    let (r, a, b) = (
+        Scratch::create(&admin, "clr").await,
+        Scratch::create(&admin, "cla").await,
+        Scratch::create(&admin, "clb").await,
+    );
+    dbmigrate_routes_in_db_mode::<sqlx::MySql>(
+        r.url.clone(),
+        [a.url.clone(), b.url.clone()],
+        crate::tenancy::BackendKind::MySql,
+    )
+    .await;
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn dbmigrate_routes_through_the_fleet_in_db_mode_sqlite() {
+    let _g = serial().lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let url = |n: &str| format!("sqlite:{}?mode=rwc", dir.path().join(n).display());
+    dbmigrate_routes_in_db_mode::<sqlx::Sqlite>(
+        url("registry.db"),
+        [url("a.db"), url("b.db")],
+        crate::tenancy::BackendKind::Sqlite,
+    )
+    .await;
+}
+
+/// `dbmigrate --help` from the tenancy CLI dials no registry.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn dbmigrate_help_needs_no_registry() {
+    let unreachable = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_secs(2))
+        .connect_lazy("postgres://u:p@127.0.0.1:1/none")
+        .unwrap();
+    let pools = TenantPools::new(unreachable);
+    let dir = tempfile::tempdir().unwrap();
+    let out = tenancy_cli(
+        &pools,
+        "postgres://u:p@127.0.0.1:1/none",
+        dir.path(),
+        &["dbmigrate", "--help"],
+    )
+    .await
+    .unwrap();
+    assert!(out.contains("down [<n> | --to <id>]"), "{out}");
 }

@@ -82,6 +82,20 @@ async fn the_verbs_run_a_v2_project() {
     assert!(out.contains("Applied 0002_n"), "{out}");
     let out = cli(&pool, &dir, &["dbmigrate", "status"]).await.unwrap();
     assert_eq!(out, "[X] project:0001_t\n[X] project:0002_n\n");
+    // QA B4: a typo is refused and `--plan` runs nothing.
+    let e = cli(&pool, &dir, &["dbmigrate", "down", "--plna"])
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("unknown flag `--plna`"), "{e}");
+    let out = cli(&pool, &dir, &["dbmigrate", "down", "--plan"])
+        .await
+        .unwrap();
+    assert!(
+        out.starts_with("-- 0002_n\n") && out.lines().count() > 1,
+        "{out}"
+    );
+    let out = cli(&pool, &dir, &["dbmigrate", "status"]).await.unwrap();
+    assert_eq!(out, "[X] project:0001_t\n[X] project:0002_n\n");
     let out = cli(&pool, &dir, &["dbmigrate", "down", "--to", "0001_t"])
         .await
         .unwrap();
@@ -278,4 +292,22 @@ async fn a_contract_file_shipped_with_its_expand_file_warns() {
             .any(|f| f.msg.contains("batched data op and a contract op")),
         "{found:?}"
     );
+}
+
+/// `dbmigrate --help` needs no database and names each verb; `manage
+/// --help` lists the group.
+#[cfg(feature = "manage")]
+#[test]
+fn help_lists_the_dbmigrate_verbs() {
+    for h in ["help", "--help", "-h"] {
+        assert!(pool_free(&[h.to_owned()]), "{h}");
+    }
+    for v in VERBS {
+        assert!(HELP.contains(&format!("\n  {v} ")), "{v}");
+    }
+    let mut out = Vec::new();
+    crate::migrate::manage::run_pool_free(&["--help".to_owned()], &mut out)
+        .unwrap()
+        .unwrap();
+    assert!(String::from_utf8(out).unwrap().contains("dbmigrate <verb>"));
 }

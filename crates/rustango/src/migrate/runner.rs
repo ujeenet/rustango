@@ -1437,10 +1437,9 @@ async fn reconcile_and_apply(
                     std::borrow::Cow::Owned(outside_tables(mig, &existing)),
                     Outcome::RanPartial { skipped: existing },
                 ),
-                ReconcileAction::RunWithoutIndexes(made) => (
-                    std::borrow::Cow::Owned(without_indexes(mig, &made)),
-                    Outcome::Ran,
-                ),
+                ReconcileAction::RunWithout(made) => {
+                    (std::borrow::Cow::Owned(made.without(mig)), Outcome::Ran)
+                }
                 _ => (std::borrow::Cow::Borrowed(mig), Outcome::Ran),
             };
             let before = snapshot_before(all, mig)?;
@@ -1492,9 +1491,46 @@ enum ReconcileAction {
     /// Apply only the schema ops on other tables: a squash whose tables
     /// already exist still carries changes to tables it does not create.
     RunOutside(Vec<String>),
-    /// Apply it without creating the listed indexes, which exist already.
-    /// Only the framework's own system chain uses this.
-    RunWithoutIndexes(Vec<String>),
+    /// Apply it without what the database already shows. Only the
+    /// framework's own system chain uses this.
+    RunWithout(Made),
+}
+
+/// Ops of a system step already in effect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Made {
+    /// `CreateIndex` names whose index exists.
+    indexes: Vec<String>,
+    /// `AlterFkOnDelete` `(table, column)` whose FK has that action already.
+    fk_actions: Vec<(String, String)>,
+}
+
+impl Made {
+    fn is_empty(&self) -> bool {
+        self.indexes.is_empty() && self.fk_actions.is_empty()
+    }
+
+    /// `mig` without these ops.
+    fn without(&self, mig: &Migration) -> Migration {
+        use super::diff::SchemaChange as SC;
+        let forward = mig
+            .forward
+            .iter()
+            .filter(|op| match op {
+                Operation::Schema(SC::CreateIndex { name, .. }) => !self.indexes.contains(name),
+                Operation::Schema(SC::AlterFkOnDelete { table, column, .. }) => !self
+                    .fk_actions
+                    .iter()
+                    .any(|(t, c)| t == table && c == column),
+                _ => true,
+            })
+            .cloned()
+            .collect();
+        Migration {
+            forward,
+            ..mig.clone()
+        }
+    }
 }
 
 /// Decide whether a pending migration should run or be reconciled.
@@ -1666,10 +1702,17 @@ async fn reconcile(
             }
         }
         // An index the framework made before its model declared it: MySQL
-        // has no `CREATE INDEX IF NOT EXISTS`, so skip it here instead.
-        let made = made_indexes(pool, mig).await?;
+        // has no `CREATE INDEX IF NOT EXISTS`, so skip it here instead. An
+        // `ON DELETE` already in effect is skipped too: no DDL for a repair.
+        let made = Made {
+            indexes: made_indexes(pool, mig).await?,
+            fk_actions: set_fk_actions(pool, mig).await?,
+        };
         if !made.is_empty() {
-            return Ok(ReconcileAction::RunWithoutIndexes(made));
+            if made.without(mig).forward.is_empty() {
+                return Ok(ReconcileAction::Fake);
+            }
+            return Ok(ReconcileAction::RunWithout(made));
         }
     }
     Ok(ReconcileAction::Run)
@@ -1874,7 +1917,7 @@ pub(crate) async fn preview_pending(
             ReconcileAction::Run => mig,
             ReconcileAction::RunPartial(existing) => without_tables(&mig, &existing),
             ReconcileAction::RunOutside(existing) => outside_tables(&mig, &existing),
-            ReconcileAction::RunWithoutIndexes(made) => without_indexes(&mig, &made),
+            ReconcileAction::RunWithout(made) => made.without(&mig),
         };
         out.push(preview_migration(
             &effective,
@@ -1973,19 +2016,33 @@ async fn made_indexes(
     Ok(made)
 }
 
-/// `mig` without its `CreateIndex` ops for `made`.
-fn without_indexes(mig: &Migration, made: &[String]) -> Migration {
+/// The `AlterFkOnDelete` ops of `mig` whose live FK already has that
+/// action: the repair step on a database that never needed it.
+async fn set_fk_actions(
+    pool: &crate::sql::Pool,
+    mig: &Migration,
+) -> Result<Vec<(String, String)>, MigrateError> {
     use super::diff::SchemaChange as SC;
-    let forward = mig
-        .forward
-        .iter()
-        .filter(|op| !matches!(op, Operation::Schema(SC::CreateIndex { name, .. }) if made.contains(name)))
-        .cloned()
-        .collect();
-    Migration {
-        forward,
-        ..mig.clone()
+    let mut set = Vec::new();
+    for op in &mig.forward {
+        let Operation::Schema(SC::AlterFkOnDelete {
+            table, column, to, ..
+        }) = op
+        else {
+            continue;
+        };
+        let live = super::v2::catalog::read_table(pool, table)
+            .await
+            .map_err(|e| MigrateError::Validation(e.to_string()))?;
+        let has = live.iter().flat_map(|t| &t.fks).any(|f| {
+            f.columns == [column.as_str()]
+                && super::diff::same_on_delete(Some(&f.on_delete), to.as_deref())
+        });
+        if has {
+            set.push((table.clone(), column.clone()));
+        }
     }
+    Ok(set)
 }
 
 fn create_only_tables(mig: &Migration) -> Option<Vec<String>> {
@@ -4153,6 +4210,8 @@ async fn atomic_mysql(
     let mut steps = render_steps(ops, before, after, &crate::sql::MySql, schema, &empty)?;
     let mut tx = my.begin().await?;
     let mut deferred_fks: Vec<String> = Vec::new();
+    // FKs re-added over a live one: its rows were already checked.
+    let mut replaced_fks: Vec<String> = Vec::new();
     let mut dropped = DroppedFks::default();
     // What has already committed when something fails.
     //
@@ -4182,7 +4241,7 @@ async fn atomic_mysql(
     }
     for op in ops {
         match op {
-            Operation::Schema(_) => {
+            Operation::Schema(change) => {
                 let step = steps.next_step();
                 // A refusal after DDL committed still says what survived it.
                 let stmts = mysql_statements(&mut tx, &step, &mut dropped)
@@ -4194,6 +4253,8 @@ async fn atomic_mysql(
                             partial => partial,
                         },
                     })?;
+                let replaces = matches!(change, super::diff::SchemaChange::AlterFkOnDelete { .. })
+                    && !stmts.is_empty();
                 // Counted per *statement*, not per operation:
                 // one operation can render several, and each
                 // auto-commits on its own, so an operation
@@ -4214,7 +4275,11 @@ async fn atomic_mysql(
                         .map_err(|e| stuck!(e))?;
                     ddl_applied += 1;
                 }
-                deferred_fks.extend(step.batch.deferred_fks);
+                if replaces {
+                    replaced_fks.extend(step.batch.deferred_fks);
+                } else {
+                    deferred_fks.extend(step.batch.deferred_fks);
+                }
             }
             Operation::Data(d) => {
                 sqlx::Executor::execute(&mut *tx, sqlx::raw_sql(&d.sql))
@@ -4230,6 +4295,26 @@ async fn atomic_mysql(
             .execute(&mut *tx)
             .await
             .map_err(|e| stuck!(e))?;
+    }
+    // Without the row check MySQL adds an FK in place, not by copying the
+    // table. Checks go back on even after a failure: the connection is pooled.
+    if !replaced_fks.is_empty() {
+        sqlx::query("SET foreign_key_checks = 0")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| stuck!(e))?;
+        let mut added = Ok(());
+        for stmt in &replaced_fks {
+            added = sqlx::query(stmt).execute(&mut *tx).await.map(drop);
+            if added.is_err() {
+                break;
+            }
+        }
+        let reset = sqlx::query("SET foreign_key_checks = 1")
+            .execute(&mut *tx)
+            .await;
+        added.map_err(|e| stuck!(e))?;
+        reset.map_err(|e| stuck!(e))?;
     }
     while let Some(stmt) = dropped.next() {
         sqlx::query(&stmt)

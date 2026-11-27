@@ -613,14 +613,18 @@ pub(crate) fn plan_system_step(
             unsupported.join("\n  - "),
         )));
     }
-    let changes = detect_changes(&prev_snapshot, &current);
+    let mut changes = detect_changes(&prev_snapshot, &current);
+    let repairs = on_delete_repairs(&prior_scoped, &current, &changes);
+    let only_repairs = changes.is_empty() && !repairs.is_empty();
+    changes.extend(repairs);
     if changes.is_empty() {
         return Ok(None);
     }
-    let suffix = name_override.map_or_else(
-        || auto_name(&changes, prior_scoped.is_empty()),
-        str::to_owned,
-    );
+    let suffix = match name_override {
+        Some(n) => n.to_owned(),
+        None if only_repairs => "repair_on_delete".to_owned(),
+        None => auto_name(&changes, prior_scoped.is_empty()),
+    };
     let name = format!("{next_index:04}_{suffix}");
     let created_at = chrono::Utc::now().to_rfc3339();
     Ok(Some(Migration {
@@ -634,6 +638,86 @@ pub(crate) fn plan_system_step(
         snapshot: current,
         forward: changes.into_iter().map(Operation::Schema).collect(),
     }))
+}
+
+/// FKs whose `ON DELETE` the chain's ops never set to what `current` says:
+/// the differ before 0.61.4 moved the snapshot without an op, so databases
+/// kept the action each FK was created with. Not those `changes` alter or drop.
+fn on_delete_repairs(
+    chain: &[&Migration],
+    current: &SchemaSnapshot,
+    changes: &[SchemaChange],
+) -> Vec<SchemaChange> {
+    use std::collections::BTreeMap;
+    type Made = BTreeMap<(String, String), Option<String>>;
+    fn set(t: &str, f: &super::snapshot::FieldSnapshot, made: &mut Made) {
+        if let Some(r) = &f.fk {
+            made.insert((t.to_owned(), f.column.clone()), r.on_delete.clone());
+        }
+    }
+    let mut made = Made::new();
+    for m in chain {
+        for op in &m.forward {
+            let Operation::Schema(c) = op else { continue };
+            match c {
+                SchemaChange::CreateTable(t) => {
+                    for f in m.snapshot.table(t).into_iter().flat_map(|s| &s.fields) {
+                        set(t, f, &mut made);
+                    }
+                }
+                SchemaChange::AddColumn { table, column } => {
+                    if let Some(f) = m.snapshot.table(table).and_then(|s| s.field(column)) {
+                        set(table, f, &mut made);
+                    }
+                }
+                SchemaChange::AlterFkOnDelete {
+                    table, column, to, ..
+                } => {
+                    made.insert((table.clone(), column.clone()), to.clone());
+                }
+                SchemaChange::DropColumn { table, column }
+                | SchemaChange::RenameColumn {
+                    table,
+                    old_column: column,
+                    ..
+                } => {
+                    made.remove(&(table.clone(), column.clone()));
+                }
+                SchemaChange::DropTable(t) | SchemaChange::RenameTable { old_name: t, .. } => {
+                    made.retain(|(table, _), _| table != t);
+                }
+                _ => {}
+            }
+        }
+    }
+    let changed = |t: &str, col: &str| {
+        changes.iter().any(|c| match c {
+            SchemaChange::DropTable(x) => x == t,
+            SchemaChange::DropColumn { table, column }
+            | SchemaChange::AlterFkOnDelete { table, column, .. } => table == t && column == col,
+            _ => false,
+        })
+    };
+    let mut out = Vec::new();
+    for t in &current.tables {
+        for f in &t.fields {
+            let (Some(r), Some(was)) = (&f.fk, made.get(&(t.name.clone(), f.column.clone())))
+            else {
+                continue;
+            };
+            if !super::diff::same_on_delete(was.as_deref(), r.on_delete.as_deref())
+                && !changed(&t.name, &f.column)
+            {
+                out.push(SchemaChange::AlterFkOnDelete {
+                    table: t.name.clone(),
+                    column: f.column.clone(),
+                    from: was.clone(),
+                    to: r.on_delete.clone(),
+                });
+            }
+        }
+    }
+    out
 }
 
 /// The framework's `system/migrations/` dir and where its files came from.
@@ -1409,6 +1493,76 @@ mod tests {
         .unwrap();
         let chain = SystemChain::prepare(tmp.path(), &scopes).unwrap();
         assert_eq!(chain.origin(), super::super::runner::ChainOrigin::OnDisk);
+    }
+
+    /// A chain that made its FKs with no action and later moved the
+    /// snapshot to the models' action with no op gets one step that sets
+    /// each such FK, and nothing once that step is in the chain.
+    #[cfg(any(feature = "media", feature = "tenancy"))]
+    #[test]
+    fn system_step_repairs_actions_the_chain_never_set() {
+        use crate::core::ModelScope;
+        let current = SchemaSnapshot::from_registry_system_for_scope(ModelScope::Tenant);
+        let mut old = current.clone();
+        let mut want = Vec::new();
+        for t in &mut old.tables {
+            for f in &mut t.fields {
+                let acts = |r: &super::super::RelationSnapshot| {
+                    r.on_delete
+                        .as_deref()
+                        .is_some_and(|a| !a.eq_ignore_ascii_case("NO ACTION"))
+                };
+                if let Some(r) = f.fk.as_mut().filter(|r| acts(r)) {
+                    r.on_delete = None;
+                    want.push((t.name.clone(), f.column.clone()));
+                }
+            }
+        }
+        assert!(!want.is_empty(), "no framework FK with an action");
+        let step = |name: &str, prev: Option<&str>, snapshot, forward| Migration {
+            name: name.into(),
+            created_at: String::new(),
+            prev: prev.map(Into::into),
+            atomic: true,
+            scope: migration_scope(ModelScope::Tenant),
+            replaces: Vec::new(),
+            merges: Vec::new(),
+            snapshot,
+            forward,
+        };
+        let create = detect_changes(&SchemaSnapshot::default(), &old);
+        let made = step(
+            "0001_initial",
+            None,
+            old,
+            create.into_iter().map(Operation::Schema).collect(),
+        );
+        let moved = step("0002_auto", Some("0001_initial"), current, Vec::new());
+        let repair = plan_system_step(ModelScope::Tenant, None, &[made.clone(), moved.clone()])
+            .unwrap()
+            .expect("a repair step");
+        assert_eq!(repair.name, "0003_repair_on_delete");
+        let mut got: Vec<(String, String)> = repair
+            .forward
+            .iter()
+            .map(|op| match op {
+                Operation::Schema(SchemaChange::AlterFkOnDelete {
+                    table,
+                    column,
+                    from: None,
+                    ..
+                }) => (table.clone(), column.clone()),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        got.sort();
+        want.sort();
+        assert_eq!(got, want);
+        assert!(
+            plan_system_step(ModelScope::Tenant, None, &[made, moved, repair])
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
