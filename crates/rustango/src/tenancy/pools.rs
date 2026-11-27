@@ -674,9 +674,19 @@ pub struct TenantPools<DB: Database = DefaultTenantDb> {
     #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
     database_name: Arc<tokio::sync::OnceCell<String>>,
     /// Tenants whose migrations failed: they answer 503 until a run fixes
-    /// them (8.3 `require_head`). Per pools, never process-global.
-    maintenance: std::sync::RwLock<std::collections::BTreeSet<String>>,
+    /// them (8.3 `require_head`), with the registry cache run id they were
+    /// parked at. Per pools, never process-global.
+    maintenance: std::sync::RwLock<std::collections::BTreeMap<String, Option<String>>>,
+    /// When the registry cache was last read for a parked tenant.
+    maintenance_checked: std::sync::Mutex<Option<std::time::Instant>>,
 }
+
+/// How often a parked tenant's registry cache row is read again.
+const MAINTENANCE_RECHECK: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_millis(100)
+} else {
+    std::time::Duration::from_secs(5)
+};
 
 /// Warns once a cache passes 80% of its cap, so the operator hears
 /// about it while it is still headroom and not an incident.
@@ -773,25 +783,22 @@ impl<DB: Database> TenantPools<DB> {
             role_secret: Arc::default(),
             database_name: Arc::default(),
             maintenance: std::sync::RwLock::default(),
+            maintenance_checked: std::sync::Mutex::default(),
         }
     }
 
-    /// Put exactly `slugs` in maintenance: their requests answer 503 until
-    /// the next fleet run that applies them.
-    pub(crate) fn set_maintenance(&self, slugs: impl IntoIterator<Item = String>) {
+    /// Put exactly `slugs` in maintenance, each with the registry cache run
+    /// id it was parked at: their requests answer 503 until a later run,
+    /// from any process, records them applied.
+    pub(crate) fn set_maintenance(
+        &self,
+        slugs: impl IntoIterator<Item = (String, Option<String>)>,
+    ) {
         let mut set = self
             .maintenance
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         *set = slugs.into_iter().collect();
-    }
-
-    /// Whether `slug` is in maintenance.
-    pub(crate) fn in_maintenance(&self, slug: &str) -> bool {
-        self.maintenance
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains(slug)
     }
 
     /// Tenants in maintenance after a failed migration, for the console banner.
@@ -800,7 +807,7 @@ impl<DB: Database> TenantPools<DB> {
         self.maintenance
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
+            .keys()
             .cloned()
             .collect()
     }
@@ -1037,6 +1044,50 @@ where
     #[must_use]
     pub fn registry_pool(&self) -> crate::sql::Pool {
         crate::sql::Pool::from(self.registry.clone())
+    }
+
+    /// Refuse a request pool for a tenant in maintenance. At most every few
+    /// seconds the registry cache is read for it: a newer applied run frees it.
+    pub(crate) async fn refuse_maintenance(&self, slug: &str) -> Result<(), TenancyError> {
+        let parked = {
+            let set = self
+                .maintenance
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match set.get(slug) {
+                None => return Ok(()),
+                Some(run) => run.clone(),
+            }
+        };
+        let due = {
+            let mut at = self
+                .maintenance_checked
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let due = at.is_none_or(|t| t.elapsed() >= MAINTENANCE_RECHECK);
+            if due {
+                *at = Some(std::time::Instant::now());
+            }
+            due
+        };
+        if due {
+            let row = crate::migrate::v2::ledger::cache_one(&self.registry_pool(), slug)
+                .await
+                .ok()
+                .flatten();
+            if let Some((state, run)) = row {
+                if state == "applied" && run != parked {
+                    self.maintenance
+                        .write()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(slug);
+                    return Ok(());
+                }
+            }
+        }
+        Err(TenancyError::Maintenance {
+            slug: slug.to_owned(),
+        })
     }
 }
 
@@ -1510,6 +1561,8 @@ where
     /// # Errors
     /// As [`Self::database_pool_for_org`].
     pub async fn scoped_pool_dyn(&self, org: &Org) -> Result<crate::sql::Pool, TenancyError> {
+        // Every request path comes here: a tenant behind its code answers 503.
+        self.refuse_maintenance(&org.slug).await?;
         let mode = org.storage_mode;
         match mode {
             StorageMode::Schema => {

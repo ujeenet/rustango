@@ -705,7 +705,30 @@ fn raw_sql_rules() {
             Code::Raw,
         );
         render(&s0, &raw("UPDATE s3_t SET a = 1", json!({})), b).unwrap();
+        // Any SET outlives the unit (or commits it on MySQL).
+        for set in ["SET x = 1", "SET autocommit = 1", "set names utf8mb4"] {
+            expect_err(&s0, &raw(set, json!({})), b, Code::Raw);
+        }
     }
+    render(
+        &s0,
+        &raw("SET LOCAL lock_timeout = 100", json!({})),
+        Backend::Postgres,
+    )
+    .unwrap();
+    expect_err(
+        &s0,
+        &raw("FLUSH TABLES", json!({})),
+        Backend::Mysql,
+        Code::Raw,
+    );
+    // A backslash ends nothing in a PG or SQLite string: a second statement shows.
+    let sneaky = raw("SELECT 'x\\'; SET search_path TO public; --'", json!({}));
+    for b in [Backend::Postgres, Backend::Sqlite] {
+        expect_err(&s0, &sneaky, b, Code::Raw);
+    }
+    // A dollar-quoted body is one string.
+    render(&s0, &raw("SELECT $$a; b$$", json!({})), Backend::Postgres).unwrap();
     // MySQL commits DDL itself: a transactional raw DDL is refused there.
     let ddl = raw("CREATE INDEX s3_t_a_idx ON s3_t (a)", json!({}));
     expect_err(&s0, &ddl, Backend::Mysql, Code::Raw);

@@ -157,12 +157,7 @@ impl<'a> MountedTenantContext<'a> {
 
     async fn lookup(self, org: &Org) -> Result<Pool, TenancyError> {
         each!(self, |c|
-            full => {
-                if c.pools.in_maintenance(&org.slug) {
-                    return Err(TenancyError::Maintenance { slug: org.slug.clone() });
-                }
-                c.pools.scoped_pool_dyn(org).await
-            },
+            full => c.pools.scoped_pool_dyn(org).await,
             db => c.pools.pool_for_org(org).await.map(|p| Pool::from(p.pool().clone())))
     }
 }

@@ -555,7 +555,7 @@ impl Undo<'_, '_> {
             column: key_col.to_owned(),
         })?;
         let mut obj = serde_json::Map::new();
-        for (c, v) in &row.0 {
+        for (c, v) in row.iter() {
             let f = t.field(c)?;
             obj.insert(
                 (*c).to_owned(),
@@ -1152,9 +1152,20 @@ fn coerce(field: &'static FieldSchema, v: SqlValue) -> Result<SqlValue, HistErro
 
 /// One decoded row: `(column, value)` in the table's column order.
 #[derive(Debug, Clone, PartialEq)]
-pub struct HistRow(pub Vec<(&'static str, SqlValue)>);
+pub struct HistRow(Vec<(&'static str, SqlValue)>);
 
 impl HistRow {
+    /// `(column, value)` pairs in the table's column order.
+    pub fn iter(&self) -> impl Iterator<Item = (&'static str, &SqlValue)> + '_ {
+        self.0.iter().map(|(c, v)| (*c, v))
+    }
+
+    /// The `(column, value)` pairs, owned.
+    #[must_use]
+    pub fn into_pairs(self) -> Vec<(&'static str, SqlValue)> {
+        self.0
+    }
+
     #[must_use]
     pub fn get(&self, column: &str) -> Option<&SqlValue> {
         self.0.iter().find(|(c, _)| *c == column).map(|(_, v)| v)

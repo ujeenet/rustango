@@ -735,6 +735,11 @@ impl Cmp<'_> {
         if w != g {
             out.push(mm(&f.name, "on_delete", w, g));
         }
+        // The engine never writes ON UPDATE: anything else is drift.
+        let u = action(self.d, &l.on_update);
+        if u != "NO ACTION" {
+            out.push(mm(&f.name, "on_update", "NO ACTION", u));
+        }
         if self.d == DialectKind::Postgres && !l.validated {
             out.push(mm(&f.name, "FK", "validated", "NOT VALID"));
         }

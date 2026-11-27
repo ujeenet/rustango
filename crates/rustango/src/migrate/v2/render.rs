@@ -171,14 +171,14 @@ fn pg_only(ty: &str) -> bool {
 }
 
 /// Session and transaction statements: refused in a transactional unit.
+/// Any `SET` is (PG's `SET LOCAL` aside): it outlives the unit, or on MySQL
+/// (`SET autocommit`) commits it.
 const SESSION_STMTS: &[&str] = &[
     "BEGIN",
     "COMMIT",
     "ROLLBACK",
     "START TRANSACTION",
-    "SET ROLE",
-    "SET SEARCH_PATH",
-    "SET SESSION",
+    "SET",
     "USE ",
 ];
 
@@ -197,7 +197,19 @@ const MYSQL_DDL: &[&str] = &[
     "ANALYZE TABLE",
     "OPTIMIZE TABLE",
     "REPAIR TABLE",
+    "FLUSH",
+    "INSTALL",
+    "UNINSTALL",
+    "LOAD INDEX",
+    "CACHE INDEX",
+    "RESET",
 ];
+
+/// The `$tag$` opening a PG dollar-quoted string at `i`, if one does.
+fn dollar_tag(b: &[char], i: usize) -> Option<Vec<char>> {
+    let end = (i + 1..b.len()).find(|&j| !(b[j].is_alphanumeric() || b[j] == '_'))?;
+    (b[end] == '$' && !b.get(i + 1).is_some_and(char::is_ascii_digit)).then(|| b[i..=end].to_vec())
+}
 
 /// `sql` without comments, and the number of statements in it (a `;`
 /// outside strings and quoted names ends one). `#` starts a comment on
@@ -234,12 +246,25 @@ pub(super) fn strip_comments(sql: &str, mysql: bool) -> (String, usize) {
                 out.push(' ');
                 continue;
             }
+            '$' if !mysql && dollar_tag(&b, i).is_some() => {
+                // A PG dollar-quoted string runs to the same tag.
+                let tag = dollar_tag(&b, i).expect("checked");
+                let end = (i + tag.len()..b.len())
+                    .find(|&j| b[j..].starts_with(&tag))
+                    .map_or(b.len(), |j| j + tag.len());
+                out.extend(&b[i..end]);
+                i = end;
+                tail = true;
+                continue;
+            }
             '\'' | '"' | '`' => {
+                // A backslash escapes on MySQL, and in PG `E'..'` strings only.
+                let escapes = c == '\'' && (mysql || (i > 0 && matches!(b[i - 1], 'E' | 'e')));
                 out.push(c);
                 i += 1;
                 while i < b.len() {
                     out.push(b[i]);
-                    if b[i] == '\\' && c == '\'' {
+                    if b[i] == '\\' && escapes {
                         if let Some(n) = b.get(i + 1) {
                             out.push(*n);
                         }
@@ -1495,7 +1520,8 @@ impl Render<'_> {
         if starts("PRAGMA") {
             return Err(self.err(Code::Raw, "`PRAGMA` is not allowed in raw_sql"));
         }
-        if !autocommit && SESSION_STMTS.iter().any(|p| starts(p.trim_end())) {
+        let set_local = self.b == Backend::Postgres && starts("SET LOCAL");
+        if !autocommit && !set_local && SESSION_STMTS.iter().any(|p| starts(p.trim_end())) {
             return Err(self.err(
                 Code::Raw,
                 format!("`{s}` is not allowed in a transactional unit"),

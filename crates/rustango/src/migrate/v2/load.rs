@@ -46,6 +46,7 @@ pub(crate) struct Project {
 pub(crate) struct Replayed {
     pub(crate) states: BTreeMap<Target, State>,
     /// Per file index: `(state_before_hash, state_after_hash)`.
+    #[cfg(test)]
     pub(crate) hashes: BTreeMap<usize, (String, String)>,
 }
 
@@ -415,18 +416,28 @@ fn check_name(stem: &str, at: &str) -> Result<(), LoadError> {
 /// # Errors
 /// The first op that does not replay.
 pub(crate) fn replay(project: &Project) -> Result<Replayed, LoadError> {
-    let mut memo = HashMemo::default();
-    let mut hashes = BTreeMap::new();
-    let mut last: BTreeMap<(Target, Option<&str>), String> = BTreeMap::new();
-    let empty = State::default().hash(&mut memo);
-    let states = replay_with(project, |target, i, after| {
-        let chain = (target, project.files[i].file.database.as_deref());
-        let prev = last.get(&chain).cloned().unwrap_or_else(|| empty.clone());
-        let now = after.hash(&mut memo);
-        hashes.insert(i, (prev, now.clone()));
-        last.insert(chain, now);
-    })?;
-    Ok(Replayed { states, hashes })
+    #[cfg(not(test))]
+    let states = replay_with(project, |_, _, _| {})?;
+    #[cfg(test)]
+    let (states, hashes) = {
+        let mut memo = HashMemo::default();
+        let mut hashes = BTreeMap::new();
+        let mut last: BTreeMap<(Target, Option<&str>), String> = BTreeMap::new();
+        let empty = State::default().hash(&mut memo);
+        let states = replay_with(project, |target, i, after| {
+            let chain = (target, project.files[i].file.database.as_deref());
+            let prev = last.get(&chain).cloned().unwrap_or_else(|| empty.clone());
+            let now = after.hash(&mut memo);
+            hashes.insert(i, (prev, now.clone()));
+            last.insert(chain, now);
+        })?;
+        (states, hashes)
+    };
+    Ok(Replayed {
+        states,
+        #[cfg(test)]
+        hashes,
+    })
 }
 
 /// Replay each target in canonical order, registry first; `each` sees the

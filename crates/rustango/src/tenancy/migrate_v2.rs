@@ -230,21 +230,22 @@ where
 /// The tenant's own login at `url` when `m` is another one; `None` when
 /// they are the same login (the documented gap) or the backend has no logins.
 fn other_login(url: &str, m: &MigratorLogin) -> Result<Option<String>, TenancyError> {
-    let _ = m;
-    let tenant = match super::BackendKind::of_url(url) {
+    let tenant: Option<String> = match super::BackendKind::of_url(url) {
         #[cfg(feature = "mysql")]
-        Some(super::BackendKind::MySql) => url
-            .parse::<sqlx::mysql::MySqlConnectOptions>()?
-            .get_username()
-            .to_owned(),
+        Some(super::BackendKind::MySql) => Some(
+            url.parse::<sqlx::mysql::MySqlConnectOptions>()?
+                .get_username()
+                .to_owned(),
+        ),
         #[cfg(feature = "postgres")]
-        Some(super::BackendKind::Postgres) => url
-            .parse::<sqlx::postgres::PgConnectOptions>()?
-            .get_username()
-            .to_owned(),
-        _ => return Ok(None),
+        Some(super::BackendKind::Postgres) => Some(
+            url.parse::<sqlx::postgres::PgConnectOptions>()?
+                .get_username()
+                .to_owned(),
+        ),
+        _ => None,
     };
-    Ok((tenant != m.user).then_some(tenant))
+    Ok(tenant.filter(|t| *t != m.user))
 }
 
 /// A small pool on the tenant database at `url` logged in as `m`. On PG its
@@ -321,6 +322,7 @@ pub(crate) const ENGINE_SCHEMAS: &[&str] = &[crate::migrate::v2::render::EXTENSI
 ///
 /// # Errors
 /// The schema is reserved.
+#[cfg(feature = "postgres")]
 pub(crate) fn refuse_engine_schema(slug: &str, schema: &str) -> Result<(), TenancyError> {
     if ENGINE_SCHEMAS.contains(&schema) {
         return Err(TenancyError::Validation(format!(

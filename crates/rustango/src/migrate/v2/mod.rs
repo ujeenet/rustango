@@ -1,9 +1,6 @@
 //! Migrations engine v2: the file format, loader, checksum, state by replay,
 //! renderer, ledger, runner, `make`, `check` and the `dbmigrate` commands.
 
-// Wired to the runner and CLI in later phase 1 branches.
-#![cfg_attr(not(test), allow(dead_code))]
-
 pub(crate) mod adopt;
 pub(crate) mod catalog;
 pub(crate) mod check;

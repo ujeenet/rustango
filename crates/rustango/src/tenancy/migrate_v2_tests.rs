@@ -556,6 +556,8 @@ async fn the_tenant_login_cannot_write_the_ledger() {
         .await
         .unwrap();
     assert_eq!(rep.failed().count(), 0, "{rep:?}");
+    // Role set-up outside a fleet run (`ensure-tenant-roles`) keeps it locked.
+    pools.ensure_tenant_role("s_t1").await.unwrap();
     let role = pools.tenant_role("s_t1").await.unwrap().expect("roles on");
     let mut db = f.db;
     db.roles.push(role.name.clone());
@@ -853,8 +855,22 @@ async fn boot_runs_the_fleet_and_parks_a_failed_tenant() {
     };
     let resp = app.clone().oneshot(get("ok.localhost")).await.unwrap();
     assert_eq!(resp.status(), axum::http::StatusCode::OK);
-    let resp = app.oneshot(get("bad.localhost")).await.unwrap();
+    let resp = app.clone().oneshot(get("bad.localhost")).await.unwrap();
     assert_eq!(resp.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    // Fixed, and migrated by another process: it serves again, no restart.
+    let bad = Pool::connect(&url("bad.db")).await.unwrap();
+    raw_execute_pool(&bad, "DROP TABLE items", Vec::new())
+        .await
+        .unwrap();
+    bad.close().await;
+    let other = TenantPools::new(registry.clone());
+    let rep = run_fleet(&other, &root, &registry_url, &FleetOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(rep.failed().count(), 0, "{rep:?}");
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let resp = app.oneshot(get("bad.localhost")).await.unwrap();
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
 }
 
 /// The same tenant file, with `phase`.
@@ -1949,6 +1965,40 @@ async fn prune_waits_for_tenants<DB: sqlx::Database>(
     let e = crate::migrate::v2::squash::prune(dir, dir, "0003_squash", &gate).unwrap_err();
     assert!(e.msg.contains(slugs[1]), "{e}");
     run_one(slugs[1], old_dir).await;
+    // An org row this build cannot read counts as behind.
+    let reg = pools.registry_pool();
+    let was: Vec<(String,)> = raw_query_pool(
+        &format!(
+            "SELECT storage_mode FROM rustango_orgs WHERE slug = '{}'",
+            slugs[1]
+        ),
+        Vec::new(),
+        &reg,
+    )
+    .await
+    .unwrap();
+    let set = |v: &str| {
+        format!(
+            "UPDATE rustango_orgs SET storage_mode = '{v}' WHERE slug = '{}'",
+            slugs[1]
+        )
+    };
+    raw_execute_pool(&reg, &set("bogus"), Vec::new())
+        .await
+        .unwrap();
+    let gate = prune_gate(pools, dir, registry_url, "0003_squash")
+        .await
+        .unwrap();
+    let crate::migrate::v2::squash::PruneGate::Fleet { behind } = &gate else {
+        panic!("{gate:?}");
+    };
+    assert!(
+        behind.iter().any(|b| b.ends_with("(unreadable)")),
+        "{gate:?}"
+    );
+    raw_execute_pool(&reg, &set(&was[0].0), Vec::new())
+        .await
+        .unwrap();
     let gate = prune_gate(pools, dir, registry_url, "0003_squash")
         .await
         .unwrap();
@@ -2568,4 +2618,66 @@ async fn a_tenant_schema_named_extensions_is_refused() {
         .expect_err("refused");
     assert!(e.to_string().contains("migration engine owns"), "{e}");
     assert!(crate::tenancy::provision::validate_schema_name("extensions").is_err());
+}
+
+/// `requires: tenants:<id>` cannot hold while a tenant is unreachable: the
+/// registry file waits and the refusal names the tenant.
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn requires_tenants_waits_for_an_unreachable_tenant() {
+    let _g = serial().lock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let url = |n: &str| format!("sqlite:{}?mode=rwc", tmp.path().join(n).display());
+    let registry_url = url("registry.db");
+    let raw = sqlx::SqlitePool::connect(&registry_url).await.unwrap();
+    let registry: Pool = raw.clone().into();
+    let pools = TenantPools::new(raw);
+    let dir = tmp.path().join("migrations");
+    std::fs::create_dir_all(&dir).unwrap();
+    run_fleet(&pools, &dir, &registry_url, &FleetOptions::default())
+        .await
+        .unwrap();
+    for (slug, db) in [
+        ("t1", url("t1.db")),
+        ("t2", "sqlite:/nonexistent/dir/t2.db?mode=ro".to_owned()),
+    ] {
+        let mut org = crate::testkit::org_with(|o| {
+            o.id = crate::sql::Auto::default();
+            o.slug = slug.into();
+            o.display_name = slug.into();
+            o.storage_mode = StorageMode::Database;
+            o.backend_kind = crate::tenancy::BackendKind::Sqlite;
+            o.database_url = Some(db.clone());
+            o.schema_name = None;
+            o.host_pattern = None;
+            o.port = None;
+            o.path_prefix = None;
+        });
+        org.insert(&registry).await.unwrap();
+    }
+    put(
+        &dir,
+        "0001_items",
+        &file("0001_items", &[], "tenant", items()),
+    );
+    let rep = run_fleet(&pools, &dir, &registry_url, &FleetOptions::default())
+        .await
+        .unwrap();
+    assert!(
+        rep.tenants
+            .iter()
+            .any(|t| t.slug == "t2" && t.error_class.as_deref() == Some("unreachable")),
+        "{rep:?}"
+    );
+    let marks = json!([{"op": "create_table", "v": 1, "table": {"name": "reg_marks",
+        "scope": "registry",
+        "fields": [{"column": "id", "ty": "i64", "primary_key": true, "nullable": false}]}}]);
+    let mut reg_file = file("0002_reg", &[], "registry", marks);
+    reg_file["requires"] = json!(["tenants:0001_items"]);
+    put(&dir, "0002_reg", &reg_file);
+    let e = run_fleet(&pools, &dir, &registry_url, &FleetOptions::default())
+        .await
+        .expect_err("t2 was never read");
+    assert!(e.to_string().contains("t2 (unreachable)"), "{e}");
+    registry.close().await;
 }

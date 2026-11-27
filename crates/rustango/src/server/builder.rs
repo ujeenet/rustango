@@ -828,7 +828,17 @@ impl<DB: Database> Builder<DB> {
                 "tenant migration failed at boot: migrations must be run; it serves 503 until then"
             );
         }
-        self.pools.set_maintenance(failed);
+        // Each parked at its cache run id: a later applied run frees it.
+        let runs: std::collections::HashMap<String, Option<String>> =
+            crate::migrate::v2::ledger::cache_runs(&self.pools.registry_pool())
+                .await
+                .map_err(crate::tenancy::TenancyError::Migrate)?
+                .into_iter()
+                .collect();
+        self.pools.set_maintenance(failed.into_iter().map(|slug| {
+            let run = runs.get(&slug).cloned().flatten();
+            (slug, run)
+        }));
         Ok(())
     }
 

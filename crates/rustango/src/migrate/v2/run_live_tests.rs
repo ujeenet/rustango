@@ -1842,7 +1842,10 @@ async fn an_invalid_index_left_by_a_drop_is_dropped_again(b: B) {
         Vec::new(),
     )
     .await;
-    if marked.is_err() {
+    if let Err(e) = marked {
+        let required = std::env::var(crate::testkit::matrix::REQUIRE_LIVE_VAR)
+            .is_ok_and(|r| r.split(',').any(|b| b.trim() == "postgres"));
+        assert!(!required, "the test role cannot mark an index invalid: {e}");
         eprintln!("skipping: the test role cannot mark an index invalid");
         return;
     }
@@ -1886,6 +1889,47 @@ async fn drift_sees_a_constraint_kind(b: B) {
         .insert("rv_author".into(), std::sync::Arc::new(t));
     let diff = super::super::probe::drift(pool, &state).await.unwrap();
     assert!(diff.iter().any(|m| m.what == "constraint"), "{diff:?}");
+}
+
+/// Drift sees a live `ON UPDATE` the engine never writes.
+async fn drift_sees_an_fk_on_update(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let (_root, dir) = author_only();
+    migrate(pool, &dir, &opts()).await.unwrap();
+    raw_execute_pool(
+        pool,
+        "CREATE TABLE ou_book (id BIGINT NOT NULL PRIMARY KEY, author_id BIGINT, \
+         CONSTRAINT ou_book_author_id_fkey FOREIGN KEY (author_id) REFERENCES rv_author (id) \
+         ON UPDATE CASCADE)",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    raw_execute_pool(
+        pool,
+        "CREATE INDEX ou_book_author_id_idx ON ou_book (author_id)",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let book = json!({"op": "create_table", "v": 1, "table": {"name": "ou_book", "scope": "tenant",
+        "fields": [{"column": "id", "ty": "i64", "primary_key": true, "nullable": false},
+                   {"column": "author_id", "ty": "i64", "nullable": true,
+                    "fk": {"name": "ou_book_author_id_fkey", "to": "rv_author", "on": "id"}}]},
+        "indexes": [{"name": "ou_book_author_id_idx", "columns": ["author_id"]}]});
+    put(
+        &dir,
+        "0002_book",
+        &v2("0002_book", &["0001_author"], json!([book])),
+    );
+    let p = super::super::load::load_project(&dir).unwrap();
+    let state = super::super::load::replay(&p).unwrap().states[&Target::Tenant].clone();
+    let diff = super::super::probe::drift(pool, &state).await.unwrap();
+    assert!(
+        diff.iter().any(|m| m.what == "on_update"),
+        "{b:?}: {diff:?}"
+    );
 }
 
 /// A run dropped mid-unit (SIGTERM, task abort, a timeout) frees the
@@ -4380,6 +4424,7 @@ per_backend!(
     custom_ledgers_keep_their_names,
     an_invalid_index_left_by_a_drop_is_dropped_again,
     drift_sees_a_constraint_kind,
+    drift_sees_an_fk_on_update,
     a_dropped_run_frees_the_lock,
     a_rust_step_runs_both_ways,
     rust_step_guards,

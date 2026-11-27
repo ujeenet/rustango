@@ -178,6 +178,7 @@ pub struct DefaultCtx {
 ///
 /// # Errors
 /// Text that does not tokenize.
+#[cfg(test)]
 pub fn norm_expr(dialect: DialectKind, sql: &str) -> Result<String, TokenizeError> {
     norm_with(dialect, sql, DefaultCtx::default())
 }
@@ -499,6 +500,7 @@ pub fn norm_type(dialect: DialectKind, raw: &str) -> String {
 }
 
 /// SQLite's column affinity for a declared type (datatype3 §3.1).
+#[cfg(test)]
 #[must_use]
 pub fn sqlite_affinity(declared: &str) -> &'static str {
     let t = declared.to_ascii_uppercase();

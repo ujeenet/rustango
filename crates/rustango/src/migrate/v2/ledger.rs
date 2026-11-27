@@ -334,6 +334,50 @@ pub(crate) async fn cache_put(
     Ok(())
 }
 
+/// `slug`'s cached `(state, run_id)`; `None` before its first run.
+///
+/// # Errors
+/// Driver failures.
+#[cfg(feature = "tenancy")]
+pub(crate) async fn cache_one(
+    registry: &Pool,
+    slug: &str,
+) -> Result<Option<(String, Option<String>)>, MigrateError> {
+    if !crate::migrate::try_table_exists_here(registry, TENANT_CACHE).await? {
+        return Ok(None);
+    }
+    let d = registry.dialect();
+    let rows: Vec<(String, Option<String>)> = raw_query_pool(
+        &format!(
+            "SELECT state, run_id FROM {} WHERE slug = {}",
+            d.quote_ident(TENANT_CACHE),
+            d.placeholder(1)
+        ),
+        vec![s(slug)],
+        registry,
+    )
+    .await?;
+    Ok(rows.into_iter().next())
+}
+
+/// Every cached tenant's `(slug, run_id)`.
+///
+/// # Errors
+/// Driver failures.
+#[cfg(feature = "tenancy")]
+pub(crate) async fn cache_runs(
+    registry: &Pool,
+) -> Result<Vec<(String, Option<String>)>, MigrateError> {
+    if !crate::migrate::try_table_exists_here(registry, TENANT_CACHE).await? {
+        return Ok(Vec::new());
+    }
+    let sql = format!(
+        "SELECT slug, run_id FROM {}",
+        registry.dialect().quote_ident(TENANT_CACHE)
+    );
+    Ok(raw_query_pool(&sql, Vec::new(), registry).await?)
+}
+
 /// Every cached tenant; none before the first fleet run.
 ///
 /// # Errors
@@ -646,6 +690,7 @@ impl Ledger {
 
     async fn revoke_pg(&self, pool: &Pool, role: &str) -> Result<(), MigrateError> {
         #[cfg(feature = "postgres")]
+        #[allow(irrefutable_let_patterns)] // Postgres-only builds
         if let Pool::Postgres(pg) = pool {
             let mut conn = pg.acquire().await?;
             return Self::pg_lock_down(&[self], &mut conn, None, role).await;
@@ -1554,10 +1599,11 @@ impl Ledger {
         Ok(out)
     }
 
-    /// The kinds of events written for `key`, oldest first (tests and status).
+    /// The kinds of events written for `key`, oldest first.
     ///
     /// # Errors
     /// Driver failures.
+    #[cfg(test)]
     pub(crate) async fn event_kinds(
         &self,
         pool: &Pool,

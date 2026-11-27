@@ -3,13 +3,17 @@
 //! feature-gated columns in apps of their own. An app runs when every table
 //! and column it adopts is in the compiled models.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::BTreeSet;
 use std::path::Path;
 
+#[cfg(test)]
 use serde_json::{json, Value};
 
 use super::format::Op;
 use super::load::Loaded;
+#[cfg(test)]
 use super::state::{Backend, Target};
 use super::LoadError;
 
@@ -17,6 +21,7 @@ use super::LoadError;
 const FILES: &[(&str, &str, &str)] = include!("system/files.rs");
 
 /// Columns a feature adds to a framework table: `(table, column, app)`.
+#[cfg(test)]
 const GATED_COLUMNS: &[(&str, &str, &str)] = &[
     ("rustango_admin_users", "email", "rustango_admin_sso"),
     ("rustango_users", "email", "rustango_sso"),
@@ -25,6 +30,7 @@ const GATED_COLUMNS: &[(&str, &str, &str)] = &[
 /// Indexes the framework made outside its models before they were declared
 /// (design item 24): `(index, app)`. Each ships as an `adopt_column` of its
 /// first column, so it is verified if present and created if not.
+#[cfg(test)]
 const SIDE_INDEXES: &[(&str, &str)] = &[(
     "rustango_content_types_natural_key",
     "rustango_contenttypes_natural_key",
@@ -76,6 +82,7 @@ pub(crate) fn files() -> Result<Vec<Loaded>, LoadError> {
 ///
 /// # Errors
 /// A framework model engine v2 cannot hold.
+#[cfg(test)]
 pub(crate) fn generate() -> Result<Vec<(String, String, String)>, LoadError> {
     let snap = crate::migrate::snapshot::SchemaSnapshot::from_registry();
     let backends = [Backend::Postgres, Backend::Mysql, Backend::Sqlite];
@@ -194,6 +201,7 @@ pub(crate) fn generate() -> Result<Vec<(String, String, String)>, LoadError> {
 }
 
 /// The ops by name, each after the tables its FKs point at in this app.
+#[cfg(test)]
 fn fk_order(mut list: Vec<Value>) -> Vec<Value> {
     let name = |o: &Value| o["table"]["name"].as_str().unwrap_or_default().to_owned();
     list.sort_by_key(name);
