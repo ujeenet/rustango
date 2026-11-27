@@ -5766,3 +5766,91 @@ async fn upgrade_from_0_69_runs_no_ddl(b: B) {
         assert!(again.system.is_empty() && again.applied.is_empty(), "{b:?}");
     }
 }
+
+/// FK checks are on and no table is locked on `conn`.
+#[cfg(feature = "mysql")]
+async fn checks_and_locks_back(conn: &mut sqlx::MySqlConnection) {
+    let checks: i64 = sqlx::query_scalar("SELECT CAST(@@foreign_key_checks AS SIGNED)")
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    assert_eq!(checks, 1, "FK checks left off");
+    // A table outside the lock reads only once the lock is released.
+    sqlx::query("SELECT COUNT(*) FROM rl_x")
+        .execute(&mut *conn)
+        .await
+        .expect("tables left locked");
+}
+
+/// A replaced MySQL FK is swapped with writes to its table held off: an
+/// insert from another session waits instead of slipping an orphan in, and
+/// FK checks and table locks come back, also after a failed swap.
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn a_replaced_mysql_fk_holds_writes_off() {
+    bounded(async {
+        use sqlx::Connection as _;
+        let Some(db) = fresh(B::My).await else { return };
+        let pool = &db.pool;
+        for sql in [
+            "CREATE TABLE rl_p (id BIGINT PRIMARY KEY)",
+            "CREATE TABLE rl_x (id BIGINT PRIMARY KEY)",
+            "CREATE TABLE rl_c (id BIGINT PRIMARY KEY, p_id BIGINT NOT NULL, \
+             CONSTRAINT rl_c_p_id_fkey FOREIGN KEY (p_id) REFERENCES rl_p (id))",
+            "INSERT INTO rl_p VALUES (1)",
+        ] {
+            raw_execute_pool(pool, sql, Vec::new()).await.unwrap();
+        }
+        #[allow(irrefutable_let_patterns)] // One variant in MySQL-only builds.
+        let crate::sql::Pool::Mysql(my) = pool
+        else {
+            unreachable!("a MySQL database")
+        };
+        let mut conn = my.acquire().await.unwrap();
+        let lock = "LOCK TABLES `rl_c` WRITE, `rl_p` READ";
+        let drop = ["ALTER TABLE `rl_c` DROP FOREIGN KEY `rl_c_p_id_fkey`".to_owned()];
+        let add = [
+            "ALTER TABLE `rl_c` ADD CONSTRAINT `rl_c_p_id_fkey` FOREIGN KEY (`p_id`) \
+                    REFERENCES `rl_p` (`id`) ON DELETE CASCADE"
+                .to_owned(),
+        ];
+        let url = db.url.clone();
+        let insert_waits = async move {
+            let mut other = sqlx::MySqlConnection::connect(&url).await.unwrap();
+            sqlx::query("SET SESSION lock_wait_timeout = 1")
+                .execute(&mut other)
+                .await
+                .unwrap();
+            let r = sqlx::query("INSERT INTO rl_c (id, p_id) VALUES (9, 99)")
+                .execute(&mut other)
+                .await;
+            let _ = other.close().await;
+            let e = r.expect_err("an orphan slipped in while the FK was off");
+            assert!(e.to_string().contains("Lock wait timeout"), "{e}");
+        };
+        crate::migrate::runner::replace_fk_locked(&mut conn, lock, &drop, &add, insert_waits)
+            .await
+            .unwrap();
+        checks_and_locks_back(&mut conn).await;
+        let orphan = raw_execute_pool(
+            pool,
+            "INSERT INTO rl_c (id, p_id) VALUES (8, 98)",
+            Vec::new(),
+        )
+        .await;
+        assert!(orphan.is_err(), "the FK is enforced again");
+        // A failed swap still puts checks and locks back.
+        let bad = ["ALTER TABLE `rl_c` ADD CONSTRAINT nope".to_owned()];
+        let e = crate::migrate::runner::replace_fk_locked(
+            &mut conn,
+            lock,
+            &drop,
+            &bad,
+            std::future::ready(()),
+        )
+        .await;
+        assert!(e.is_err());
+        checks_and_locks_back(&mut conn).await;
+    })
+    .await;
+}

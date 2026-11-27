@@ -2951,3 +2951,53 @@ async fn dbmigrate_help_needs_no_registry() {
     .unwrap();
     assert!(out.contains("down [<n> | --to <id>]"), "{out}");
 }
+
+/// `dbmigrate apply --plan` under tenancy writes nothing: a tenant whose
+/// schema does not exist yet is reported, not created; `status` neither.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn a_tenancy_plan_writes_nothing() {
+    let _g = serial().lock().await;
+    let Some(f) = PgFleet::new("plan").await else {
+        return;
+    };
+    // The fleet ran before the org: its schema is not made yet.
+    f.with_orgs(&["t1"]).await;
+    put(
+        &f.dir(),
+        "0001_items",
+        &file("0001_items", &[], "tenant", items()),
+    );
+    let pools = f.pools();
+    let schema_made = || async {
+        count(
+            &f.registry(),
+            "SELECT COUNT(*) FROM pg_namespace WHERE nspname = 's_t1'",
+        )
+        .await
+            > 0
+    };
+    assert!(!schema_made().await);
+    let plan = tenancy_cli(
+        &pools,
+        &f.db.url,
+        &f.dir(),
+        &["dbmigrate", "apply", "--plan"],
+    )
+    .await
+    .unwrap();
+    assert!(
+        plan.contains("-- tenant t1\nschema missing, would create"),
+        "{plan}"
+    );
+    assert!(!schema_made().await, "the plan created the schema");
+    let status = tenancy_cli(&pools, &f.db.url, &f.dir(), &["dbmigrate", "status"])
+        .await
+        .unwrap();
+    assert!(status.contains("tenant t1:\n  schema missing"), "{status}");
+    assert!(!schema_made().await, "status created the schema");
+    tenancy_cli(&pools, &f.db.url, &f.dir(), &["dbmigrate", "apply"])
+        .await
+        .unwrap();
+    assert!(exists_in(&f.registry(), "s_t1", "items").await);
+}

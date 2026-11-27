@@ -4210,8 +4210,6 @@ async fn atomic_mysql(
     let mut steps = render_steps(ops, before, after, &crate::sql::MySql, schema, &empty)?;
     let mut tx = my.begin().await?;
     let mut deferred_fks: Vec<String> = Vec::new();
-    // FKs re-added over a live one: its rows were already checked.
-    let mut replaced_fks: Vec<String> = Vec::new();
     let mut dropped = DroppedFks::default();
     // What has already committed when something fails.
     //
@@ -4253,8 +4251,22 @@ async fn atomic_mysql(
                             partial => partial,
                         },
                     })?;
-                let replaces = matches!(change, super::diff::SchemaChange::AlterFkOnDelete { .. })
-                    && !stmts.is_empty();
+                // An FK whose action changes over a live one: swapped under a lock.
+                let lock = replaced_fk_lock(change, &stmts, after, schema);
+                if let Some(lock) = lock {
+                    if !ddl_sent {
+                        tx.commit().await?;
+                        ddl_sent = true;
+                        tx = my.begin().await.map_err(|e| stuck!(e))?;
+                    }
+                    let adds = &step.batch.deferred_fks;
+                    replace_fk_locked(&mut tx, &lock, &stmts, adds, std::future::ready(()))
+                        .await
+                        .map_err(|e| stuck!(e))?;
+                    ddl_applied += stmts.len() + adds.len();
+                    applied += 1;
+                    continue;
+                }
                 // Counted per *statement*, not per operation:
                 // one operation can render several, and each
                 // auto-commits on its own, so an operation
@@ -4275,11 +4287,7 @@ async fn atomic_mysql(
                         .map_err(|e| stuck!(e))?;
                     ddl_applied += 1;
                 }
-                if replaces {
-                    replaced_fks.extend(step.batch.deferred_fks);
-                } else {
-                    deferred_fks.extend(step.batch.deferred_fks);
-                }
+                deferred_fks.extend(step.batch.deferred_fks);
             }
             Operation::Data(d) => {
                 sqlx::Executor::execute(&mut *tx, sqlx::raw_sql(&d.sql))
@@ -4295,26 +4303,6 @@ async fn atomic_mysql(
             .execute(&mut *tx)
             .await
             .map_err(|e| stuck!(e))?;
-    }
-    // Without the row check MySQL adds an FK in place, not by copying the
-    // table. Checks go back on even after a failure: the connection is pooled.
-    if !replaced_fks.is_empty() {
-        sqlx::query("SET foreign_key_checks = 0")
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| stuck!(e))?;
-        let mut added = Ok(());
-        for stmt in &replaced_fks {
-            added = sqlx::query(stmt).execute(&mut *tx).await.map(drop);
-            if added.is_err() {
-                break;
-            }
-        }
-        let reset = sqlx::query("SET foreign_key_checks = 1")
-            .execute(&mut *tx)
-            .await;
-        added.map_err(|e| stuck!(e))?;
-        reset.map_err(|e| stuck!(e))?;
     }
     while let Some(stmt) = dropped.next() {
         sqlx::query(&stmt)
@@ -4337,6 +4325,68 @@ async fn atomic_mysql(
             .map_err(|e| stuck!(e))?,
     };
     tx.commit().await.map_err(|e| stuck!(e))?;
+    Ok(())
+}
+
+/// `LOCK TABLES` for an `AlterFkOnDelete` that drops a live FK (`drops`):
+/// its table for writing, the FK's target for reading.
+#[cfg(feature = "mysql")]
+fn replaced_fk_lock(
+    change: &super::diff::SchemaChange,
+    drops: &[String],
+    after: &SchemaSnapshot,
+    schema: Option<&str>,
+) -> Option<String> {
+    let super::diff::SchemaChange::AlterFkOnDelete { table, column, .. } = change else {
+        return None;
+    };
+    let to = &after.table(table)?.field(column)?.fk.as_ref()?.to;
+    if drops.is_empty() {
+        return None;
+    }
+    let q = |t: &str| super::diff::target(schema, t).quoted(&crate::sql::MySql);
+    Some(if to == table {
+        format!("LOCK TABLES {} WRITE", q(table))
+    } else {
+        format!("LOCK TABLES {} WRITE, {} READ", q(table), q(to))
+    })
+}
+
+/// Replace a live FK: `drops`, then `adds`, under `lock` so no write reaches
+/// its table in between. FK checks are off meanwhile (the old FK checked the
+/// rows), so MySQL adds it in place, not by copying the table. Checks and
+/// locks go back even on failure: the connection is pooled.
+#[cfg(feature = "mysql")]
+pub(crate) async fn replace_fk_locked(
+    conn: &mut sqlx::MySqlConnection,
+    lock: &str,
+    drops: &[String],
+    adds: &[String],
+    between: impl std::future::Future<Output = ()>,
+) -> Result<(), sqlx::Error> {
+    // LOCK and UNLOCK TABLES do not run as prepared statements.
+    sqlx::Executor::execute(&mut *conn, sqlx::raw_sql(lock)).await?;
+    let ran = async {
+        sqlx::query("SET foreign_key_checks = 0")
+            .execute(&mut *conn)
+            .await?;
+        for s in drops {
+            sqlx::query(s).execute(&mut *conn).await?;
+        }
+        between.await;
+        for s in adds {
+            sqlx::query(s).execute(&mut *conn).await?;
+        }
+        Ok::<(), sqlx::Error>(())
+    }
+    .await;
+    let checks = sqlx::query("SET foreign_key_checks = 1")
+        .execute(&mut *conn)
+        .await;
+    let unlock = sqlx::Executor::execute(&mut *conn, sqlx::raw_sql("UNLOCK TABLES")).await;
+    ran?;
+    checks?;
+    unlock?;
     Ok(())
 }
 

@@ -49,6 +49,8 @@ Migrations engine v2: `manage dbmigrate`, data steps, batched moves with resume,
 - A tenant schema holding only an engine v2 ledger is not taken for a foreign schema.
 - Engine v1 `migrate` adds a system step that re-creates framework FKs (API keys, roles, permissions, media tags) with the `ON DELETE CASCADE` their models declare: releases before 0.61.4 created them without it, and the v2 switch refused those databases. A database that already has it runs no DDL.
 - An engine v2 `apply` refused for a database behind the v1 head writes nothing, so engine v1 can still migrate it.
+- On MySQL an FK whose `ON DELETE` changes is swapped under `LOCK TABLES`, so no write reaches the table while it has no FK.
+- Under tenancy, `dbmigrate apply --plan`, `status`, `check --drift` and `down` never create a missing tenant schema; the plan reports it.
 
 ## [0.70.0] — 2026-11-22
 

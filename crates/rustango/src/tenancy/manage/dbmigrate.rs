@@ -11,7 +11,7 @@ use crate::migrate::v2::run::{self, Options, RunAs};
 use crate::migrate::v2::state::{Backend, Target};
 use crate::migrate::MigrateError;
 use crate::tenancy::error::TenancyError;
-use crate::tenancy::migrate_v2::{self as fleet, FleetOptions, Tenants};
+use crate::tenancy::migrate_v2::{self as fleet, FleetOptions, Reached, Tenants};
 use crate::tenancy::pools::TenantPools;
 
 /// The fleet of one tenancy CLI call.
@@ -296,7 +296,14 @@ where
                     "tenant `{slug}`: {e}; later tenants and the registry were not rolled back"
                 ))
             };
-            let t = t.map_err(|e| stop(&e))?;
+            let t = match t {
+                Reached::Target(t) => t,
+                Reached::MissingSchema => {
+                    writeln!(w, "tenant {slug}: schema missing, nothing to roll back")?;
+                    continue;
+                }
+                Reached::Unreachable(e) => return Err(stop(&e)),
+            };
             let open = t.open().await.map_err(|e| stop(&e))?;
             let r = back
                 .run(&open.pool, dir, &back.opts(fleet::tenant_opts(&t)))
@@ -347,8 +354,9 @@ where
     for (slug, t) in fleet::targets(f.pools, f.registry_url, Tenants::All).await? {
         writeln!(w, "tenant {slug}:")?;
         let lines = match t {
-            Err(e) => Err(e.to_string()),
-            Ok(t) => match t.open().await {
+            Reached::Unreachable(e) => Err(e.to_string()),
+            Reached::MissingSchema => Ok(vec!["schema missing".to_owned()]),
+            Reached::Target(t) => match t.open().await {
                 Err(e) => Err(e.to_string()),
                 Ok(open) => {
                     let opts = fleet::tenant_opts(&t);
@@ -413,8 +421,9 @@ where
     each(w, "registry", reg)?;
     for (slug, t) in fleet::targets(f.pools, f.registry_url, Tenants::All).await? {
         let r = match t {
-            Err(e) => Err(e.to_string()),
-            Ok(t) => match t.open().await {
+            Reached::Unreachable(e) => Err(e.to_string()),
+            Reached::MissingSchema => Ok(vec!["schema missing".to_owned()]),
+            Reached::Target(t) => match t.open().await {
                 Err(e) => Err(e.to_string()),
                 Ok(open) => {
                     let r =

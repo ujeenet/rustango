@@ -1156,6 +1156,23 @@ pub(crate) async fn ensure_tenant_schema(
     Ok(())
 }
 
+/// Whether the tenant's schema exists; reads the catalog only.
+#[cfg(feature = "postgres")]
+pub(crate) async fn tenant_schema_exists(
+    registry_url: &str,
+    schema: &str,
+) -> Result<bool, TenancyError> {
+    let probe = PgPool::connect(registry_url).await?;
+    let found = rustango::sql::sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = $1)",
+    )
+    .bind(schema)
+    .fetch_one(&probe)
+    .await;
+    probe.close().await;
+    Ok(found?)
+}
+
 /// Where a tenant's schema came from, by [`ensure_schema`].
 #[cfg(feature = "postgres")]
 #[derive(Debug, PartialEq, Eq)]
