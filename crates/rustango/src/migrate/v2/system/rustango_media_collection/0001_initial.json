@@ -1,0 +1,76 @@
+{
+  "app": "rustango_media_collection",
+  "engine": 2,
+  "format": 1,
+  "id": "0001_initial",
+  "operations": [
+    {
+      "indexes": [
+        {
+          "columns": [
+            "slug"
+          ],
+          "constraint": true,
+          "name": "rustango_media_collections_slug_key",
+          "unique": true
+        },
+        {
+          "columns": [
+            "parent_id"
+          ],
+          "name": "rustango_media_collections_parent_id_idx"
+        }
+      ],
+      "op": "adopt_table",
+      "table": {
+        "fields": [
+          {
+            "column": "created_at",
+            "nullable": false,
+            "portable_default": "now",
+            "ty": "datetime"
+          },
+          {
+            "column": "deleted_at",
+            "nullable": true,
+            "ty": "datetime"
+          },
+          {
+            "column": "description",
+            "default": "('')",
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "auto": true,
+            "column": "id",
+            "nullable": false,
+            "primary_key": true,
+            "ty": "i64"
+          },
+          {
+            "column": "name",
+            "max_length": 255,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "parent_id",
+            "nullable": true,
+            "ty": "i64"
+          },
+          {
+            "column": "slug",
+            "max_length": 255,
+            "nullable": false,
+            "ty": "string"
+          }
+        ],
+        "name": "rustango_media_collections",
+        "scope": "tenant"
+      },
+      "v": 1
+    }
+  ],
+  "target": "tenant"
+}

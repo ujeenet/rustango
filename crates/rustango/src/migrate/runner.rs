@@ -38,6 +38,89 @@ pub const LEDGER_TABLE: &str = "__rustango_migrations__";
 /// the project's never collide or renumber each other.
 pub const SYSTEM_LEDGER_TABLE: &str = "__rustango_system_migrations__";
 
+/// A ledger table a migrations engine owns, under its default name.
+#[cfg_attr(
+    not(any(feature = "sqlite", all(feature = "tenancy", feature = "postgres"))),
+    allow(dead_code)
+)]
+pub(crate) struct LedgerTable {
+    pub(crate) name: &'static str,
+    /// The datetime column old SQLite defaults wrote in a legacy shape;
+    /// `None` for v2 tables, which bind the canonical shape from day one.
+    #[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
+    pub(crate) legacy_datetime: Option<&'static str>,
+}
+
+/// Every ledger table: v1's two and engine v2's four (derived from
+/// [`LEDGER_TABLE`] by [`v2_ledger`]). The one list every reader uses.
+#[cfg_attr(
+    not(any(feature = "sqlite", all(feature = "tenancy", feature = "postgres"))),
+    allow(dead_code)
+)]
+pub(crate) const LEDGER_TABLES: &[LedgerTable] = &[
+    LedgerTable {
+        name: LEDGER_TABLE,
+        legacy_datetime: Some("applied_at"),
+    },
+    LedgerTable {
+        name: SYSTEM_LEDGER_TABLE,
+        legacy_datetime: Some("applied_at"),
+    },
+    LedgerTable {
+        name: "__rustango_migrations_v2",
+        legacy_datetime: None,
+    },
+    LedgerTable {
+        name: "__rustango_migrations_v2_progress",
+        legacy_datetime: None,
+    },
+    LedgerTable {
+        name: "__rustango_migrations_v2_undo",
+        legacy_datetime: None,
+    },
+    LedgerTable {
+        name: "__rustango_migrations_v2_events",
+        legacy_datetime: None,
+    },
+    LedgerTable {
+        name: "__rustango_system_v2",
+        legacy_datetime: None,
+    },
+    LedgerTable {
+        name: "__rustango_system_v2_progress",
+        legacy_datetime: None,
+    },
+    LedgerTable {
+        name: "__rustango_system_v2_undo",
+        legacy_datetime: None,
+    },
+    LedgerTable {
+        name: "__rustango_system_v2_events",
+        legacy_datetime: None,
+    },
+];
+
+/// The engine v2 ledger that goes with the v1 ledger `ledger`.
+pub(crate) fn v2_ledger(ledger: &str) -> String {
+    format!("{}_v2", ledger.trim_end_matches('_'))
+}
+
+/// Refuse a database switched to engine v2: it holds `ledger`'s v2 ledger.
+/// The system chain has no v2 ledger of its own until it moves to v2, so it
+/// checks the project's.
+async fn refuse_switched_db(pool: &crate::sql::Pool, ledger: &str) -> Result<(), MigrateError> {
+    let base = if ledger == SYSTEM_LEDGER_TABLE {
+        LEDGER_TABLE
+    } else {
+        ledger
+    };
+    let table = v2_ledger(base);
+    if try_table_exists_here(pool, &table).await? {
+        return Err(MigrateError::SwitchedToV2 { table });
+    }
+    Ok(())
+}
+
 /// Per-app migration runner config. Lets two rustango apps live in
 /// the same Postgres database without colliding on the default
 /// `__rustango_migrations__` ledger table — each app picks its own
@@ -524,6 +607,7 @@ pub fn sqlmigrate_one(
     name: &str,
     dialect: &dyn crate::sql::Dialect,
 ) -> Result<MigrationPreview, MigrateError> {
+    super::require_v1_project(dir)?;
     let all = file::list_dir(dir)?;
     let mig = all.iter().find(|m| m.name == name).ok_or_else(|| {
         MigrateError::Validation(format!("migration `{name}` not found in {}", dir.display()))
@@ -980,7 +1064,11 @@ pub async fn ensure_ledger_pool_with_ledger(
 
 /// The ledger `CREATE TABLE IF NOT EXISTS`. Only under the migrate lock:
 /// concurrent PG creators collide on `pg_type` (23505) (#1844).
+///
+/// Every v1 ledger write starts here, so a database switched to engine v2
+/// is refused here.
 async fn create_ledger_locked(pool: &crate::sql::Pool, ledger: &str) -> Result<(), MigrateError> {
+    refuse_switched_db(pool, ledger).await?;
     // Was a three-arm match on the dialect name with a hand-written
     // type + DEFAULT each, whose SQLite arm carried a copy of #1464's
     // canonical `strftime`. `Dialect` answers both halves now, so the
@@ -1217,6 +1305,8 @@ async fn migrate_pool_with_ledger_opts(
     origin: ChainOrigin,
     observer: Option<&dyn MigrationObserver>,
 ) -> Result<Vec<Migration>, MigrateError> {
+    // Before the lock: a refused folder must leave no ledger behind.
+    file::v1_folder(dir)?;
     with_migrate_lock_pool(
         pool,
         ledger,
@@ -1347,6 +1437,10 @@ async fn reconcile_and_apply(
                     std::borrow::Cow::Owned(outside_tables(mig, &existing)),
                     Outcome::RanPartial { skipped: existing },
                 ),
+                ReconcileAction::RunWithoutIndexes(made) => (
+                    std::borrow::Cow::Owned(without_indexes(mig, &made)),
+                    Outcome::Ran,
+                ),
                 _ => (std::borrow::Cow::Borrowed(mig), Outcome::Ran),
             };
             let before = snapshot_before(all, mig)?;
@@ -1398,6 +1492,9 @@ enum ReconcileAction {
     /// Apply only the schema ops on other tables: a squash whose tables
     /// already exist still carries changes to tables it does not create.
     RunOutside(Vec<String>),
+    /// Apply it without creating the listed indexes, which exist already.
+    /// Only the framework's own system chain uses this.
+    RunWithoutIndexes(Vec<String>),
 }
 
 /// Decide whether a pending migration should run or be reconciled.
@@ -1567,6 +1664,12 @@ async fn reconcile(
                 );
                 return Ok(ReconcileAction::RunPartial(existing));
             }
+        }
+        // An index the framework made before its model declared it: MySQL
+        // has no `CREATE INDEX IF NOT EXISTS`, so skip it here instead.
+        let made = made_indexes(pool, mig).await?;
+        if !made.is_empty() {
+            return Ok(ReconcileAction::RunWithoutIndexes(made));
         }
     }
     Ok(ReconcileAction::Run)
@@ -1771,6 +1874,7 @@ pub(crate) async fn preview_pending(
             ReconcileAction::Run => mig,
             ReconcileAction::RunPartial(existing) => without_tables(&mig, &existing),
             ReconcileAction::RunOutside(existing) => outside_tables(&mig, &existing),
+            ReconcileAction::RunWithoutIndexes(made) => without_indexes(&mig, &made),
         };
         out.push(preview_migration(
             &effective,
@@ -1843,6 +1947,47 @@ fn create_table_targets(mig: &Migration) -> Vec<String> {
 /// Everything else (a column add, an alter, a drop, a data backfill, a
 /// callback) disqualifies the migration, so a genuine side effect is never
 /// faked away.
+/// The indexes `mig` creates that the database already has, by name.
+async fn made_indexes(
+    pool: &crate::sql::Pool,
+    mig: &Migration,
+) -> Result<Vec<String>, MigrateError> {
+    use super::diff::SchemaChange as SC;
+    let mut made = Vec::new();
+    let mut schema = None;
+    for op in &mig.forward {
+        if let Operation::Schema(SC::CreateIndex { name, table, .. }) = op {
+            if schema.is_none() {
+                schema = Some(
+                    super::ensure::creation_schema(pool)
+                        .await?
+                        .unwrap_or_default(),
+                );
+            }
+            let s = schema.as_deref().unwrap_or_default();
+            if super::inspectdb::index_exists(pool, s, table, name).await? {
+                made.push(name.clone());
+            }
+        }
+    }
+    Ok(made)
+}
+
+/// `mig` without its `CreateIndex` ops for `made`.
+fn without_indexes(mig: &Migration, made: &[String]) -> Migration {
+    use super::diff::SchemaChange as SC;
+    let forward = mig
+        .forward
+        .iter()
+        .filter(|op| !matches!(op, Operation::Schema(SC::CreateIndex { name, .. }) if made.contains(name)))
+        .cloned()
+        .collect();
+    Migration {
+        forward,
+        ..mig.clone()
+    }
+}
+
 fn create_only_tables(mig: &Migration) -> Option<Vec<String>> {
     use super::diff::SchemaChange as SC;
     let mut tables: Vec<String> = Vec::new();
@@ -2215,6 +2360,7 @@ where
 {
     hold_migrate_lock(
         pool,
+        &LockScope::Session,
         Box::pin(async {
             create_ledger_locked(pool, ledger).await?;
             body.await
@@ -2238,8 +2384,52 @@ where
     F: FnOnce(LockHeld) -> Fut,
     Fut: std::future::Future<Output = Result<R, MigrateError>>,
 {
-    hold_migrate_lock(pool, Box::pin(body(LockHeld(())))).await
+    hold_migrate_lock(pool, &LockScope::Session, Box::pin(body(LockHeld(())))).await
 }
+
+/// The migrate lock for the engine v2 runner: the same key, so v1 and v2
+/// runs exclude each other. It mints no [`LockHeld`]: v2 runs no v1 chain.
+pub(crate) async fn with_migrate_lock_held_v2<F, Fut, R>(
+    pool: &crate::sql::Pool,
+    scope: &LockScope,
+    body: F,
+) -> Result<R, MigrateError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<R, MigrateError>>,
+{
+    hold_migrate_lock(pool, scope, Box::pin(body())).await
+}
+
+/// Which lock a run takes (6.6). Built from the target, never from the
+/// pool's session: one pool serving several schemas still locks each apart.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) enum LockScope {
+    /// The pool's database, and on PG its session schema (as engine v1).
+    #[default]
+    Session,
+    /// A schema-mode tenant: PG keys on the schema, as v1's
+    /// [`lock_key_for_schema`] does for that schema.
+    #[cfg_attr(not(all(feature = "tenancy", feature = "postgres")), allow(dead_code))]
+    Schema(String),
+    /// The fleet run, in the registry: orchestrators exclude each other
+    /// while per-target runs take their own locks inside it.
+    Fleet,
+}
+
+/// The PG advisory key of `scope`, for a scope that names it.
+#[cfg(feature = "postgres")]
+pub(crate) fn lock_key_of(scope: &LockScope) -> Option<i64> {
+    match scope {
+        LockScope::Session => None,
+        LockScope::Schema(s) => Some(lock_key_for_schema(Some(s))),
+        LockScope::Fleet => Some(lock_key_for_schema(Some(FLEET_LOCK))),
+    }
+}
+
+/// The fleet lock's name in the schema key space: no schema is named so.
+#[cfg(feature = "postgres")]
+const FLEET_LOCK: &str = "\u{0}rustango_fleet";
 
 tokio::task_local! {
     /// Set while this task holds the migrate lock.
@@ -2281,13 +2471,29 @@ fn refuse_nested_lock() -> Result<(), MigrateError> {
 /// overflowed a 2 MiB stack in debug builds (#2305).
 async fn hold_migrate_lock<F, R>(
     pool: &crate::sql::Pool,
+    scope: &LockScope,
     body: std::pin::Pin<Box<F>>,
 ) -> Result<R, MigrateError>
 where
     F: std::future::Future<Output = Result<R, MigrateError>>,
 {
+    // The fleet lock wraps per-target runs, which take their own locks.
+    if *scope == LockScope::Fleet {
+        return hold_lock_session(pool, scope, body).await;
+    }
     refuse_nested_lock()?;
-    let body = LOCK_HELD.scope((), body);
+    hold_lock_session(pool, scope, Box::pin(LOCK_HELD.scope((), body))).await
+}
+
+/// Take `scope`'s lock on its own session, run `body`, release.
+async fn hold_lock_session<F, R>(
+    pool: &crate::sql::Pool,
+    scope: &LockScope,
+    body: std::pin::Pin<Box<F>>,
+) -> Result<R, MigrateError>
+where
+    F: std::future::Future<Output = Result<R, MigrateError>>,
+{
     let dialect = pool.dialect();
     let (Some(acquire), Some(release)) = (
         dialect.acquire_session_lock_sql(),
@@ -2300,7 +2506,10 @@ where
         crate::sql::Pool::Postgres(pg) => {
             let opts = pg.connect_options();
             let connect_timeout = pg.options().get_acquire_timeout();
-            let key = pg_migrate_lock_key(pg).await?;
+            let key = match lock_key_of(scope) {
+                Some(key) => key,
+                None => pg_migrate_lock_key(pg).await?,
+            };
             let mut held =
                 LockSession::<sqlx::PgConnection>::wait(&opts, connect_timeout, |conn| {
                     let sql = acquire.clone();
@@ -2320,7 +2529,12 @@ where
         }
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
-            const NAME: &str = "rustango_migrate_";
+            // The database name is bound in by the dialect; one DB, one tenant.
+            let name = if *scope == LockScope::Fleet {
+                "rustango_fleet_"
+            } else {
+                "rustango_migrate_"
+            };
             let opts = my.connect_options();
             let connect_timeout = my.options().get_acquire_timeout();
             let mut held =
@@ -2328,7 +2542,7 @@ where
                     let sql = acquire.clone();
                     Box::pin(async move {
                         let got: Option<i64> = sqlx::query_scalar(&sql)
-                            .bind(NAME)
+                            .bind(name)
                             .fetch_one(&mut *conn)
                             .await?;
                         mysql_lock_taken(got)
@@ -2336,13 +2550,18 @@ where
                 })
                 .await?;
             let result = body.await;
-            let _ = sqlx::query(&release).bind(NAME).execute(held.conn()).await;
+            let _ = sqlx::query(&release).bind(name).execute(held.conn()).await;
             held.close().await;
             result
         }
         #[cfg(feature = "sqlite")]
         crate::sql::Pool::Sqlite(sq) => {
-            let Some(opts) = sqlite_lock_options(sq).await? else {
+            let suffix = if *scope == LockScope::Fleet {
+                "fleet"
+            } else {
+                "migrate"
+            };
+            let Some(opts) = sqlite_lock_options(sq, suffix).await? else {
                 return body.await;
             };
             let connect_timeout = sq.options().get_acquire_timeout();
@@ -2365,7 +2584,7 @@ where
                 })
                 .await;
             // A directory or file that refuses the lock file, as a read-only one does.
-            let mut held = match held {
+            let held = match held {
                 Ok(held) => held,
                 Err(MigrateError::Driver(e)) => {
                     tracing::warn!(
@@ -2376,11 +2595,69 @@ where
                 }
                 Err(e) => return Err(e),
             };
+            let mut guard = SqliteLockGuard {
+                held: Some(held),
+                pool: sq.clone(),
+                release: release.to_string(),
+            };
             let result = body.await;
-            let _ = sqlx::query(&release).execute(held.conn()).await;
-            held.close().await;
+            guard.release().await;
             result
         }
+    }
+}
+
+/// The SQLite migrate lock while its body runs. A body dropped mid-statement
+/// leaves that statement running on the pool's worker thread (SQLite runs
+/// in-process), so the lock waits for the pool to go idle before it goes:
+/// a next run must not start until a late write of the dropped one lands.
+#[cfg(feature = "sqlite")]
+struct SqliteLockGuard {
+    held: Option<LockSession<sqlx::SqliteConnection>>,
+    pool: sqlx::SqlitePool,
+    release: String,
+}
+
+#[cfg(feature = "sqlite")]
+impl SqliteLockGuard {
+    /// How long a dropped run may hold the lock for its last statement: the
+    /// pool's busy timeout, plus the time to return the connection.
+    const DRAIN: std::time::Duration = std::time::Duration::from_secs(10);
+
+    async fn release(&mut self) {
+        if let Some(held) = self.held.take() {
+            Self::unlock(held, &self.release).await;
+        }
+    }
+
+    async fn unlock(mut held: LockSession<sqlx::SqliteConnection>, release: &str) {
+        let _ = sqlx::query(release).execute(held.conn()).await;
+        held.close().await;
+    }
+}
+
+#[cfg(feature = "sqlite")]
+impl Drop for SqliteLockGuard {
+    fn drop(&mut self) {
+        let Some(held) = self.held.take() else {
+            return;
+        };
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let (pool, release) = (self.pool.clone(), std::mem::take(&mut self.release));
+        rt.spawn(async move {
+            // A connection goes back to the pool only after its worker ran
+            // every queued statement, the dropped one included.
+            let until = std::time::Instant::now() + Self::DRAIN;
+            while pool.num_idle() < pool.size() as usize
+                && !pool.is_closed()
+                && std::time::Instant::now() < until
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Self::unlock(held, &release).await;
+        });
     }
 }
 
@@ -2390,6 +2667,7 @@ where
 #[cfg(feature = "sqlite")]
 async fn sqlite_lock_options(
     sq: &sqlx::SqlitePool,
+    suffix: &str,
 ) -> Result<Option<sqlx::sqlite::SqliteConnectOptions>, MigrateError> {
     let file: String =
         sqlx::query_scalar("SELECT file FROM pragma_database_list WHERE name = 'main'")
@@ -2400,7 +2678,7 @@ async fn sqlite_lock_options(
     }
     Ok(Some(
         sqlx::sqlite::SqliteConnectOptions::new()
-            .filename(format!("{file}-migrate.lock"))
+            .filename(format!("{file}-{suffix}.lock"))
             .create_if_missing(true)
             .busy_timeout(std::time::Duration::ZERO),
     ))
@@ -4417,6 +4695,8 @@ pub async fn migrate_to_pool_with_ledger(
     target: &str,
     ledger: &str,
 ) -> Result<Vec<Migration>, MigrateError> {
+    // Before the lock: a refused folder must leave no ledger behind.
+    file::v1_folder(dir)?;
     let moved = with_migrate_lock_held(pool, |held| {
         migrate_to_locked(held, pool, dir, target, ledger)
     })
@@ -4511,6 +4791,8 @@ pub async fn downgrade_pool_with_ledger(
     steps: usize,
     ledger: &str,
 ) -> Result<Vec<Migration>, MigrateError> {
+    // Before the lock: a refused folder must leave no ledger behind.
+    file::v1_folder(dir)?;
     if steps == 0 {
         return Ok(Vec::new());
     }
@@ -4681,6 +4963,8 @@ pub async fn unapply_pool_with_ledger(
     name: &str,
     ledger: &str,
 ) -> Result<Migration, MigrateError> {
+    // Before the lock: a refused folder must leave no ledger behind.
+    file::v1_folder(dir)?;
     with_migrate_lock_pool(pool, ledger, async {
         check_is_head_pool(pool, dir, name, ledger).await?;
         unapply_locked_pool(pool, dir, name, ledger).await
@@ -4708,6 +4992,8 @@ async fn unapply_force_pool_with_ledger(
     name: &str,
     ledger: &str,
 ) -> Result<Migration, MigrateError> {
+    // Before the lock: a refused folder must leave no ledger behind.
+    file::v1_folder(dir)?;
     with_migrate_lock_pool(pool, ledger, unapply_locked_pool(pool, dir, name, ledger)).await
 }
 
@@ -5032,20 +5318,21 @@ async fn migrate_embedded_pool_with_ledger(
     embedded: &[(&str, &str)],
     ledger: &str,
 ) -> Result<Vec<Migration>, MigrateError> {
-    with_migrate_lock_pool(pool, ledger, async {
-        let mut all: Vec<Migration> = Vec::with_capacity(embedded.len());
-        for (name, json) in embedded {
-            let mig = file::parse(json)?;
-            if mig.name != *name {
-                return Err(MigrateError::Validation(format!(
-                    "embedded entry key `{name}` doesn't match migration `name` field `{}`",
-                    mig.name,
-                )));
-            }
-            all.push(mig);
+    // Parsed before the lock: an engine v2 entry creates no ledger.
+    let mut all: Vec<Migration> = Vec::with_capacity(embedded.len());
+    for (name, json) in embedded {
+        let mig = file::parse_from(json, &format!("embedded migration `{name}`"))?;
+        if mig.name != *name {
+            return Err(MigrateError::Validation(format!(
+                "embedded entry key `{name}` doesn't match migration `name` field `{}`",
+                mig.name,
+            )));
         }
-        all.sort_by(|a, b| a.name.cmp(&b.name));
-        file::validate_chain(&all, "embedded slice")?;
+        all.push(mig);
+    }
+    all.sort_by(|a, b| a.name.cmp(&b.name));
+    file::validate_chain(&all, "embedded slice")?;
+    with_migrate_lock_pool(pool, ledger, async {
         apply_chain(pool, all, ledger, false, ChainOrigin::OnDisk, None).await
     })
     .await
@@ -5106,6 +5393,47 @@ async fn unapply_nonatomic_pool(
 
 #[cfg(test)]
 mod tests {
+    /// A schema scope takes the key v1 takes for that schema (6.6): v1 and
+    /// v2 runs on one tenant exclude each other; two schemas never share one.
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn a_schema_scope_takes_v1s_key() {
+        use super::{lock_key_for_schema, lock_key_of, LockScope};
+        let t1 = lock_key_of(&LockScope::Schema("t1".into())).unwrap();
+        assert_eq!(t1, lock_key_for_schema(Some("t1")));
+        assert_ne!(t1, lock_key_of(&LockScope::Schema("t2".into())).unwrap());
+        assert_eq!(
+            lock_key_of(&LockScope::Schema("public".into())),
+            Some(super::MIGRATE_LOCK_KEY)
+        );
+        let fleet = lock_key_of(&LockScope::Fleet).unwrap();
+        assert_ne!(fleet, t1);
+        assert_ne!(fleet, super::MIGRATE_LOCK_KEY);
+        assert_eq!(lock_key_of(&LockScope::Session), None);
+    }
+
+    /// The list names each engine v2 table under the name `v2_ledger` derives.
+    #[test]
+    fn ledger_tables_hold_the_v2_names() {
+        let names: Vec<&str> = super::LEDGER_TABLES.iter().map(|t| t.name).collect();
+        let v2 = super::v2_ledger(super::LEDGER_TABLE);
+        assert_eq!(v2, "__rustango_migrations_v2");
+        let mut want = vec![super::LEDGER_TABLE, super::SYSTEM_LEDGER_TABLE];
+        let system = crate::migrate::v2::ledger::SYSTEM_LEDGER;
+        let derived: Vec<String> = [v2.as_str(), system]
+            .iter()
+            .flat_map(|t| {
+                ["", "_progress", "_undo", "_events"]
+                    .iter()
+                    .map(move |s| format!("{t}{s}"))
+            })
+            .collect();
+        want.extend(derived.iter().map(String::as_str));
+        assert_eq!(names, want);
+        assert!(names.iter().all(|n| n.len() <= 63), "{names:?}");
+        assert_eq!(super::v2_ledger("app_ledger"), "app_ledger_v2");
+    }
+
     /// GET_LOCK's NULL is a server error, not "held elsewhere": polling it would spin forever.
     #[test]
     fn mysql_get_lock_null_is_an_error() {

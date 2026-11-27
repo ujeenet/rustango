@@ -1678,6 +1678,9 @@ pub mod prelude {
 /// ```
 pub use rustango_macros::embed_migrations;
 
+/// Register an engine v2 data step; see [`migrate::v2::StepCtx`].
+pub use rustango_macros::data_step;
+
 /// Compile a static directory into the binary; serve it with
 /// [`static_files::StaticFiles::embedded`].
 #[cfg(feature = "_http_layers")]

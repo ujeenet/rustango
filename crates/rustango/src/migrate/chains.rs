@@ -104,6 +104,37 @@ pub(crate) async fn migrate_chains_to(
     with_signals(run, pool, signals).await
 }
 
+/// One table effect of a migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Fact<'a> {
+    Created(&'a str),
+    Dropped(&'a str),
+    Renamed { from: &'a str, to: &'a str },
+    Written(&'a str),
+}
+
+/// What one project migration does to tables (4.9).
+fn facts(m: &Migration) -> Vec<Fact<'_>> {
+    let mut out = Vec::new();
+    for c in schema_ops(m) {
+        match c {
+            SchemaChange::CreateTable(t) | SchemaChange::CreateM2MTable { through: t, .. } => {
+                out.push(Fact::Created(t));
+            }
+            SchemaChange::DropTable(t) | SchemaChange::DropM2MTable { through: t } => {
+                out.push(Fact::Dropped(t));
+            }
+            SchemaChange::RenameTable { old_name, new_name } => out.push(Fact::Renamed {
+                from: old_name,
+                to: new_name,
+            }),
+            _ => {}
+        }
+        out.push(Fact::Written(c.table()));
+    }
+    out
+}
+
 async fn with_signals(
     run: impl Future<Output = Result<Option<Applied>, MigrateError>>,
     pool: &Pool,
@@ -229,28 +260,27 @@ impl ProjectTables {
         };
         for m in migs {
             let is_pending = !applied.contains(&m.name);
-            for c in schema_ops(m) {
-                match c {
-                    SchemaChange::CreateTable(t)
-                    | SchemaChange::CreateM2MTable { through: t, .. } => {
-                        out.owned.insert(t.clone());
-                        out.claimed.insert(t.clone());
+            for f in facts(m) {
+                match f {
+                    Fact::Created(t) => {
+                        out.owned.insert(t.to_owned());
+                        out.claimed.insert(t.to_owned());
                     }
-                    SchemaChange::DropTable(t) | SchemaChange::DropM2MTable { through: t } => {
+                    Fact::Dropped(t) => {
                         out.owned.remove(t);
                     }
-                    SchemaChange::RenameTable { old_name, new_name } => {
-                        if out.owned.remove(old_name) {
-                            out.owned.insert(new_name.clone());
+                    Fact::Renamed { from, to } => {
+                        if out.owned.remove(from) {
+                            out.owned.insert(to.to_owned());
                         }
                         if is_pending {
-                            out.pending.insert(new_name.clone());
+                            out.pending.insert(to.to_owned());
                         }
                     }
-                    _ => {}
-                }
-                if is_pending {
-                    out.pending.insert(c.table().to_owned());
+                    Fact::Written(t) if is_pending => {
+                        out.pending.insert(t.to_owned());
+                    }
+                    Fact::Written(_) => {}
                 }
             }
         }

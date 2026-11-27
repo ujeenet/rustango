@@ -1968,46 +1968,10 @@ fn write_json(state: &ViewSetState, form: &HashMap<String, String>, json: Option
         model_name(key)
             .and_then(|m| state.vs.schema.field(m))
             .and_then(|f| parse_form_value(f, Some(raw)).ok())
-            .and_then(sql_value_json)
+            .and_then(SqlValue::into_json)
             .unwrap_or_else(|| Value::String(raw.clone()))
     };
     Value::Object(form.iter().map(|(k, v)| (k.clone(), typed(k, v))).collect())
-}
-
-/// A parsed form value in the JSON shape its serializer field reads.
-fn sql_value_json(v: SqlValue) -> Option<Value> {
-    match v {
-        SqlValue::Null => Some(Value::Null),
-        SqlValue::I16(n) => Some(n.into()),
-        SqlValue::I32(n) => Some(n.into()),
-        SqlValue::I64(n) => Some(n.into()),
-        SqlValue::F32(n) => serde_json::to_value(n).ok(),
-        SqlValue::F64(n) => serde_json::to_value(n).ok(),
-        SqlValue::Bool(b) => Some(b.into()),
-        SqlValue::String(s) | SqlValue::RangeLiteral(s) => Some(s.into()),
-        SqlValue::Json(j) => Some(j),
-        SqlValue::DateTime(d) => serde_json::to_value(d).ok(),
-        SqlValue::Date(d) => serde_json::to_value(d).ok(),
-        SqlValue::Time(t) => serde_json::to_value(t).ok(),
-        SqlValue::Uuid(u) => serde_json::to_value(u).ok(),
-        SqlValue::Decimal(d) => serde_json::to_value(d).ok(),
-        SqlValue::Binary(bytes) => serde_json::to_value(bytes).ok(),
-        SqlValue::Vector(v) => serde_json::to_value(v).ok(),
-        SqlValue::HStore(pairs) => Some(Value::Object(
-            pairs
-                .into_iter()
-                .map(|(k, v)| (k, v.map_or(Value::Null, Value::String)))
-                .collect(),
-        )),
-        SqlValue::Array(items) | SqlValue::List(items) => items
-            .into_iter()
-            .map(sql_value_json)
-            .collect::<Option<Vec<_>>>()
-            .map(Value::Array),
-        SqlValue::Geometry { x, y, srid } => {
-            Some(serde_json::json!({"x": x, "y": y, "srid": srid}))
-        }
-    }
 }
 
 /// The fields one write request may set, decided once (#1845).

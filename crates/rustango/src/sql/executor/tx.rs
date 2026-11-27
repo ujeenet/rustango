@@ -291,6 +291,7 @@ impl<'a> PoolTx<'a> {
 /// # Errors
 /// Driver errors from `BEGIN`.
 pub async fn transaction_pool(pool: &Pool) -> Result<PoolTx<'static>, ExecError> {
+    super::refuse_in_migration_step()?;
     let conn = match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => TxConn::Postgres(pg.begin().await?),
@@ -310,6 +311,7 @@ pub async fn transaction_pool(pool: &Pool) -> Result<PoolTx<'static>, ExecError>
 /// # Errors
 /// Driver errors from `BEGIN`.
 pub async fn write_transaction(pool: &Pool) -> Result<PoolTx<'static>, ExecError> {
+    super::refuse_in_migration_step()?;
     match pool {
         // Take the write lock up front: a deferred tx that reads first
         // fails at once on a busy WAL database instead of waiting.

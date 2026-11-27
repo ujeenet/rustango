@@ -1312,11 +1312,19 @@ pub(crate) fn json_to_sql_value(
     v: &serde_json::Value,
     field: &crate::core::FieldSchema,
 ) -> Result<crate::core::SqlValue, String> {
+    json_to_sql_value_of(v, field.ty)
+}
+
+/// [`json_to_sql_value`] for a bare column type.
+pub(crate) fn json_to_sql_value_of(
+    v: &serde_json::Value,
+    ty: crate::core::FieldType,
+) -> Result<crate::core::SqlValue, String> {
     use crate::core::{FieldType, SqlValue};
     if v.is_null() {
         return Ok(SqlValue::Null);
     }
-    match field.ty {
+    match ty {
         FieldType::I16 => v
             .as_i64()
             .and_then(|n| i16::try_from(n).ok())

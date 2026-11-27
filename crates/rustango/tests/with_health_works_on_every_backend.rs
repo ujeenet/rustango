@@ -55,21 +55,27 @@ fn code_only(src: &str) -> String {
         .join("\n")
 }
 
-/// The body of `Cli::runserver`, comments removed.
+/// The body of `Cli::<name>`, comments removed.
 ///
 /// Bounded by the next `async fn` rather than by a `#[cfg]` marker:
 /// anchoring on a `cfg` is what made v3 blind to the path nested inside
-/// one.
-fn runserver_body() -> String {
+/// one. The receiver is not part of the anchor.
+fn fn_body(name: &str) -> String {
     let src = include_str!("../src/manage.rs");
-    let start = src
-        .find("async fn runserver(mut self)")
-        .expect("Cli::runserver exists");
+    let start = ["(", "<"]
+        .iter()
+        .find_map(|open| src.find(&format!("async fn {name}{open}")))
+        .unwrap_or_else(|| panic!("Cli::{name} exists"));
     let rest = &src[start..];
     let end = rest[1..]
         .find("\n    async fn ")
         .map_or(rest.len(), |i| i + 1);
     code_only(&rest[..end])
+}
+
+/// `Cli::runserver` and the boot helper its paths hand over to.
+fn runserver_body() -> String {
+    format!("{}\n{}", fn_body("runserver"), fn_body("serve_after_boot"))
 }
 
 /// Every serving path assembles its router in one place.

@@ -46,6 +46,7 @@ fn rustango_root() -> TokenStream2 {
     }
 }
 
+mod data_step;
 mod text_enum;
 
 /// Derive `rustango::core::TextEnum` on a fieldless enum: stored as text,
@@ -408,6 +409,16 @@ pub fn Q(input: TokenStream) -> TokenStream {
 /// Pulls `tracing-subscriber` into the rustango crate behind the
 /// `runtime` sub-feature (implied by `tenancy`), so apps that opt
 /// out get plain `#[tokio::main]` ergonomics without the dependency.
+/// Register an engine v2 data step: `#[rustango::data_step(app = "accounts",
+/// id = "move_address_v1")] impl MoveAddressV1 { async fn up(ctx, batch) ... }`.
+/// It declares `pub struct MoveAddressV1;` for you.
+#[proc_macro_attribute]
+pub fn data_step(args: TokenStream, item: TokenStream) -> TokenStream {
+    data_step::expand(args.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
 #[proc_macro_attribute]
 pub fn main(args: TokenStream, item: TokenStream) -> TokenStream {
     expand_main(args.into(), item.into())
@@ -724,6 +735,37 @@ fn expand_q(input: TokenStream2) -> syn::Result<TokenStream2> {
     Ok(expanded)
 }
 
+/// An engine v2 file: a non-null top-level `engine` or `format`. Kept in
+/// step with `rustango::migrate::engine` by `engine_marker_cases.json`.
+fn is_engine_v2_file(json: &serde_json::Value) -> bool {
+    ["engine", "format"]
+        .iter()
+        .any(|k| json.get(*k).is_some_and(|v| !v.is_null()))
+}
+
+/// An engine v2 entry: `id` is the file stem and `format` a positive integer.
+fn check_v2_entry(json: &serde_json::Value, stem: &str, path: &std::path::Path) -> syn::Result<()> {
+    let fail = |why: String| {
+        Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!("embed_migrations!: {}: {why}", path.display()),
+        ))
+    };
+    if json
+        .get("format")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+        == 0
+    {
+        return fail("`format` must be a positive integer".to_owned());
+    }
+    match json.get("id").and_then(|v| v.as_str()) {
+        Some(id) if id == stem => Ok(()),
+        Some(id) => fail(format!("`id` is `{id}` but the file stem is `{stem}`")),
+        None => fail("an engine v2 file needs `id`".to_owned()),
+    }
+}
+
 fn expand_embed_migrations(input: TokenStream2) -> syn::Result<TokenStream2> {
     // Default to "./migrations" if invoked without args.
     let path_str = if input.is_empty() {
@@ -780,6 +822,8 @@ fn expand_embed_migrations(input: TokenStream2) -> syn::Result<TokenStream2> {
     let mut chain_names: Vec<String> = Vec::with_capacity(entries.len());
     let mut prev_refs: Vec<(String, Option<String>)> = Vec::with_capacity(entries.len());
     let mut texts: Vec<String> = Vec::with_capacity(entries.len());
+    let mut v2_files: Vec<String> = Vec::new();
+    let mut v2_refs: Vec<(String, Vec<String>)> = Vec::new();
     for (stem, path) in &entries {
         let raw = std::fs::read(path)
             .map_err(|e| e.to_string())
@@ -802,6 +846,23 @@ fn expand_embed_migrations(input: TokenStream2) -> syn::Result<TokenStream2> {
                 ),
             )
         })?;
+        if is_engine_v2_file(&json) {
+            check_v2_entry(&json, stem, path)?;
+            v2_files.push(path.display().to_string());
+            v2_refs.push((
+                stem.clone(),
+                json.get("parents")
+                    .and_then(|p| p.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            ));
+            texts.push(raw);
+            continue;
+        }
         let name = json
             .get("name")
             .and_then(|v| v.as_str())
@@ -828,6 +889,31 @@ fn expand_embed_migrations(input: TokenStream2) -> syn::Result<TokenStream2> {
         chain_names.push(name.clone());
         prev_refs.push((name, prev));
         texts.push(raw);
+    }
+
+    if !v2_files.is_empty() && !chain_names.is_empty() {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!(
+                "embed_migrations!: {} mixes engine v1 and engine v2 migration files; a project \
+                 runs one engine (v2: {})",
+                abs.display(),
+                v2_files.join(", ")
+            ),
+        ));
+    }
+    // Engine v2: every parent is in the folder (the runtime loader checks the rest).
+    let ids: std::collections::HashSet<&str> = v2_refs.iter().map(|(id, _)| id.as_str()).collect();
+    for (id, parents) in &v2_refs {
+        if let Some(p) = parents.iter().find(|p| !ids.contains(p.as_str())) {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!(
+                    "embed_migrations!: `{id}` names parent `{p}`, which is not in {}",
+                    abs.display()
+                ),
+            ));
+        }
     }
 
     let name_set: std::collections::HashSet<&str> =
@@ -14846,6 +14932,79 @@ mod embed_migrations_tests {
     fn existing_dir_does_not_warn() {
         let out = expand("./src");
         assert!(!out.contains("deprecated"), "{out}");
+    }
+
+    /// The cases `rustango::migrate::engine` is tested on too.
+    #[test]
+    fn engine_marker_matches_the_shared_cases() {
+        let cases: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../engine_marker_cases.json")).unwrap();
+        for case in cases {
+            let want = case["v2"].as_bool().unwrap();
+            assert_eq!(is_engine_v2_file(&case["file"]), want, "{}", case["case"]);
+        }
+    }
+
+    /// A temp folder holding `files`, for `expand_err`.
+    fn folder(tag: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("rustango_embed_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, body) in files {
+            std::fs::write(dir.join(name), body).unwrap();
+        }
+        dir
+    }
+
+    const V1: &str =
+        r#"{"name": "0001_initial", "created_at": "", "snapshot": {"tables": []}, "forward": []}"#;
+    const V2: &str = r#"{"engine": 2, "format": 1, "id": "0002_add_bio", "operations": []}"#;
+
+    fn expand_err(dir: &std::path::Path) -> String {
+        let path = dir.display().to_string();
+        let err = expand_embed_migrations(quote! { #path })
+            .expect_err("must not compile")
+            .to_string();
+        let _ = std::fs::remove_dir_all(dir);
+        err
+    }
+
+    #[test]
+    fn embed_migrations_embeds_a_v2_folder() {
+        let parent =
+            r#"{"engine": 2, "format": 1, "id": "0001_initial", "parents": [], "operations": []}"#;
+        let child = r#"{"engine": 2, "format": 1, "id": "0002_add_bio", "parents": ["0001_initial"], "operations": []}"#;
+        let dir = folder(
+            "v2",
+            &[("0001_initial.json", parent), ("0002_add_bio.json", child)],
+        );
+        let out = expand(&dir.display().to_string());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            out.contains("\"0001_initial\"") && out.contains("\"0002_add_bio\""),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn embed_migrations_checks_v2_id_and_parents() {
+        let dir = folder("v2id", &[("0003_other.json", V2)]);
+        let err = expand_err(&dir);
+        assert!(err.contains("`id` is `0002_add_bio`"), "{err}");
+        let orphan = r#"{"engine": 2, "format": 1, "id": "0002_add_bio", "parents": ["0001_gone"], "operations": []}"#;
+        let dir = folder("v2parent", &[("0002_add_bio.json", orphan)]);
+        let err = expand_err(&dir);
+        assert!(err.contains("parent `0001_gone`"), "{err}");
+    }
+
+    #[test]
+    fn embed_migrations_refuses_mixed_dir() {
+        let dir = folder(
+            "mixed",
+            &[("0001_initial.json", V1), ("0002_add_bio.json", V2)],
+        );
+        let err = expand_err(&dir);
+        assert!(err.contains("mixes engine v1 and engine v2"), "{err}");
     }
 }
 

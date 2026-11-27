@@ -49,6 +49,7 @@ impl Pool {
     /// # Errors
     /// The driver's acquire error, e.g. a pool timeout.
     pub async fn acquire(&self) -> Result<PoolConn, ExecError> {
+        super::refuse_in_migration_step()?;
         let conn = match self {
             #[cfg(feature = "postgres")]
             Pool::Postgres(p) => PooledConn::Postgres(p.acquire().await?),
@@ -94,6 +95,27 @@ impl PoolConn {
             PooledConn::Mysql(c) => c.close_on_drop(),
             #[cfg(feature = "sqlite")]
             PooledConn::Sqlite(c) => c.close_on_drop(),
+        }
+    }
+
+    /// [`Self::begin`] that takes SQLite's write lock at `BEGIN`
+    /// (`BEGIN IMMEDIATE`), so a write never fails part way on `SQLITE_BUSY`.
+    ///
+    /// # Errors
+    /// Driver errors from `BEGIN`.
+    pub(crate) async fn begin_write(&mut self) -> Result<PoolTx<'_>, ExecError> {
+        let pool = self.pool.clone();
+        match &mut self.conn {
+            #[cfg(feature = "sqlite")]
+            PooledConn::Sqlite(c) => {
+                use sqlx::Connection as _;
+                let tx = (**c).begin_with("BEGIN IMMEDIATE").await?;
+                Ok(PoolTx::new(super::TxConn::Sqlite(tx), pool))
+            }
+            #[cfg(feature = "postgres")]
+            PooledConn::Postgres(c) => PoolTx::begin_on(&mut **c, &pool).await,
+            #[cfg(feature = "mysql")]
+            PooledConn::Mysql(c) => PoolTx::begin_on(&mut **c, &pool).await,
         }
     }
 
@@ -481,7 +503,8 @@ macro_rules! fetch_rows_or_count {
 /// statement joins a block through here, so all get the same savepoint,
 /// gate and one-statement-at-a-time rules ([`atomic::Joined`]).
 macro_rules! on_pool {
-    ($pool:expr, $stmt:expr, |$tx:ident| $joined:expr, $alone:expr $(,)?) => {
+    ($pool:expr, $stmt:expr, |$tx:ident| $joined:expr, $alone:expr $(,)?) => {{
+        $crate::sql::executor::refuse_in_migration_step()?;
         match $crate::sql::executor::atomic::join($pool, $stmt).await {
             Some(joined) => {
                 let mut joined = joined?;
@@ -493,7 +516,7 @@ macro_rules! on_pool {
             }
             None => $alone,
         }
-    };
+    }};
 }
 pub(super) use on_pool;
 

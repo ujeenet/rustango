@@ -148,6 +148,30 @@ untouched.
 
 ---
 
+## Unreleased
+
+- Every migrate verb, `Builder::migrate`, boot and the tenancy runners refuse a project with an engine v2 migration file (top-level `engine` or `format` key) with `MigrateError::EngineV2`, or `MigrateError::MixedEngine` when v1 and v2 files sit together; `file::list_dir`, `file::load` and `file::parse` refuse the file itself. `embed_migrations!` fails to compile on a mixed folder. The `system` folder does not decide the engine; an engine v2 file there is refused with `MigrateError::SystemChainV2`.
+- A v1 migrate on a database holding the engine v2 ledger (`__rustango_migrations_v2`, or `<ledger>_v2`) is refused with `MigrateError::SwitchedToV2`; `runserver` and `Builder::migrate` log a warning and serve without migrating.
+- `migrate_embedded_pool` parses every entry before it takes the lock, so a bad entry no longer creates the ledger.
+- Inside an engine v2 migration data step, `&Pool` queries fail with the new `ExecError::InMigrationStep`, `databases::get`/`default` return `None` and `databases::pool` panics: a step writes only through its own unit.
+- `Settings` gains a `migrate` field (`[migrate]`, `MigrateSettings`): a struct literal of `Settings` must add it, or use `..Default::default()`. `boot_stale_after_secs` (default 120) is how old the lock holder's heartbeat may get before a booting replica gives up.
+- Engine v2 `down --to <id>` now rolls back only the target's descendants (over `parents` and `depends_on`), not every row applied after it; descendants in other apps need `--cascade`. A failed or partial migration is rolled back instead of refused.
+- Engine v2 DDL units run with the lock timeout (5 s by default): a PG `CONCURRENTLY` build or a MySQL `ALTER` that waits longer on a lock fails, and the next run resumes it.
+- A tenancy project on engine v2 migrates at boot (registry, then every tenant). A separate migrator login needs `CREATE` on the database, `CREATE` on schema `public` (PG 15+) and `CREATEROLE` while schema tenant roles are on; the database owner also runs `REVOKE TEMPORARY ON DATABASE <db> FROM PUBLIC`.
+- `TenancyError::Maintenance` and `TenantRejection::Maintenance` are new: a tenant whose engine v2 migration failed answers 503 until a run applies it.
+- Engine v2 resume ends the DDL session a killed run left behind. A migrate role ends its own sessions without extra rights; to end another role's session, PG needs `GRANT pg_signal_backend, pg_read_all_stats TO <migrate role>` and MySQL needs `GRANT CONNECTION_ADMIN, PROCESS ON *.* TO <migrate user>`. Without it, resume stops with an error naming the grant and leaves the ledger as it was.
+- `runserver` on an engine v2 project binds before it migrates: `/health` answers 200, `/ready` and every route 503 until the run ends. A SIGTERM during the run stops after the current unit and exits non-zero; the next start resumes.
+- `MigrateSettings` gains `fleet_parallel`, `fleet_canaries`, `fleet_max_failures` and `fleet_active_only`; it is `#[non_exhaustive]`, so build it with `..Default::default()`.
+- An engine v2 tenancy fleet now migrates inactive tenants too; pass `--active-only` (or `fleet_active_only = true`) for the old set.
+- Under engine v2 tenancy on Postgres, the first fleet run moves relocatable extensions from `public` to a new `extensions` schema and sets the database `search_path` to `"$user", public, extensions`. It needs the extension owner or a superuser; without it the run stops and names the statement to run. Registry sessions opened before the move keep the old path until they reconnect.
+- A registry file's `create_extension` installs into `extensions`; a `schema` other than `extensions` is refused under tenancy.
+- Engine v2 database-mode tenants can be migrated as a separate login: set `RUSTANGO_TENANT_MIGRATOR=user:password`. The tenant's own login then loses its table-level grants on the ledger tables (SELECT on the ledger stays). On MySQL a tenant login with database-level writes refuses the fleet run: grant it table-level privileges instead. The migrator needs `SELECT` on the `mysql` schema and `GRANT OPTION`. Without a separate login, the tenant login can still write the ledger on MySQL.
+- Engine v2 `make` now writes contract ops in a second file with `phase: contract`; under tenancy those wait until every tenant reached its expand head. Pass `--no-split` for the old single file.
+- Loading an engine v2 project now refuses a merge file whose branches do not commute (`MV2-E033`); rebase one branch instead.
+- On SQLite, a migrate run that is dropped mid-statement now keeps the migrate lock until that statement ends (up to 10 s): SQLite runs it in-process, and the next run must not race its late write.
+- An engine v2 project file that creates, alters, drops or renames a `rustango_*` table is refused at load (`MV2-E034`): the framework's system chain owns them. Declare one with `extern_table` to point an FK at it.
+- `ContentType` now declares its `(app_label, model_name)` unique index, so on engine v1 the next `migrate` writes a system step that adds it (an index already there is kept), and `ContentType::upsert` targets that pair instead of the primary key.
+
 ## 0.70.0
 
 - A write body or form value holding a NUL byte now answers 400 on every backend (admin, ViewSet, `CreateView`, `UpdateView`, `FormView`, `ListView` bulk actions, operator console forms, media JSON bodies, string keys in the URL); MySQL and SQLite used to store it. A JSON, array or hstore value with a `\u0000` escape is refused as a field error. The filter 400 message now reads "a value must not contain a NUL byte".

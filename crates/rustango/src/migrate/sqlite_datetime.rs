@@ -86,13 +86,25 @@ impl Normalised {
 /// [`Normalised::missing`], because both are normal part-way through a
 /// migration run.
 pub async fn normalise_sqlite_datetimes(pool: &Pool) -> Result<Normalised, MigrateError> {
+    normalise_sqlite_datetimes_in(pool, targets()).await
+}
+
+/// [`normalise_sqlite_datetimes`] over the given `(table, column)` pairs:
+/// engine v2 reads them from its replayed state.
+///
+/// # Errors
+/// As [`normalise_sqlite_datetimes`].
+pub(crate) async fn normalise_sqlite_datetimes_in(
+    pool: &Pool,
+    targets: Vec<(String, String)>,
+) -> Result<Normalised, MigrateError> {
     let mut out = Normalised::default();
     if pool.dialect().kind() != crate::sql::DialectKind::Sqlite {
         return Ok(out);
     }
 
     let d = pool.dialect();
-    for (table, column) in targets() {
+    for (table, column) in targets {
         // Identifiers cannot be bound as placeholders, so quote them.
         // `quote_ident` doubles any embedded quote; `ModelSchema` has
         // public fields, so the name is not guaranteed safe on its own.
@@ -160,17 +172,15 @@ fn targets() -> Vec<(String, String)> {
         .map(|(t, c)| ((*t).to_owned(), (*c).to_owned()))
         .collect();
 
-    // The two migration ledgers, taken from the constants that own
-    // their names so a typo cannot silently skip them.
+    // The migration ledgers, from the one list that owns their names.
     //
     // `ensure_ledger_pool_with_ledger` lets an operator rename a
     // ledger, so only the defaults are covered. A renamed ledger is
     // the operator's to normalise: its `applied_at` is display-only.
-    for t in [
-        super::runner::LEDGER_TABLE,
-        super::runner::SYSTEM_LEDGER_TABLE,
-    ] {
-        seen.push((t.to_owned(), "applied_at".to_owned()));
+    for t in super::runner::LEDGER_TABLES {
+        if let Some(column) = t.legacy_datetime {
+            seen.push((t.name.to_owned(), column.to_owned()));
+        }
     }
 
     for entry in inventory::iter::<ModelEntry> {

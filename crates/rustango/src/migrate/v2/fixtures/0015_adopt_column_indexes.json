@@ -1,0 +1,14 @@
+{
+  "engine": 2, "format": 1,
+  "id": "0015_adopt_column_indexes", "app": "accounts",
+  "parents": ["0014_adopt_column"],
+  "target": "tenant",
+  "description": "Takes over an index made outside the models",
+  "operations": [
+    { "op": "adopt_column", "v": 1, "table": "user",
+      "column": { "column": "email", "ty": "string", "max_length": 254, "nullable": true },
+      "indexes": [
+        { "name": "user_email_locale_uq", "columns": ["email", "locale"], "unique": true, "method": "btree" },
+        { "name": "user_email_idx", "columns": ["email"] } ] }
+  ]
+}

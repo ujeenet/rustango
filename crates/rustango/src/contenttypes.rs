@@ -46,12 +46,18 @@ use crate::Model;
 /// One row per registered model, so audit log front-ends, generic
 /// FKs and permissions can all name a model the same way.
 ///
-/// `(app_label, model_name)` is a natural key — the migration
-/// emits a `UNIQUE` constraint on the pair so duplicate inserts
-/// from a racy bootstrap fail loudly instead of silently creating
-/// two rows.
+/// `(app_label, model_name)` is a natural key with a `UNIQUE` index,
+/// so duplicate inserts from a racy bootstrap fail loudly instead of
+/// silently creating two rows.
 #[derive(Debug, Clone, Model)]
-#[rustango(table = "rustango_content_types", access = "open")]
+#[rustango(
+    table = "rustango_content_types",
+    access = "open",
+    unique_together(
+        columns = "app_label, model_name",
+        name = "rustango_content_types_natural_key"
+    )
+)]
 pub struct ContentType {
     /// Auto-assigned primary key. Used as the foreign key everywhere
     /// the framework needs to point at "any model" (permissions,

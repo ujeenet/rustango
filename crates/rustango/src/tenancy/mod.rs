@@ -92,6 +92,8 @@ pub mod middleware;
 pub mod migrate;
 /// Tenant migrations against a recorded, streamable run.
 pub mod migrate_run;
+/// Engine v2 under tenancy: the registry chain, then every tenant's.
+pub(crate) mod migrate_v2;
 /// Purges and password rotations, reported step by step and recorded.
 pub mod operation;
 pub mod operator_console;

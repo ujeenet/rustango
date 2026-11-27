@@ -13,6 +13,7 @@ pub mod callbacks;
 pub(crate) mod chains;
 pub mod ddl;
 pub mod diff;
+mod engine;
 pub(crate) mod ensure;
 mod error;
 pub mod file;
@@ -36,11 +37,35 @@ pub mod snapshot;
 /// compares correctly against a Rust-bound timestamp.
 #[cfg(feature = "sqlite")]
 pub mod sqlite_datetime;
+/// Engine v2: file format, loader, checksum and state by replay.
+/// Migrations engine v2: data steps (`#[data_step]`) and their context.
+pub mod v2;
+
+/// Apply `embed_migrations!` entries of an engine v2 folder; returns the
+/// `<app>:<id>` of each migration applied. Engine v1 folders use
+/// [`migrate_embedded_pool`].
+///
+/// # Errors
+/// An engine v1 entry, every v2 load error, a refusal, a failed unit, or
+/// a lost lock.
+pub async fn migrate_embedded_v2(
+    pool: &crate::sql::Pool,
+    embedded: &[(&str, &str)],
+) -> Result<Vec<String>, MigrateError> {
+    v2::run::migrate_embedded(pool, embedded, &v2::run::Options::default())
+        .await
+        .map(|r| r.applied)
+        .map_err(MigrateError::from)
+}
 
 pub use diff::{
     detect_changes, detect_unsupported_field_changes, render_changes,
     render_changes_split_with_dialect, RenderedBatch, SchemaChange,
 };
+#[cfg(any(feature = "manage", feature = "tenancy"))]
+pub(crate) use engine::boot_skips_switched_db;
+pub(crate) use engine::require_v1_project;
+pub use engine::ProjectEngine;
 #[cfg(all(feature = "admin", feature = "totp"))]
 pub(crate) use ensure::add_columns_idempotent;
 pub(crate) use ensure::apply_idempotent;
@@ -74,9 +99,12 @@ pub(crate) use runner::try_table_exists_here;
 #[cfg(all(feature = "tenancy", feature = "media", feature = "postgres"))]
 pub(crate) use runner::try_table_exists_in_schema;
 pub use runner::unapply_pool_with_ledger;
+#[cfg(all(feature = "tenancy", feature = "postgres"))]
+pub(crate) use runner::LEDGER_TABLES;
 #[cfg(feature = "tenancy")]
 pub(crate) use runner::{applied_or_empty, SYSTEM_LEDGER_TABLE};
 pub use runner::{ensure_ledger_pool_with_ledger, render_changes_between};
+pub(crate) use runner::{v2_ledger, with_migrate_lock_held_v2, LockScope};
 pub(crate) use runner::{LockHeld, Signals};
 // Always on: entry points that work on PG, MySQL and SQLite through the
 // `Pool` enum, plus the inventory and builder surface.

@@ -1,0 +1,39 @@
+{
+  "app": "rustango_tenancy_used_jti_registry",
+  "engine": 2,
+  "format": 1,
+  "id": "0001_initial",
+  "operations": [
+    {
+      "indexes": [
+        {
+          "columns": [
+            "exp"
+          ],
+          "name": "rustango_used_jti_exp_idx"
+        }
+      ],
+      "op": "adopt_table",
+      "table": {
+        "fields": [
+          {
+            "column": "exp",
+            "nullable": false,
+            "ty": "i64"
+          },
+          {
+            "column": "jti",
+            "max_length": 128,
+            "nullable": false,
+            "primary_key": true,
+            "ty": "string"
+          }
+        ],
+        "name": "rustango_used_jti",
+        "scope": "registry"
+      },
+      "v": 1
+    }
+  ],
+  "target": "registry"
+}

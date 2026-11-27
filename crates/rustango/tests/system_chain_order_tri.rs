@@ -541,6 +541,26 @@ async fn later_index_on_owned(backend: Backend) {
     manage_migrate(&pool, &dir).await.expect("second run");
 }
 
+/// A v1 database whose chain predates the declared content-type natural
+/// key, which `ensure_table` already made, takes the catch-up step.
+async fn declared_index_already_made(backend: Backend) {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((pool, _, _db)) = fresh(backend, tmp.path(), "natkey").await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let root = tmp.path().join("app");
+    let dir = root.join("migrations");
+    let index = "rustango_content_types_natural_key";
+    system_chain(&root);
+    manage_migrate(&pool, &dir).await.expect("first run");
+    assert!(has_index(&pool, index).await);
+    let ops = age_tenant_chain(&root, &[], Some(index));
+    assert!(ops.contains(index), "{ops}");
+    manage_migrate(&pool, &dir).await.expect("catch-up run");
+    assert!(has_index(&pool, index).await);
+}
+
 /// Run `sql` on a new pool: a pooled SQLite connection keeps a stale schema
 /// after another connection's DDL, and then refuses `CREATE INDEX`.
 async fn ddl(url: &str, sql: &str) -> bool {
@@ -2045,6 +2065,7 @@ per_backend!(
     owned_table_dropped_later,
     not_null_column_on_empty_table,
     later_index_on_owned,
+    declared_index_already_made,
     clashing_index_is_reported,
     dropped_index_is_restored,
     fk_only_step_adds_only_targets,
