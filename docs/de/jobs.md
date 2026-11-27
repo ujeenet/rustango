@@ -33,6 +33,7 @@ vollständig in Rust.
 - [Schritt 2 — Eine Queue starten](#schritt-2--eine-queue-starten)
 - [Schritt 3 — Aus einem Handler dispatchen](#schritt-3--aus-einem-handler-dispatchen)
 - [Schritt 4 — In deine App verdrahten](#schritt-4--in-deine-app-verdrahten) — das vollständige Beispiel
+- [Verzögerte, abbrechbare und eindeutige Jobs](#verzögerte-abbrechbare-und-eindeutige-jobs)
 - [Die Worker laufen lassen (CLI + Produktion)](#die-worker-laufen-lassen-cli--produktion)
 - [Retries und Backoff](#retries-und-backoff)
 - [Der Job-Kontext: ID, Versuch, Stopp](#der-job-kontext-id-versuch-stopp)
@@ -161,6 +162,51 @@ for to in ["a@example.com", "b@example.com", "c@example.com"] {
 }
 // → all three WelcomeEmail::run() calls execute on the worker pool
 ```
+
+---
+
+## Verzögerte, abbrechbare und eindeutige Jobs
+
+`dispatch_at` stellt einen Job zur späteren Ausführung in die Queue und gibt
+seine `JobId` zurück. Speichere die ID (`id.to_string()`); `cancel` entfernt den
+Job, bis ein Worker ihn startet:
+
+```rust
+use rustango::jobs::{Dispatch, JobId, JobQueue, UniqueKey};
+
+let when = chrono::Utc::now() + chrono::Duration::days(7);
+let id = queue.dispatch_at(&DeleteAccount { user_id: 42 }, when).await?;
+account.deletion_job = Some(id.to_string());
+
+// Later, maybe from another process:
+let id: JobId = stored.parse()?;
+let dropped = queue.cancel(&id).await?;   // false once the job runs or ran
+```
+
+`enqueue` nimmt alle Optionen entgegen. Ein `UniqueKey` hält pro Job-Typ und
+Key einen Job in der Queue oder in Ausführung; ein zweiter Dispatch gibt
+`Enqueued::Duplicate` mit der ID des ersten Jobs zurück und stellt nichts in
+die Queue:
+
+```rust
+let key = UniqueKey::new(format!("delete-account:{}", user.id))?;
+let queued = queue
+    .enqueue(&DeleteAccount { user_id: user.id }, Dispatch::at(when).unique(key))
+    .await?;
+let id = queued.id();   // the new job, or the one already queued
+```
+
+- `cancel` entfernt auch einen Job, der auf einen Retry wartet. Einen laufenden
+  Job stoppt es nie.
+- Ein Key hat 1 bis 200 Zeichen, ohne führende oder nachfolgende Leerzeichen,
+  und wird auf jedem Backend exakt verglichen (Groß-/Kleinschreibung zählt).
+  Er ist wieder frei, sobald sein Job fertig ist, im Dead-Letter landet oder
+  abgebrochen wird.
+- Auf der Datenbank-Queue braucht ein Key die Spalte `unique_key`, die
+  `ensure_table_pool` hinzufügt; bis dahin wird ein eindeutiger Dispatch
+  abgelehnt.
+- In einem `atomic`-Block halten beide Queues den Key ab dem `enqueue`: Ein
+  zweiter im Block gibt `Duplicate` zurück, und ein Rollback gibt ihn frei.
 
 ---
 

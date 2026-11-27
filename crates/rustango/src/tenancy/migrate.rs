@@ -196,11 +196,6 @@ pub struct TenantMigrationOutcome {
     pub error: Option<TenancyError>,
 }
 
-/// Ledger table tracking the framework's own ("system app") migrations,
-/// kept separate from the project's `__rustango_migrations__` so the two
-/// chains never collide.
-pub(crate) const SYSTEM_LEDGER: &str = "__rustango_system_migrations__";
-
 /// Apply `chain`'s `scope` steps and the project chain via `project` to
 /// `pool`, in [`crate::migrate::chains::migrate_chains`]'s order.
 ///
@@ -276,6 +271,8 @@ impl ScopedProject {
     /// `dir`'s project: its `migrations/` and `<app>/migrations/` folders,
     /// each cut down to `scope`.
     pub(crate) async fn of(dir: &Path, scope: MigrationScope) -> Result<Self, TenancyError> {
+        // Every tenancy runner and provisioning path starts here.
+        crate::migrate::require_v1_project(dir)?;
         let mut dirs = Vec::new();
         let mut copies = Vec::new();
         let sources = crate::migrate::file::project_migration_dirs(dir);
@@ -668,6 +665,14 @@ pub async fn migrate_one_tenant<DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
+    // Engine v2: the fleet's own per-tenant run. It reports no v1 migrations.
+    if matches!(
+        crate::migrate::ProjectEngine::of_project(dir)?,
+        crate::migrate::ProjectEngine::V2 { .. }
+    ) {
+        super::migrate_v2::migrate_tenant(pools, org, dir, registry_url).await?;
+        return Ok(Vec::new());
+    }
     let project = ScopedProject::of(dir, MigrationScope::Tenant).await?;
     let chain = project.system_chain(crate::core::ModelScope::Tenant)?;
 
@@ -1120,8 +1125,25 @@ async fn build_schema_scoped_pool(
     schema: &str,
     acquire_timeout: std::time::Duration,
 ) -> Result<PgPool, TenancyError> {
-    // Ensure the schema exists. Use a one-shot connection so we don't
-    // pollute the migration pool's connections.
+    ensure_tenant_schema(registry_url, schema, acquire_timeout).await?;
+    super::pools::connect_schema_scoped(
+        registry_url,
+        schema,
+        2,
+        super::pools::FallThrough::CheckAfterMigrate,
+        acquire_timeout,
+    )
+    .await
+}
+
+/// Create the tenant's schema if missing; refuse one that holds tables but
+/// no rustango ledger. A one-shot connection, so no pool's session is touched.
+#[cfg(feature = "postgres")]
+pub(crate) async fn ensure_tenant_schema(
+    registry_url: &str,
+    schema: &str,
+    acquire_timeout: std::time::Duration,
+) -> Result<(), TenancyError> {
     let bootstrap = PgPool::connect(registry_url).await?;
     let origin = ensure_schema(&bootstrap, schema, acquire_timeout).await;
     bootstrap.close().await;
@@ -1131,15 +1153,7 @@ async fn build_schema_scoped_pool(
              may own it; move the tenant to a schema of its own"
         )));
     }
-
-    super::pools::connect_schema_scoped(
-        registry_url,
-        schema,
-        2,
-        super::pools::FallThrough::CheckAfterMigrate,
-        acquire_timeout,
-    )
-    .await
+    Ok(())
 }
 
 /// Where a tenant's schema came from, by [`ensure_schema`].
@@ -1161,18 +1175,21 @@ async fn ensure_schema(
     schema: &str,
     timeout: std::time::Duration,
 ) -> Result<SchemaOrigin, TenancyError> {
-    use crate::migrate::{LEDGER_TABLE, SYSTEM_LEDGER_TABLE};
     if super::pools::create_tenant_schema(pg, schema, timeout).await? {
         return Ok(SchemaOrigin::Created);
     }
+    // Any engine's ledger marks the schema as ours.
+    let ledger_names: Vec<&str> = crate::migrate::LEDGER_TABLES
+        .iter()
+        .map(|t| t.name)
+        .collect();
     let (tables, ledgers): (i64, i64) = rustango::sql::sqlx::query_as(
-        "SELECT count(*), count(*) FILTER (WHERE c.relname IN ($2, $3)) \
+        "SELECT count(*), count(*) FILTER (WHERE c.relname = ANY($2)) \
          FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
          WHERE n.nspname = $1 AND c.relkind IN ('r', 'p', 'v', 'm', 'f')",
     )
     .bind(schema)
-    .bind(LEDGER_TABLE)
-    .bind(SYSTEM_LEDGER_TABLE)
+    .bind(ledger_names)
     .fetch_one(pg)
     .await?;
     Ok(if tables > 0 && ledgers == 0 {
@@ -1342,6 +1359,38 @@ mod schema_pool_tests {
         let _ = sqlx::query(&format!("DROP SCHEMA {q} CASCADE"))
             .execute(&pg)
             .await;
+    }
+
+    /// A schema engine v2 migrated holds its ledger, not v1's: still the tenant's.
+    #[tokio::test]
+    async fn fresh_v2_tenant_schema_is_not_foreign() {
+        use super::{ensure_schema, SchemaOrigin};
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pg = crate::sql::sqlx::PgPool::connect(&url)
+            .await
+            .expect("registry");
+        let s = format!("origin_v2_{}", std::process::id());
+        let q = crate::sql::quote_with(&s, '"');
+        let _ = sqlx::query(&format!("DROP SCHEMA IF EXISTS {q} CASCADE"))
+            .execute(&pg)
+            .await;
+        sqlx::query(&format!("CREATE SCHEMA {q}"))
+            .execute(&pg)
+            .await
+            .unwrap();
+        for t in ["app_data", "__rustango_migrations_v2"] {
+            sqlx::query(&format!("CREATE TABLE {q}.\"{t}\" (id INT)"))
+                .execute(&pg)
+                .await
+                .unwrap();
+        }
+        let origin = ensure_schema(&pg, &s, std::time::Duration::from_secs(30)).await;
+        let _ = sqlx::query(&format!("DROP SCHEMA {q} CASCADE"))
+            .execute(&pg)
+            .await;
+        assert_eq!(origin.unwrap(), SchemaOrigin::Kept);
     }
 }
 

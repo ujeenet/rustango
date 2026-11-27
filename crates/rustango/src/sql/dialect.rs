@@ -166,6 +166,16 @@ impl DialectKind {
             Self::Sqlite => "sqlite",
         }
     }
+
+    /// Whether `word` is reserved here: it must be quoted as an identifier.
+    pub(crate) fn is_reserved(self, word: &str) -> bool {
+        let list = match self {
+            Self::Postgres => super::reserved::POSTGRES,
+            Self::Mysql => super::reserved::MYSQL,
+            Self::Sqlite => super::reserved::SQLITE,
+        };
+        list.iter().any(|w| w.eq_ignore_ascii_case(word))
+    }
 }
 
 impl std::fmt::Display for DialectKind {

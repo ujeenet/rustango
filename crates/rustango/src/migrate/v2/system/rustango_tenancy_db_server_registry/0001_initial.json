@@ -1,0 +1,174 @@
+{
+  "app": "rustango_tenancy_db_server_registry",
+  "engine": 2,
+  "format": 1,
+  "id": "0001_initial",
+  "operations": [
+    {
+      "indexes": [
+        {
+          "columns": [
+            "name"
+          ],
+          "constraint": true,
+          "name": "rustango_db_servers_name_key",
+          "unique": true
+        }
+      ],
+      "op": "adopt_table",
+      "table": {
+        "fields": [
+          {
+            "column": "active",
+            "nullable": false,
+            "portable_default": "true",
+            "ty": "bool"
+          },
+          {
+            "column": "admin_password",
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "admin_user",
+            "max_length": 128,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "backend",
+            "max_length": 16,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "created_at",
+            "nullable": false,
+            "portable_default": "now",
+            "ty": "datetime"
+          },
+          {
+            "column": "host",
+            "max_length": 255,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "auto": true,
+            "column": "id",
+            "nullable": false,
+            "primary_key": true,
+            "ty": "i64"
+          },
+          {
+            "column": "maintenance_db",
+            "max_length": 63,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "name",
+            "max_length": 64,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "port",
+            "nullable": true,
+            "ty": "i32"
+          },
+          {
+            "column": "sqlite_dir",
+            "max_length": 1024,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "tls_mode",
+            "max_length": 16,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "updated_at",
+            "nullable": false,
+            "portable_default": "now",
+            "ty": "datetime"
+          }
+        ],
+        "name": "rustango_db_servers",
+        "scope": "registry"
+      },
+      "v": 1
+    },
+    {
+      "indexes": [
+        {
+          "columns": [
+            "server_name",
+            "database_name"
+          ],
+          "name": "rustango_tenant_databases_server_name_database_name_idx",
+          "unique": true
+        }
+      ],
+      "op": "adopt_table",
+      "table": {
+        "fields": [
+          {
+            "column": "created",
+            "nullable": false,
+            "portable_default": "false",
+            "ty": "bool"
+          },
+          {
+            "column": "created_at",
+            "nullable": false,
+            "portable_default": "now",
+            "ty": "datetime"
+          },
+          {
+            "column": "database_name",
+            "max_length": 63,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "auto": true,
+            "column": "id",
+            "nullable": false,
+            "primary_key": true,
+            "ty": "i64"
+          },
+          {
+            "column": "login_name",
+            "max_length": 32,
+            "nullable": true,
+            "ty": "string"
+          },
+          {
+            "column": "org_id",
+            "nullable": true,
+            "ty": "i64"
+          },
+          {
+            "column": "org_slug",
+            "max_length": 63,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "server_name",
+            "max_length": 64,
+            "nullable": false,
+            "ty": "string"
+          }
+        ],
+        "name": "rustango_tenant_databases",
+        "scope": "registry"
+      },
+      "v": 1
+    }
+  ],
+  "target": "registry"
+}

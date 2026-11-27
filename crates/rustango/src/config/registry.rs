@@ -248,6 +248,11 @@ pub(crate) const KEYS: &[Key] = &[
     key("storage.default", STORAGE),
     // Disk entries hold account keys.
     secret("storage.disks", STORAGE),
+    key("migrate.boot_stale_after_secs", F),
+    key("migrate.fleet_parallel", F),
+    key("migrate.fleet_canaries", F),
+    key("migrate.fleet_max_failures", F),
+    key("migrate.fleet_active_only", F),
     key("errors.enabled", F),
     key("errors.templates", F),
     key("errors.htmx_target", F),

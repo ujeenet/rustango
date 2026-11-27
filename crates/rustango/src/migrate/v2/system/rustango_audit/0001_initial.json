@@ -1,0 +1,76 @@
+{
+  "app": "rustango_audit",
+  "engine": 2,
+  "format": 1,
+  "id": "0001_initial",
+  "operations": [
+    {
+      "indexes": [
+        {
+          "columns": [
+            "entity_table",
+            "entity_pk"
+          ],
+          "name": "rustango_audit_log_entity_table_entity_pk_idx"
+        },
+        {
+          "columns": [
+            "occurred_at"
+          ],
+          "name": "rustango_audit_log_occurred_at_idx"
+        }
+      ],
+      "op": "adopt_table",
+      "table": {
+        "fields": [
+          {
+            "column": "changes",
+            "nullable": false,
+            "ty": "json"
+          },
+          {
+            "column": "entity_pk",
+            "max_length": 255,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "entity_table",
+            "max_length": 255,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "auto": true,
+            "column": "id",
+            "nullable": false,
+            "primary_key": true,
+            "ty": "i64"
+          },
+          {
+            "column": "occurred_at",
+            "nullable": false,
+            "portable_default": "now",
+            "ty": "datetime"
+          },
+          {
+            "column": "operation",
+            "max_length": 32,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "source",
+            "max_length": 255,
+            "nullable": false,
+            "ty": "string"
+          }
+        ],
+        "name": "rustango_audit_log",
+        "scope": "tenant"
+      },
+      "v": 1
+    }
+  ],
+  "target": "tenant"
+}

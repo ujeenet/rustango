@@ -1,0 +1,103 @@
+{
+  "app": "rustango_media_tag",
+  "engine": 2,
+  "format": 1,
+  "id": "0001_initial",
+  "operations": [
+    {
+      "indexes": [
+        {
+          "columns": [
+            "slug"
+          ],
+          "constraint": true,
+          "name": "rustango_media_tags_slug_key",
+          "unique": true
+        }
+      ],
+      "op": "adopt_table",
+      "table": {
+        "fields": [
+          {
+            "column": "created_at",
+            "nullable": false,
+            "portable_default": "now",
+            "ty": "datetime"
+          },
+          {
+            "auto": true,
+            "column": "id",
+            "nullable": false,
+            "primary_key": true,
+            "ty": "i64"
+          },
+          {
+            "column": "name",
+            "max_length": 255,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "slug",
+            "max_length": 255,
+            "nullable": false,
+            "ty": "string"
+          }
+        ],
+        "name": "rustango_media_tags",
+        "scope": "tenant"
+      },
+      "v": 1
+    },
+    {
+      "indexes": [
+        {
+          "columns": [
+            "media_id",
+            "tag_id"
+          ],
+          "name": "rustango_media_tag_links_media_id_tag_id_idx",
+          "unique": true
+        },
+        {
+          "columns": [
+            "tag_id"
+          ],
+          "name": "rustango_media_tag_links_tag_id_idx"
+        }
+      ],
+      "op": "adopt_table",
+      "table": {
+        "fields": [
+          {
+            "auto": true,
+            "column": "id",
+            "nullable": false,
+            "primary_key": true,
+            "ty": "i64"
+          },
+          {
+            "column": "media_id",
+            "nullable": false,
+            "ty": "i64"
+          },
+          {
+            "column": "tag_id",
+            "fk": {
+              "name": "rustango_media_tag_links_tag_id_fkey",
+              "on": "id",
+              "on_delete": "cascade",
+              "to": "rustango_media_tags"
+            },
+            "nullable": false,
+            "ty": "i64"
+          }
+        ],
+        "name": "rustango_media_tag_links",
+        "scope": "tenant"
+      },
+      "v": 1
+    }
+  ],
+  "target": "tenant"
+}

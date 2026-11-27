@@ -1,0 +1,44 @@
+{
+  "app": "rustango_contenttypes",
+  "engine": 2,
+  "format": 1,
+  "id": "0001_initial",
+  "operations": [
+    {
+      "op": "adopt_table",
+      "table": {
+        "fields": [
+          {
+            "column": "app_label",
+            "max_length": 100,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "auto": true,
+            "column": "id",
+            "nullable": false,
+            "primary_key": true,
+            "ty": "i64"
+          },
+          {
+            "column": "model_name",
+            "max_length": 100,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "table",
+            "max_length": 100,
+            "nullable": false,
+            "ty": "string"
+          }
+        ],
+        "name": "rustango_content_types",
+        "scope": "tenant"
+      },
+      "v": 1
+    }
+  ],
+  "target": "tenant"
+}

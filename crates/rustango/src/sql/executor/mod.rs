@@ -481,6 +481,7 @@ pub use row_to_json::row_to_json;
 pub use row_to_json::row_to_json_my;
 #[cfg(feature = "sqlite")]
 pub use row_to_json::row_to_json_sqlite;
+pub(crate) use row_to_json::{raw_rows_as_json_strict_tx, select_rows_as_json_strict_tx};
 pub use row_to_json::{select_one_row_as_json, select_rows_as_json};
 #[cfg(feature = "admin")]
 pub(crate) use row_to_json::{select_one_row_as_json_tx, select_rows_as_json_tx};
@@ -1628,6 +1629,7 @@ pub fn row_saved(n: u64) -> Result<u64, ExecError> {
 /// Run a parameterized statement that returns no rows. Shared by the
 /// non-`FromRow` `_pool` functions.
 async fn execute_pool(pool: &Pool, sql: &str, binds: BindParams) -> Result<u64, ExecError> {
+    refuse_in_migration_step()?;
     // Counts toward `assert_num_queries`; a no-op outside tests.
     crate::test_assertions::query_counter::bump();
     match pool {
@@ -3392,4 +3394,31 @@ mod pool_dispatch_tests {
             vec![("author", "author"), ("authorship", "authorship")],
         );
     }
+}
+
+tokio::task_local! {
+    /// Set while a migration data step runs (5.4).
+    static IN_MIGRATION_STEP: ();
+}
+
+/// Run `f` as a migration data step: every `&Pool` entry point refuses
+/// inside it, so the step writes only through its own unit.
+pub(crate) async fn migration_step<F: std::future::Future>(f: F) -> F::Output {
+    IN_MIGRATION_STEP.scope((), f).await
+}
+
+/// Whether a migration data step is running on this task.
+pub(crate) fn in_migration_step() -> bool {
+    IN_MIGRATION_STEP.try_with(|()| ()).is_ok()
+}
+
+/// The escape guard of the `&Pool` entry points.
+///
+/// # Errors
+/// [`ExecError::InMigrationStep`] inside a migration data step.
+pub(crate) fn refuse_in_migration_step() -> Result<(), ExecError> {
+    if in_migration_step() {
+        return Err(ExecError::InMigrationStep);
+    }
+    Ok(())
 }

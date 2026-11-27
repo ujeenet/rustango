@@ -1,0 +1,11 @@
+{"engine": 2, "format": 1, "id": "0002_create_invoice", "app": "billing", "parents": ["0001_create_customer"],
+ "target": "tenant", "operations": [
+  { "op": "create_table", "v": 1,
+    "table": { "name": "invoice", "scope": "tenant",
+      "fields": [
+        { "column": "id", "ty": "i64", "primary_key": true, "auto": true, "nullable": false },
+        { "column": "customer_id", "ty": "i64", "nullable": false,
+          "fk": { "to": "customer", "on": "id", "on_delete": "cascade", "name": "invoice_customer_id_fkey" } },
+        { "column": "total", "ty": "decimal", "nullable": false, "default": "0" } ] },
+    "indexes": [ { "name": "invoice_customer_idx", "columns": ["customer_id"], "unique": false, "method": "btree" } ],
+    "checks":  [ { "name": "invoice_total_ge0", "expr": "total >= 0" } ] } ]}

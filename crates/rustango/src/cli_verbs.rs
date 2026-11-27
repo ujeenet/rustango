@@ -12,6 +12,7 @@ pub(crate) const SINGLE_DB_VERBS: &[&str] = &[
     "-h",
     // `migrate::manage`.
     "makemigrations",
+    "dbmigrate",
     "migrate",
     "downgrade",
     "showmigrations",
@@ -56,6 +57,34 @@ pub(crate) const SINGLE_DB_VERBS: &[&str] = &[
     "make:notification",
     "make:middleware",
     "make:test",
+];
+
+/// The single-database verbs that read migration files: each refuses an
+/// engine v2 project before it runs.
+pub(crate) const ENGINE_V1_VERBS: &[&str] = &[
+    "makemigrations",
+    "migrate",
+    "downgrade",
+    "showmigrations",
+    "status",
+    "sqlmigrate",
+    "forget-pending",
+    "add-data-op",
+    "check",
+];
+
+/// Tenancy's own verbs of that kind; the others fall through to
+/// [`ENGINE_V1_VERBS`]. `init-tenancy` checks inside, for the wizard too.
+#[cfg(feature = "tenancy")]
+pub(crate) const TENANCY_ENGINE_V1_VERBS: &[&str] = &[
+    "migrate",
+    "migrate-tenants",
+    "migrate-registry",
+    "downgrade",
+    "check",
+    "forget-pending",
+    "showmigrations",
+    "status",
 ];
 
 /// The verbs `tenancy::manage` adds; the rest fall through to [`SINGLE_DB_VERBS`].

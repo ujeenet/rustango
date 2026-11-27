@@ -135,6 +135,8 @@ pub fn make_migrations_for_app_with(
     name_override: Option<&str>,
     drops: DropAndAdd,
 ) -> Result<Option<Migration>, MigrateError> {
+    // Project-level: the new app folder must not join an engine v2 project.
+    super::require_v1_project(project_root)?;
     let app_dir = project_root.join(app).join("migrations");
     if !app_dir.exists() {
         std::fs::create_dir_all(&app_dir)?;
@@ -181,6 +183,7 @@ pub fn make_migrations_scoped_with(
     name_override: Option<&str>,
     drops: DropAndAdd,
 ) -> Result<Option<Migration>, MigrateError> {
+    super::require_v1_project(dir)?;
     let prior = file::list_dir(dir)?;
     let Some(mig) = plan_scoped(
         &prior,
@@ -332,6 +335,37 @@ fn write_planned(dir: &Path, mig: &Migration) -> Result<(), MigrateError> {
 }
 
 /// The file [`make_migrations_scoped`] would write after `prior`, unwritten.
+/// The schema a scope's v1 chain ends with: the last snapshot, the side
+/// heads folded in, the framework (`rustango_*`) tables of `current` added,
+/// filtered to `model_scope`. makemigrations diffs against it; engine v2's
+/// `adopt` checkpoints it.
+pub(crate) fn legacy_baseline(
+    prior_scoped: &[&Migration],
+    current: &SchemaSnapshot,
+    model_scope: crate::core::ModelScope,
+) -> SchemaSnapshot {
+    legacy_chain_snapshot(prior_scoped, current).filtered_to_scope(model_scope)
+}
+
+/// [`legacy_baseline`] before the scope filter: a tenancy chain's
+/// snapshots hold that scope's tables already.
+pub(crate) fn legacy_chain_snapshot(
+    prior_scoped: &[&Migration],
+    current: &SchemaSnapshot,
+) -> SchemaSnapshot {
+    let mut prev_snapshot = prior_scoped
+        .last()
+        .map_or_else(empty_snapshot, |m| effective_snapshot(prior_scoped, m));
+    let in_chain = chain_membership(prior_scoped);
+    for m in prior_scoped {
+        if !in_chain.contains(m.name.as_str()) {
+            fold_in_missing_tables(&mut prev_snapshot, &m.snapshot);
+        }
+    }
+    fold_in_framework_tables(&mut prev_snapshot, current);
+    prev_snapshot
+}
+
 fn plan_scoped(
     prior: &[Migration],
     current: &SchemaSnapshot,
@@ -361,17 +395,7 @@ fn plan_scoped(
     //   2. Add every `rustango_*` table the registry knows. The
     //      framework owns that prefix, so an app migration must
     //      never create one of those tables.
-    let mut prev_snapshot = prior_scoped
-        .last()
-        .map_or_else(empty_snapshot, |m| effective_snapshot(&prior_scoped, m));
-    let in_chain = chain_membership(&prior_scoped);
-    for m in &prior_scoped {
-        if !in_chain.contains(m.name.as_str()) {
-            fold_in_missing_tables(&mut prev_snapshot, &m.snapshot);
-        }
-    }
-    fold_in_framework_tables(&mut prev_snapshot, current);
-    let prev_snapshot = prev_snapshot.filtered_to_scope(model_scope);
+    let prev_snapshot = legacy_baseline(&prior_scoped, current, model_scope);
     let mut current = current.clone();
     current.keep_unmanaged(&prev_snapshot);
     let current = &current;
@@ -506,6 +530,18 @@ fn check_drops(
 /// As [`make_migrations_from`], plus [`MigrateError::Io`] if the
 /// `system/migrations/` dir can't be created.
 pub fn make_migrations_system(
+    project_root: &Path,
+    scope: crate::core::ModelScope,
+    name_override: Option<&str>,
+) -> Result<Option<Migration>, MigrateError> {
+    // It writes into the project, so the whole project must be engine v1.
+    super::require_v1_project(project_root)?;
+    make_system_step(project_root, scope, name_override)
+}
+
+/// [`make_migrations_system`] without the project check, for the v1 runner's
+/// catch-up step (engine v2 ships its system apps in the crate).
+fn make_system_step(
     project_root: &Path,
     scope: crate::core::ModelScope,
     name_override: Option<&str>,
@@ -654,10 +690,11 @@ impl SystemChain {
             .get_or_init(Default::default)
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let shipped = file::list_dir(&dir).is_ok_and(|m| !m.is_empty());
+        // A refusal (an engine v2 file) must not read as "nothing shipped".
+        let shipped = !file::list_dir(&dir)?.is_empty();
         let generated = scopes
             .iter()
-            .try_for_each(|&scope| make_migrations_system(project_root, scope, None).map(drop));
+            .try_for_each(|&scope| make_system_step(project_root, scope, None).map(drop));
         let key = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
         let origin = if !shipped {
             regenerated.insert(key);
@@ -673,7 +710,7 @@ impl SystemChain {
     }
 
     /// A shipped chain in `dir`, as is: no catch-up step from today's models.
-    #[cfg(all(test, feature = "sqlite"))]
+    #[cfg(test)]
     pub(crate) fn shipped(dir: std::path::PathBuf) -> Self {
         Self {
             dir,
@@ -724,6 +761,7 @@ pub fn make_migrations_from_with(
     name_override: Option<&str>,
     drops: DropAndAdd,
 ) -> Result<Option<Migration>, MigrateError> {
+    super::require_v1_project(dir)?;
     let prior = file::list_dir(dir)?;
     let Some(mig) = plan_from(&prior, current, name_override, drops)? else {
         return Ok(None);
@@ -824,7 +862,7 @@ pub(crate) fn models_ahead_of(prior: &[Migration], scoped: bool) -> Result<bool,
 
 /// The registry checks every `makemigrations` runs: `--squash` runs them
 /// before it deletes the files it regenerates.
-fn check_models() -> Result<(), MigrateError> {
+pub(crate) fn check_models() -> Result<(), MigrateError> {
     super::snapshot::check_registry_junctions()?;
     super::snapshot::check_relation_targets()
 }
@@ -1060,7 +1098,7 @@ fn branched_leaves<'a>(chain: &[&'a Migration]) -> Vec<Vec<&'a Migration>> {
 }
 
 /// Refuse to diff a branched chain: its last file holds one branch only.
-fn refuse_branched(chain: &[&Migration]) -> Result<(), MigrateError> {
+pub(crate) fn refuse_branched(chain: &[&Migration]) -> Result<(), MigrateError> {
     let Some(branch) = branched_leaves(chain).into_iter().next() else {
         return Ok(());
     };
@@ -1263,6 +1301,7 @@ fn auto_name(changes: &[SchemaChange], is_first: bool) -> String {
 /// merged, or [`MigrateError::Io`] / [`MigrateError::Json`] on file
 /// problems.
 pub fn make_merge_migration(dir: &Path) -> Result<Option<Migration>, MigrateError> {
+    super::require_v1_project(dir)?;
     let prior = file::list_dir(dir)?;
     if prior.is_empty() {
         return Err(MigrateError::Validation(
@@ -1344,6 +1383,33 @@ pub fn make_merge_migration(dir: &Path) -> Result<Option<Migration>, MigrateErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A refused system dir must not be taken for an empty one: that marked
+    /// it regenerated for the rest of the process.
+    #[test]
+    fn prepare_does_not_treat_v2_as_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sys = tmp.path().join("system").join("migrations");
+        std::fs::create_dir_all(&sys).unwrap();
+        let v2 = sys.join("0001_x.json");
+        std::fs::write(&v2, r#"{"engine": 2, "format": 1}"#).unwrap();
+        let scopes = [crate::core::ModelScope::Tenant];
+        let err = SystemChain::prepare(tmp.path(), &scopes).unwrap_err();
+        assert!(matches!(err, MigrateError::EngineV2 { .. }), "{err}");
+        assert_eq!(
+            std::fs::read_dir(&sys).unwrap().count(),
+            1,
+            "nothing written"
+        );
+        std::fs::remove_file(&v2).unwrap();
+        std::fs::write(
+            sys.join("0001_x.json"),
+            r#"{"name": "0001_x", "created_at": "", "snapshot": {"tables": []}, "forward": []}"#,
+        )
+        .unwrap();
+        let chain = SystemChain::prepare(tmp.path(), &scopes).unwrap();
+        assert_eq!(chain.origin(), super::super::runner::ChainOrigin::OnDisk);
+    }
 
     #[test]
     fn auto_name_initial_for_first_migration_with_create_tables() {

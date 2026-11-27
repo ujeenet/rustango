@@ -1408,6 +1408,11 @@ pub(crate) fn validate_stored_schema_name(name: &str) -> Result<(), String> {
             "schema name `{name}` is the registry's schema — choose another"
         ));
     }
+    if super::migrate_v2::ENGINE_SCHEMAS.contains(&name) {
+        return Err(format!(
+            "schema name `{name}` is owned by the migration engine — choose another"
+        ));
+    }
     Ok(())
 }
 
@@ -3350,6 +3355,7 @@ mod validation_tests {
             "pg_anything",        // the whole `pg_` namespace is reserved
             "information_schema", // reserved
             "public",             // the registry's schema (#1868)
+            "extensions",         // the migration engine's
         ] {
             assert!(
                 validate_schema_name(bad).is_err(),

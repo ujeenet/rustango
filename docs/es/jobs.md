@@ -33,6 +33,7 @@ cola de tareas, íntegramente en Rust.
 - [Paso 2 — Iniciar una cola](#paso-2--iniciar-una-cola)
 - [Paso 3 — Despachar desde un handler](#paso-3--despachar-desde-un-handler)
 - [Paso 4 — Cablearlo en tu aplicación](#paso-4--cablearlo-en-tu-aplicación) — el ejemplo completo
+- [Trabajos retrasados, cancelables y únicos](#trabajos-retrasados-cancelables-y-únicos)
 - [Ejecutar los workers (CLI + producción)](#ejecutar-los-workers-cli--producción)
 - [Reintentos y backoff](#reintentos-y-backoff)
 - [El contexto del trabajo: id, intento, parada](#el-contexto-del-trabajo-id-intento-parada)
@@ -157,6 +158,49 @@ for to in ["a@example.com", "b@example.com", "c@example.com"] {
 }
 // → all three WelcomeEmail::run() calls execute on the worker pool
 ```
+
+---
+
+## Trabajos retrasados, cancelables y únicos
+
+`dispatch_at` encola un trabajo para ejecutarlo más tarde y devuelve su
+`JobId`. Guarda el id (`id.to_string()`), y `cancel` descarta el trabajo hasta
+que un worker lo inicia:
+
+```rust
+use rustango::jobs::{Dispatch, JobId, JobQueue, UniqueKey};
+
+let when = chrono::Utc::now() + chrono::Duration::days(7);
+let id = queue.dispatch_at(&DeleteAccount { user_id: 42 }, when).await?;
+account.deletion_job = Some(id.to_string());
+
+// Later, maybe from another process:
+let id: JobId = stored.parse()?;
+let dropped = queue.cancel(&id).await?;   // false once the job runs or ran
+```
+
+`enqueue` acepta todas las opciones. Una `UniqueKey` mantiene un solo trabajo de
+un tipo con esa clave en cola o en ejecución; un segundo despacho devuelve
+`Enqueued::Duplicate` con el id del primer trabajo y no encola nada:
+
+```rust
+let key = UniqueKey::new(format!("delete-account:{}", user.id))?;
+let queued = queue
+    .enqueue(&DeleteAccount { user_id: user.id }, Dispatch::at(when).unique(key))
+    .await?;
+let id = queued.id();   // the new job, or the one already queued
+```
+
+- `cancel` también descarta un trabajo que espera un reintento. Nunca detiene un
+  trabajo en ejecución.
+- Una clave tiene de 1 a 200 caracteres, sin espacios al principio ni al final,
+  y se compara exactamente (distingue mayúsculas) en todos los backends. Queda
+  libre de nuevo cuando su trabajo termina, pasa a dead-letter o se cancela.
+- En la cola de base de datos, una clave necesita la columna `unique_key`, que
+  añade `ensure_table_pool`; hasta entonces un despacho único se rechaza.
+- En un bloque `atomic`, ambas colas retienen la clave desde el `enqueue`: un
+  segundo `enqueue` en el bloque devuelve `Duplicate`, y un rollback la libera.
+
 
 ---
 

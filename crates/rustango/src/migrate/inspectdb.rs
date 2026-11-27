@@ -1158,7 +1158,7 @@ fn mysql_udt(data_type: &str, column_type: &str) -> String {
 /// A MySQL `COLUMN_DEFAULT` as SQL. MySQL reports a literal unquoted
 /// (`pending`) and an expression bare (`uuid()`), which DDL needs in parens.
 #[cfg(any(feature = "mysql", test))]
-fn mysql_default_sql(default: &str, data_type: &str, extra: &str) -> String {
+pub(crate) fn mysql_default_sql(default: &str, data_type: &str, extra: &str) -> String {
     let numeric = matches!(
         data_type.to_ascii_lowercase().as_str(),
         "tinyint"

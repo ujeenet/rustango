@@ -26,10 +26,11 @@ pub mod model_shortcuts;
 // tri-dialect *emission* test impossible to compile unless the binary
 // also linked all three drivers, which is the opposite of the point.
 // `postgres` was always ungated; these two now match it.
-mod mysql;
+pub(crate) mod mysql;
 mod pool;
 mod postgres;
 mod range;
+mod reserved;
 /// Validated names for tenant database and login DDL.
 pub mod server;
 mod sqlite;
@@ -97,6 +98,8 @@ pub(crate) use executor::{
     inserted_pk, rows_per_batch, run_delete_statements_tx, truncate_refusal, truncate_tx, write_tx,
 };
 pub(crate) use executor::{caught, in_block, refuse_ddl_in_block, Ddl};
+pub(crate) use executor::{in_migration_step, migration_step};
+pub(crate) use executor::{raw_rows_as_json_strict_tx, select_rows_as_json_strict_tx};
 #[allow(deprecated)]
 pub use executor::{
     AtomicOptions, AtomicTx, CounterPool, DecodeModel, ExistsPool, ExplainFormat, ExplainOptions,
@@ -203,6 +206,7 @@ pub(crate) use sqlite::SQLITE_CANONICAL_GLOB;
 /// builds its `SQLite` branch through `Dialect`, and that renderer
 /// compiles in every build whether or not the driver is linked.
 pub(crate) use sqlite::SQLITE_DATETIME_FORMAT;
+pub(crate) use sqlite::SQLITE_UUID_V4;
 
 /// Re-exported so `#[derive(Model)]` output can name `sqlx` types without
 /// requiring downstream crates to add their own dependency on it.

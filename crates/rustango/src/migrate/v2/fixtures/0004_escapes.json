@@ -1,0 +1,3 @@
+{"engine": 2, "format": 1, "id": "0004_escapes", "app": "accounts", "parents": [], "target": "registry",
+ "allow": [{"code": "MV2-W020", "reason": "quote \" backslash \\ tab \t newline \n é 名 \u0001 /slash"}],
+ "operations": [{"op": "add_check", "v": 1, "table": "org", "name": "org_neg", "expr": "n > -9007199254740993", "label": "x"}]}

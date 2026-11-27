@@ -673,7 +673,20 @@ pub struct TenantPools<DB: Database = DefaultTenantDb> {
     /// The registry's `current_database()`, part of each tenant role's name.
     #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
     database_name: Arc<tokio::sync::OnceCell<String>>,
+    /// Tenants whose migrations failed: they answer 503 until a run fixes
+    /// them (8.3 `require_head`), with the registry cache run id they were
+    /// parked at. Per pools, never process-global.
+    maintenance: std::sync::RwLock<std::collections::BTreeMap<String, Option<String>>>,
+    /// When the registry cache was last read for a parked tenant.
+    maintenance_checked: std::sync::Mutex<Option<std::time::Instant>>,
 }
+
+/// How often a parked tenant's registry cache row is read again.
+const MAINTENANCE_RECHECK: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_millis(100)
+} else {
+    std::time::Duration::from_secs(5)
+};
 
 /// Warns once a cache passes 80% of its cap, so the operator hears
 /// about it while it is still headroom and not an incident.
@@ -769,7 +782,34 @@ impl<DB: Database> TenantPools<DB> {
             #[cfg(feature = "postgres")]
             role_secret: Arc::default(),
             database_name: Arc::default(),
+            maintenance: std::sync::RwLock::default(),
+            maintenance_checked: std::sync::Mutex::default(),
         }
+    }
+
+    /// Put exactly `slugs` in maintenance, each with the registry cache run
+    /// id it was parked at: their requests answer 503 until a later run,
+    /// from any process, records them applied.
+    pub(crate) fn set_maintenance(
+        &self,
+        slugs: impl IntoIterator<Item = (String, Option<String>)>,
+    ) {
+        let mut set = self
+            .maintenance
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *set = slugs.into_iter().collect();
+    }
+
+    /// Tenants in maintenance after a failed migration, for the console banner.
+    #[must_use]
+    pub fn tenants_in_maintenance(&self) -> Vec<String> {
+        self.maintenance
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// Next LRU stamp. Relaxed is enough: the value only has to be
@@ -906,7 +946,8 @@ pub(crate) async fn boot_checks<DB: Database>(pools: &TenantPools<DB>) -> Result
         }
         let mut conn = pg.registry().acquire().await?;
         super::schema_role::revoke_public_writes(&mut conn).await?;
-        super::schema_role::refuse_writable(&mut conn, "public").await?;
+        super::schema_role::refuse_writable(&mut conn, "public", "then `ensure-tenant-roles`")
+            .await?;
     }
     Ok(())
 }
@@ -1003,6 +1044,50 @@ where
     #[must_use]
     pub fn registry_pool(&self) -> crate::sql::Pool {
         crate::sql::Pool::from(self.registry.clone())
+    }
+
+    /// Refuse a request pool for a tenant in maintenance. At most every few
+    /// seconds the registry cache is read for it: a newer applied run frees it.
+    pub(crate) async fn refuse_maintenance(&self, slug: &str) -> Result<(), TenancyError> {
+        let parked = {
+            let set = self
+                .maintenance
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match set.get(slug) {
+                None => return Ok(()),
+                Some(run) => run.clone(),
+            }
+        };
+        let due = {
+            let mut at = self
+                .maintenance_checked
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let due = at.is_none_or(|t| t.elapsed() >= MAINTENANCE_RECHECK);
+            if due {
+                *at = Some(std::time::Instant::now());
+            }
+            due
+        };
+        if due {
+            let row = crate::migrate::v2::ledger::cache_one(&self.registry_pool(), slug)
+                .await
+                .ok()
+                .flatten();
+            if let Some((state, run)) = row {
+                if state == "applied" && run != parked {
+                    self.maintenance
+                        .write()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(slug);
+                    return Ok(());
+                }
+            }
+        }
+        Err(TenancyError::Maintenance {
+            slug: slug.to_owned(),
+        })
     }
 }
 
@@ -1137,6 +1222,11 @@ pub trait TenantPoolInvalidator: Send + Sync {
         >,
     >;
 
+    /// Tenants whose migrations failed at boot, for the console banner.
+    fn tenants_in_maintenance(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// How tenant URLs are opened and stored, so an edit can check a new
     /// reference before it is written. No default: a fallback would drop
     /// the deployment's `require_sealed_secrets()`.
@@ -1206,6 +1296,10 @@ impl<DB: Database> TenantPoolInvalidator for TenantPools<DB>
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
+    fn tenants_in_maintenance(&self) -> Vec<String> {
+        TenantPools::<DB>::tenants_in_maintenance(self)
+    }
+
     fn invalidate<'a>(
         &'a self,
         slug: &'a str,
@@ -1467,6 +1561,8 @@ where
     /// # Errors
     /// As [`Self::database_pool_for_org`].
     pub async fn scoped_pool_dyn(&self, org: &Org) -> Result<crate::sql::Pool, TenancyError> {
+        // Every request path comes here: a tenant behind its code answers 503.
+        self.refuse_maintenance(&org.slug).await?;
         let mode = org.storage_mode;
         match mode {
             StorageMode::Schema => {
@@ -2080,11 +2176,14 @@ impl TenantSearchPath {
         check: FallThrough,
         timeout: std::time::Duration,
     ) -> Result<Self, TenancyError> {
-        let unchecked = tokio::time::timeout(timeout, Self::resolve(registry, schema))
-            .await
-            .map_err(|_| sqlx::Error::PoolTimedOut)??;
+        let unchecked = tokio::time::timeout(
+            timeout,
+            Self::resolve_ruled(registry, schema, check.public_rule()),
+        )
+        .await
+        .map_err(|_| sqlx::Error::PoolTimedOut)??;
         match check {
-            FallThrough::Refuse => unchecked.strict(),
+            FallThrough::Refuse | FallThrough::V2Unit => unchecked.strict(),
             FallThrough::OpenPool => unchecked.warn_skipped().strict(),
             FallThrough::CheckAfterMigrate => unchecked.before_migrate(),
             FallThrough::BeforeCreate => {
@@ -2098,6 +2197,14 @@ impl TenantSearchPath {
     /// `public` and schemas holding nothing but extension-owned objects qualify,
     /// and never one an org names, so another tenant's schema never joins the path.
     async fn resolve(registry: &PgPool, schema: &str) -> Result<UncheckedPath, TenancyError> {
+        Self::resolve_ruled(registry, schema, PublicRule::Admit).await
+    }
+
+    async fn resolve_ruled(
+        registry: &PgPool,
+        schema: &str,
+        rule: PublicRule,
+    ) -> Result<UncheckedPath, TenancyError> {
         use crate::core::Model as _;
         use crate::sql::Dialect as _;
         let orgs = crate::sql::Postgres.quote_ident(Org::SCHEMA.table);
@@ -2106,10 +2213,10 @@ impl TenantSearchPath {
             "AND n.nspname NOT IN (SELECT slug FROM {orgs} \
              UNION ALL SELECT schema_name FROM {orgs} WHERE schema_name IS NOT NULL)"
         );
-        match Self::resolve_with(registry, schema, &named_by_org).await {
+        match Self::resolve_with(registry, schema, &named_by_org, rule).await {
             // No orgs table (orgs came from elsewhere): the objects check alone guards the path.
             Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("42P01") => {
-                Ok(Self::resolve_with(registry, schema, "").await?)
+                Ok(Self::resolve_with(registry, schema, "", rule).await?)
             }
             other => Ok(other?),
         }
@@ -2119,11 +2226,16 @@ impl TenantSearchPath {
         registry: &PgPool,
         schema: &str,
         org_filter: &str,
+        rule: PublicRule,
     ) -> Result<UncheckedPath, sqlx::Error> {
+        let public = match rule {
+            PublicRule::Admit => "n.nspname = 'public' OR",
+            PublicRule::LikeAnyOther => "",
+        };
         // A class row is the extension's when it or its row type is a member.
         let sql = format!(
             "WITH ext AS (SELECT DISTINCT n.oid, n.nspname::text AS name, \
-                   (n.nspname = 'public' OR (TRUE {org_filter} \
+                   ({public} (TRUE {org_filter} \
                    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c \
                      WHERE c.relnamespace = n.oid \
                      AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S', 'c') \
@@ -2190,7 +2302,7 @@ impl TenantSearchPath {
             .join(", ")
     }
 
-    fn set_sql(&self) -> String {
+    pub(crate) fn set_sql(&self) -> String {
         format!("SET search_path TO {}", self.list())
     }
 
@@ -2283,6 +2395,30 @@ pub(crate) enum FallThrough {
     CheckAfterMigrate,
     /// Before `CREATE SCHEMA`: only the name.
     BeforeCreate,
+    /// Engine v2's unit connection (8.2): every check, and `public` joins
+    /// only when it holds nothing but extension objects.
+    V2Unit,
+}
+
+/// Whether `public` joins a tenant path as an extension schema.
+#[cfg(feature = "postgres")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PublicRule {
+    /// Always (engine v1, the app's pools).
+    Admit,
+    /// Judged like any other schema: only with no objects of its own (8.2).
+    LikeAnyOther,
+}
+
+#[cfg(feature = "postgres")]
+impl FallThrough {
+    fn public_rule(self) -> PublicRule {
+        if self == Self::V2Unit {
+            PublicRule::LikeAnyOther
+        } else {
+            PublicRule::Admit
+        }
+    }
 }
 
 /// [`TenantSearchPath::open`] through a one-connection registry pool.

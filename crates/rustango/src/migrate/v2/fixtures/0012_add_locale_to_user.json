@@ -1,0 +1,14 @@
+{
+  "engine": 2, "format": 1,
+  "id": "0012_add_locale_to_user", "app": "accounts",
+  "parents": ["0011_adopt"],
+  "target": "tenant",
+  "created_at": "2026-11-24T10:00:00Z",
+  "description": "Example A, schema part",
+  "operations": [
+    { "op": "add_column", "v": 1, "table": "user", "label": "locale",
+      "column": { "column": "locale", "ty": "string", "max_length": 8, "nullable": true } },
+    { "op": "alter_column", "v": 1, "table": "user", "column": "locale",
+      "changes": { "nullable": { "from": true, "to": false } } }
+  ]
+}

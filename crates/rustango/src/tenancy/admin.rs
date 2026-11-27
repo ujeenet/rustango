@@ -454,6 +454,9 @@ where
             .await
         {
             Ok(p) => p,
+            Err(super::TenancyError::Maintenance { .. }) => {
+                return super::TenancyError::maintenance_response()
+            }
             Err(e) => {
                 // Before the session check, and the text can name the tenant DB host.
                 let body = crate::error::server_error_body("tenancy::admin::pool", &e);

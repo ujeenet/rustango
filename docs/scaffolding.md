@@ -162,7 +162,7 @@ cargo rgo new shop --alias rgo
 
 ```toml
 [dependencies]
-rgo = { package = "rustango", version = "0.70", default-features = false, features = ["batteries"] }
+rgo = { package = "rustango", version = "0.71", default-features = false, features = ["batteries"] }
 
 [features]
 postgres = ["rgo/postgres"]
@@ -200,7 +200,7 @@ Every template writes a self-contained Cargo project:
   Dockerfile.dev        # the dev image docker-compose.yml builds
   .dockerignore
   README.md
-  config/
+  config/               # not written by --template api: it reads env vars only
     default.toml        # settings shared across every environment
     dev_settings.toml   # per-tier overrides …
     staging_settings.toml

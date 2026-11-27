@@ -38,6 +38,7 @@ cambio de una línea.
 - [Archivos grandes: transmítelos en streaming](#archivos-grandes-transmítelos-en-streaming)
 - [Varios discos desde la configuración](#varios-discos-desde-la-configuración)
 - [La biblioteca de medios](#la-biblioteca-de-medios)
+- [Archivos estáticos: nombres con hash, SRI e imágenes en un solo archivo](#archivos-estáticos-nombres-con-hash-sri-e-imágenes-en-un-solo-archivo)
 - [Referencia](#referencia)
 - [Véase también](#véase-también)
 
@@ -709,6 +710,50 @@ framework, cada vez que ejecutas `migrate` / aprovisionas un inquilino. No hay u
 > fuera solo `CreateTable`, mientras que una migración inicial generada son tablas *e*
 > índices, así que abandonaba en cada caso real. 0.51.2 es la versión en la que esto
 > funciona de verdad.
+
+---
+
+## Archivos estáticos: nombres con hash, SRI e imágenes en un solo archivo
+
+Tus propios CSS, JS y WASM no son subidas; sírvelos con
+`static_files::StaticFiles`. Las apps sin `admin` activan solo la feature
+`static-files` (y `security-headers`, `test-client` según haga falta).
+
+`AssetManifest` da a cada archivo un nombre con hash del contenido y un hash de
+Subresource Integrity. Móntalo junto con los archivos para que los nombres con
+hash se sirvan como `immutable` durante un año, y enlázalos desde las
+plantillas:
+
+```rust
+use rustango::static_files::{static_router, AssetManifest, StaticFiles};
+
+let manifest = AssetManifest::from_dir("static")?.prefix("/static");
+let app = Router::new()
+    .nest("/static", static_router(StaticFiles::new("static").manifest(manifest.clone())));
+manifest.register_tera(&mut tera); // asset_url(name=...) and asset_integrity(name=...)
+```
+
+```html
+<script src="{{ asset_url(name='js/app.js') }}"
+        integrity="{{ asset_integrity(name='js/app.js') }}" crossorigin="anonymous"></script>
+```
+
+El manifiesto se construye a partir de los archivos tal como están al arrancar,
+así que nunca queda obsoleto; `to_json()` lo escribe para un bundler. Para
+distribuir un solo binario sin carpeta `static/`, compila el directorio dentro:
+
+```rust
+use rustango::static_files::{AssetManifest, EmbeddedDir, StaticFiles};
+
+static ASSETS: EmbeddedDir = rustango::embed_static!("static");
+let manifest = AssetManifest::from_embedded(&ASSETS).prefix("/static");
+let files = StaticFiles::embedded(ASSETS).manifest(manifest);
+```
+
+`embed_static!` omite los nombres que empiezan por `.`. Las ediciones
+recompilan el crate; un archivo nuevo necesita
+`println!("cargo:rerun-if-changed=static");` en `build.rs`.
+
 
 ---
 

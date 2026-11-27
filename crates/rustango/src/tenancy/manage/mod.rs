@@ -268,6 +268,9 @@ where
     #[cfg(feature = "postgres")]
     crate::tenancy::boot_checks(pools).await?;
     let cmd = args.first().map_or("", String::as_str);
+    if crate::cli_verbs::TENANCY_ENGINE_V1_VERBS.contains(&cmd) {
+        crate::migrate::require_v1_project(dir)?;
+    }
 
     match cmd {
         "" | "help" | "--help" | "-h" => {
@@ -321,6 +324,13 @@ where
                 report.total_active, report.warmed, report.failed, report.skipped_cap
             )?;
             migrations::tenant_failures(report.failed, report.total_active)
+        }
+        // A prune under tenancy reads every ledger, not just the registry's (9.6).
+        "dbmigrate"
+            if args.get(1).map(String::as_str) == Some("squash")
+                && !args.iter().any(|a| a == "--assume-all-applied") =>
+        {
+            migrations::v2_prune(pools, registry_url, dir, &args[2..], writer).await
         }
         "migrate-tenants" => {
             migrations::migrate_tenants_cmd(pools, registry_url, dir, &args[1..], writer).await

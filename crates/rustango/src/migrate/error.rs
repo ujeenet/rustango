@@ -77,6 +77,67 @@ pub enum MigrateError {
         /// The driver error that stopped it.
         source: Box<sqlx::Error>,
     },
+
+    /// Migration files written for engine v2, which this release cannot run.
+    #[error(
+        "{origin} holds engine v2 migrations, and rustango {version} runs engine v1 only. \
+         It needs a newer rustango with migrations engine v2: use `manage dbmigrate` there.",
+        version = env!("CARGO_PKG_VERSION")
+    )]
+    #[non_exhaustive]
+    EngineV2 {
+        /// The folder, file or embedded entry that holds them.
+        origin: String,
+    },
+
+    /// Engine v1 and engine v2 migration files in one project.
+    #[error(
+        "this project mixes engine v1 and engine v2 migration files; a project runs one \
+         engine. v1: {}. v2: {}.",
+        super::engine::path_list(.v1),
+        super::engine::path_list(.v2)
+    )]
+    #[non_exhaustive]
+    MixedEngine {
+        /// The v1 files.
+        v1: Vec<std::path::PathBuf>,
+        /// The v2 files.
+        v2: Vec<std::path::PathBuf>,
+    },
+
+    /// An engine v2 file in the `system` folder, which stays engine v1.
+    #[error(
+        "the `system` folder is the framework's own chain and stays on engine v1; \
+         move these engine v2 files to an app folder: {}",
+        super::engine::path_list(.files)
+    )]
+    #[non_exhaustive]
+    SystemChainV2 {
+        /// The v2 files found there.
+        files: Vec<std::path::PathBuf>,
+    },
+
+    /// The database was switched to engine v2: it holds the v2 ledger.
+    #[error(
+        "this database was switched to migrations engine v2 (table `{table}` exists), and \
+         rustango {version} runs engine v1 only; migrate it with the newer release",
+        version = env!("CARGO_PKG_VERSION")
+    )]
+    #[non_exhaustive]
+    SwitchedToV2 {
+        /// The v2 ledger table found.
+        table: String,
+    },
+
+    /// Engine v2 met a server it does not support.
+    #[error(
+        "migrations engine v2 supports MySQL 8.0.16+; MariaDB is not supported (server {server})"
+    )]
+    #[non_exhaustive]
+    UnsupportedServer {
+        /// What the server reports as its version.
+        server: String,
+    },
 }
 
 impl From<crate::sql::UnsavedRow> for MigrateError {

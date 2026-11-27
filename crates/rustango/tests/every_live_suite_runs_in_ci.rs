@@ -444,6 +444,126 @@ fn every_named_target_with_a_mysql_arm_still_exists() {
     );
 }
 
+/// Module path of a source file under `src/`, following `#[path]` includes.
+fn lib_module_path(src: &Path, file: &Path) -> String {
+    let rel = file.strip_prefix(src).expect("file under src");
+    let name = rel.file_name().and_then(|s| s.to_str()).unwrap_or_default();
+    let dir = rel.parent().unwrap_or(Path::new(""));
+    let mut parts: Vec<String> = dir
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    // `#[path = "x_tests.rs"] mod tests;` in a sibling file names it.
+    for sib in std::fs::read_dir(src.join(dir))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let p = sib.path();
+        let text = std::fs::read_to_string(&p).unwrap_or_default();
+        let mut lines = text.lines();
+        while let Some(l) = lines.next() {
+            if l.trim() == format!("#[path = \"{name}\"]") {
+                let decl = lines.next().unwrap_or_default().trim();
+                let m = decl
+                    .trim_start_matches("pub(crate) ")
+                    .trim_start_matches("mod ")
+                    .trim_end_matches(';');
+                let host = p.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+                if host != "mod" && host != "lib" {
+                    parts.push(host.to_owned());
+                }
+                parts.push(m.to_owned());
+                return parts.join("::");
+            }
+        }
+    }
+    let stem = rel.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+    if stem != "mod" && stem != "lib" {
+        parts.push(stem.to_owned());
+    }
+    parts.join("::")
+}
+
+/// Every lib source file whose tests reach MySQL, by module path.
+fn lib_modules_with_a_mysql_arm() -> BTreeSet<String> {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut out = BTreeSet::new();
+    let mut stack = vec![src.clone()];
+    while let Some(dir) = stack.pop() {
+        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if p.extension().and_then(|s| s.to_str()) != Some("rs")
+                || p.ends_with("testkit/matrix.rs")
+            {
+                continue;
+            }
+            let text = std::fs::read_to_string(&p).unwrap_or_default();
+            let reaches = code_lines(&text).any(|l| {
+                l.contains("Backend::MySql")
+                    || l.contains("live_url(\"MYSQL_TEST_URL\"")
+                    || l.contains("MySql if \"mysql\"")
+            });
+            if reaches {
+                out.insert(lib_module_path(&src, &p));
+            }
+        }
+    }
+    out
+}
+
+/// Literal module prefixes the `mysql_live` job selects from the lib binary.
+fn lib_test_prefixes(block: &str) -> Vec<String> {
+    let key = "binary(=rustango) & test(/^";
+    block
+        .match_indices(key)
+        .map(|(i, _)| {
+            let rest = &block[i + key.len()..];
+            let end = rest
+                .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':'))
+                .unwrap_or(rest.len());
+            rest[..end].trim_end_matches(':').to_owned()
+        })
+        // A clause with no literal prefix (an exclusion) selects no module.
+        .filter(|p| !p.is_empty())
+        .collect()
+}
+
+/// Lib test modules with a MySQL arm are selected by the `mysql_live` job,
+/// which is the only job that sets `MYSQL_TEST_URL`.
+#[test]
+fn every_lib_module_with_a_mysql_arm_is_selected_in_the_ci_job() {
+    let modules = lib_modules_with_a_mysql_arm();
+    let prefixes = lib_test_prefixes(&mysql_live_job());
+    assert!(!modules.is_empty(), "the src scan found no MySQL arm");
+    assert!(
+        !prefixes.is_empty(),
+        "parsed no lib filters from `mysql_live`"
+    );
+    let missing: Vec<&String> = modules
+        .iter()
+        .filter(|m| {
+            !prefixes
+                .iter()
+                .any(|p| p.starts_with(m.as_str()) || m.starts_with(p.as_str()))
+        })
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these lib modules have a MySQL arm the `mysql_live` job never selects:\n\n  {}\n\n\
+         Add `(binary(=rustango) & test(/^<module>::/))` to its `-E` filterset.",
+        missing
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+}
+
 /// Naming a suite, and building the `mysql` feature, still is not
 /// running it: both jobs need their database URL in `env:`.
 ///

@@ -17,10 +17,10 @@
 //!
 //! ```toml
 //! [dependencies]
-//! rustango = "0.70"                                        # Postgres (the default backend)
+//! rustango = "0.71"                                        # Postgres (the default backend)
 //! # or pick another backend — see "Choosing a backend" below:
-//! rustango = { version = "0.70", default-features = false, features = ["sqlite", "batteries"] }
-//! rustango = { version = "0.70", default-features = false, features = ["mysql",  "batteries"] }
+//! rustango = { version = "0.71", default-features = false, features = ["sqlite", "batteries"] }
+//! rustango = { version = "0.71", default-features = false, features = ["mysql",  "batteries"] }
 //! ```
 //!
 //! `default = ["postgres", "batteries"]`. **`batteries`** is everything except
@@ -1677,6 +1677,9 @@ pub mod prelude {
 /// const NONE: &[(&str, &str)] = rustango::embed_migrations!("./no_such_migrations_dir");
 /// ```
 pub use rustango_macros::embed_migrations;
+
+/// Register an engine v2 data step; see [`migrate::v2::StepCtx`].
+pub use rustango_macros::data_step;
 
 /// Compile a static directory into the binary; serve it with
 /// [`static_files::StaticFiles::embedded`].

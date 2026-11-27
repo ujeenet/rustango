@@ -63,6 +63,8 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     first_admin_mail: Option<(crate::email::BoxedMailer, String)>,
     /// How long `serve` lets open connections finish after SIGTERM.
     pub(crate) drain_timeout: std::time::Duration,
+    /// How the boot fleet run goes: `[migrate]` rollout settings (8.3).
+    pub(crate) fleet: crate::tenancy::migrate_v2::FleetOptions,
     /// A `running` run silent this long is closed at boot.
     stale_run_after: std::time::Duration,
     /// Mounts registered via [`Builder::with_static_files`].
@@ -196,6 +198,7 @@ impl<DB: Database> Builder<DB> {
             #[cfg(feature = "email")]
             first_admin_mail: None,
             drain_timeout: crate::shutdown::DEFAULT_DRAIN_TIMEOUT,
+            fleet: crate::tenancy::migrate_v2::FleetOptions::default(),
             stale_run_after: crate::tenancy::provision_store::STALE_RUN_AFTER,
             static_dirs: Vec::new(),
             observability: false,
@@ -761,6 +764,15 @@ impl<DB: Database> Builder<DB> {
         crate::tenancy::boot_checks(self.pools.as_ref()).await?;
         let root = project_root.as_ref();
         std::fs::create_dir_all(root)?;
+        if matches!(
+            crate::migrate::ProjectEngine::of_project(root)?,
+            crate::migrate::ProjectEngine::V2 { .. }
+        ) {
+            self.migrate_fleet_v2(root).await?;
+            return Ok(self);
+        }
+        // Before `init_tenancy_fn` writes anything.
+        crate::migrate::require_v1_project(root)?;
 
         // Detect which shape the user passed. If `<root>/migrations/`
         // exists OR `<root>/<app>/migrations/` exists, we're a project
@@ -770,10 +782,7 @@ impl<DB: Database> Builder<DB> {
         if dirs.is_empty() && root_has_json_files(root) {
             // v0.8.1 shape: user passed the flat migrations dir.
             (self.init_tenancy_fn)(root)?;
-            let _ = crate::tenancy::migrate_registry(self.pools.as_ref(), root).await?;
-            let _ =
-                crate::tenancy::migrate_tenants_dyn(self.pools.as_ref(), root, &self.registry_url)
-                    .await?;
+            self.migrate_registry_then_tenants(root).await?;
             return Ok(self);
         }
 
@@ -783,10 +792,76 @@ impl<DB: Database> Builder<DB> {
         (self.init_tenancy_fn)(&flat)?;
 
         // Each runner walks the flat dir and every app dir, with one system chain.
-        let _ = crate::tenancy::migrate_registry(self.pools.as_ref(), root).await?;
-        let _ = crate::tenancy::migrate_tenants_dyn(self.pools.as_ref(), root, &self.registry_url)
-            .await?;
+        self.migrate_registry_then_tenants(root).await?;
         Ok(self)
+    }
+
+    /// Engine v2 at boot (8.3): the registry chain, then the fleet. A
+    /// registry or system failure (or a blocker) stops the boot; a failed
+    /// tenant does not: it is logged and serves 503 maintenance.
+    async fn migrate_fleet_v2(
+        &self,
+        root: &std::path::Path,
+    ) -> Result<(), crate::tenancy::TenancyError>
+    where
+        crate::sql::Pool: From<sqlx::Pool<DB>>,
+    {
+        let report = crate::tenancy::migrate_v2::run_fleet(
+            self.pools.as_ref(),
+            root,
+            &self.registry_url,
+            &self.fleet,
+        )
+        .await?;
+        // Failed tenants, and those a stop left behind, serve 503.
+        let failed: Vec<String> = report
+            .failed()
+            .map(|t| t.slug.clone())
+            .chain(report.skipped.iter().cloned())
+            .collect();
+        for t in report.failed() {
+            tracing::error!(
+                target: "rustango::tenancy",
+                slug = %t.slug,
+                class = t.error_class.as_deref().unwrap_or_default(),
+                error = t.error.as_deref().unwrap_or_default(),
+                "tenant migration failed at boot: migrations must be run; it serves 503 until then"
+            );
+        }
+        // Each parked at its cache run id: a later applied run frees it.
+        let runs: std::collections::HashMap<String, Option<String>> =
+            crate::migrate::v2::ledger::cache_runs(&self.pools.registry_pool())
+                .await
+                .map_err(crate::tenancy::TenancyError::Migrate)?
+                .into_iter()
+                .collect();
+        self.pools.set_maintenance(failed.into_iter().map(|slug| {
+            let run = runs.get(&slug).cloned().flatten();
+            (slug, run)
+        }));
+        Ok(())
+    }
+
+    /// The registry, then every tenant. A registry switched to engine v2
+    /// is ahead of this binary: boot warns and serves without migrating.
+    async fn migrate_registry_then_tenants(
+        &self,
+        dir: &std::path::Path,
+    ) -> Result<(), crate::tenancy::TenancyError>
+    where
+        crate::sql::Pool: From<sqlx::Pool<DB>>,
+    {
+        match crate::tenancy::migrate_registry(self.pools.as_ref(), dir).await {
+            Err(crate::tenancy::TenancyError::Migrate(e))
+                if crate::migrate::boot_skips_switched_db(&e) =>
+            {
+                return Ok(());
+            }
+            registry => drop(registry?),
+        }
+        crate::tenancy::migrate_tenants_dyn(self.pools.as_ref(), dir, &self.registry_url)
+            .await
+            .map(drop)
     }
 
     /// Bind + serve. Owns the host dispatcher, operator console,
@@ -1301,6 +1376,60 @@ impl<DB: Database> Builder<DB> {
         self
     }
 
+    /// Bind first, run the boot fleet behind the boot gate (`/health` 200,
+    /// `/ready` and every route 503), then serve the app (6.11, 8.3).
+    ///
+    /// # Errors
+    /// A bind failure, the boot migrate, or [`Self::into_router`].
+    #[cfg(feature = "manage")]
+    pub(crate) async fn serve_after_fleet(
+        self,
+        addr: &str,
+        dir: std::path::PathBuf,
+        lock_timeout: std::time::Duration,
+    ) -> Result<(), Box<dyn std::error::Error>>
+    where
+        crate::sql::Pool: From<sqlx::Pool<DB>>,
+    {
+        let drain = self.drain_timeout;
+        let gate = crate::manage::boot_gate::BootGate::default();
+        let listener = crate::shutdown::bind_announced(addr, Some(&self.apex)).await?;
+        let port = listener.local_addr()?.port();
+        let serving = tokio::spawn(crate::shutdown::serve_until_drained(
+            listener,
+            gate.router(),
+            drain,
+        ));
+        let booted = async {
+            let b = crate::migrate::with_lock_timeout(lock_timeout, self.migrate(dir)).await?;
+            b.warn_email_gaps();
+            b.into_router().await
+        }
+        .await;
+        match booted {
+            Ok(app) => gate.open(app.layer(Extension(ListenerPort(port)))),
+            Err(e) => {
+                serving.abort();
+                return Err(e);
+            }
+        }
+        serving.await??;
+        Ok(())
+    }
+
+    #[allow(clippy::unused_self)]
+    fn warn_email_gaps(&self)
+    where
+        crate::sql::Pool: From<sqlx::Pool<DB>>,
+    {
+        #[cfg(feature = "sso")]
+        if crate::tenancy::login_field() == crate::login_field::LoginField::Email {
+            // Off the boot path: one slow tenant must not delay the bind.
+            let pools = self.pools.clone();
+            tokio::spawn(async move { crate::tenancy::login::warn_email_gaps(&pools).await });
+        }
+    }
+
     /// Assemble everything and bind.
     ///
     /// # Errors
@@ -1311,12 +1440,7 @@ impl<DB: Database> Builder<DB> {
     {
         let drain = self.drain_timeout;
         let apex = self.apex.clone();
-        #[cfg(feature = "sso")]
-        if crate::tenancy::login_field() == crate::login_field::LoginField::Email {
-            // Off the boot path: one slow tenant must not delay the bind.
-            let pools = self.pools.clone();
-            tokio::spawn(async move { crate::tenancy::login::warn_email_gaps(&pools).await });
-        }
+        self.warn_email_gaps();
         let app = self.into_router().await?;
         let listener = crate::shutdown::bind_announced(addr, Some(&apex)).await?;
         let app = tag_listener_port(app, &listener)?;

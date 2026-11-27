@@ -643,6 +643,8 @@ jobs:
           --health-retries 20
     env:
       DATABASE_URL: postgres://rustango:rustango@localhost:5432/rustango_test
+      # A live arm whose URL went missing panics instead of passing skipped.
+      RUSTANGO_REQUIRE_LIVE: postgres
       # In CI a missing extension fails its suite; this image has no PostGIS,
       # whose suites run in `postgis_live`.
       RUSTANGO_TEST_MISSING_PG_EXTENSIONS: postgis
@@ -1562,6 +1564,11 @@ jobs:
         partition: [1, 2, 3]
         # MariaDB speaks the same protocol, but not the same SQL.
         db: [mysql, mariadb]
+        # Migrations engine v2 supports MySQL 8 only: on MariaDB its lib tests
+        # are skipped, all but the one that checks it refuses the server.
+        include:
+          - db: mariadb
+            v2_skip: " - (binary(=rustango) & test(/^(migrate::v2|tenancy::migrate_v2)::/) & not test(/a_mariadb_server_is_refused/))"
     services:
       mysql:
         # GHCR mirror, see `postgres_test`.
@@ -1583,6 +1590,7 @@ jobs:
           --health-retries 30
     env:
       MYSQL_TEST_URL: mysql://rustango:rustango@127.0.0.1:3306/rustango_test
+      RUSTANGO_REQUIRE_LIVE: mysql
     steps:
       # Same disk reason and SHA pin as `postgres_test`.
       - name: Free disk space
@@ -1604,16 +1612,15 @@ jobs:
         with:
           name: nextest-archive
           path: ${{ runner.temp }}
-      # Suites that make their own `rustango_*` databases (#1988) need CREATE
-      # rights, and tenancy provisions into a second database the service
-      # does not grant. `Backend::pool` runs each nextest slot on `rustango-test-s<N>`.
-      - name: Grant rustango_* databases
+      # Suites make their own databases (`rustango_*`, `rgo-own-*`, engine v2's
+      # scratch ones), logins and roles, grant table rights to them, and read
+      # `performance_schema`: the server-wide rights a local test server has.
+      # `Backend::pool` runs each nextest slot on `rustango-test-s<N>`.
+      - name: Grant the test user
         run: |
           mysql -h 127.0.0.1 -P 3306 -uroot -prustango -e "
-            GRANT ALL PRIVILEGES ON \`rustango\_%\`.* TO 'rustango'@'%';
-            GRANT ALL PRIVILEGES ON \`rustango-test-s%\`.* TO 'rustango'@'%';
+            GRANT ALL PRIVILEGES ON *.* TO 'rustango'@'%' WITH GRANT OPTION;
             CREATE DATABASE IF NOT EXISTS rustango_tenant_test;
-            GRANT ALL PRIVILEGES ON rustango_tenant_test.* TO 'rustango'@'%';
             FLUSH PRIVILEGES;"
       # Every suite with a MySQL arm, from the `--all-features` archive
       # `tests_compile` built; `every_live_suite_runs_in_ci` checks the list.
@@ -1624,7 +1631,7 @@ jobs:
           --workspace-remap ${{ github.workspace }}
           --extract-to ${{ github.workspace }}
           --partition count:${{ matrix.partition }}/3
-          -E 'binary(=jobs_mysql_live) |
+          -E '(binary(=jobs_mysql_live) |
           binary(=jobs_worker_survives_tri) |
           binary(=mysql_live) |
           binary(=explain_pool_tri) |
@@ -1690,6 +1697,13 @@ jobs:
           binary(=tenant_login_field_tri) |
           binary(=api_key_hmac_tri) |
           binary(=system_chain_order_tri) |
+          binary(=migrate_engine_v2_refusal_tri) |
+          binary(=migrate_v2_hist_tri) |
+          (binary(=rustango) & test(/^migrate::v2::render_live_tests::/)) |
+          (binary(=rustango) & test(/^migrate::v2::run::live_tests::/)) |
+          (binary(=rustango) & test(/^tenancy::migrate_v2::tests::/)) |
+          (binary(=rustango) & test(/^migrate::chains::tests::regenerated_chain_refuses_column_drift$/)) |
+          (binary(=rustango) & test(/^migrate::runner::tests::a_failed_table_probe_is_an_error$/)) |
           binary(=agent_grants_unique_tri) |
           binary(=admin_totp_replay_tri) |
           binary(=operator_console_totp_tri) |
@@ -1763,7 +1777,7 @@ jobs:
           binary(=orm_setops) |
           binary(=orm_json_dates) |
           binary(=orm_writes) |
-          binary(=orm_delta)'
+          binary(=orm_delta))${{ matrix.v2_skip }}'
       # These create databases and users, so they run as root. The archive
       # is already extracted by the step above.
       - run: >-

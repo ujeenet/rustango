@@ -1,0 +1,324 @@
+{
+  "app": "rustango_tenancy_agents",
+  "engine": 2,
+  "format": 1,
+  "id": "0001_initial",
+  "operations": [
+    {
+      "indexes": [
+        {
+          "columns": [
+            "codename"
+          ],
+          "constraint": true,
+          "name": "rustango_agent_skills_codename_key",
+          "unique": true
+        }
+      ],
+      "op": "adopt_table",
+      "table": {
+        "fields": [
+          {
+            "column": "codename",
+            "max_length": 100,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "data",
+            "nullable": false,
+            "portable_default": "empty_object",
+            "ty": "json"
+          },
+          {
+            "column": "description",
+            "max_length": 500,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "auto": true,
+            "column": "id",
+            "nullable": false,
+            "primary_key": true,
+            "ty": "i64"
+          },
+          {
+            "column": "instructions",
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "name",
+            "max_length": 150,
+            "nullable": false,
+            "ty": "string"
+          }
+        ],
+        "name": "rustango_agent_skills",
+        "scope": "tenant"
+      },
+      "v": 1
+    },
+    {
+      "indexes": [
+        {
+          "columns": [
+            "skill_id",
+            "permission_codename"
+          ],
+          "name": "rustango_agent_skill_permissions_skill_id_permission_c_73ae1da0",
+          "unique": true
+        }
+      ],
+      "op": "adopt_table",
+      "table": {
+        "fields": [
+          {
+            "auto": true,
+            "column": "id",
+            "nullable": false,
+            "primary_key": true,
+            "ty": "i64"
+          },
+          {
+            "column": "permission_codename",
+            "max_length": 150,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "skill_id",
+            "fk": {
+              "name": "rustango_agent_skill_permissions_skill_id_fkey",
+              "on": "id",
+              "on_delete": "cascade",
+              "to": "rustango_agent_skills"
+            },
+            "nullable": false,
+            "ty": "i64"
+          }
+        ],
+        "name": "rustango_agent_skill_permissions",
+        "scope": "tenant"
+      },
+      "v": 1
+    },
+    {
+      "op": "adopt_table",
+      "table": {
+        "fields": [
+          {
+            "column": "data",
+            "nullable": false,
+            "portable_default": "empty_object",
+            "ty": "json"
+          },
+          {
+            "auto": true,
+            "column": "id",
+            "nullable": false,
+            "primary_key": true,
+            "ty": "i64"
+          },
+          {
+            "column": "mime",
+            "max_length": 100,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "resource_uri",
+            "max_length": 500,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "skill_id",
+            "fk": {
+              "name": "rustango_agent_skill_resources_skill_id_fkey",
+              "on": "id",
+              "on_delete": "cascade",
+              "to": "rustango_agent_skills"
+            },
+            "nullable": false,
+            "ty": "i64"
+          }
+        ],
+        "name": "rustango_agent_skill_resources",
+        "scope": "tenant"
+      },
+      "v": 1
+    },
+    {
+      "op": "adopt_table",
+      "table": {
+        "fields": [
+          {
+            "auto": true,
+            "column": "id",
+            "nullable": false,
+            "primary_key": true,
+            "ty": "i64"
+          },
+          {
+            "column": "skill_id",
+            "fk": {
+              "name": "rustango_agent_skill_tools_skill_id_fkey",
+              "on": "id",
+              "on_delete": "cascade",
+              "to": "rustango_agent_skills"
+            },
+            "nullable": false,
+            "ty": "i64"
+          },
+          {
+            "column": "tool_name",
+            "max_length": 150,
+            "nullable": false,
+            "ty": "string"
+          }
+        ],
+        "name": "rustango_agent_skill_tools",
+        "scope": "tenant"
+      },
+      "v": 1
+    },
+    {
+      "indexes": [
+        {
+          "columns": [
+            "name"
+          ],
+          "constraint": true,
+          "name": "rustango_agents_name_key",
+          "unique": true
+        },
+        {
+          "columns": [
+            "secret_prefix"
+          ],
+          "constraint": true,
+          "name": "rustango_agents_secret_prefix_key",
+          "unique": true
+        }
+      ],
+      "op": "adopt_table",
+      "table": {
+        "fields": [
+          {
+            "column": "active",
+            "nullable": false,
+            "ty": "bool"
+          },
+          {
+            "column": "created_at",
+            "nullable": false,
+            "portable_default": "now",
+            "ty": "datetime"
+          },
+          {
+            "column": "data",
+            "nullable": false,
+            "portable_default": "empty_object",
+            "ty": "json"
+          },
+          {
+            "auto": true,
+            "column": "id",
+            "nullable": false,
+            "primary_key": true,
+            "ty": "i64"
+          },
+          {
+            "column": "name",
+            "max_length": 150,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "secret_hash",
+            "max_length": 255,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "secret_prefix",
+            "max_length": 16,
+            "nullable": false,
+            "ty": "string"
+          },
+          {
+            "column": "secret_rotated_at",
+            "nullable": true,
+            "ty": "datetime"
+          },
+          {
+            "column": "user_id",
+            "nullable": true,
+            "ty": "i64"
+          }
+        ],
+        "name": "rustango_agents",
+        "scope": "tenant"
+      },
+      "v": 1
+    },
+    {
+      "indexes": [
+        {
+          "columns": [
+            "agent_id",
+            "skill_id"
+          ],
+          "name": "rustango_agent_grants_agent_id_skill_id_idx",
+          "unique": true
+        }
+      ],
+      "op": "adopt_table",
+      "table": {
+        "fields": [
+          {
+            "column": "agent_id",
+            "fk": {
+              "name": "rustango_agent_grants_agent_id_fkey",
+              "on": "id",
+              "on_delete": "cascade",
+              "to": "rustango_agents"
+            },
+            "nullable": false,
+            "ty": "i64"
+          },
+          {
+            "column": "data",
+            "nullable": false,
+            "portable_default": "empty_object",
+            "ty": "json"
+          },
+          {
+            "auto": true,
+            "column": "id",
+            "nullable": false,
+            "primary_key": true,
+            "ty": "i64"
+          },
+          {
+            "column": "skill_id",
+            "fk": {
+              "name": "rustango_agent_grants_skill_id_fkey",
+              "on": "id",
+              "on_delete": "cascade",
+              "to": "rustango_agent_skills"
+            },
+            "nullable": false,
+            "ty": "i64"
+          }
+        ],
+        "name": "rustango_agent_grants",
+        "scope": "tenant"
+      },
+      "v": 1
+    }
+  ],
+  "target": "tenant"
+}
