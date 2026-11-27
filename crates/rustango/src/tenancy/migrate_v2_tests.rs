@@ -1755,6 +1755,7 @@ async fn mysql_revoke_case(wide_case: bool) {
 /// Prune under tenancy (9.6): refused while a tenant ran part of what the
 /// checkpoint replaces; allowed once it caught up with the old files.
 /// `slugs` are orgs already on `pools`, the registry chain run.
+#[cfg(any(feature = "postgres", feature = "sqlite"))]
 async fn prune_waits_for_tenants<DB: sqlx::Database>(
     pools: &TenantPools<DB>,
     registry_url: &str,
