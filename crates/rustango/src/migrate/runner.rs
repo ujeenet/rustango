@@ -2539,7 +2539,7 @@ where
                 })
                 .await;
             // A directory or file that refuses the lock file, as a read-only one does.
-            let mut held = match held {
+            let held = match held {
                 Ok(held) => held,
                 Err(MigrateError::Driver(e)) => {
                     tracing::warn!(
@@ -2550,11 +2550,69 @@ where
                 }
                 Err(e) => return Err(e),
             };
+            let mut guard = SqliteLockGuard {
+                held: Some(held),
+                pool: sq.clone(),
+                release: release.to_string(),
+            };
             let result = body.await;
-            let _ = sqlx::query(&release).execute(held.conn()).await;
-            held.close().await;
+            guard.release().await;
             result
         }
+    }
+}
+
+/// The SQLite migrate lock while its body runs. A body dropped mid-statement
+/// leaves that statement running on the pool's worker thread (SQLite runs
+/// in-process), so the lock waits for the pool to go idle before it goes:
+/// a next run must not start until a late write of the dropped one lands.
+#[cfg(feature = "sqlite")]
+struct SqliteLockGuard {
+    held: Option<LockSession<sqlx::SqliteConnection>>,
+    pool: sqlx::SqlitePool,
+    release: String,
+}
+
+#[cfg(feature = "sqlite")]
+impl SqliteLockGuard {
+    /// How long a dropped run may hold the lock for its last statement: the
+    /// pool's busy timeout, plus the time to return the connection.
+    const DRAIN: std::time::Duration = std::time::Duration::from_secs(10);
+
+    async fn release(&mut self) {
+        if let Some(held) = self.held.take() {
+            Self::unlock(held, &self.release).await;
+        }
+    }
+
+    async fn unlock(mut held: LockSession<sqlx::SqliteConnection>, release: &str) {
+        let _ = sqlx::query(release).execute(held.conn()).await;
+        held.close().await;
+    }
+}
+
+#[cfg(feature = "sqlite")]
+impl Drop for SqliteLockGuard {
+    fn drop(&mut self) {
+        let Some(held) = self.held.take() else {
+            return;
+        };
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let (pool, release) = (self.pool.clone(), std::mem::take(&mut self.release));
+        rt.spawn(async move {
+            // A connection goes back to the pool only after its worker ran
+            // every queued statement, the dropped one included.
+            let until = std::time::Instant::now() + Self::DRAIN;
+            while pool.num_idle() < pool.size() as usize
+                && !pool.is_closed()
+                && std::time::Instant::now() < until
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Self::unlock(held, &release).await;
+        });
     }
 }
 

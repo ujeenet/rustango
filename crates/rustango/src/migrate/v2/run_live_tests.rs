@@ -1831,10 +1831,18 @@ async fn a_dropped_run_frees_the_lock(b: B) {
         ..Options::default()
     };
     let cut = tokio::time::timeout(Duration::from_secs(3), migrate(pool, &dir, &slow)).await;
-    // The dropped run's statement may still wait server-side: the lock must
+    // SQLite runs in-process: the dropped run's statement still waits on the
+    // worker thread, and the lock stays until it lands, so a next run never
+    // races its late write. Release the row first there.
+    let lite = b == B::Lite;
+    let mut htx = Some(htx);
+    if lite {
+        htx.take().unwrap().rollback().await.unwrap();
+    }
+    // On a server the dropped statement may still wait there: the lock must
     // be free anyway, while the row is still held.
     let lock = crate::migrate::with_lock_timeout(
-        Duration::from_secs(3),
+        Duration::from_secs(if lite { 12 } else { 3 }),
         crate::migrate::with_migrate_lock_held_v2(
             V2Token(()),
             pool,
@@ -1843,7 +1851,10 @@ async fn a_dropped_run_frees_the_lock(b: B) {
         ),
     )
     .await;
-    htx.rollback().await.unwrap();
+    if let Some(tx) = htx.take() {
+        tx.rollback().await.unwrap();
+    }
+    drop(htx);
     drop(hconn);
     holder.close().await;
     assert!(cut.is_err(), "the run was still waiting");
