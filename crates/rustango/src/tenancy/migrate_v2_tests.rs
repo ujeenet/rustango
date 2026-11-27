@@ -1,6 +1,8 @@
 //! Engine v2 under tenancy, live: schema mode on PG, DB mode on all three.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(any(feature = "postgres", feature = "sqlite"))]
+use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
