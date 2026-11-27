@@ -94,6 +94,8 @@ pub use runner::{applied_set_pool_with_ledger, migrate_to_pool_with_ledger};
 #[cfg(feature = "tenancy")]
 pub(crate) use runner::{rollback_pool, ApplyOrder, Rollback};
 // Ungated like the fn itself: a caller list here drifts from the callers' gates.
+#[cfg(feature = "tenancy")]
+pub(crate) use runner::applied_or_empty;
 #[allow(unused_imports)]
 pub(crate) use runner::try_table_exists_here;
 #[cfg(all(feature = "tenancy", feature = "media", feature = "postgres"))]
@@ -101,8 +103,10 @@ pub(crate) use runner::try_table_exists_in_schema;
 pub use runner::unapply_pool_with_ledger;
 #[cfg(all(feature = "tenancy", feature = "postgres"))]
 pub(crate) use runner::LEDGER_TABLES;
-#[cfg(feature = "tenancy")]
-pub(crate) use runner::{applied_or_empty, SYSTEM_LEDGER_TABLE};
+// Tests of `manage` read it in builds without tenancy.
+#[cfg(any(test, feature = "tenancy"))]
+#[cfg_attr(not(feature = "tenancy"), allow(unused_imports))]
+pub(crate) use runner::SYSTEM_LEDGER_TABLE;
 pub use runner::{ensure_ledger_pool_with_ledger, render_changes_between};
 pub(crate) use runner::{v2_ledger, with_migrate_lock_held_v2, LockScope};
 pub(crate) use runner::{LockHeld, Signals};

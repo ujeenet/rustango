@@ -16,7 +16,7 @@ use super::*;
 #[test]
 fn shipped_system_files_match_the_models() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/migrate/v2/system");
-    let generated = generate().unwrap();
+    let generated = super::gen::generate().unwrap();
     if std::env::var_os("RUSTANGO_WRITE_SYSTEM").is_some() {
         let mut index = String::from("&[\n");
         for (app, stem, text) in &generated {

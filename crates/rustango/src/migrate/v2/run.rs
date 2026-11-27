@@ -193,7 +193,7 @@ impl From<RunError> for MigrateError {
 }
 
 impl RunError {
-    #[cfg(feature = "tenancy")]
+    #[cfg(any(test, feature = "tenancy"))]
     pub(crate) fn code(&self) -> Option<Code> {
         match self {
             Self::Load(e) => Some(e.code),

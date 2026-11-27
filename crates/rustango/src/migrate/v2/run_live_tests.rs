@@ -5497,10 +5497,18 @@ async fn upgrade_from_0_69_runs_no_ddl(b: B) {
             .filter(|r| !r.unit_plan.is_empty())
             .map(|r| r.app)
             .collect();
-        let want: &[&str] = if email {
-            &[]
+        // Only the email columns this build compiles have a system app.
+        let gated: Vec<(&str, &str)> = [
+            ("rustango_admin_users", "rustango_admin_sso"),
+            ("rustango_users", "rustango_sso"),
+        ]
+        .into_iter()
+        .filter(|(t, _)| super::super::system::compiled(t, Some("email")))
+        .collect();
+        let want: Vec<&str> = if email {
+            Vec::new()
         } else {
-            &["rustango_admin_sso", "rustango_sso"]
+            gated.iter().map(|(_, app)| *app).collect()
         };
         assert_eq!(ran, want, "{b:?} email={email}");
         // MySQL renames the project's v1 check to its v2 name, nothing else.
@@ -5512,7 +5520,7 @@ async fn upgrade_from_0_69_runs_no_ddl(b: B) {
                 .all(|u| b == B::My && u.sql.iter().all(|s| s.contains("DROP CHECK"))),
             "{b:?}: {project:?}"
         );
-        for t in ["rustango_users", "rustango_admin_users"] {
+        for (t, _) in &gated {
             assert!(
                 columns(pool, t).await.contains(&"email".to_owned()),
                 "{b:?} {t}"

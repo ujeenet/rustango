@@ -56,6 +56,11 @@ const ALLOWED: &[(&str, &str)] = &[
          stage 3",
     ),
     (
+        "src/tenancy/migrate_v2.rs",
+        "same `after_connect` search_path scoping, for schema tenants and \
+         the migrator login",
+    ),
+    (
         "src/tenancy/manage/users.rs",
         "same `after_connect` search_path scoping",
     ),
@@ -159,6 +164,23 @@ fn without_test_modules(src: &str) -> String {
     out
 }
 
+/// A file a sibling includes as `#[cfg(test)] #[path = "<file>"] mod ..;`.
+fn test_only_file(path: &Path) -> bool {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else {
+        return false;
+    };
+    let decl = format!("#[path = \"{name}\"]");
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| {
+            let text = std::fs::read_to_string(e.path()).unwrap_or_default();
+            let lines: Vec<&str> = text.lines().map(str::trim).collect();
+            lines.windows(2).any(|w| w[1] == decl && is_test_gate(w[0]))
+        })
+}
+
 #[test]
 fn production_code_does_not_build_pools_directly() {
     let root = repo_root();
@@ -173,7 +195,7 @@ fn production_code_does_not_build_pools_directly() {
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/");
-        if ALLOWED.iter().any(|(f, _)| *f == rel) {
+        if ALLOWED.iter().any(|(f, _)| *f == rel) || test_only_file(path) {
             continue;
         }
         let Ok(text) = std::fs::read_to_string(path) else {

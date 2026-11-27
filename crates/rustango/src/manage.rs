@@ -2894,6 +2894,7 @@ mod tests {
             .expect("the next start runs it");
     }
 
+    #[cfg(feature = "sqlite")]
     const BOOT_CHILD: &str = "RUSTANGO_TEST_V2_BOOT_CHILD";
 
     /// A missing data step makes `runserver` exit non-zero before any

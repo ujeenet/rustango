@@ -26,7 +26,7 @@ pub mod model_shortcuts;
 // tri-dialect *emission* test impossible to compile unless the binary
 // also linked all three drivers, which is the opposite of the point.
 // `postgres` was always ungated; these two now match it.
-mod mysql;
+pub(crate) mod mysql;
 mod pool;
 mod postgres;
 mod range;
