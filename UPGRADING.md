@@ -150,15 +150,23 @@ untouched.
 
 ## 0.71.0
 
+Switching a project to migrations engine v2:
+
+1. Run `manage migrate` (engine v1) on every database until it is at the v1 head. This release adds a system step that re-creates the framework FKs older releases made without `ON DELETE CASCADE`; the v2 switch refuses a database without it.
+2. Run `manage dbmigrate adopt` once and commit the files it writes.
+3. Run `manage dbmigrate apply` on each database. Under tenancy run it once from the tenancy CLI: it migrates the registry, then every tenant.
+
+The switch is one way: v2 rollback stops at the adopt checkpoint. A database behind the v1 head is refused before anything is written; run `manage migrate` from the commit before `adopt`, then apply again.
+
 - Migrations engine v2 does not support MariaDB (it needs MySQL 8.0.16+): its runs refuse with `MigrateError::UnsupportedServer`. MariaDB projects keep using engine v1, which still works in 0.71.0: do not switch them to v2.
-- Every migrate verb, `Builder::migrate`, boot and the tenancy runners refuse a project with an engine v2 migration file (top-level `engine` or `format` key) with `MigrateError::EngineV2`, or `MigrateError::MixedEngine` when v1 and v2 files sit together; `file::list_dir`, `file::load` and `file::parse` refuse the file itself. `embed_migrations!` fails to compile on a mixed folder. The `system` folder does not decide the engine; an engine v2 file there is refused with `MigrateError::SystemChainV2`.
+- The engine v1 verbs (`migrate`, `makemigrations`, `downgrade`, `migrate-tenants`, `migrate-registry`, …) and the v1 runner APIs refuse a project with an engine v2 migration file (top-level `engine` or `format` key) with `MigrateError::EngineV2`, which names the `dbmigrate` verb to run (its new `instead` field), or `MigrateError::MixedEngine` when v1 and v2 files sit together. Boot (`runserver`, `Builder::migrate`) runs such a project on engine v2; `file::list_dir`, `file::load` and `file::parse` refuse the file itself. `embed_migrations!` fails to compile on a mixed folder. The `system` folder does not decide the engine; an engine v2 file there is refused with `MigrateError::SystemChainV2`.
 - A v1 migrate on a database holding the engine v2 ledger (`__rustango_migrations_v2`, or `<ledger>_v2`) is refused with `MigrateError::SwitchedToV2`; `runserver` and `Builder::migrate` log a warning and serve without migrating.
 - `migrate_embedded_pool` parses every entry before it takes the lock, so a bad entry no longer creates the ledger.
 - Inside an engine v2 migration data step, `&Pool` queries fail with the new `ExecError::InMigrationStep`, `databases::get`/`default` return `None` and `databases::pool` panics: a step writes only through its own unit.
 - `Settings` gains a `migrate` field (`[migrate]`, `MigrateSettings`): a struct literal of `Settings` must add it, or use `..Default::default()`. `boot_stale_after_secs` (default 120) is how old the lock holder's heartbeat may get before a booting replica gives up.
 - Engine v2 `down --to <id>` now rolls back only the target's descendants (over `parents` and `depends_on`), not every row applied after it; descendants in other apps need `--cascade`. A failed or partial migration is rolled back instead of refused.
 - Engine v2 DDL units run with the lock timeout (5 s by default): a PG `CONCURRENTLY` build or a MySQL `ALTER` that waits longer on a lock fails, and the next run resumes it.
-- A tenancy project on engine v2 migrates at boot (registry, then every tenant). A separate migrator login needs `CREATE` on the database, `CREATE` on schema `public` (PG 15+) and `CREATEROLE` while schema tenant roles are on; the database owner also runs `REVOKE TEMPORARY ON DATABASE <db> FROM PUBLIC`.
+- A tenancy project on engine v2 migrates at boot (registry, then every tenant), or with `manage dbmigrate apply` from the tenancy CLI; `dbmigrate down` there needs `--registry`, `--tenant <slug>` or `--all-tenants`. A separate migrator login needs `CREATE` on the database, `CREATE` on schema `public` (PG 15+) and `CREATEROLE` while schema tenant roles are on; the database owner also runs `REVOKE TEMPORARY ON DATABASE <db> FROM PUBLIC`.
 - `TenancyError::Maintenance` and `TenantRejection::Maintenance` are new: a tenant whose engine v2 migration failed answers 503 (its tenant admin too) until a run applies it; a run from another process (`migrate-tenants`) frees it within seconds, no restart needed.
 - Engine v2 resume ends the DDL session a killed run left behind. A migrate role ends its own sessions without extra rights; to end another role's session, PG needs `GRANT pg_signal_backend, pg_read_all_stats TO <migrate role>` and MySQL needs `GRANT CONNECTION_ADMIN, PROCESS ON *.* TO <migrate user>`. Without it, resume stops with an error naming the grant and leaves the ledger as it was.
 - `runserver` on an engine v2 project binds before it migrates: `/health` answers 200, `/ready` and every route 503 until the run ends. A SIGTERM during the run stops after the current unit and exits non-zero; the next start resumes.
