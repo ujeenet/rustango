@@ -4275,6 +4275,7 @@ per_backend!(
     adopt_table_verifies_or_creates,
     portable_defaults_render_per_backend,
     v1_framework_tables_adopt_cleanly,
+    adopt_column_verifies_adds_or_refuses,
 );
 
 /// Legacy SQLite datetime text is swept before the first data unit, so a
@@ -4881,5 +4882,95 @@ async fn v1_framework_tables_adopt_cleanly(b: B) {
         "{b:?}: {} differences:\n{}",
         list.len(),
         list.join("\n")
+    );
+}
+
+/// `adopt_column` (design item 22): a base `adopt_table` and a feature
+/// app's `adopt_column`. A table that already has the column is adopted
+/// with no DDL, the column checked by its own definition; one without it
+/// gets the column; a column that differs is refused.
+async fn adopt_column_verifies_adds_or_refuses(b: B) {
+    let base = json!({"name": "ac_t", "scope": "tenant", "fields": [
+        {"column": "id", "ty": "i64", "primary_key": true, "nullable": false}]});
+    let email = json!({"column": "email", "ty": "string", "max_length": 254, "nullable": true});
+    let root = tempfile::tempdir().unwrap();
+    let adopt = root.path().join("adopt").join("migrations");
+    put(
+        &adopt,
+        "0001_base",
+        &v2(
+            "0001_base",
+            &[],
+            json!([{"op": "adopt_table", "v": 1, "table": base}]),
+        ),
+    );
+    put(
+        &adopt,
+        "0002_email",
+        &v2(
+            "0002_email",
+            &["0001_base"],
+            json!([{"op": "adopt_column", "v": 1, "table": "ac_t", "column": email}]),
+        ),
+    );
+    let made = |cols: Value| {
+        let d = root
+            .path()
+            .join(format!("made{}", cols.as_array().unwrap().len()))
+            .join("migrations");
+        let mut fields =
+            vec![json!({"column": "id", "ty": "i64", "primary_key": true, "nullable": false})];
+        fields.extend(cols.as_array().unwrap().iter().cloned());
+        put(
+            &d,
+            "0001_t",
+            &v2(
+                "0001_t",
+                &[],
+                json!([{"op": "create_table", "v": 1,
+            "table": {"name": "ac_t", "scope": "tenant", "fields": fields}}]),
+            ),
+        );
+        d
+    };
+    let other = Options {
+        ledger: Some("__made_migrations__".into()),
+        ..opts()
+    };
+    // Present and the same: recorded, no units at all.
+    let Some(with) = fresh(b).await else { return };
+    migrate(&with.pool, &made(json!([email])), &other)
+        .await
+        .unwrap();
+    migrate(&with.pool, &adopt, &opts())
+        .await
+        .unwrap_or_else(|e| panic!("{b:?}: {e}"));
+    let rows = Ledger::default_names().rows(&with.pool).await.unwrap();
+    assert!(
+        rows.iter().all(|r| r.unit_plan.is_empty()),
+        "{b:?}: {rows:?}"
+    );
+    // Absent: added.
+    let without = fresh(b).await.unwrap();
+    migrate(&without.pool, &made(json!([])), &other)
+        .await
+        .unwrap();
+    migrate(&without.pool, &adopt, &opts())
+        .await
+        .unwrap_or_else(|e| panic!("{b:?}: {e}"));
+    assert_eq!(columns(&without.pool, "ac_t").await, ["id", "email"]);
+    // Rolling the column app back forgets it: the column stays.
+    downgrade(&without.pool, &adopt, 1, &opts()).await.unwrap();
+    assert_eq!(columns(&without.pool, "ac_t").await, ["id", "email"]);
+    // Present but different: refused.
+    let differs = fresh(b).await.unwrap();
+    // NOT NULL where the feature's column is nullable: every backend reports it.
+    let narrow = json!({"column": "email", "ty": "string", "max_length": 254, "nullable": false});
+    migrate(&differs.pool, &made(json!([narrow])), &other)
+        .await
+        .unwrap();
+    assert_eq!(
+        code(migrate(&differs.pool, &adopt, &opts()).await),
+        Code::Drift
     );
 }

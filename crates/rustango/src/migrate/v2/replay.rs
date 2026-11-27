@@ -221,6 +221,7 @@ pub(crate) fn apply(
             column,
             fill,
         } => add_column(s, at, table, column, fill.as_deref(), created_here)?,
+        Op::AdoptColumn { table, column } => add_column(s, at, table, column, None, created_here)?,
         Op::DropColumn {
             table,
             column,

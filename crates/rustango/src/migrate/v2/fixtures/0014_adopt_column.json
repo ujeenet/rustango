@@ -1,0 +1,11 @@
+{
+  "engine": 2, "format": 1,
+  "id": "0014_adopt_column", "app": "accounts",
+  "parents": ["0013_portable_defaults"],
+  "target": "tenant",
+  "description": "Takes over a feature-gated column",
+  "operations": [
+    { "op": "adopt_column", "v": 1, "table": "user", "label": "email",
+      "column": { "column": "email", "ty": "string", "max_length": 254, "nullable": true } }
+  ]
+}

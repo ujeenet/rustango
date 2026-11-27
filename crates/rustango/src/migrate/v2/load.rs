@@ -64,6 +64,7 @@ impl crate::migrate::chains::ChainFacts for Loaded {
                 }
                 Op::AlterTableComment { table, .. }
                 | Op::AddColumn { table, .. }
+                | Op::AdoptColumn { table, .. }
                 | Op::DropColumn { table, .. }
                 | Op::RenameColumn { table, .. }
                 | Op::AlterColumn { table, .. }

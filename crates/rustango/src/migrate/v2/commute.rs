@@ -159,7 +159,8 @@ pub(crate) fn keys(op: &Op, at: &str) -> Result<Keys, LoadError> {
         }
         Op::AddColumn {
             table: t, column, ..
-        } => {
+        }
+        | Op::AdoptColumn { table: t, column } => {
             k.writes.insert(col(t, &column.column.column));
             k.reads.insert(table(t));
             if let Some(fk) = &column.fk {

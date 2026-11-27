@@ -504,6 +504,12 @@ pub(crate) enum Op {
         #[serde(default)]
         fill: Option<String>,
     },
+    /// Take over an existing column (design item 22): verified if present,
+    /// added if not; rollback forgets it, never drops.
+    AdoptColumn {
+        table: String,
+        column: Field,
+    },
     DropColumn {
         table: String,
         column: String,
@@ -1158,6 +1164,7 @@ pub(crate) fn op_name(op: &Op) -> &'static str {
         Op::AlterTableComment { .. } => "alter_table_comment",
         Op::AdoptTable { .. } => "adopt_table",
         Op::AddColumn { .. } => "add_column",
+        Op::AdoptColumn { .. } => "adopt_column",
         Op::DropColumn { .. } => "drop_column",
         Op::RenameColumn { .. } => "rename_column",
         Op::AlterColumn { .. } => "alter_column",

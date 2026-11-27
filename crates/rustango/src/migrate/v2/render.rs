@@ -1400,7 +1400,10 @@ impl Render<'_> {
                     batch: batch.as_ref().and_then(|b| BatchPlan::of(b, self.before)),
                 }]
             }
-            Op::StateOnly { .. } | Op::ExternTable { .. } | Op::AdoptTable { .. } => Vec::new(),
+            Op::StateOnly { .. }
+            | Op::ExternTable { .. }
+            | Op::AdoptTable { .. }
+            | Op::AdoptColumn { .. } => Vec::new(),
             // Rendered by `op`.
             Op::ArchiveRestore { .. } | Op::ArchiveDrop { .. } => Vec::new(),
             Op::CreateExtension {

@@ -25,6 +25,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Engine v2 merges: a merge file over branches that write what the other reads or writes is refused (`MV2-E033`, both ops named). `make --merge` writes the merge file; `make --rebase <id>` moves a leaf on top of the other one, refused once a database ran it or a remote branch has it (`--force`).
 - `make` puts contract ops (drops, renames, NOT NULL on an existing column) in a `phase: contract` file of their own (`--no-split` keeps one file). `check` warns (`MV2-W012`) when a contract file and its expand file are both pending, and refuses a batched data op next to a contract op unless the file is `offline`.
 - `check --drift` compares the database with the state at its applied migrations.
+- Engine v2 `adopt_column` takes over a column: verified if it exists, added if not; rollback forgets it. An `adopt_table` earlier in the same run accepts a live column that a pending `adopt_column` takes over.
 - Engine v2 typed `portable_default` (`now`, `true`, `false`, `empty_object`, `empty_array`): one file, each backend's own spelling. `make` writes it for model defaults that map to it instead of refusing them.
 - Engine v2 `adopt_table` verifies an existing table's full definition and runs no DDL, or creates the table on a fresh database. `adopt` lists every framework table a v1 chain touched as `extern_table`.
 - Fresh tenants in a fleet run install the latest state in one step and run the fresh seeds, when every seed comes after the last change to its tables.

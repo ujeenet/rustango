@@ -14,7 +14,7 @@ use super::load::{load_project, Loaded, Project};
 use super::probe::{drift, probe, Verdict};
 use super::render::{render_plan, Unit, UnitKind};
 use super::replay::{apply, apply_file, Ctx};
-use super::state::{Backend, HashMemo, State, Target};
+use super::state::{Backend, ColumnDef, HashMemo, State, Target};
 use super::{Code, LoadError};
 use crate::migrate::MigrateError;
 use crate::sql::{raw_execute_pool, raw_execute_tx, Pool};
@@ -504,6 +504,7 @@ async fn migrate_project(
                 started: std::time::Instant::now(),
                 planned: Vec::new(),
                 sweep: Some(sweep),
+                adopted_later: Vec::new(),
             };
             // A long unit keeps its heartbeat fresh, so boot waiters wait on it.
             let applying = runner.apply_project(project);
@@ -693,6 +694,7 @@ async fn rollback(
                 started: std::time::Instant::now(),
                 planned: Vec::new(),
                 sweep: None,
+                adopted_later: Vec::new(),
             };
             runner.downgrade(back).await
         },
@@ -1136,6 +1138,9 @@ struct Runner<'a> {
     planned: Vec<String>,
     /// SQLite datetime columns to sweep before the first data unit; taken then.
     sweep: Option<Vec<(String, String)>>,
+    /// `(table, column)` a pending `adopt_column` takes over: an
+    /// `adopt_table` before it accepts that live column (design item 22).
+    adopted_later: Vec<(String, ColumnDef)>,
 }
 
 fn renamed_name(r: &super::probe::Renamed) -> &str {
@@ -1220,6 +1225,16 @@ impl Runner<'_> {
             .map(|r| ((r.app.clone(), r.id.clone()), r))
             .collect();
         self.refuse_unknown_rows(project, &rows)?;
+        self.adopted_later = project
+            .files
+            .iter()
+            .filter(|f| !rows.contains_key(&(f.file.app.clone(), f.file.id.clone())))
+            .flat_map(|f| &f.file.operations)
+            .filter_map(|e| match &e.op {
+                Op::AdoptColumn { table, column } => Some((table.clone(), column.column.clone())),
+                _ => None,
+            })
+            .collect();
         if self.opts.fast_fresh && rows.is_empty() && self.opts.up_to.is_none() {
             if let Some(applied) = self.fast_fresh(project).await? {
                 return Ok(applied);
@@ -1444,7 +1459,7 @@ impl Runner<'_> {
             .file
             .operations
             .iter()
-            .any(|e| matches!(e.op, Op::AdoptTable { .. }))
+            .any(|e| matches!(e.op, Op::AdoptTable { .. } | Op::AdoptColumn { .. }))
         {
             return Ok(f.file.clone());
         }
@@ -1463,6 +1478,21 @@ impl Runner<'_> {
                 if crate::migrate::try_table_exists_here(self.pool, &table.name).await? {
                     let mut one = after.clone();
                     one.tables.retain(|k, _| **k == *table.name);
+                    // A live column a later `adopt_column` takes over is checked
+                    // with its own definition, not taken for a difference.
+                    let live = super::catalog::read_table(self.pool, &table.name).await?;
+                    let live_has = |c: &str| {
+                        live.as_ref()
+                            .is_some_and(|l| l.columns.iter().any(|x| x.name == c))
+                    };
+                    if let Some(t) = one.tables.get_mut(table.name.as_str()) {
+                        let t = std::sync::Arc::make_mut(t);
+                        for (_, c) in self.adopted_later.iter().filter(|(n, _)| *n == table.name) {
+                            if t.column(&c.column).is_none() && live_has(&c.column) {
+                                t.columns.push(c.clone());
+                            }
+                        }
+                    }
                     let diff = drift(self.pool, &one).await?;
                     if !diff.is_empty() {
                         let list: Vec<String> = diff.iter().map(ToString::to_string).collect();
@@ -1481,6 +1511,38 @@ impl Runner<'_> {
                         table: table.clone(),
                         indexes: indexes.clone(),
                         checks: checks.clone(),
+                    };
+                }
+            }
+            if let Op::AdoptColumn { table, column } = &env.op {
+                let name = &column.column.column;
+                let live = super::catalog::read_table(self.pool, table).await?;
+                if live.is_some_and(|l| l.columns.iter().any(|c| c.name == *name)) {
+                    // The column's own definition: type, nullability, default.
+                    let mut one = after.clone();
+                    one.tables.retain(|k, _| **k == **table);
+                    let obj = format!("{table}.{name}");
+                    let diff: Vec<String> = drift(self.pool, &one)
+                        .await?
+                        .iter()
+                        .filter(|m| m.object == obj)
+                        .map(ToString::to_string)
+                        .collect();
+                    if !diff.is_empty() {
+                        return Err(refused(
+                            Code::Drift,
+                            &at,
+                            format!(
+                                "`{obj}` differs from the column it adopts: {}",
+                                diff.join("; ")
+                            ),
+                        ));
+                    }
+                } else {
+                    file.operations[i].op = Op::AddColumn {
+                        table: table.clone(),
+                        column: column.clone(),
+                        fill: None,
                     };
                 }
             }
