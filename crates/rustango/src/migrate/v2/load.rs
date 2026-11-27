@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::checksum::checksum;
-use super::format::{decode, File};
+use super::format::{decode, File, Op};
 use super::graph::{order, Node};
 use super::json::JsonError;
 use super::replay::{apply_file, Ctx};
@@ -226,10 +226,46 @@ fn load_folders(raw: Vec<(PathBuf, Vec<RawFile>)>) -> Result<Project, LoadError>
             project.files.push(loaded);
         }
     }
+    refuse_framework_writes(&project.files)?;
     remap_replaced(&mut project);
     project.order = order_targets(&project.files)?;
     super::commute::refuse_conflicts(&project)?;
     Ok(project)
+}
+
+/// Framework tables belong to the system chain (design item 20): a project
+/// file may name one through `extern_table` and write its rows, never
+/// create, alter, drop or rename it.
+fn refuse_framework_writes(files: &[Loaded]) -> Result<(), LoadError> {
+    use super::commute::Key;
+    use super::make::FRAMEWORK_PREFIX;
+    for l in files {
+        for (i, env) in l.file.operations.iter().enumerate() {
+            if matches!(
+                env.op,
+                Op::ExternTable { .. } | Op::DataSql { .. } | Op::DataRust { .. }
+            ) {
+                continue;
+            }
+            let at = format!("{}#/operations/{i}", l.at);
+            let keys = super::commute::keys(&env.op, &at)?;
+            let hit = keys.writes.iter().find_map(|k| match k {
+                Key::Table(t) | Key::Column(t, _) if t.starts_with(FRAMEWORK_PREFIX) => Some(t),
+                _ => None,
+            });
+            if let Some(t) = hit {
+                return Err(LoadError::new(
+                    Code::FrameworkTable,
+                    at,
+                    format!(
+                        "`{t}` is a framework table: the framework's system chain owns it; \
+                         declare it with `extern_table` instead"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Squash checkpoints stand for the ids they replace, at load (9.6): the

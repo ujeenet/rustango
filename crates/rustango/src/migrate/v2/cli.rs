@@ -15,6 +15,7 @@ pub(crate) const VERBS: &[&str] = &[
 ];
 
 /// Whether `args` (after `dbmigrate`) needs no connection.
+#[cfg(feature = "manage")]
 pub(crate) fn pool_free(args: &[String]) -> bool {
     match args.first().map(String::as_str) {
         Some("make" | "sql") | None => true,

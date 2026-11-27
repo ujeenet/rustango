@@ -864,60 +864,103 @@ async fn defaults_pass_check_online(b: B) {
     );
 }
 
-/// ChainFacts (4.9): a v2 project owns a framework table and changes it;
-/// the system chain leaves it to the project instead of creating it first.
+/// Framework tables belong to the system chain (design item 20): a project
+/// file that creates or alters one is refused at load, before any SQL; one
+/// that declares it with `extern_table` and points an FK at it loads.
 async fn project_owns_a_framework_table(b: B) {
-    #[cfg(feature = "admin")]
-    owned_framework_table(b).await;
-    #[cfg(not(feature = "admin"))]
-    let _ = b;
-}
-
-#[cfg(feature = "admin")]
-async fn owned_framework_table(b: B) {
-    use crate::core::ModelScope;
     let Some(db) = fresh(b).await else { return };
     let pool = &db.pool;
+    let id = || json!({"column": "id", "ty": "i64", "primary_key": true, "nullable": false});
+    let bad = [
+        json!({"op": "create_table", "v": 1,
+            "table": {"name": "rustango_mine", "scope": "tenant", "fields": [id()]}}),
+        json!({"op": "add_column", "v": 1, "table": "rustango_mine",
+            "column": {"column": "x", "ty": "i32", "nullable": true}}),
+    ];
+    for op in bad {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("migrations");
+        put(&dir, "0001_fw", &v2("0001_fw", &[], json!([op])));
+        assert_eq!(
+            code(migrate(pool, &dir, &opts()).await),
+            Code::FrameworkTable
+        );
+    }
+    assert!(rows(pool).await.is_empty(), "nothing ran");
     let root = tempfile::tempdir().unwrap();
-    for scope in [ModelScope::Registry, ModelScope::Tenant] {
-        crate::migrate::make_migrations_system(root.path(), scope, None).unwrap();
-    }
-    let sys = root.path().join("system/migrations");
-    let mut snap = crate::migrate::snapshot::SchemaSnapshot::default();
-    for e in std::fs::read_dir(&sys).unwrap() {
-        let m = crate::migrate::file::load(&e.unwrap().path()).unwrap();
-        snap.tables.extend(m.snapshot.tables);
-        snap.indexes.extend(m.snapshot.indexes);
-    }
-    let (table, column) = ("rustango_admin_users", "sessions_revoked_at");
-    let t = snap.tables.iter().find(|t| t.name == table).unwrap();
-    let state = super::super::make::table_of(t, &snap, &[backend_of(pool)], "test").unwrap();
-    let late = state.column(column).unwrap().clone();
-    let fields: Vec<Value> = state
-        .columns
-        .iter()
-        .filter(|c| c.column != column)
-        .map(|c| serde_json::to_value(c).unwrap())
-        .collect();
-    let create = json!({"op": "create_table", "v": 1,
-        "table": {"name": table, "scope": "tenant", "fields": fields},
-        "indexes": state.indexes, "checks": state.checks});
-    let add = json!({"op": "add_column", "v": 1, "table": table, "column": late});
     let dir = root.path().join("migrations");
-    put(&dir, "0001_users", &v2("0001_users", &[], json!([create])));
+    let ok = json!([{"op": "extern_table", "v": 1, "table": "rustango_mine", "owner": "system",
+            "columns": [{"name": "id", "ty": "i64", "unique": true}]}]);
+    put(&dir, "0001_fw", &v2("0001_fw", &[], ok));
+    super::super::load::load_project(&dir).unwrap();
+}
+
+/// `adopt_table` (3.7): over an existing table of the same definition it
+/// runs no DDL; over a different one it refuses; on a fresh database it
+/// creates the table.
+async fn adopt_table_verifies_or_creates(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let table = json!({"name": "at_t", "scope": "tenant", "fields": [
+        {"column": "id", "ty": "i64", "primary_key": true, "nullable": false},
+        {"column": "code", "ty": "string", "max_length": 20, "nullable": true}]});
+    let idx = json!([{"name": "at_t_code_idx", "columns": ["code"]}]);
+    let root = tempfile::tempdir().unwrap();
+    let made = root.path().join("made").join("migrations");
     put(
-        &dir,
-        "0002_revoked",
-        &v2("0002_revoked", &["0001_users"], json!([add])),
+        &made,
+        "0001_t",
+        &v2(
+            "0001_t",
+            &[],
+            json!([{"op": "create_table", "v": 1,
+        "table": table, "indexes": idx}]),
+        ),
     );
-    let rep = migrate(pool, &dir, &opts()).await.unwrap();
-    assert_eq!(rep.applied, ["0001_users", "0002_revoked"]);
-    assert!(columns(pool, table).await.iter().any(|c| c == column));
-    assert!(migrate(pool, &dir, &opts())
-        .await
-        .unwrap()
-        .applied
-        .is_empty());
+    migrate(
+        pool,
+        &made,
+        &Options {
+            ledger: Some("__made_migrations__".into()),
+            ..opts()
+        },
+    )
+    .await
+    .unwrap();
+    let adopt = root.path().join("adopt").join("migrations");
+    put(
+        &adopt,
+        "0001_adopt",
+        &v2(
+            "0001_adopt",
+            &[],
+            json!([{"op": "adopt_table", "v": 1,
+        "table": table, "indexes": idx}]),
+        ),
+    );
+    // The same definition: recorded, no units.
+    assert_eq!(
+        migrate(pool, &adopt, &opts()).await.unwrap().applied,
+        ["0001_adopt"]
+    );
+    let row = Ledger::default_names().rows(pool).await.unwrap().remove(0);
+    assert!(row.unit_plan.is_empty(), "{:?}", row.unit_plan);
+    // Rolling it back forgets it: the table stays.
+    downgrade(pool, &adopt, 1, &opts()).await.unwrap();
+    assert_eq!(columns(pool, "at_t").await, ["id", "code"]);
+    // A different definition: refused.
+    raw_execute_pool(
+        pool,
+        "ALTER TABLE at_t ADD COLUMN stray INTEGER",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code(migrate(pool, &adopt, &opts()).await), Code::Drift);
+    // A fresh database: created.
+    let other = fresh(b).await.unwrap();
+    migrate(&other.pool, &adopt, &opts()).await.unwrap();
+    assert_eq!(columns(&other.pool, "at_t").await, ["id", "code"]);
 }
 
 /// Two apps, each with its own ledger, in one database.
@@ -4218,6 +4261,7 @@ per_backend!(
     commuting_branches_in_either_order,
     fast_fresh_matches_full_replay,
     random_ops_render_to_their_state,
+    adopt_table_verifies_or_creates,
 );
 
 /// Legacy SQLite datetime text is swept before the first data unit, so a
@@ -4701,4 +4745,36 @@ async fn random_ops_render_to_their_state(b: B) {
             "{b:?}: {t} left"
         );
     }
+}
+
+/// Adopt (design item 20): a framework table a v1 chain touched becomes an
+/// `extern_table` of the checkpoint, never a table the project owns.
+#[test]
+fn adopt_lists_touched_framework_tables_as_extern() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    let t = json!({"name": "ad_note", "model": "AdNote", "fields": [
+        v1_field("id", "i64", json!({"primary_key": true, "auto": true, "nullable": false}))]});
+    let fw = json!({"name": "rustango_widgets", "model": "Widget", "fields": [
+        v1_field("id", "i64", json!({"primary_key": true, "auto": true, "nullable": false})),
+        v1_field("label", "string", json!({"max_length": 20}))]});
+    put(
+        &dir,
+        "0001_initial",
+        &json!({"name": "0001_initial", "created_at": "",
+        "snapshot": {"tables": [t, fw]},
+        "forward": [{"schema": {"CreateTable": "ad_note"}}, {"schema": {"CreateTable": "rustango_widgets"}}]}),
+    );
+    super::super::adopt::adopt(&dir, Backend::Postgres).unwrap();
+    let v: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("0002_adopt.json")).unwrap())
+            .unwrap();
+    assert!(
+        v["state"]["tables"].get("rustango_widgets").is_none(),
+        "{v}"
+    );
+    let ext = &v["state"]["externs"]["rustango_widgets"];
+    assert_eq!(ext["owner"], "system", "{v}");
+    assert_eq!(ext["columns"].as_array().unwrap().len(), 2, "{v}");
+    super::super::load::load_project(&dir).unwrap();
 }

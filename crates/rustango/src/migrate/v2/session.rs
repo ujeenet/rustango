@@ -324,6 +324,10 @@ pub(crate) async fn reap(
 }
 
 /// The server identity, the current user and what thread `id` runs, if visible.
+#[cfg_attr(
+    not(any(feature = "postgres", feature = "sqlite")),
+    allow(irrefutable_let_patterns, unreachable_code)
+)]
 async fn mysql_now(
     conn: &mut PoolConn,
     id: u64,

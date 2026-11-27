@@ -86,6 +86,8 @@ pub(crate) enum Code {
     OtherSchema,
     /// Merged branches that do not commute (4.5).
     Conflict,
+    /// A project file changing a framework table: the system chain owns them.
+    FrameworkTable,
     /// A checkpoint field misused, or its state hash does not match.
     Checkpoint,
     /// Two app labels in one folder, or one label in two folders.
@@ -159,6 +161,7 @@ impl Code {
             Self::CrossTarget => "MV2-E030",
             Self::OtherSchema => "MV2-E031",
             Self::Conflict => "MV2-E033",
+            Self::FrameworkTable => "MV2-E034",
             Self::FkType => "MV2-E3780",
             Self::CheckColumn => "MV2-E3959",
         }

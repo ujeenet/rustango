@@ -210,6 +210,7 @@ pub(crate) fn new_run_id() -> String {
 ///
 /// # Errors
 /// The lock's error, or `body`'s.
+#[cfg(feature = "tenancy")]
 pub(crate) async fn fleet_locked<F, Fut, R>(registry: &Pool, body: F) -> Result<R, MigrateError>
 where
     F: FnOnce() -> Fut,
@@ -229,6 +230,7 @@ where
 ///
 /// # Errors
 /// Driver failures.
+#[cfg(feature = "tenancy")]
 pub(crate) async fn applied_ids(
     pool: &Pool,
     opts: &Options,
@@ -305,8 +307,9 @@ pub(crate) async fn contract_pending(
         .any(|f| f.phase == Phase::Contract && !done.contains(&format!("{}:{}", f.app, f.id))))
 }
 
-/// What a run migrates (8.1).
+/// What a run migrates (8.1). Registry and tenant runs exist under tenancy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
 pub(crate) enum RunAs {
     /// A project without tenancy: one database, every framework table.
     #[default]
@@ -1434,6 +1437,58 @@ impl Runner<'_> {
         Ok(Some(applied))
     }
 
+    /// `adopt_table` (3.7): a table that exists is verified against the
+    /// op's full definition and runs no DDL; a missing one is created.
+    async fn adopt_tables(&self, f: &Loaded, state: &State) -> Result<File, RunError> {
+        if !f
+            .file
+            .operations
+            .iter()
+            .any(|e| matches!(e.op, Op::AdoptTable { .. }))
+        {
+            return Ok(f.file.clone());
+        }
+        let mut file = f.file.clone();
+        let mut before = state.clone();
+        for (i, env) in f.file.operations.iter().enumerate() {
+            let at = format!("{}#/operations/{i}", f.at);
+            let mut after = before.clone();
+            apply(&mut after, &env.op, &at, &self.ctx(), &[])?;
+            if let Op::AdoptTable {
+                table,
+                indexes,
+                checks,
+            } = &env.op
+            {
+                if crate::migrate::try_table_exists_here(self.pool, &table.name).await? {
+                    let mut one = after.clone();
+                    one.tables.retain(|k, _| **k == *table.name);
+                    let diff = drift(self.pool, &one).await?;
+                    if !diff.is_empty() {
+                        let list: Vec<String> = diff.iter().map(ToString::to_string).collect();
+                        return Err(refused(
+                            Code::Drift,
+                            &at,
+                            format!(
+                                "`{}` differs from the table it adopts: {}",
+                                table.name,
+                                list.join("; ")
+                            ),
+                        ));
+                    }
+                } else {
+                    file.operations[i].op = Op::CreateTable {
+                        table: table.clone(),
+                        indexes: indexes.clone(),
+                        checks: checks.clone(),
+                    };
+                }
+            }
+            before = after;
+        }
+        Ok(file)
+    }
+
     /// Render, record `running` with the frozen plan, run its units.
     async fn forward(
         &mut self,
@@ -1441,7 +1496,8 @@ impl Runner<'_> {
         state: State,
         memo: &mut HashMemo,
     ) -> Result<State, RunError> {
-        let (units, after) = render_plan(&state, &f.file, &f.at, &self.ctx(), self.b)?;
+        let file = self.adopt_tables(f, &state).await?;
+        let (units, after) = render_plan(&state, &file, &f.at, &self.ctx(), self.b)?;
         let moves = self.long_moves(&units).await?;
         let archives = self.archive_sizes(&f.file, &state, &f.at).await?;
         if self.opts.dry_run {

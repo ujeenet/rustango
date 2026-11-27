@@ -166,7 +166,20 @@ fn checkpoint(
     b: Backend,
     at: &str,
 ) -> Result<serde_json::Value, LoadError> {
-    let mut doc = state_of(snap, b, at)?;
+    // The v1 baseline folds framework tables to today's models; the ones
+    // this chain touched come from its own last snapshot.
+    let touched: Vec<crate::migrate::snapshot::TableSnapshot> = prior
+        .last()
+        .map(|m| {
+            m.snapshot
+                .tables
+                .iter()
+                .filter(|t| t.name.starts_with(super::make::FRAMEWORK_PREFIX))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut doc = state_of(snap, &touched, b, at)?;
     if target == "registry" {
         for t in doc.tables.values_mut() {
             t.scope = super::state::Target::Registry;
@@ -237,8 +250,35 @@ pub(super) fn app_label(root: &Path, folder: &Path) -> String {
 
 /// The v1 snapshot as v2 state for `b`: the models state, plus the index
 /// MySQL added for an FK nothing covers, named after the FK.
-fn state_of(snap: &SchemaSnapshot, b: Backend, at: &str) -> Result<StateDoc, LoadError> {
+fn state_of(
+    snap: &SchemaSnapshot,
+    touched: &[crate::migrate::snapshot::TableSnapshot],
+    b: Backend,
+    at: &str,
+) -> Result<StateDoc, LoadError> {
     let mut doc = super::make::state_of(snap, &[b], at)?;
+    // The system chain owns framework tables (design item 20): one a v1
+    // chain touched is named as extern, never owned.
+    for t in touched {
+        let e = doc
+            .externs
+            .entry(t.name.clone())
+            .or_insert_with(|| super::state::ExternTable {
+                table: t.name.clone(),
+                columns: Vec::new(),
+                unique_sets: Vec::new(),
+                owner: super::state::ExternOwner::System,
+            });
+        for f in &t.fields {
+            if !e.columns.iter().any(|c| c.name == f.column) {
+                e.columns.push(super::state::ExternColumn {
+                    name: f.column.clone(),
+                    ty: f.ty.clone(),
+                    unique: f.primary_key || f.unique,
+                });
+            }
+        }
+    }
     if b == Backend::Mysql {
         for t in doc.tables.values_mut() {
             let pk = t.primary_key().next().map(str::to_owned);
