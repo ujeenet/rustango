@@ -428,10 +428,11 @@ async fn v1_refuses_v2_tenancy_verbs(backend: Backend) {
 }
 
 async fn v1_refuses_v2_provisioning(backend: Backend) {
-    // A v2 project provisions through the v2 fleet's per-tenant run.
+    // A v2 project (a leftover v1 `system/` too) provisions through the v2
+    // fleet's per-tenant run; a mixed project is still refused.
     refuses(
         backend,
-        &PROJECT[1..],
+        &[Shape::MixedApps, Shape::MixedFolder],
         vec![
             (
                 "migrate_one_tenant",
