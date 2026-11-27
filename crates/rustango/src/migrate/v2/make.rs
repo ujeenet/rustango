@@ -669,8 +669,13 @@ fn column_of(
     backends: &[Backend],
     at: &str,
 ) -> Result<ColumnDef, LoadError> {
+    let portable_default = f
+        .default
+        .as_deref()
+        .and_then(|e| super::state::PortableDefault::of(e, &f.ty));
     let default = match f.default.as_deref() {
         None => None,
+        Some(_) if portable_default.is_some() => None,
         Some(e) => Some(
             one_default(e, &f.ty, f.max_length, backends).map_err(|(a, b)| {
                 err(
@@ -697,6 +702,7 @@ fn column_of(
         primary_key: f.primary_key,
         auto: f.auto && f.primary_key,
         default,
+        portable_default,
         generated_as: f.generated_as.clone(),
         comment: f.db_comment.clone(),
         case_insensitive: f.case_insensitive,
@@ -1054,7 +1060,7 @@ fn diff(
                     let mut payload = json!({"table": name, "column": field_json(c, None)});
                     if let Some(fill) = fills.get(&key) {
                         payload["fill"] = json!(fill);
-                    } else if !c.nullable && c.default.is_none() && c.generated_as.is_none() {
+                    } else if !c.nullable && !c.has_default() && c.generated_as.is_none() {
                         return Err(err(
                             Code::Fill,
                             at,
@@ -1173,6 +1179,11 @@ fn changes(o: &ColumnDef, c: &ColumnDef) -> Value {
     put("ty", json!(o.ty), json!(c.ty));
     put("nullable", json!(o.nullable), json!(c.nullable));
     put("default", json!(o.default), json!(c.default));
+    put(
+        "portable_default",
+        json!(o.portable_default),
+        json!(c.portable_default),
+    );
     put("max_length", json!(o.max_length), json!(c.max_length));
     put("comment", json!(o.comment), json!(c.comment));
     put(

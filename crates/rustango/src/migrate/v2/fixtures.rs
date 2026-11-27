@@ -24,6 +24,11 @@ pub(super) const CHECKSUM_GOLDENS: &[(&str, &str, &str)] = &[
         include_str!("fixtures/0012_add_locale_to_user.json"),
         "7287f388ba3d9d02910fcab9c72e865b86d6d2f08df7fc0322c0f5a3ee2899b6",
     ),
+    (
+        "0013_portable_defaults.json",
+        include_str!("fixtures/0013_portable_defaults.json"),
+        "9a2f8f84467c710fccbe18c5d712a3df62278a0483f79420e4e953910355068c",
+    ),
 ];
 
 /// Every fixture is a valid v2 file, and the loader records the golden checksum.

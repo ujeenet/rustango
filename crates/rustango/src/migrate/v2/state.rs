@@ -84,6 +84,10 @@ pub(crate) struct ColumnDef {
     /// Raw SQL text after DEFAULT, as written; never translated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) default: Option<String>,
+    /// A default each backend spells its own way (design item 21); never
+    /// beside `default`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) portable_default: Option<PortableDefault>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) generated_as: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -92,6 +96,78 @@ pub(crate) struct ColumnDef {
     pub(crate) case_insensitive: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub(crate) sealed: bool,
+}
+
+/// A typed default every backend renders in its own spelling (design item
+/// 21): the current time, a boolean, an empty JSON object or array.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PortableDefault {
+    Now,
+    True,
+    False,
+    EmptyObject,
+    EmptyArray,
+}
+
+impl PortableDefault {
+    /// The spelling each dialect's default translation starts from.
+    pub(crate) fn canonical(self) -> &'static str {
+        match self {
+            Self::Now => "now()",
+            Self::True => "true",
+            Self::False => "false",
+            Self::EmptyObject => "'{}'",
+            Self::EmptyArray => "'[]'",
+        }
+    }
+
+    /// The typed form of a model default, when it has one for `ty`.
+    pub(crate) fn of(expr: &str, ty: &str) -> Option<Self> {
+        let e = expr.trim();
+        match ty {
+            "datetime" | "date"
+                if matches!(
+                    e,
+                    "now()" | "NOW()" | "CURRENT_TIMESTAMP" | "current_timestamp"
+                ) =>
+            {
+                Some(Self::Now)
+            }
+            "bool" if e.eq_ignore_ascii_case("true") => Some(Self::True),
+            "bool" if e.eq_ignore_ascii_case("false") => Some(Self::False),
+            "json" if e == "'{}'" => Some(Self::EmptyObject),
+            "json" if e == "'[]'" => Some(Self::EmptyArray),
+            _ => None,
+        }
+    }
+}
+
+impl ColumnDef {
+    /// The default text to render: the raw one, or the typed one's spelling.
+    pub(crate) fn default_text(&self) -> Option<String> {
+        self.default
+            .clone()
+            .or_else(|| self.portable_default.map(|p| p.canonical().to_owned()))
+    }
+
+    /// The default as `b` spells it in SQL: the typed one translated, the
+    /// raw one as written.
+    pub(crate) fn rendered_default(&self, b: Backend) -> Option<String> {
+        match self.portable_default {
+            Some(p) => Some(crate::migrate::diff::render_column_default(
+                p.canonical(),
+                &self.ty,
+                self.max_length,
+                super::render::dialect(b),
+            )),
+            None => self.default.clone(),
+        }
+    }
+
+    pub(crate) fn has_default(&self) -> bool {
+        self.default.is_some() || self.portable_default.is_some()
+    }
 }
 
 /// An index; a unique constraint is a unique index.
@@ -699,6 +775,7 @@ mod tests {
             primary_key: false,
             auto: false,
             default: Some("0".into()),
+            portable_default: None,
             generated_as: None,
             comment: None,
             case_insensitive: false,

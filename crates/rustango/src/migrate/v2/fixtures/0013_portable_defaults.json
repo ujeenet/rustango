@@ -1,0 +1,16 @@
+{
+  "engine": 2, "format": 1,
+  "id": "0013_portable_defaults", "app": "accounts",
+  "parents": ["0012_add_locale_to_user"],
+  "target": "tenant",
+  "created_at": "2026-11-26T10:00:00Z",
+  "description": "Typed portable defaults",
+  "operations": [
+    { "op": "add_column", "v": 1, "table": "user", "label": "active",
+      "column": { "column": "active", "ty": "bool", "nullable": false, "portable_default": "true" } },
+    { "op": "add_column", "v": 1, "table": "user",
+      "column": { "column": "seen_at", "ty": "datetime", "nullable": true, "portable_default": "now" } },
+    { "op": "add_column", "v": 1, "table": "user",
+      "column": { "column": "prefs", "ty": "json", "nullable": false, "portable_default": "empty_object" } }
+  ]
+}

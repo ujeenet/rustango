@@ -4273,6 +4273,7 @@ per_backend!(
     fast_fresh_matches_full_replay,
     random_ops_render_to_their_state,
     adopt_table_verifies_or_creates,
+    portable_defaults_render_per_backend,
 );
 
 /// Legacy SQLite datetime text is swept before the first data unit, so a
@@ -4788,4 +4789,44 @@ fn adopt_lists_touched_framework_tables_as_extern() {
     assert_eq!(ext["owner"], "system", "{v}");
     assert_eq!(ext["columns"].as_array().unwrap().len(), 2, "{v}");
     super::super::load::load_project(&dir).unwrap();
+}
+
+/// Typed portable defaults (design item 21): one file, each backend's own
+/// spelling; the catalog matches state and a row takes the defaults.
+async fn portable_defaults_render_per_backend(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    let create = json!([{"op": "create_table", "v": 1, "table": {"name": "pd_t", "scope": "tenant",
+        "fields": [
+            {"column": "id", "ty": "i64", "primary_key": true, "nullable": false},
+            {"column": "active", "ty": "bool", "nullable": false, "portable_default": "true"},
+            {"column": "off", "ty": "bool", "nullable": false, "portable_default": "false"},
+            {"column": "seen_at", "ty": "datetime", "nullable": false, "portable_default": "now"},
+            {"column": "prefs", "ty": "json", "nullable": false, "portable_default": "empty_object"},
+            {"column": "tags", "ty": "json", "nullable": false, "portable_default": "empty_array"}]}}]);
+    put(&dir, "0001_pd", &v2("0001_pd", &[], create));
+    let add = json!([{"op": "add_column", "v": 1, "table": "pd_t",
+        "column": {"column": "late", "ty": "datetime", "nullable": false, "portable_default": "now"}}]);
+    put(&dir, "0002_late", &v2("0002_late", &["0001_pd"], add));
+    migrate(pool, &dir, &opts())
+        .await
+        .unwrap_or_else(|e| panic!("{b:?}: {e}"));
+    let p = super::super::load::load_project(&dir).unwrap();
+    let state = super::super::load::replay(&p).unwrap().states[&Target::Tenant].clone();
+    let diff = super::super::probe::drift(pool, &state).await.unwrap();
+    assert!(diff.is_empty(), "{b:?}: {diff:?}");
+    raw_execute_pool(pool, "INSERT INTO pd_t (id) VALUES (1)", Vec::new())
+        .await
+        .unwrap_or_else(|e| panic!("{b:?}: {e}"));
+    let n: Vec<(i64,)> = crate::sql::raw_query_pool(
+        "SELECT COUNT(*) FROM pd_t WHERE seen_at IS NOT NULL AND late IS NOT NULL",
+        Vec::new(),
+        pool,
+    )
+    .await
+    .unwrap();
+    assert_eq!(n[0].0, 1, "{b:?}");
+    downgrade(pool, &dir, 2, &opts()).await.unwrap();
 }

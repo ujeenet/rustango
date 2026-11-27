@@ -48,7 +48,7 @@ fn field_default(key: &str, v: &Value) -> bool {
         | "down_binds" | "restores" => is_empty_array(v),
         "tx" | "concurrently" | "where" | "to_ty" | "max_length" | "default" | "comment"
         | "generated_as" | "min" | "max" | "fill" | "schema" | "probe" | "down" | "using"
-        | "using_down" | "fk" => v.is_null(),
+        | "using_down" | "fk" | "portable_default" => v.is_null(),
         _ => false,
     }
 }

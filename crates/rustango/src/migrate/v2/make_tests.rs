@@ -121,7 +121,7 @@ fn a_default_with_two_spellings_is_refused_naming_the_backends() {
     let dir = tmp.path().join("migrations");
     let mut m = models(json!({}));
     let at: FieldSnapshot =
-        serde_json::from_value(field("at", "datetime", json!({"default": "now()"}))).unwrap();
+        serde_json::from_value(field("at", "time", json!({"default": "now()"}))).unwrap();
     m.tables[0].fields.push(at);
     let e = make(&dir, &dir, &m, &opts()).unwrap_err();
     assert_eq!(e.code, Code::Dialect, "{e}");
@@ -349,4 +349,32 @@ fn contract_ops_split_into_their_own_file() {
         super::super::load::load_project(&dir).unwrap();
         assert!(make(&dir, &dir, &m, &opts()).unwrap().is_none());
     }
+}
+
+/// A model default every backend spells its own way becomes a typed
+/// `portable_default` instead of a refusal (design item 21).
+#[test]
+fn portable_model_defaults_are_typed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("migrations");
+    let m: SchemaSnapshot = serde_json::from_value(json!({"tables": [
+        {"name": "mk_pd", "model": "MkPd", "fields": [id(),
+            field("at", "datetime", json!({"nullable": false, "default": "now()"})),
+            field("on", "bool", json!({"nullable": false, "default": "true"})),
+            field("prefs", "json", json!({"nullable": false, "default": "'{}'"}))]}]}))
+    .unwrap();
+    let made = make(&dir, &dir, &m, &opts()).unwrap().unwrap();
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(&made.path).unwrap()).unwrap();
+    let fields = v["operations"][0]["table"]["fields"].as_array().unwrap();
+    let pd = |c: &str| {
+        fields
+            .iter()
+            .find(|f| f["column"] == c)
+            .map(|f| (f["portable_default"].clone(), f.get("default").cloned()))
+            .unwrap()
+    };
+    assert_eq!(pd("at"), (json!("now"), None));
+    assert_eq!(pd("on"), (json!("true"), None));
+    assert_eq!(pd("prefs"), (json!("empty_object"), None));
+    assert!(make(&dir, &dir, &m, &opts()).unwrap().is_none());
 }

@@ -517,7 +517,7 @@ fn add_column(
             "add_column cannot carry an FK: add the column, an index on it, then add_fk",
         ));
     }
-    if !c.nullable && c.default.is_none() && fill.is_none() && !created_here.contains(&table) {
+    if !c.nullable && !c.has_default() && fill.is_none() && !created_here.contains(&table) {
         return Err(coded(
             Code::Fill,
             at,
@@ -625,6 +625,13 @@ fn alter_column(
     change!(ty);
     change!(nullable);
     change!(default);
+    change!(portable_default);
+    if col.default.is_some() && col.portable_default.is_some() {
+        return Err(fail(
+            at,
+            format!("`{table}.{column}`: `default` and `portable_default` are one or the other"),
+        ));
+    }
     change!(max_length);
     change!(comment);
     change!(case_insensitive);

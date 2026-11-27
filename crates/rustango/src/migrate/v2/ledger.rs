@@ -105,6 +105,7 @@ impl Ledger {
 
 fn col(name: &str, ty: &str, nullable: bool, max_length: Option<u32>) -> ColumnDef {
     ColumnDef {
+        portable_default: None,
         column: name.into(),
         ty: ty.into(),
         nullable,

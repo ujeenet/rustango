@@ -7,7 +7,7 @@
 use super::catalog::{read_table, CatalogError, LiveColumn, LiveFk, LiveIndex, LiveTable};
 use super::norm::{self, DefaultCtx};
 use super::render::{snapshot, Expect};
-use super::state::{CheckDef, ColumnDef, FkDef, IndexDef, State, TableState};
+use super::state::{Backend, CheckDef, ColumnDef, FkDef, IndexDef, State, TableState};
 use crate::sql::{DialectKind, Pool};
 
 /// One property that differs from what state says.
@@ -517,7 +517,11 @@ impl Cmp<'_> {
                 format!("{:?}", l.comment),
             ));
         }
-        match (&c.default, &l.default) {
+        let want = match c.portable_default {
+            Some(_) => c.rendered_default(Backend::of(self.d)),
+            None => c.default.clone(),
+        };
+        match (&want, &l.default) {
             (None, None) => {}
             (Some(w), Some(g)) => {
                 if !self

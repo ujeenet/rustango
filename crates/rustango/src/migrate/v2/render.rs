@@ -487,7 +487,7 @@ pub(crate) fn snapshot(c: &ColumnDef) -> FieldSnapshot {
         max_length: c.max_length,
         min: None,
         max: None,
-        default: c.default.clone(),
+        default: c.default_text(),
         auto: c.auto,
         unique: false,
         case_insensitive: c.case_insensitive,
@@ -515,9 +515,15 @@ fn index_snapshot(table: &str, i: &IndexDef) -> IndexSnapshot {
     .expect("an IndexSnapshot")
 }
 
-/// The column as `CREATE TABLE`/`ADD COLUMN` writes it, default as written.
+/// The column as `CREATE TABLE`/`ADD COLUMN` writes it: a raw default as
+/// written, a typed one in the dialect's own spelling (design item 21).
 fn col_def(d: &dyn Dialect, c: &ColumnDef) -> String {
-    diff::column_definition(&snapshot(c), d, DefaultText::AsWritten)
+    let mode = if c.portable_default.is_some() {
+        DefaultText::Translate
+    } else {
+        DefaultText::AsWritten
+    };
+    diff::column_definition(&snapshot(c), d, mode)
 }
 
 fn on_delete(o: OnDelete) -> Option<&'static str> {
@@ -1622,7 +1628,7 @@ impl Render<'_> {
     ) -> Result<Vec<Unit>, LoadError> {
         let d = self.d;
         let not_null_no_default =
-            !column.nullable && column.default.is_none() && column.generated_as.is_none();
+            !column.nullable && !column.has_default() && column.generated_as.is_none();
         if fill.is_some() && !not_null_no_default {
             return Err(self.err(
                 Code::Fill,
@@ -1634,14 +1640,15 @@ impl Render<'_> {
         let after = self.table(self.after, table)?;
         match self.b {
             Backend::Sqlite => {
-                let paren_default = column.default.as_deref().is_some_and(|x| {
+                let default = column.rendered_default(self.b);
+                let paren_default = default.as_deref().is_some_and(|x| {
                     let x = x.trim();
                     x.starts_with('(') || x.to_ascii_uppercase().starts_with("CURRENT_")
                 });
                 if column.generated_as.is_some() || paren_default || not_null_no_default {
                     let value = fill
                         .map(str::to_owned)
-                        .or_else(|| column.default.clone())
+                        .or_else(|| default.clone())
                         .unwrap_or_else(|| "NULL".into());
                     let copy = if column.generated_as.is_some() {
                         vec![]

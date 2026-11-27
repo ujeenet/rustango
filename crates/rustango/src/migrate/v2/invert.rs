@@ -190,7 +190,7 @@ pub(crate) fn invert(op: &Op, after: &State, allow: Allow, at: &str) -> Result<V
                     format!("drop_column `{table}.{}`: its values are gone; re-adding it empty needs --accept-data-loss", c.column),
                 ));
             }
-            if !c.nullable && c.default.is_none() {
+            if !c.nullable && !c.has_default() {
                 return Err(blocked(
                     at,
                     format!(
@@ -228,6 +228,7 @@ pub(crate) fn invert(op: &Op, after: &State, allow: Allow, at: &str) -> Result<V
                     ty: swap(&c.ty),
                     nullable: swap(&c.nullable),
                     default: swap(&c.default),
+                    portable_default: swap(&c.portable_default),
                     max_length: swap(&c.max_length),
                     comment: swap(&c.comment),
                     case_insensitive: swap(&c.case_insensitive),

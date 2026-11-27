@@ -279,6 +279,7 @@ pub(crate) struct ColumnChanges {
     pub(crate) ty: Option<Change<String>>,
     pub(crate) nullable: Option<Change<bool>>,
     pub(crate) default: Option<Change<Option<String>>>,
+    pub(crate) portable_default: Option<Change<Option<super::state::PortableDefault>>>,
     pub(crate) max_length: Option<Change<Option<u32>>>,
     pub(crate) comment: Option<Change<Option<String>>>,
     pub(crate) case_insensitive: Option<Change<bool>>,

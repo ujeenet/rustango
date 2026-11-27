@@ -106,6 +106,7 @@ pub(crate) async fn check(
                 } => {
                     if let Some(ch) = &changes.default {
                         let c = ColumnDef {
+                            portable_default: None,
                             column: column.clone(),
                             ty: changes
                                 .ty

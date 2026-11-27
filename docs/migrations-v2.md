@@ -48,6 +48,12 @@ Flags: `--max-failures N`, `--fail-fast`, `--parallel K`, `--canary a,b`, `--act
 Contract files run only after every tenant reached its expand head.
 Set `RUSTANGO_TENANT_MIGRATOR=user:password` to migrate database-mode tenants as a separate login; the tenant login then cannot write the ledger.
 
+## Portable defaults
+
+A column's `default` is SQL text, written as is on every backend. For a value each backend spells its own way,
+write `portable_default` instead: `now`, `true`, `false`, `empty_object` or `empty_array`. `make` writes it when a
+model default maps to one.
+
 ## Framework tables
 
 The framework's system chain owns every `rustango_*` table. A project file may declare one with `extern_table`
