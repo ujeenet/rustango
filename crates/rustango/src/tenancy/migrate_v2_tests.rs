@@ -316,13 +316,15 @@ async fn requires_waits_for_the_registry() {
         "{e}"
     );
     assert!(!exists_in(&f.registry(), "s_t1", "items").await);
+    // Refused before any write: the registry chain did not run either.
+    assert!(!exists_in(&f.registry(), "public", "reg_one").await);
     put(
         &f.dir(),
         "0002_reg",
         &file("0002_reg", &["0001_reg"], "registry", flag("reg_two")),
     );
     let rep = f.fleet(&FleetOptions::default()).await.unwrap();
-    assert_eq!(rep.registry, ["0002_reg"]);
+    assert_eq!(rep.registry, ["0001_reg", "0002_reg"]);
     assert!(exists_in(&f.registry(), "s_t1", "items").await);
 }
 
@@ -397,6 +399,13 @@ async fn a_failed_tenant_does_not_stop_the_fleet() {
     let cache = cache_text(&reg).await;
     assert!(!cache.contains("secret-xyz"), "{cache}");
     assert!(cache.contains("\"failed\""), "{cache}");
+    let t2 = cache_all(&reg).await.unwrap();
+    let t2 = t2.iter().find(|r| r.0 == "t2").unwrap();
+    assert_eq!(
+        t2.2.as_deref(),
+        Some("0001_items"),
+        "a failed tenant keeps its head"
+    );
 }
 
 /// `--max-failures 0`: the first failure stops the fleet; later tenants
@@ -1118,6 +1127,7 @@ async fn contract_files_wait_for_every_expand_head() {
     // A plain run: every expand head is reached, contract files run.
     let rep = f.fleet(&FleetOptions::default()).await.unwrap();
     assert_eq!(rep.failed().count(), 0, "{rep:?}");
+    assert_eq!(rep.tenants.len(), 2, "one line per tenant: {rep:?}");
     for s in ["s_t1", "s_t2"] {
         assert!(exists_in(&reg, s, "gone").await, "{s}");
     }
@@ -1273,7 +1283,7 @@ async fn boot_binds_before_the_fleet_runs() {
     let b = crate::server::Builder::from_pool(registry.clone(), registry_url, "localhost")
         .with_health();
     let addr = format!("127.0.0.1:{port}");
-    let server = b.serve_after_fleet(&addr, root, std::time::Duration::from_secs(30));
+    let server = b.serve_after_fleet(&addr, root);
     let client = async {
         let mut health = None;
         for _ in 0..100 {
@@ -2271,26 +2281,21 @@ impl tracing::Subscriber for QueryCounter {
     fn exit(&self, _: &tracing::span::Id) {}
 }
 
-/// The most connections the database at `url` had while `work` ran.
-#[cfg(feature = "postgres")]
+/// The highest `count_sql` (a connection count) on `admin` while `work` ran.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
 async fn peak_connections<F: std::future::Future>(
     admin: &str,
-    db: &str,
+    count_sql: &str,
     work: F,
 ) -> (F::Output, i64) {
     let watch = Pool::connect(admin).await.unwrap();
     let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let poll = {
-        let (watch, done, db) = (watch.clone(), done.clone(), db.to_owned());
+        let (watch, done, sql) = (watch.clone(), done.clone(), count_sql.to_owned());
         tokio::spawn(async move {
             let mut peak = 0;
             while !done.load(std::sync::atomic::Ordering::SeqCst) {
-                let n = count(
-                    &watch,
-                    &format!("SELECT COUNT(*) FROM pg_stat_activity WHERE datname = '{db}'"),
-                )
-                .await;
-                peak = peak.max(n);
+                peak = peak.max(count(&watch, &sql).await);
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
             peak
@@ -2330,7 +2335,11 @@ async fn fleet_connections_follow_parallel_not_tenants() {
         "0001_items",
         &file("0001_items", &[], "tenant", items()),
     );
-    let (rep, peak) = peak_connections(&admin, &f.db.name, f.fleet(&FleetOptions::default())).await;
+    let sql = format!(
+        "SELECT COUNT(*) FROM pg_stat_activity WHERE datname = '{}'",
+        f.db.name
+    );
+    let (rep, peak) = peak_connections(&admin, &sql, f.fleet(&FleetOptions::default())).await;
     let rep = rep.unwrap();
     assert_eq!(rep.failed().count(), 0, "{rep:?}");
     assert!(
@@ -3000,4 +3009,794 @@ async fn a_tenancy_plan_writes_nothing() {
         .await
         .unwrap();
     assert!(exists_in(&f.registry(), "s_t1", "items").await);
+}
+
+/// A tenant file whose one data unit sleeps `secs` on PG.
+#[cfg(feature = "postgres")]
+fn slow_file(id: &str, parent: &str, secs: f64) -> Value {
+    let up = format!(
+        "INSERT INTO {{{{t:items}}}} ({{{{c:id}}}}, {{{{c:code}}}}) \
+         SELECT 77, 'slow' FROM (SELECT pg_sleep({secs})) s"
+    );
+    let ops = json!([{"op": "data_sql", "v": 1, "id": format!("{id}_v1"),
+        "tables": {"write": ["items"]},
+        "up": {"any": up},
+        "down": {"any": "DELETE FROM {{t:items}} WHERE {{c:id}} = 77"}}]);
+    file(id, &[parent], "tenant", ops)
+}
+
+/// Polls until `slug`'s registry cache row says `running`; `false` after 10 s.
+#[cfg(feature = "postgres")]
+async fn wait_running(reg: &Pool, slug: &str) -> bool {
+    for _ in 0..500 {
+        let rows = cache_all(reg).await.unwrap_or_default();
+        if rows.iter().any(|r| r.0 == slug && r.1 == "running") {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    false
+}
+
+/// A shutdown during a fleet run: the tenant in flight finishes its unit and
+/// runs no other, later tenants do not start, the record says `stopped`,
+/// and the next run resumes (6.11).
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn a_shutdown_stops_the_fleet_after_the_unit_in_flight() {
+    use crate::migrate::v2::ledger::fleet_runs;
+    let _g = serial().lock().await;
+    let Some(f) = PgFleet::new("sigterm").await else {
+        return;
+    };
+    f.with_orgs(&["t1", "t2", "t3"]).await;
+    put(
+        &f.dir(),
+        "0001_items",
+        &file("0001_items", &[], "tenant", items()),
+    );
+    f.fleet(&FleetOptions::default()).await.unwrap();
+    put(
+        &f.dir(),
+        "0002_slow",
+        &slow_file("0002_slow", "0001_items", 1.5),
+    );
+    put(
+        &f.dir(),
+        "0003_more",
+        &file("0003_more", &["0002_slow"], "tenant", table_op("more")),
+    );
+    let reg = f.registry();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let signal = {
+        let (reg, stop) = (reg.clone(), stop.clone());
+        tokio::spawn(async move {
+            assert!(wait_running(&reg, "t1").await, "t1 never ran");
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+    };
+    let rep = f
+        .fleet(&FleetOptions {
+            stop: Some(stop),
+            ..FleetOptions::default()
+        })
+        .await
+        .unwrap();
+    signal.await.unwrap();
+    assert!(rep.shutdown && rep.stop_error().is_some(), "{rep:?}");
+    let slow = |s: &str| format!("SELECT COUNT(*) FROM {s}.items WHERE id = 77");
+    assert_eq!(
+        count(&reg, &slow("s_t1")).await,
+        1,
+        "the unit in flight ends"
+    );
+    assert!(
+        !exists_in(&reg, "s_t1", "more").await,
+        "a unit after the stop"
+    );
+    for s in ["s_t2", "s_t3"] {
+        assert_eq!(count(&reg, &slow(s)).await, 0, "{s} started");
+    }
+    assert_eq!(rep.skipped, ["t2", "t3"]);
+    let runs = fleet_runs(&reg).await.unwrap();
+    assert_eq!(runs.last().unwrap().2, "stopped", "{runs:?}");
+    let rep = f.fleet(&FleetOptions::default()).await.unwrap();
+    assert_eq!(rep.failed().count(), 0, "{rep:?}");
+    for s in ["s_t1", "s_t2", "s_t3"] {
+        assert!(exists_in(&reg, s, "more").await, "{s} did not resume");
+    }
+}
+
+/// Boot with the shutdown flag up: the fleet stops and boot fails, so
+/// `/ready` never opens (6.11).
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn boot_fails_on_a_shutdown_during_the_fleet() {
+    let _g = serial().lock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let url = |n: &str| format!("sqlite://{}?mode=rwc", tmp.path().join(n).display());
+    let registry_url = url("registry.db");
+    let registry = sqlx::SqlitePool::connect(&registry_url).await.unwrap();
+    let root = tmp.path().join("project");
+    std::fs::create_dir_all(root.join("migrations")).unwrap();
+    let builder =
+        || crate::server::Builder::from_pool(registry.clone(), registry_url.clone(), "localhost");
+    let first = builder().migrate(&root).await.unwrap();
+    let mut o = Org::new("t1".to_owned());
+    o.storage_mode = StorageMode::Database;
+    o.backend_kind = crate::tenancy::BackendKind::Sqlite;
+    o.database_url = Some(url("t1.db"));
+    o.insert(&first.pools().registry_pool()).await.unwrap();
+    put(
+        &root.join("migrations"),
+        "0001_items",
+        &file("0001_items", &[], "tenant", items()),
+    );
+    let mut b = builder();
+    b.fleet.stop = Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+        true,
+    )));
+    let e = b.migrate(&root).await.err().expect("a stopped boot fails");
+    assert!(e.to_string().contains(run::STOPPED), "{e}");
+}
+
+/// The fleet record's heartbeat is refreshed on a timer, so it stays fresh
+/// while one tenant takes longer than the staleness limit (6.11).
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn the_fleet_heartbeat_stays_fresh_through_a_long_tenant() {
+    let _g = serial().lock().await;
+    let Some(f) = PgFleet::new("beat").await else {
+        return;
+    };
+    f.with_orgs(&["t1"]).await;
+    put(
+        &f.dir(),
+        "0001_items",
+        &file("0001_items", &[], "tenant", items()),
+    );
+    f.fleet(&FleetOptions::default()).await.unwrap();
+    put(
+        &f.dir(),
+        "0002_slow",
+        &slow_file("0002_slow", "0001_items", 3.0),
+    );
+    let reg = f.registry();
+    let watch = {
+        let reg = reg.clone();
+        tokio::spawn(async move {
+            assert!(wait_running(&reg, "t1").await, "t1 never ran");
+            for _ in 0..25 {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let stale = crate::migrate::v2::ledger::fleet_stale(
+                    &reg,
+                    std::time::Duration::from_secs(1),
+                )
+                .await
+                .unwrap();
+                if stale.is_some() {
+                    return stale;
+                }
+            }
+            None
+        })
+    };
+    let rep = f
+        .fleet(&FleetOptions {
+            heartbeat_every: Some(std::time::Duration::from_millis(200)),
+            ..FleetOptions::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(rep.failed().count(), 0, "{rep:?}");
+    assert_eq!(watch.await.unwrap(), None, "the heartbeat went stale");
+}
+
+/// A booting replica waits on a live fleet holder past its staleness limit,
+/// then finds nothing to do (6.11).
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn a_booting_waiter_waits_on_a_live_fleet_holder() {
+    let _g = serial().lock().await;
+    let Some(f) = PgFleet::new("waitlive").await else {
+        return;
+    };
+    f.with_orgs(&["t1"]).await;
+    put(
+        &f.dir(),
+        "0001_items",
+        &file("0001_items", &[], "tenant", items()),
+    );
+    f.fleet(&FleetOptions::default()).await.unwrap();
+    put(
+        &f.dir(),
+        "0002_slow",
+        &slow_file("0002_slow", "0001_items", 2.5),
+    );
+    // The fleet future is not `Send`: both run on this task.
+    let beat = FleetOptions {
+        heartbeat_every: Some(std::time::Duration::from_millis(200)),
+        ..FleetOptions::default()
+    };
+    let holder = f.fleet(&beat);
+    let waiter = async {
+        assert!(wait_running(&f.registry(), "t1").await, "t1 never ran");
+        f.fleet(&FleetOptions {
+            stale_after: Some(std::time::Duration::from_secs(1)),
+            ..FleetOptions::default()
+        })
+        .await
+    };
+    let (held, waited) = tokio::join!(holder, waiter);
+    assert_eq!(held.unwrap().failed().count(), 0);
+    let rep = waited.expect("waits on a live holder");
+    assert!(rep.tenants.iter().all(|t| t.applied.is_empty()), "{rep:?}");
+}
+
+/// A booting replica gives up on a fleet holder whose record's heartbeat is
+/// older than its staleness limit, on each backend's clock (6.11).
+async fn a_waiter_leaves_a_hung_fleet_holder<DB: sqlx::Database>(registry_url: String)
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let raw = sqlx::Pool::<DB>::connect(&registry_url).await.unwrap();
+    let registry: Pool = raw.clone().into();
+    let pools = TenantPools::new(raw);
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    std::fs::create_dir_all(&dir).unwrap();
+    run_fleet(&pools, &dir, &registry_url, &FleetOptions::default())
+        .await
+        .unwrap();
+    let t = registry
+        .dialect()
+        .quote_ident(crate::migrate::v2::ledger::FLEET_RUNS);
+    raw_execute_pool(
+        &registry,
+        &format!(
+            "INSERT INTO {t} (run_id, direction, plan_hash, state, heartbeat_at, started_at) \
+             VALUES ('hung', 'up', 'x', 'running', '2000-01-01 00:00:00', '2000-01-01 00:00:00')"
+        ),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let holder_pool = Pool::connect(&registry_url).await.unwrap();
+    let (held_tx, held) = tokio::sync::oneshot::channel();
+    let (go_tx, go) = tokio::sync::oneshot::channel::<()>();
+    let holder = tokio::spawn(async move {
+        run::fleet_locked(&holder_pool, || async {
+            held_tx.send(()).unwrap();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(30), go).await;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        holder_pool.close().await;
+    });
+    held.await.unwrap();
+    let fo = FleetOptions {
+        stale_after: Some(std::time::Duration::from_secs(1)),
+        ..FleetOptions::default()
+    };
+    let waited = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        run_fleet(&pools, &dir, &registry_url, &fo),
+    )
+    .await;
+    let _ = go_tx.send(());
+    holder.await.unwrap();
+    let e = waited.expect("gave up in time").expect_err("a hung holder");
+    assert!(e.to_string().contains("looks hung"), "{e}");
+    registry.close().await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn a_waiter_leaves_a_hung_fleet_holder_postgres() {
+    let _g = serial().lock().await;
+    let Some(admin) = crate::testkit::matrix::live_url("DATABASE_URL", "postgres") else {
+        return;
+    };
+    let r = Scratch::create(&admin, "hung").await;
+    a_waiter_leaves_a_hung_fleet_holder::<sqlx::Postgres>(r.url.clone()).await;
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn a_waiter_leaves_a_hung_fleet_holder_mysql() {
+    let _g = serial().lock().await;
+    let Some(admin) = crate::testkit::matrix::live_url("MYSQL_TEST_URL", "mysql") else {
+        return;
+    };
+    let r = Scratch::create(&admin, "hung").await;
+    a_waiter_leaves_a_hung_fleet_holder::<sqlx::MySql>(r.url.clone()).await;
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn a_waiter_leaves_a_hung_fleet_holder_sqlite() {
+    let _g = serial().lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!(
+        "sqlite:{}?mode=rwc",
+        dir.path().join("registry.db").display()
+    );
+    a_waiter_leaves_a_hung_fleet_holder::<sqlx::Sqlite>(url).await;
+}
+
+/// A refused fleet run writes nothing: no registry chain, no tenant schema.
+/// Here another plan's unfinished run refuses it, then a tenant blocker.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn a_refused_fleet_run_writes_nothing() {
+    use crate::migrate::v2::ledger::FLEET_RUNS;
+    let _g = serial().lock().await;
+    let Some(f) = PgFleet::new("refwrite").await else {
+        return;
+    };
+    f.with_orgs(&["t1"]).await;
+    put(
+        &f.dir(),
+        "0001_items",
+        &file("0001_items", &[], "tenant", items()),
+    );
+    f.fleet(&FleetOptions::default()).await.unwrap();
+    let reg = f.registry();
+    raw_execute_pool(
+        &reg,
+        &format!(
+            "INSERT INTO {FLEET_RUNS} (run_id, direction, plan_hash, state, started_at) \
+             VALUES ('dead', 'up', 'another-plan', 'running', now())"
+        ),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let flags = json!([{"op": "create_table", "v": 1, "table": {"name": "flags",
+        "scope": "registry", "fields": [
+            {"column": "id", "ty": "i64", "primary_key": true, "nullable": false}]}}]);
+    put(
+        &f.dir(),
+        "0002_flags",
+        &file("0002_flags", &[], "registry", flags),
+    );
+    f.add_org("t2").await;
+    let schema_made = |s: &'static str| {
+        let reg = reg.clone();
+        async move {
+            count(
+                &reg,
+                &format!("SELECT COUNT(*) FROM pg_namespace WHERE nspname = '{s}'"),
+            )
+            .await
+                > 0
+        }
+    };
+    let e = f
+        .fleet(&FleetOptions::default())
+        .await
+        .expect_err("refused");
+    assert!(e.to_string().contains("--abandon-fleet-run"), "{e}");
+    assert!(!has_table(&reg, "flags").await, "the registry chain ran");
+    assert!(!schema_made("s_t2").await, "a tenant schema was made");
+    raw_execute_pool(
+        &reg,
+        &format!("DELETE FROM {FLEET_RUNS} WHERE run_id = 'dead'"),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    // A blocker in t1 (an edited applied file) refuses before the registry chain.
+    raw_execute_pool(
+        &reg,
+        &format!(
+            "UPDATE s_t1.{} SET checksum = 'edited'",
+            Ledger::default_names().table
+        ),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    put(
+        &f.dir(),
+        "0003_other",
+        &file("0003_other", &["0001_items"], "tenant", table_op("other")),
+    );
+    let e = f
+        .fleet(&FleetOptions::default())
+        .await
+        .expect_err("blocked");
+    assert!(e.to_string().contains("blocked"), "{e}");
+    assert!(!has_table(&reg, "flags").await, "the registry chain ran");
+    assert!(!schema_made("s_t2").await, "a tenant schema was made");
+}
+
+/// Database-mode tenants open short-lived connections: the peak follows
+/// `--parallel`, not the tenant count, and none stays open after.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+async fn db_mode_connections_follow_parallel<DB: sqlx::Database>(
+    admin: &str,
+    kind: crate::tenancy::BackendKind,
+    tenants: usize,
+) where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let r = Scratch::create(admin, "dbcr").await;
+    let mut dbs = Vec::new();
+    for _ in 0..tenants {
+        dbs.push(Scratch::create(admin, "dbct").await);
+    }
+    let raw = sqlx::Pool::<DB>::connect(&r.url).await.unwrap();
+    let registry: Pool = raw.clone().into();
+    let pools = TenantPools::new(raw);
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    std::fs::create_dir_all(&dir).unwrap();
+    run_fleet(&pools, &dir, &r.url, &FleetOptions::default())
+        .await
+        .unwrap();
+    for (i, db) in dbs.iter().enumerate() {
+        let mut org = crate::testkit::org_with(|o| {
+            o.id = crate::sql::Auto::default();
+            o.slug = format!("c{i:02}");
+            o.display_name = o.slug.clone();
+            o.storage_mode = StorageMode::Database;
+            o.backend_kind = kind;
+            o.database_url = Some(db.url.clone());
+            o.schema_name = None;
+            o.host_pattern = None;
+            o.port = None;
+            o.path_prefix = None;
+        });
+        org.insert(&registry).await.unwrap();
+    }
+    put(
+        &dir,
+        "0001_items",
+        &file("0001_items", &[], "tenant", items()),
+    );
+    let prefix = format!("rv5\\_dbct\\_{}\\_%", std::process::id());
+    let sql = match kind {
+        crate::tenancy::BackendKind::MySql => {
+            format!("SELECT COUNT(*) FROM information_schema.processlist WHERE db LIKE '{prefix}'")
+        }
+        _ => format!("SELECT COUNT(*) FROM pg_stat_activity WHERE datname LIKE '{prefix}'"),
+    };
+    let k = 2;
+    let fo = FleetOptions {
+        parallel: k,
+        ..FleetOptions::default()
+    };
+    let (rep, peak) = peak_connections(admin, &sql, run_fleet(&pools, &dir, &r.url, &fo)).await;
+    let rep = rep.unwrap();
+    assert_eq!(rep.failed().count(), 0, "{rep:?}");
+    let watch = Pool::connect(admin).await.unwrap();
+    let after = count(&watch, &sql).await;
+    watch.close().await;
+    eprintln!("{kind:?}: {tenants} tenants, --parallel {k}: peak {peak}, open after {after}");
+    assert!(
+        peak <= 3 * k as i64 + 1,
+        "{peak} connections for {tenants} tenants"
+    );
+    assert_eq!(after, 0, "tenant connections left open");
+    registry.close().await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn db_mode_connections_follow_parallel_postgres() {
+    let _g = serial().lock().await;
+    let Some(admin) = crate::testkit::matrix::live_url("DATABASE_URL", "postgres") else {
+        return;
+    };
+    db_mode_connections_follow_parallel::<sqlx::Postgres>(
+        &admin,
+        crate::tenancy::BackendKind::Postgres,
+        12,
+    )
+    .await;
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn db_mode_connections_follow_parallel_mysql() {
+    let _g = serial().lock().await;
+    let Some(admin) = crate::testkit::matrix::live_url("MYSQL_TEST_URL", "mysql") else {
+        return;
+    };
+    db_mode_connections_follow_parallel::<sqlx::MySql>(
+        &admin,
+        crate::tenancy::BackendKind::MySql,
+        12,
+    )
+    .await;
+}
+
+/// The tenancy CLI's output, also when the verb fails.
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+async fn tenancy_cli_out<DB: sqlx::Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    dir: &Path,
+    args: &[&str],
+) -> (Result<(), TenancyError>, String)
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let mut out = Vec::new();
+    let args = args.iter().map(|a| (*a).to_owned());
+    let r = crate::tenancy::manage::run_with_writer(pools, registry_url, dir, args, &mut out).await;
+    (r, String::from_utf8(out).unwrap())
+}
+
+/// `dbmigrate apply` prints why a tenant failed, and counts and lists the
+/// tenants a stop left out.
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn apply_prints_why_a_tenant_failed() {
+    let _g = serial().lock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let url = |n: &str| format!("sqlite:{}?mode=rwc", tmp.path().join(n).display());
+    let registry_url = url("registry.db");
+    let raw = sqlx::SqlitePool::connect(&registry_url).await.unwrap();
+    let registry: Pool = raw.clone().into();
+    let pools = TenantPools::new(raw);
+    let dir = tmp.path().join("migrations");
+    std::fs::create_dir_all(&dir).unwrap();
+    run_fleet(&pools, &dir, &registry_url, &FleetOptions::default())
+        .await
+        .unwrap();
+    for (slug, db) in [
+        ("t1", url("t1.db")),
+        ("t2", "sqlite:/nonexistent/dir/t2.db?mode=ro".to_owned()),
+        ("t3", url("t3.db")),
+    ] {
+        let mut org = crate::testkit::org_with(|o| {
+            o.id = crate::sql::Auto::default();
+            o.slug = slug.into();
+            o.display_name = slug.into();
+            o.storage_mode = StorageMode::Database;
+            o.backend_kind = crate::tenancy::BackendKind::Sqlite;
+            o.database_url = Some(db.clone());
+            o.schema_name = None;
+            o.host_pattern = None;
+            o.port = None;
+            o.path_prefix = None;
+        });
+        org.insert(&registry).await.unwrap();
+    }
+    put(
+        &dir,
+        "0001_items",
+        &file("0001_items", &[], "tenant", items()),
+    );
+    let (r, out) = tenancy_cli_out(
+        &pools,
+        &registry_url,
+        &dir,
+        &["dbmigrate", "apply", "--fail-fast"],
+    )
+    .await;
+    let line = out
+        .lines()
+        .find(|l| l.starts_with("tenant t2: failed (unreachable): "))
+        .unwrap_or_else(|| panic!("no reason for t2: {out}"));
+    assert!(
+        line.len() > "tenant t2: failed (unreachable): ".len() + 5,
+        "{out}"
+    );
+    assert!(out.contains("tenant t1: skipped, not run"), "{out}");
+    let e = r.expect_err("t2 failed");
+    assert!(
+        e.to_string().contains("1 of 3 tenant(s) failed, 2 skipped"),
+        "{e}"
+    );
+    registry.close().await;
+}
+
+/// A migrator cannot take over a database its tenant login owns: refused up
+/// front, naming the fix, even with the login's rights granted (8.1).
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn a_migrator_refuses_a_database_its_tenant_login_owns() {
+    let _g = serial().lock().await;
+    let Some(admin) = crate::testkit::matrix::live_url("DATABASE_URL", "postgres") else {
+        return;
+    };
+    let (r, mut a) = (
+        Scratch::create(&admin, "omr").await,
+        Scratch::create(&admin, "oma").await,
+    );
+    let (login, mig) = (
+        format!("rv5ot_{}", std::process::id()),
+        format!("rv5om_{}", std::process::id()),
+    );
+    a.roles.extend([mig.clone(), login.clone()]);
+    let root = Pool::connect(&a.url).await.unwrap();
+    for sql in [
+        format!("CREATE ROLE {login} LOGIN PASSWORD 'pw'"),
+        format!("CREATE ROLE {mig} LOGIN PASSWORD 'pw' NOSUPERUSER NOCREATEDB"),
+        format!("ALTER DATABASE {} OWNER TO {login}", a.name),
+        format!("GRANT {login} TO {mig}"),
+    ] {
+        raw_execute_pool(&root, &sql, Vec::new()).await.unwrap();
+    }
+    root.close().await;
+    let host = admin.split_once('@').unwrap().1.split_once('/').unwrap().0;
+    let raw = sqlx::PgPool::connect(&r.url).await.unwrap();
+    let registry: Pool = raw.clone().into();
+    let pools = TenantPools::new(raw);
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("migrations");
+    std::fs::create_dir_all(&dir).unwrap();
+    run_fleet(&pools, &dir, &r.url, &FleetOptions::default())
+        .await
+        .unwrap();
+    let mut org = crate::testkit::org_with(|o| {
+        o.id = crate::sql::Auto::default();
+        o.slug = "own".into();
+        o.display_name = "own".into();
+        o.storage_mode = StorageMode::Database;
+        o.backend_kind = crate::tenancy::BackendKind::Postgres;
+        o.database_url = Some(format!("postgres://{login}:pw@{host}/{}", a.name));
+        o.schema_name = None;
+        o.host_pattern = None;
+        o.port = None;
+        o.path_prefix = None;
+    });
+    org.insert(&registry).await.unwrap();
+    put(
+        &dir,
+        "0001_items",
+        &file("0001_items", &[], "tenant", items()),
+    );
+    let fo = FleetOptions {
+        migrator: Some(MigratorLogin {
+            user: mig.clone(),
+            password: "pw".into(),
+        }),
+        ..FleetOptions::default()
+    };
+    let rep = run_fleet(&pools, &dir, &r.url, &fo).await.unwrap();
+    let e = rep
+        .failed()
+        .next()
+        .and_then(|t| t.error.clone())
+        .expect("refused");
+    assert!(
+        e.contains("owns its database") && e.contains("OWNER TO <migrator>"),
+        "{e}"
+    );
+    registry.close().await;
+}
+
+/// A fleet `down 1` that failed part way, rerun: the tenants already rolled
+/// back stay at the same target; the rest catch up (8.4). The failure names
+/// `--to`.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn a_rerun_fleet_down_stops_at_the_same_targets() {
+    let _g = serial().lock().await;
+    let Some(f) = PgFleet::new("downrerun").await else {
+        return;
+    };
+    f.with_orgs(&["t1", "t2", "t3"]).await;
+    put(
+        &f.dir(),
+        "0001_items",
+        &file("0001_items", &[], "tenant", items()),
+    );
+    let five = json!([{"op": "data_sql", "v": 1, "id": "five_v1",
+        "tables": {"write": ["items"]},
+        "up": {"any": "INSERT INTO {{t:items}} ({{c:id}}, {{c:code}}) VALUES (5, '5')"},
+        "down": {"any": "DELETE FROM {{t:items}} WHERE CAST({{c:code}} AS BIGINT) = 5"}}]);
+    put(
+        &f.dir(),
+        "0002_five",
+        &file("0002_five", &["0001_items"], "tenant", five),
+    );
+    f.fleet(&FleetOptions::default()).await.unwrap();
+    let reg = f.registry();
+    raw_execute_pool(
+        &reg,
+        "INSERT INTO s_t2.items (id, code) VALUES (9, 'xx')",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let pools = f.pools();
+    let down = ["dbmigrate", "down", "1", "--all-tenants"];
+    let (r, _) = tenancy_cli_out(&pools, &f.db.url, &f.dir(), &down).await;
+    let e = r.expect_err("t2 fails");
+    assert!(
+        e.to_string().contains("t2") && e.to_string().contains("--to"),
+        "{e}"
+    );
+    let fives = |s: &str| format!("SELECT COUNT(*) FROM {s}.items WHERE id = 5");
+    assert_eq!(count(&reg, &fives("s_t1")).await, 0);
+    assert_eq!(count(&reg, &fives("s_t3")).await, 1);
+    raw_execute_pool(&reg, "DELETE FROM s_t2.items WHERE id = 9", Vec::new())
+        .await
+        .unwrap();
+    let (r, out) = tenancy_cli_out(&pools, &f.db.url, &f.dir(), &down).await;
+    r.unwrap();
+    assert!(out.contains("tenant t1: nothing to roll back"), "{out}");
+    for s in ["s_t1", "s_t2", "s_t3"] {
+        assert!(exists_in(&reg, s, "items").await, "{s} lost 0001_items");
+        assert_eq!(count(&reg, &fives(s)).await, 0, "{s}");
+    }
+    // Finished: the same command again is a new run, one step further.
+    let (r, _) = tenancy_cli_out(&pools, &f.db.url, &f.dir(), &down).await;
+    r.unwrap();
+    for s in ["s_t1", "s_t2", "s_t3"] {
+        assert!(!exists_in(&reg, s, "items").await, "{s}");
+    }
+}
+
+/// `--canary` keeps the order given, and a slug no tenant has is refused
+/// before anything runs (8.3).
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn canaries_keep_their_order_and_an_unknown_one_refuses() {
+    let _g = serial().lock().await;
+    let Some(f) = PgFleet::new("canord").await else {
+        return;
+    };
+    f.with_orgs(&["t1", "t2", "t3"]).await;
+    put(
+        &f.dir(),
+        "0001_items",
+        &file("0001_items", &[], "tenant", items()),
+    );
+    let e = f
+        .fleet(&FleetOptions {
+            canaries: vec!["t9".into()],
+            ..FleetOptions::default()
+        })
+        .await
+        .expect_err("an unknown canary");
+    assert!(e.to_string().contains("t9"), "{e}");
+    assert!(!exists_in(&f.registry(), "s_t1", "items").await);
+    let rep = f
+        .fleet(&FleetOptions {
+            canaries: vec!["t3".into(), "t1".into()],
+            ..FleetOptions::default()
+        })
+        .await
+        .unwrap();
+    let ran: Vec<&str> = rep.tenants.iter().map(|t| t.slug.as_str()).collect();
+    assert_eq!(ran, ["t3", "t1", "t2"], "{rep:?}");
+}
+
+/// Two replicas booting on a fresh database revoke PUBLIC's TEMP at once:
+/// the one that loses the race reads the grants again instead of failing.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn a_concurrent_public_revoke_is_not_an_error() {
+    let _g = serial().lock().await;
+    let Some(admin) = crate::testkit::matrix::live_url("DATABASE_URL", "postgres") else {
+        return;
+    };
+    let db = Scratch::create(&admin, "race").await;
+    let (a, b) = (
+        sqlx::PgPool::connect(&db.url).await.unwrap(),
+        sqlx::PgPool::connect(&db.url).await.unwrap(),
+    );
+    let mut tx = a.begin().await.unwrap();
+    sqlx::query(&format!(
+        "REVOKE TEMPORARY ON DATABASE {} FROM PUBLIC",
+        db.name
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    let other = tokio::spawn(async move {
+        let mut c = b.acquire().await.unwrap();
+        crate::tenancy::schema_role::revoke_public_writes_beside_others(&mut c).await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    tx.commit().await.unwrap();
+    other.await.unwrap().expect("the second revoke reads again");
+    a.close().await;
 }

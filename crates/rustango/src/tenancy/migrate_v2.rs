@@ -33,22 +33,23 @@ enum Conn {
     },
     /// The tenant database as the migrator login.
     Migrator { url: String, login: MigratorLogin },
-    /// The app's own tenant pool, which the fleet does not close.
-    Shared(crate::sql::Pool),
+    /// The tenant database as its own login, never through the app's cached
+    /// pool: the fleet's connections follow `--parallel` (8.3).
+    Direct {
+        url: String,
+        timeout: std::time::Duration,
+    },
 }
 
 /// A target's pool while one step uses it.
 pub(crate) struct Open {
     pub(crate) pool: crate::sql::Pool,
-    owned: bool,
 }
 
 impl Open {
     /// Release the connections the fleet opened for this step.
     pub(crate) async fn close(self) {
-        if self.owned {
-            self.pool.close().await;
-        }
+        self.pool.close().await;
     }
 }
 
@@ -68,15 +69,10 @@ impl Target {
             Conn::Schema { url, path, timeout } => {
                 schema_only_pool(url, path, *timeout).await?.into()
             }
-            Conn::Migrator { url, login } => connect_as(url, login).await?,
-            Conn::Shared(pool) => {
-                return Ok(Open {
-                    pool: pool.clone(),
-                    owned: false,
-                })
-            }
+            Conn::Migrator { url, login } => connect_step(url, Some(login), None).await?,
+            Conn::Direct { url, timeout } => connect_step(url, None, Some(*timeout)).await?,
         };
-        Ok(Open { pool, owned: true })
+        Ok(Open { pool })
     }
 
     /// Whether the fleet logs in as the migrator, not the tenant.
@@ -246,18 +242,14 @@ where
             }));
         }
     }
-    let pool = match pools.database_pool_for_org(org).await? {
-        super::pools::TenantPool::Database { pool } => crate::sql::Pool::from((*pool).clone()),
-        #[cfg(feature = "postgres")]
-        super::pools::TenantPool::Schema { .. } => {
-            unreachable!("database_pool_for_org refuses schema mode")
-        }
-    };
     Ok(Some(Target {
         slug: org.slug.clone(),
         scope: LockScope::Session,
         role: None,
-        conn: Conn::Shared(pool),
+        conn: Conn::Direct {
+            url: pools.tagged_database_url(org).await?,
+            timeout: pools.pool_config().database_pool_acquire_timeout,
+        },
     }))
 }
 
@@ -282,40 +274,63 @@ fn other_login(url: &str, m: &MigratorLogin) -> Result<Option<String>, TenancyEr
     Ok(tenant.filter(|t| *t != m.user))
 }
 
-/// A small pool on the tenant database at `url` logged in as `m`. On PG its
-/// path is pinned, so names never resolve through a schema the tenant
-/// login can create.
+/// A pool of two on the tenant database at `url` for one step, as `login`
+/// when given. A migrator's path on PG is pinned, so names never resolve
+/// through a schema the tenant login can create.
 #[allow(clippy::unused_async)]
-async fn connect_as(url: &str, m: &MigratorLogin) -> Result<crate::sql::Pool, TenancyError> {
-    let _ = m;
+async fn connect_step(
+    url: &str,
+    login: Option<&MigratorLogin>,
+    timeout: Option<std::time::Duration>,
+) -> Result<crate::sql::Pool, TenancyError> {
+    let _ = (login, timeout);
     match super::BackendKind::of_url(url) {
         #[cfg(feature = "mysql")]
         Some(super::BackendKind::MySql) => {
-            let opts: sqlx::mysql::MySqlConnectOptions = url.parse()?;
-            Ok(sqlx::mysql::MySqlPoolOptions::new()
-                .max_connections(2)
-                .connect_with(opts.username(&m.user).password(&m.password))
-                .await?
-                .into())
+            let mut opts: sqlx::mysql::MySqlConnectOptions = url.parse()?;
+            if let Some(m) = login {
+                opts = opts.username(&m.user).password(&m.password);
+            }
+            let mut po = sqlx::mysql::MySqlPoolOptions::new().max_connections(2);
+            if let Some(t) = timeout {
+                po = po.acquire_timeout(t);
+            }
+            Ok(po.connect_with(opts).await?.into())
         }
         #[cfg(feature = "postgres")]
         Some(super::BackendKind::Postgres) => {
-            let opts: sqlx::postgres::PgConnectOptions = url.parse()?;
-            Ok(sqlx::postgres::PgPoolOptions::new()
-                .max_connections(2)
-                .after_connect(|conn, _| {
+            let mut opts: sqlx::postgres::PgConnectOptions = url.parse()?;
+            let mut po = sqlx::postgres::PgPoolOptions::new().max_connections(2);
+            if let Some(m) = login {
+                opts = opts.username(&m.user).password(&m.password);
+                po = po.after_connect(|conn, _| {
                     Box::pin(async move {
                         use sqlx::Executor as _;
                         conn.execute(sqlx::raw_sql(MIGRATOR_PATH)).await.map(drop)
                     })
-                })
-                .connect_with(opts.username(&m.user).password(&m.password))
-                .await?
-                .into())
+                });
+            }
+            if let Some(t) = timeout {
+                po = po.acquire_timeout(t);
+            }
+            Ok(po.connect_with(opts).await?.into())
         }
-        _ => Err(TenancyError::Validation(format!(
+        #[cfg(feature = "sqlite")]
+        Some(super::BackendKind::Sqlite) if login.is_none() => {
+            let url = super::pools::ensure_sqlite_creates(url);
+            let mut po = sqlx::sqlite::SqlitePoolOptions::new().max_connections(2);
+            if let Some(t) = timeout {
+                po = po.acquire_timeout(t);
+            }
+            Ok(po.connect(&url).await?.into())
+        }
+        _ if login.is_some() => Err(TenancyError::Validation(format!(
             "{} is set, but this tenant's backend has no logins",
             MigratorLogin::ENV
+        ))),
+        _ => Err(TenancyError::Validation(format!(
+            "this build cannot open the tenant database at a `{}` URL",
+            url.split(':').next().unwrap_or_default()
         ))),
     }
 }
@@ -390,6 +405,22 @@ pub(crate) struct FleetOptions {
     pub(crate) abandon: bool,
     /// The login database tenants are migrated as ([`MigratorLogin::from_env`]).
     pub(crate) migrator: Option<MigratorLogin>,
+    /// Set by a shutdown signal: each tenant stops after its unit in flight,
+    /// no further tenant starts, and the record says `stopped` (6.11).
+    pub(crate) stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Boot: give up waiting on the fleet lock (or a tenant's) once the
+    /// holder's heartbeat is this old; `None` waits on.
+    pub(crate) stale_after: Option<std::time::Duration>,
+    /// How often the fleet record's heartbeat is refreshed; `None` = 30 s.
+    pub(crate) heartbeat_every: Option<std::time::Duration>,
+}
+
+impl FleetOptions {
+    fn stopping(&self) -> bool {
+        self.stop
+            .as_ref()
+            .is_some_and(|s| s.load(std::sync::atomic::Ordering::SeqCst))
+    }
 }
 
 /// One tenant's result.
@@ -410,6 +441,8 @@ pub(crate) struct FleetReport {
     pub(crate) tenants: Vec<TenantOutcome>,
     /// `--max-failures` or a canary stopped the run; later tenants did not run.
     pub(crate) stopped: bool,
+    /// A shutdown signal stopped the run; it resumes on the next one.
+    pub(crate) shutdown: bool,
     /// Tenants a stop left unmigrated; boot parks them with the failed ones.
     pub(crate) skipped: Vec<String>,
     /// The fleet record of this run (8.3).
@@ -421,6 +454,30 @@ impl FleetReport {
     pub(crate) fn failed(&self) -> impl Iterator<Item = &TenantOutcome> {
         self.tenants.iter().filter(|t| t.error_class.is_some())
     }
+
+    /// A shutdown stopped the run: the process exits non-zero (6.11).
+    pub(crate) fn stop_error(&self) -> Option<TenancyError> {
+        self.shutdown.then(|| {
+            TenancyError::Validation(format!(
+                "{}: a shutdown signal stopped the fleet run",
+                run::STOPPED
+            ))
+        })
+    }
+
+    /// One outcome per tenant: a later stage's adds to the earlier one.
+    fn record(&mut self, o: TenantOutcome) {
+        match self.tenants.iter_mut().find(|t| t.slug == o.slug) {
+            Some(t) => {
+                t.applied.extend(o.applied);
+                if o.error_class.is_some() {
+                    t.error_class = o.error_class;
+                    t.error = o.error;
+                }
+            }
+            None => self.tenants.push(o),
+        }
+    }
 }
 
 fn migrate_err(e: run::RunError) -> TenancyError {
@@ -430,14 +487,17 @@ fn migrate_err(e: run::RunError) -> TenancyError {
 /// The registry chain, then every tenant's, under the fleet lock and a
 /// fleet record (8.3). A registry failure is an error; a tenant failure is
 /// recorded in the registry cache (its error class only) and the run goes
-/// on, within `max_failures`. Every tenant is planned first: one blocker
-/// refuses them all before any change. Canaries go first; every tenant
-/// reaches its expand head before any contract file runs; tenants added
-/// while it runs are picked up before it ends.
+/// on, within `max_failures`. Every refusal comes before any write: the
+/// record refuses another plan's unfinished run, then every tenant is
+/// planned (against the registry as its chain will leave it) and one
+/// blocker refuses them all. Canaries go first, in the order given; every
+/// tenant reaches its expand head before any contract file runs; tenants
+/// added while it runs are picked up before it ends. A waiter gives up
+/// only on a holder whose heartbeat is older than `stale_after` (6.11).
 ///
 /// # Errors
 /// The registry chain, a blocker in any tenant, another unfinished fleet
-/// plan, or reading the orgs.
+/// plan, an unknown canary, a hung lock holder, or reading the orgs.
 pub(crate) async fn run_fleet<DB: Database>(
     pools: &TenantPools<DB>,
     dir: &Path,
@@ -448,12 +508,70 @@ where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
     let registry = pools.registry_pool();
+    let got_lock = std::sync::atomic::AtomicBool::new(false);
+    let locked = run::fleet_locked(&registry, || async {
+        got_lock.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(fleet_body(pools, &registry, dir, registry_url, fo).await)
+    });
     let result: Result<Result<FleetReport, TenancyError>, crate::migrate::MigrateError> =
-        run::fleet_locked(&registry, || async {
-            Ok(fleet_body(pools, &registry, dir, registry_url, fo).await)
-        })
-        .await;
+        match fo.stale_after {
+            None => locked.await,
+            // Waits on the holder's heartbeat, never a flat lock timeout (6.11).
+            Some(stale) => tokio::select! {
+                r = crate::migrate::with_lock_timeout(std::time::Duration::MAX, locked) => r,
+                e = stale_fleet_holder(&registry, stale, &got_lock) => return Err(e),
+            },
+        };
     result?
+}
+
+/// Resolves with an error once the fleet lock's holder has a fleet record
+/// whose heartbeat is older than `stale`, while this run still waits; pends
+/// after that ([`run::stale_lock_holder`]).
+async fn stale_fleet_holder(
+    registry: &crate::sql::Pool,
+    stale: std::time::Duration,
+    got_lock: &std::sync::atomic::AtomicBool,
+) -> TenancyError {
+    // A missing record table or a read error: keep waiting.
+    let probe = || async {
+        crate::migrate::v2::ledger::fleet_stale(registry, stale)
+            .await
+            .ok()
+            .flatten()
+    };
+    let (run, age) = run::stale_lock_holder(stale, got_lock, probe).await;
+    TenancyError::Validation(format!(
+        "the fleet lock is held by fleet run {run} whose heartbeat is {age}s old: it looks hung; \
+         stopping instead of waiting on it"
+    ))
+}
+
+/// `fut` while the fleet record `run_id`'s heartbeat is refreshed every
+/// `every` (30 s by default), so waiters see a live holder (6.11).
+pub(crate) async fn beating<F: std::future::Future>(
+    registry: &crate::sql::Pool,
+    run_id: &str,
+    every: Option<std::time::Duration>,
+    fut: F,
+) -> F::Output {
+    tokio::select! {
+        out = fut => out,
+        never = fleet_heartbeats(registry, run_id, every.unwrap_or(run::HEARTBEAT_EVERY)) => {
+            match never {}
+        }
+    }
+}
+
+async fn fleet_heartbeats(
+    registry: &crate::sql::Pool,
+    run_id: &str,
+    every: std::time::Duration,
+) -> std::convert::Infallible {
+    run::beat_every(every, || {
+        crate::migrate::v2::ledger::fleet_beat(registry, run_id)
+    })
+    .await
 }
 
 /// The fleet's tenants by slug order: every org (or the active ones), and
@@ -489,6 +607,23 @@ async fn fleet_orgs(
     Ok((orgs, unknown))
 }
 
+/// A `--canary` slug no tenant of this run has is a typo: refused.
+fn refuse_unknown_canaries(fo: &FleetOptions, orgs: &[Org]) -> Result<(), TenancyError> {
+    let unknown: Vec<&str> = fo
+        .canaries
+        .iter()
+        .filter(|c| !orgs.iter().any(|o| o.slug == **c))
+        .map(String::as_str)
+        .collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    Err(TenancyError::Validation(format!(
+        "--canary names no tenant of this run: {}; nothing was changed",
+        unknown.join(", ")
+    )))
+}
+
 /// A tenant run's options.
 pub(crate) fn tenant_opts(t: &Target) -> Options {
     Options {
@@ -511,24 +646,74 @@ where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
     let mut report = FleetReport::default();
-    let (orgs, mut unknown) = fleet_orgs(registry, fo).await?;
-    #[cfg(feature = "postgres")]
-    if registry.dialect().kind() == crate::sql::DialectKind::Postgres {
-        extensions_home(registry, &orgs).await?;
-    }
+    let (orgs, unknown) = fleet_orgs(registry, fo).await?;
+    refuse_unknown_canaries(fo, &orgs)?;
     // Read once for the whole run (every tenant plans from it).
     let project = crate::migrate::v2::load::load_project(dir)
         .map_err(|e| migrate_err(run::RunError::Load(e)))?;
-    let k = fo.parallel.max(1);
-    let (surveyed, unreachable) = survey_all(
-        pools,
-        &orgs,
-        registry_url,
-        fo.migrator.as_ref(),
-        &project,
-        k,
+    // The record first: another plan's unfinished run refuses before any write.
+    report.run_id = run::new_run_id();
+    crate::migrate::v2::ledger::fleet_open(
+        registry,
+        &report.run_id,
+        "up",
+        &run::plan_hash(&project),
+        fo.abandon,
+        None,
     )
-    .await;
+    .await?;
+    let run_id = report.run_id.clone();
+    // Boxed: the fleet future is large in debug builds.
+    let work = Box::pin(fleet_work(
+        pools,
+        registry,
+        &project,
+        registry_url,
+        fo,
+        orgs,
+        unknown,
+        &mut report,
+    ));
+    let result = beating(registry, &run_id, fo.heartbeat_every, work).await;
+    let state = if report.shutdown {
+        "stopped"
+    } else if result.is_err() || report.failed().next().is_some() || report.stopped {
+        "failed"
+    } else {
+        "succeeded"
+    };
+    crate::migrate::v2::ledger::fleet_close(registry, &run_id, state).await?;
+    result.map(|()| report)
+}
+
+/// The run behind the record: read and plan every tenant, refuse on any
+/// blocker, then the extension move, the registry chain and the tenants.
+#[allow(clippy::too_many_arguments)]
+async fn fleet_work<DB: Database>(
+    pools: &TenantPools<DB>,
+    registry: &crate::sql::Pool,
+    project: &crate::migrate::v2::load::Project,
+    registry_url: &str,
+    fo: &FleetOptions,
+    orgs: Vec<Org>,
+    mut unknown: Vec<String>,
+    report: &mut FleetReport,
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    #[cfg(feature = "postgres")]
+    for o in orgs
+        .iter()
+        .filter(|o| o.storage_mode == StorageMode::Schema)
+    {
+        refuse_engine_schema(&o.slug, o.effective_schema())?;
+    }
+    // Every target's state from the files, before any tenant is read.
+    crate::migrate::v2::load::replay(project).map_err(|e| migrate_err(run::RunError::Load(e)))?;
+    let k = fo.parallel.max(1);
+    let (surveyed, unreachable) =
+        survey_all(pools, &orgs, registry_url, fo.migrator.as_ref(), project, k).await;
     unknown.extend(
         unreachable
             .iter()
@@ -547,12 +732,45 @@ where
         run_as: RunAs::Registry,
         tenants_applied: Some(everywhere.unwrap_or_default()),
         tenants_unknown: unknown,
+        stop: fo.stop.clone(),
+        stale_after: fo.stale_after,
         ..Options::default()
     };
-    report.registry = run::migrate_loaded(registry, &project, &reg)
+    // One tip for every tenant: each distinct applied set plans once (4.4).
+    let plan = std::sync::Arc::new(
+        crate::migrate::v2::plan::TipPlanner::new(
+            project,
+            crate::migrate::v2::state::Target::Tenant,
+        )
+        .map_err(|e| migrate_err(run::RunError::Load(e)))?,
+    );
+    // Planned as the registry chain will leave it, before it writes.
+    let expected = run::registry_after(registry, project, &reg)
         .await
-        .map_err(migrate_err)?
-        .applied;
+        .map_err(migrate_err)?;
+    let planning = Fleet {
+        registry,
+        project,
+        registry_applied: &expected,
+        run_id: &report.run_id,
+        plan: plan.clone(),
+        parallel: k,
+        fo,
+    };
+    planning.refuse_blockers(&surveyed).await?;
+    // Writes from here.
+    #[cfg(feature = "postgres")]
+    if registry.dialect().kind() == crate::sql::DialectKind::Postgres {
+        extensions_home(registry).await?;
+    }
+    let ran = run::migrate_loaded(registry, project, &reg)
+        .await
+        .map_err(migrate_err)?;
+    report.registry = ran.applied;
+    if ran.stopped.is_some() {
+        report.shutdown = true;
+        return Ok(());
+    }
     let registry_applied = run::applied_ids(registry, &reg)
         .await
         .map_err(migrate_err)?;
@@ -560,51 +778,31 @@ where
     if registry.dialect().kind() == crate::sql::DialectKind::Postgres
         && orgs.iter().any(|o| o.storage_mode == StorageMode::Schema)
     {
-        refuse_missing_extensions(registry, &run::registry_extensions(&project)).await?;
+        refuse_missing_extensions(registry, &run::registry_extensions(project)).await?;
     }
-    report.run_id = run::new_run_id();
-    crate::migrate::v2::ledger::fleet_open(
-        registry,
-        &report.run_id,
-        "up",
-        &run::plan_hash(&project),
-        fo.abandon,
-    )
-    .await?;
     crate::migrate::v2::ledger::cache_ensure(registry).await?;
     let run_id = report.run_id.clone();
-    // One tip for every tenant: each distinct applied set plans once (4.4).
-    let plan = crate::migrate::v2::plan::TipPlanner::new(
-        &project,
-        crate::migrate::v2::state::Target::Tenant,
-    )
-    .map_err(|e| migrate_err(run::RunError::Load(e)))?;
     let fleet = Fleet {
         registry,
-        project: &project,
+        project,
         registry_applied: &registry_applied,
         run_id: &run_id,
-        plan: std::sync::Arc::new(plan),
+        plan,
         parallel: k,
+        fo,
     };
     let seen = orgs.iter().map(|o| o.slug.clone()).collect();
-    let result = fleet_rounds(pools, &fleet, registry_url, fo, surveyed, seen, &mut report).await;
-    let state = if result.is_err() || report.failed().next().is_some() || report.stopped {
-        "failed"
-    } else {
-        "succeeded"
-    };
-    crate::migrate::v2::ledger::fleet_close(registry, &run_id, state).await?;
-    result.map(|()| report)
+    fleet_rounds(pools, &fleet, registry_url, surveyed, seen, report).await
 }
 
 /// The fleet's rounds: the tenants known, then those provisioned meanwhile.
+/// The first round was planned before the registry chain; later rounds are
+/// planned here.
 #[allow(clippy::too_many_lines)]
 async fn fleet_rounds<DB: Database>(
     pools: &TenantPools<DB>,
     fleet: &Fleet<'_>,
     registry_url: &str,
-    fo: &FleetOptions,
     mut surveyed: Vec<Surveyed>,
     mut seen: std::collections::BTreeSet<String>,
     report: &mut FleetReport,
@@ -612,19 +810,21 @@ async fn fleet_rounds<DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    let registry = fleet.registry;
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    let (registry, fo) = (fleet.registry, fleet.fo);
     // Shared by the buffered tenant futures; atomic so the fleet future is `Send`.
     let failures = AtomicUsize::new(report.tenants.len());
     let bump = |n: usize| failures.fetch_add(n, SeqCst);
+    let mut planned = true;
     loop {
+        if !std::mem::replace(&mut planned, false) {
+            fleet.refuse_blockers(&surveyed).await?;
+        }
         let (current, work): (Vec<Surveyed>, Vec<Surveyed>) = std::mem::take(&mut surveyed)
             .into_iter()
             .partition(|s| s.current);
         fleet.record_current(&current, report).await?;
-        fleet.refuse_blockers(&work).await?;
-        // Canaries first, one by one, then the rest; contract files only
-        // once every tenant reached its expand head.
+        // Contract files only once every tenant reached its expand head.
         let gated = !fo.allow_mixed_heads
             && work.iter().any(|s| {
                 run::contract_pending(
@@ -633,6 +833,17 @@ where
                     &s.applied,
                 )
             });
+        // Schemas and login roles are set up only now, for tenants with work.
+        let mut ready = Vec::new();
+        for s in work {
+            match setup(pools, s, registry_url, fo.migrator.as_ref()).await {
+                Ok(t) => ready.push(t),
+                Err(o) => {
+                    bump(1);
+                    report.record(o);
+                }
+            }
+        }
         let stages: &[bool] = if fo.expand_only || gated {
             if fo.expand_only {
                 &[true]
@@ -642,20 +853,33 @@ where
         } else {
             &[false]
         };
-        let (canaries, rest): (Vec<&Target>, Vec<&Target>) = work
+        // Canaries first, one by one, in the order given; then the rest.
+        let canaries: Vec<&Target> = fo
+            .canaries
             .iter()
-            .map(|s| &s.target)
-            .partition(|t| fo.canaries.contains(&t.slug));
+            .filter_map(|c| ready.iter().find(|t| t.slug == *c))
+            .collect();
+        let rest: Vec<&Target> = ready
+            .iter()
+            .filter(|t| !fo.canaries.contains(&t.slug))
+            .collect();
         for &expand in stages {
             let before = failures.load(SeqCst);
             for (n, t) in canaries.iter().enumerate() {
+                if fo.stopping() {
+                    report.shutdown = true;
+                    report
+                        .skipped
+                        .extend(canaries[n..].iter().chain(&rest).map(|t| t.slug.clone()));
+                    break;
+                }
                 let out = fleet.migrate_one(t, expand).await?;
                 let failed = out.error_class.is_some();
                 if failed {
                     bump(1);
                 }
-                report.tenants.push(out);
-                if failed {
+                report.record(out);
+                if failed && !fo.stopping() {
                     tracing::error!(
                         target: "rustango::tenancy",
                         slug = %t.slug,
@@ -671,13 +895,16 @@ where
                     break;
                 }
             }
-            if report.stopped {
+            if report.stopped || report.shutdown {
                 break;
             }
             use futures_util::StreamExt as _;
             let mut stream = futures_util::stream::iter(rest.iter().map(|t| async {
+                if fo.stopping() {
+                    return Ok(Err((t.slug.clone(), true)));
+                }
                 if fo.max_failures.is_some_and(|m| failures.load(SeqCst) > m) {
-                    return Ok(Err(t.slug.clone()));
+                    return Ok(Err((t.slug.clone(), false)));
                 }
                 fleet.migrate_one(t, expand).await.map(Ok)
             }))
@@ -688,15 +915,22 @@ where
                         if o.error_class.is_some() {
                             bump(1);
                         }
-                        report.tenants.push(o);
+                        report.record(o);
                     }
-                    Err(slug) => {
-                        report.stopped = true;
+                    Err((slug, shutdown)) => {
+                        if shutdown {
+                            report.shutdown = true;
+                        } else {
+                            report.stopped = true;
+                        }
                         report.skipped.push(slug);
                     }
                 }
             }
             drop(stream);
+            if fo.stopping() {
+                report.shutdown = true;
+            }
             if fo.max_failures.is_some_and(|m| failures.load(SeqCst) > m) {
                 report.stopped = true;
             }
@@ -708,12 +942,11 @@ where
                 );
                 break;
             }
-            if report.stopped {
+            if report.stopped || report.shutdown {
                 break;
             }
         }
-        crate::migrate::v2::ledger::fleet_beat(registry, fleet.run_id).await?;
-        if report.stopped {
+        if report.stopped || report.shutdown {
             break;
         }
         // Tenants provisioned while the fleet ran: migrate them too, until none is new.
@@ -753,14 +986,8 @@ const EXTENSIONS: &str = crate::migrate::v2::render::EXTENSIONS_SCHEMA;
 /// # Errors
 /// Missing rights: the error names the statement to run as the owner.
 #[cfg(feature = "postgres")]
-async fn extensions_home(registry: &crate::sql::Pool, orgs: &[Org]) -> Result<(), TenancyError> {
+async fn extensions_home(registry: &crate::sql::Pool) -> Result<(), TenancyError> {
     use crate::sql::raw_query_pool;
-    for o in orgs
-        .iter()
-        .filter(|o| o.storage_mode == StorageMode::Schema)
-    {
-        refuse_engine_schema(&o.slug, o.effective_schema())?;
-    }
     let q = |sql: &'static str| async move {
         raw_query_pool::<(String,)>(sql, Vec::new(), registry)
             .await
@@ -959,14 +1186,34 @@ where
 
 /// One tenant after the fleet read its ledgers.
 struct Surveyed {
-    target: Target,
+    org: Org,
+    /// `None`: a schema tenant whose schema is not made yet.
+    target: Option<Target>,
     applied: std::collections::BTreeSet<String>,
     /// Every file applied as on disk: nothing to plan or run.
     current: bool,
 }
 
-/// Each org's target and ledgers, `k` at a time, each connection closed
-/// after; an outcome for each one unreachable.
+/// A tenant the fleet could not reach or set up: its error class, and the
+/// error itself in the operator's log.
+fn unreachable_of(slug: &str, e: &TenancyError) -> TenantOutcome {
+    tracing::warn!(
+        target: "rustango::tenancy",
+        slug,
+        error = %e,
+        "tenant unreachable; it is not migrated"
+    );
+    TenantOutcome {
+        slug: slug.to_owned(),
+        applied: Vec::new(),
+        error_class: Some("unreachable".into()),
+        error: Some(e.to_string()),
+    }
+}
+
+/// Each org's target and ledgers, read only, `k` at a time, each
+/// connection closed after; an outcome for each one unreachable. Nothing
+/// is set up here: [`setup`] does that for tenants with work.
 async fn survey_all<DB: Database>(
     pools: &TenantPools<DB>,
     orgs: &[Org],
@@ -979,38 +1226,64 @@ where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
     use futures_util::StreamExt as _;
-    let unreachable_of = |slug: &str, e: TenancyError| TenantOutcome {
-        slug: slug.to_owned(),
-        applied: Vec::new(),
-        error_class: Some("unreachable".into()),
-        error: Some(e.to_string()),
-    };
-    // Serial: schema and role set-up race on shared catalog rows.
-    let mut targets = Vec::new();
-    let mut unreachable = Vec::new();
-    for org in orgs {
-        match target_as(pools, org, registry_url, migrator).await {
-            Ok(t) => targets.push(t),
-            Err(e) => unreachable.push(unreachable_of(&org.slug, e)),
+    let one = |org: &Org| {
+        let org = org.clone();
+        async move {
+            let target =
+                match target_with(pools, &org, registry_url, migrator, Setup::ReadOnly).await {
+                    Ok(Some(t)) => t,
+                    Ok(None) => {
+                        return Ok(Surveyed {
+                            org,
+                            target: None,
+                            applied: std::collections::BTreeSet::new(),
+                            current: false,
+                        })
+                    }
+                    Err(e) => return Err(unreachable_of(&org.slug, &e)),
+                };
+            survey_target(org, target, project)
+                .await
+                .map_err(|(slug, e)| unreachable_of(&slug, &e))
         }
-    }
-    let results: Vec<_> =
-        futures_util::stream::iter(targets.into_iter().map(|t| survey_target(t, project)))
-            .buffered(k)
-            .collect()
-            .await;
-    let mut surveyed = Vec::new();
+    };
+    let results: Vec<Result<Surveyed, TenantOutcome>> = futures_util::stream::iter(orgs.iter())
+        .map(one)
+        .buffered(k)
+        .collect()
+        .await;
+    let (mut surveyed, mut unreachable) = (Vec::new(), Vec::new());
     for r in results {
         match r {
-            Ok(s) if s.current => surveyed.push(s),
-            Ok(s) => match prepare(pools, &s.target).await {
-                Ok(()) => surveyed.push(s),
-                Err(e) => unreachable.push(unreachable_of(&s.target.slug, e)),
-            },
-            Err((t, e)) => unreachable.push(unreachable_of(&t.slug, e)),
+            Ok(s) => surveyed.push(s),
+            Err(o) => unreachable.push(o),
         }
     }
     (surveyed, unreachable)
+}
+
+/// A tenant with work, ready to run: a schema tenant's schema is made and
+/// its path read again (the extension move may have changed it), and its
+/// login role set up (or its password reset to the current secret).
+async fn setup<DB: Database>(
+    pools: &TenantPools<DB>,
+    s: Surveyed,
+    registry_url: &str,
+    migrator: Option<&MigratorLogin>,
+) -> Result<Target, TenantOutcome>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let target = match s.target {
+        Some(t) if t.own_database() => t,
+        _ => target_as(pools, &s.org, registry_url, migrator)
+            .await
+            .map_err(|e| unreachable_of(&s.org.slug, &e))?,
+    };
+    prepare(pools, &target)
+        .await
+        .map_err(|e| unreachable_of(&target.slug, &e))?;
+    Ok(target)
 }
 
 /// A schema tenant with work gets its login role set up (or its password
@@ -1042,12 +1315,13 @@ async fn secure_migrator(pool: &crate::sql::Pool, login: Option<&str>) -> Result
 /// `target`'s ledgers read on a connection closed after. A migrator
 /// secures the tenant database before it reads anything there.
 async fn survey_target(
+    org: Org,
     target: Target,
     project: &crate::migrate::v2::load::Project,
-) -> Result<Surveyed, (Target, TenancyError)> {
+) -> Result<Surveyed, (String, TenancyError)> {
     let open = match target.open().await {
         Ok(o) => o,
-        Err(e) => return Err((target, e)),
+        Err(e) => return Err((target.slug, e)),
     };
     let s = async {
         if target.as_migrator() {
@@ -1061,11 +1335,12 @@ async fn survey_target(
     open.close().await;
     match s {
         Ok(s) => Ok(Surveyed {
+            org,
             current: s.current,
             applied: s.applied,
-            target,
+            target: Some(target),
         }),
-        Err(e) => Err((target, e)),
+        Err(e) => Err((target.slug, e)),
     }
 }
 
@@ -1083,6 +1358,7 @@ struct Fleet<'a> {
     plan: std::sync::Arc<crate::migrate::v2::plan::TipPlanner>,
     /// Tenants worked on at once, and so the tenant connections open.
     parallel: usize,
+    fo: &'a FleetOptions,
 }
 
 impl Fleet<'_> {
@@ -1094,6 +1370,8 @@ impl Fleet<'_> {
             stop_before_contract: expand,
             plan: Some(self.plan.clone()),
             fast_fresh: true,
+            stop: self.fo.stop.clone(),
+            stale_after: self.fo.stale_after,
             ..tenant_opts(t)
         }
     }
@@ -1118,10 +1396,10 @@ impl Fleet<'_> {
         for s in current {
             let head = head_of(&s.applied);
             let want = ("applied".to_owned(), head.clone());
-            if cache.get(&s.target.slug) != Some(&want) {
+            if cache.get(&s.org.slug) != Some(&want) {
                 crate::migrate::v2::ledger::cache_put(
                     self.registry,
-                    &s.target.slug,
+                    &s.org.slug,
                     "applied",
                     head.as_deref(),
                     None,
@@ -1129,8 +1407,8 @@ impl Fleet<'_> {
                 )
                 .await?;
             }
-            report.tenants.push(TenantOutcome {
-                slug: s.target.slug.clone(),
+            report.record(TenantOutcome {
+                slug: s.org.slug.clone(),
                 applied: Vec::new(),
                 error_class: None,
                 error: None,
@@ -1139,19 +1417,44 @@ impl Fleet<'_> {
         Ok(())
     }
 
-    /// Plan every tenant before any change, `parallel` at a time: a refusal
-    /// anywhere stops all.
-    async fn refuse_blockers(&self, work: &[Surveyed]) -> Result<(), TenancyError> {
+    /// Plan every tenant with work before any change, `parallel` at a
+    /// time: a refusal anywhere stops all. A schema not made yet has
+    /// nothing to refuse.
+    async fn refuse_blockers(&self, surveyed: &[Surveyed]) -> Result<(), TenancyError> {
         use futures_util::StreamExt as _;
+        let mut blockers = Vec::new();
+        // A schema not made yet has nothing applied: its files alone tell.
+        let fresh: Vec<&str> = surveyed
+            .iter()
+            .filter(|s| !s.current && s.target.is_none())
+            .map(|s| s.org.slug.as_str())
+            .collect();
+        if !fresh.is_empty() {
+            let opts = Options {
+                registry_applied: Some(self.registry_applied.clone()),
+                run_as: RunAs::Tenant {
+                    own_database: false,
+                },
+                ..Options::default()
+            };
+            let b = crate::migrate::v2::state::Backend::Postgres;
+            if let Err(e) = run::fresh_refusal(self.project, &opts, b) {
+                blockers.push(format!("  - {}: {e}", fresh.join(", ")));
+            }
+        }
+        let work: Vec<&Target> = surveyed
+            .iter()
+            .filter(|s| !s.current)
+            .filter_map(|s| s.target.as_ref())
+            .collect();
         let found: Vec<Result<Option<String>, TenancyError>> =
-            futures_util::stream::iter(work.iter().map(|s| self.check_one(&s.target)))
+            futures_util::stream::iter(work.iter().map(|t| self.check_one(t)))
                 .buffered(self.parallel)
                 .collect()
                 .await;
-        let mut blockers = Vec::new();
-        for (s, r) in work.iter().zip(found) {
+        for (t, r) in work.iter().zip(found) {
             if let Some(b) = r? {
-                blockers.push(format!("  - {}: {b}", s.target.slug));
+                blockers.push(format!("  - {}: {b}", t.slug));
             }
         }
         if blockers.is_empty() {
@@ -1188,20 +1491,21 @@ impl Fleet<'_> {
         }
     }
 
-    /// One tenant's run, recorded in the registry cache.
+    /// One tenant's run, recorded in the registry cache. A failed or
+    /// stopped tenant keeps the head it reached.
     async fn migrate_one(&self, t: &Target, expand: bool) -> Result<TenantOutcome, TenancyError> {
         use crate::migrate::v2::ledger::cache_put;
         cache_put(self.registry, &t.slug, "running", None, None, self.run_id).await?;
-        let ran = match t.open().await {
+        let (ran, head) = match t.open().await {
             Ok(open) => {
                 let r = self.run_open(t, &open.pool, expand).await;
                 open.close().await;
                 r
             }
-            Err(e) => Err(("unreachable", e.to_string())),
+            Err(e) => (Err(("unreachable", e.to_string())), None),
         };
         Ok(match ran {
-            Ok((applied, head)) => {
+            Ok(applied) => {
                 cache_put(
                     self.registry,
                     &t.slug,
@@ -1223,7 +1527,7 @@ impl Fleet<'_> {
                     self.registry,
                     &t.slug,
                     "failed",
-                    None,
+                    head.as_deref(),
                     Some(class),
                     self.run_id,
                 )
@@ -1244,25 +1548,32 @@ impl Fleet<'_> {
         })
     }
 
-    /// `t`'s run on its open pool: what it applied, and its head after.
+    /// `t`'s run on its open pool: what it applied (a stop is a failure of
+    /// class `stopped`), and its head after either way.
     async fn run_open(
         &self,
         t: &Target,
         pool: &crate::sql::Pool,
         expand: bool,
-    ) -> Result<(Vec<String>, Option<String>), (&'static str, String)> {
-        let rep = run::migrate_loaded(pool, self.project, &self.opts(t, false, expand))
-            .await
-            .map_err(|e| (run::error_class(&e), e.to_string()))?;
+    ) -> (Result<Vec<String>, (&'static str, String)>, Option<String>) {
+        let ran = match run::migrate_loaded(pool, self.project, &self.opts(t, false, expand)).await
+        {
+            Ok(rep) => match rep.stopped {
+                Some(why) => Err(("stopped", format!("{}: {why}", run::STOPPED))),
+                None => Ok(rep.applied),
+            },
+            Err(e) => Err((run::error_class(&e), e.to_string())),
+        };
         let head = run::applied_ids(pool, &tenant_opts(t))
             .await
             .ok()
             .and_then(|ids| head_of(&ids));
-        Ok((rep.applied, head))
+        (ran, head)
     }
 }
 
 /// Which tenants a per-database `dbmigrate` verb works on.
+#[derive(Clone, Copy)]
 pub(crate) enum Tenants<'a> {
     All,
     One(&'a str),
@@ -1443,6 +1754,7 @@ where
     .map_err(|e| migrate_err(run::RunError::Load(e)))?;
     crate::migrate::v2::ledger::cache_ensure(&registry).await?;
     let run_id = run::new_run_id();
+    let fo = FleetOptions::default();
     let fleet = Fleet {
         registry: &registry,
         project: &project,
@@ -1450,23 +1762,27 @@ where
         run_id: &run_id,
         plan: std::sync::Arc::new(plan),
         parallel: 1,
+        fo: &fo,
     };
     let migrator = MigratorLogin::from_env();
     let target = target_as(pools, org, registry_url, migrator.as_ref()).await?;
     prepare(pools, &target).await?;
-    let one = [survey_target(target, &project).await.map_err(|(_, e)| e)?];
+    let one = [survey_target(org.clone(), target, &project)
+        .await
+        .map_err(|(_, e)| e)?];
     let mut report = FleetReport::default();
     if one[0].current {
         fleet.record_current(&one, &mut report).await?;
         return Ok(report.tenants.remove(0));
     }
-    if let Some(b) = fleet.check_one(&one[0].target).await? {
+    let target = one[0].target.as_ref().expect("surveyed with a target");
+    if let Some(b) = fleet.check_one(target).await? {
         return Err(TenancyError::Validation(format!(
             "tenant `{}` is blocked; nothing was changed: {b}",
             org.slug
         )));
     }
-    let out = fleet.migrate_one(&one[0].target, false).await?;
+    let out = fleet.migrate_one(target, false).await?;
     match &out.error {
         Some(e) => Err(TenancyError::Validation(format!(
             "tenant `{}` did not migrate: {e}",

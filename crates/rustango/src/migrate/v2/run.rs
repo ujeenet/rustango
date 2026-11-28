@@ -260,6 +260,129 @@ fn ids_of(rows: &[super::ledger::Brief]) -> std::collections::BTreeSet<String> {
     out
 }
 
+/// The ids a registry run with `opts` leaves applied when it ends well:
+/// those applied now and every file of its chains. Tenants are planned
+/// against it before the registry chain writes anything (8.3).
+///
+/// # Errors
+/// Driver failures.
+#[cfg(feature = "tenancy")]
+pub(crate) async fn registry_after(
+    pool: &Pool,
+    project: &Project,
+    opts: &Options,
+) -> Result<std::collections::BTreeSet<String>, RunError> {
+    let mut ids = applied_ids(pool, opts).await?;
+    for &c in opts.chains() {
+        for i in super::load::chain(project, c, None) {
+            let f = &project.files[i].file;
+            ids.insert(format!("{}:{}", f.app, f.id));
+            ids.insert(f.id.clone());
+        }
+    }
+    Ok(ids)
+}
+
+/// The newest ledger row `down <steps>` keeps on `pool` (`app:id`); `None`
+/// when it rolls back every row. A row half rolled back counts as a step,
+/// as [`downgrade`] counts it.
+///
+/// # Errors
+/// Driver failures.
+#[cfg(feature = "tenancy")]
+pub(crate) async fn head_after_down(
+    pool: &Pool,
+    opts: &Options,
+    steps: usize,
+) -> Result<Option<String>, RunError> {
+    let rows = Ledger::of(opts).rows(pool).await?;
+    Ok(rows
+        .len()
+        .checked_sub(steps + 1)
+        .map(|i| format!("{}:{}", rows[i].app, rows[i].id)))
+}
+
+/// The steps [`downgrade`] takes on `pool` to leave `head` the newest row
+/// (`None`: no row); `0` once it is, or once `head` is gone.
+///
+/// # Errors
+/// Driver failures.
+#[cfg(feature = "tenancy")]
+pub(crate) async fn steps_to_head(
+    pool: &Pool,
+    opts: &Options,
+    head: Option<&str>,
+) -> Result<usize, RunError> {
+    let rows = Ledger::of(opts).rows(pool).await?;
+    Ok(match head {
+        None => rows.len(),
+        Some(h) => rows
+            .iter()
+            .position(|r| names(h, &r.app, &r.id))
+            .map_or(0, |at| rows.len() - at - 1),
+    })
+}
+
+/// A file's `requires` (8.4): `registry:<id>` from a tenant run needs that
+/// registry migration applied; `tenants:<id>` from a registry run needs
+/// every tenant past it.
+fn requires_met(f: &Loaded, opts: &Options) -> Result<(), RunError> {
+    for req in &f.file.requires {
+        let (side, id) = req.split_once(':').unwrap_or(("", req));
+        let (set, verb) = match side {
+            "registry" => (&opts.registry_applied, "manage migrate-registry"),
+            "tenants" => (&opts.tenants_applied, "manage migrate-tenants"),
+            _ => {
+                return Err(refused(
+                    Code::File,
+                    &f.at,
+                    format!("`requires: {req}` is not `registry:<id>` or `tenants:<id>`"),
+                ))
+            }
+        };
+        if side == "tenants" && !opts.tenants_unknown.is_empty() {
+            return Err(refused(
+                Code::State,
+                &f.at,
+                format!(
+                    "`requires: {req}` cannot be checked while these tenants are not read: {}",
+                    opts.tenants_unknown.join(", ")
+                ),
+            ));
+        }
+        if !set.as_ref().is_some_and(|s| s.contains(id)) {
+            return Err(refused(
+                Code::State,
+                &f.at,
+                format!("apply {side} `{id}` first (`{verb}`)"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// What refuses a run with `opts` on a target where nothing is applied,
+/// read from the files alone: a data step this binary lacks, or an unmet
+/// `requires`. The fleet plans a tenant whose schema is not made yet so.
+///
+/// # Errors
+/// That refusal.
+#[cfg(feature = "tenancy")]
+pub(crate) fn fresh_refusal(project: &Project, opts: &Options, b: Backend) -> Result<(), RunError> {
+    let files: Vec<&Loaded> = opts
+        .chains()
+        .iter()
+        .flat_map(|&c| super::load::chain(project, c, None))
+        .map(|i| &project.files[i])
+        .collect();
+    let misses: Vec<String> = files
+        .iter()
+        .flat_map(|f| super::data::misses(&f.file, b, false))
+        .collect();
+    super::data::refuse_misses(&misses, "plan")?;
+    files.into_iter().try_for_each(|f| requires_met(f, opts))
+}
+
 /// A target's ledgers read once: its applied ids, and whether every file of
 /// its chains (system and project) is applied as on disk, so a run would
 /// do nothing.
@@ -507,7 +630,7 @@ async fn run_system(pool: &Pool, run_id: &str, opts: &Options) -> Result<Vec<Str
 /// head, unowned tables), a failed unit, or a lost lock.
 pub(crate) async fn migrate(pool: &Pool, dir: &Path, opts: &Options) -> Result<Report, RunError> {
     let project = load_project(dir)?;
-    migrate_project(pool, &project, true, opts).await
+    Box::pin(migrate_project(pool, &project, true, opts)).await
 }
 
 /// [`migrate`] over a project loaded once, as a fleet run does.
@@ -520,7 +643,8 @@ pub(crate) async fn migrate_loaded(
     project: &Project,
     opts: &Options,
 ) -> Result<Report, RunError> {
-    migrate_project(pool, project, true, opts).await
+    // Boxed: a fleet nests it deep, past a debug test thread's 2 MiB stack.
+    Box::pin(migrate_project(pool, project, true, opts)).await
 }
 
 /// [`migrate`] for `embed_migrations!` entries: no system chain, as engine
@@ -534,7 +658,7 @@ pub(crate) async fn migrate_embedded(
     opts: &Options,
 ) -> Result<Report, RunError> {
     let project = super::load::load_embedded(entries)?;
-    migrate_project(pool, &project, false, opts).await
+    Box::pin(migrate_project(pool, &project, false, opts)).await
 }
 
 async fn migrate_project(
@@ -661,10 +785,11 @@ async fn migrate_project(
             Ok((applied, planned, None, warnings, system))
         },
     );
+    // A boot waiter waits on the holder's heartbeat, never a flat lock timeout (6.11).
     let (applied, planned, stopped, long_moves, system) = match opts.stale_after {
         None => run.await?,
         Some(stale) => tokio::select! {
-            r = run => r?,
+            r = crate::migrate::with_lock_timeout(std::time::Duration::MAX, run) => r?,
             e = stale_holder(pool, &ledger, stale, &got_lock) => return Err(e),
         },
     };
@@ -1277,7 +1402,7 @@ async fn session_timeouts(
 pub(crate) const LONG_MOVE_ROWS: u64 = 1_000_000;
 
 /// How often a run holding the lock refreshes its heartbeat.
-const HEARTBEAT_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+pub(crate) const HEARTBEAT_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Refresh this run's heartbeat every `every`; never returns.
 async fn heartbeats(
@@ -1286,10 +1411,25 @@ async fn heartbeats(
     run_id: &str,
     every: std::time::Duration,
 ) -> std::convert::Infallible {
+    // Display and boot waiters only (6.2).
+    beat_every(every, || ledger.touch(pool, run_id)).await
+}
+
+/// Run `beat` every `every`, best effort; never returns. The single
+/// database and the fleet record both refresh their heartbeat with it.
+pub(crate) async fn beat_every<F, Fut>(
+    every: std::time::Duration,
+    beat: F,
+) -> std::convert::Infallible
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<(), MigrateError>>,
+{
     loop {
         tokio::time::sleep(every).await;
-        // Best effort: display and boot waiters only (6.2).
-        let _ = ledger.touch(pool, run_id).await;
+        if let Err(e) = beat().await {
+            tracing::warn!(target: "rustango::migrate", error = %e, "heartbeat failed");
+        }
     }
 }
 
@@ -1301,25 +1441,60 @@ async fn stale_holder(
     stale: std::time::Duration,
     got_lock: &std::sync::atomic::AtomicBool,
 ) -> RunError {
-    let every = (stale / 4).clamp(
-        std::time::Duration::from_millis(100),
-        std::time::Duration::from_secs(5),
-    );
+    let probe = || async {
+        // The ledger may not exist yet: keep waiting.
+        let row = ledger.stale_running(pool, stale).await.ok().flatten();
+        row.map(|(app, id, age)| (format!("`{app}:{id}`"), age))
+    };
+    let (holder, age) = stale_lock_holder(stale, got_lock, probe).await;
+    RunError::Db(MigrateError::Validation(format!(
+        "the migrate lock is held by a run of {holder} whose heartbeat is {age}s old: it looks \
+         hung; stopping instead of waiting on it"
+    )))
+}
+
+/// A waiter's watch on the lock holder (6.11): resolves with `(holder, age)`
+/// once `probe` reports the same holder's heartbeat older than `stale` for
+/// a while (a live holder that just took the lock first takes over a dead
+/// run's row), as long as this run still waits; pends once it holds the
+/// lock. The single database and the fleet both wait with it.
+pub(crate) async fn stale_lock_holder<F, Fut>(
+    stale: std::time::Duration,
+    got_lock: &std::sync::atomic::AtomicBool,
+    probe: F,
+) -> (String, i64)
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Option<(String, i64)>>,
+{
+    use std::sync::atomic::Ordering::SeqCst;
+    use std::time::{Duration, Instant};
+    let every = (stale / 4).clamp(Duration::from_millis(100), Duration::from_secs(5));
+    let confirm = (stale / 2).min(Duration::from_secs(10)).max(every);
+    let mut seen: Option<(String, Instant)> = None;
+    let mut logged = Instant::now();
     loop {
         tokio::time::sleep(every).await;
-        if got_lock.load(std::sync::atomic::Ordering::SeqCst) {
+        if got_lock.load(SeqCst) {
             return std::future::pending().await;
         }
-        match ledger.stale_running(pool, stale).await {
-            Ok(Some((app, id, age))) => {
-                return RunError::Db(MigrateError::Validation(format!(
-                    "the migrate lock is held by a run of `{app}:{id}` whose heartbeat is {age}s \
-                     old: it looks hung; stopping instead of waiting on it"
-                )))
+        let found = probe().await;
+        if got_lock.load(SeqCst) {
+            return std::future::pending().await;
+        }
+        match (found, &seen) {
+            (Some((holder, age)), Some((was, since)))
+                if *was == holder && since.elapsed() >= confirm =>
+            {
+                return (holder, age);
             }
-            Ok(None) => {}
-            // The ledger may not exist yet; keep waiting.
-            Err(_) => {}
+            (Some((holder, _)), Some((was, _))) if *was == holder => {}
+            (Some((holder, _)), _) => seen = Some((holder, Instant::now())),
+            (None, _) => seen = None,
+        }
+        if logged.elapsed() >= Duration::from_secs(30) {
+            logged = Instant::now();
+            tracing::info!(target: "rustango::migrate", "still waiting for the migrate lock");
         }
     }
 }
@@ -2266,38 +2441,7 @@ impl Runner<'_> {
     /// needs that registry migration applied; `tenants:<id>` from a registry
     /// run needs every tenant past it.
     fn check_requires(&self, f: &Loaded) -> Result<(), RunError> {
-        for req in &f.file.requires {
-            let (side, id) = req.split_once(':').unwrap_or(("", req));
-            let (set, verb) = match side {
-                "registry" => (&self.opts.registry_applied, "manage migrate-registry"),
-                "tenants" => (&self.opts.tenants_applied, "manage migrate-tenants"),
-                _ => {
-                    return Err(refused(
-                        Code::File,
-                        &f.at,
-                        format!("`requires: {req}` is not `registry:<id>` or `tenants:<id>`"),
-                    ))
-                }
-            };
-            if side == "tenants" && !self.opts.tenants_unknown.is_empty() {
-                return Err(refused(
-                    Code::State,
-                    &f.at,
-                    format!(
-                        "`requires: {req}` cannot be checked while these tenants are not read: {}",
-                        self.opts.tenants_unknown.join(", ")
-                    ),
-                ));
-            }
-            if !set.as_ref().is_some_and(|s| s.contains(id)) {
-                return Err(refused(
-                    Code::State,
-                    &f.at,
-                    format!("apply {side} `{id}` first (`{verb}`)"),
-                ));
-            }
-        }
-        Ok(())
+        requires_met(f, self.opts)
     }
 
     fn lock_timeout(&self) -> std::time::Duration {

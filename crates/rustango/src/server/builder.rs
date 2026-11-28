@@ -813,6 +813,10 @@ impl<DB: Database> Builder<DB> {
             &self.fleet,
         )
         .await?;
+        // A shutdown during the run never opens the gate; the next start resumes.
+        if let Some(e) = report.stop_error() {
+            return Err(e);
+        }
         // Failed tenants, and those a stop left behind, serve 503.
         let failed: Vec<String> = report
             .failed()
@@ -1377,16 +1381,16 @@ impl<DB: Database> Builder<DB> {
     }
 
     /// Bind first, run the boot fleet behind the boot gate (`/health` 200,
-    /// `/ready` and every route 503), then serve the app (6.11, 8.3).
+    /// `/ready` and every route 503), then serve the app (6.11, 8.3). A
+    /// shutdown signal stops the fleet after each tenant's unit in flight.
     ///
     /// # Errors
     /// A bind failure, the boot migrate, or [`Self::into_router`].
     #[cfg(feature = "manage")]
     pub(crate) async fn serve_after_fleet(
-        self,
+        mut self,
         addr: &str,
         dir: std::path::PathBuf,
-        lock_timeout: std::time::Duration,
     ) -> Result<(), Box<dyn std::error::Error>>
     where
         crate::sql::Pool: From<sqlx::Pool<DB>>,
@@ -1400,12 +1404,15 @@ impl<DB: Database> Builder<DB> {
             gate.router(),
             drain,
         ));
+        let on_signal = crate::shutdown::StopOnSignal::listen();
+        self.fleet.stop = Some(on_signal.flag());
         let booted = async {
-            let b = crate::migrate::with_lock_timeout(lock_timeout, self.migrate(dir)).await?;
+            let b = self.migrate(dir).await?;
             b.warn_email_gaps();
             b.into_router().await
         }
         .await;
+        drop(on_signal);
         match booted {
             Ok(app) => gate.open(app.layer(Extension(ListenerPort(port)))),
             Err(e) => {

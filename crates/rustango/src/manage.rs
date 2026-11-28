@@ -1443,11 +1443,13 @@ impl Cli {
                 max_failures: m.fleet_max_failures,
                 active_only: m.fleet_active_only,
                 migrator: crate::tenancy::migrate_v2::MigratorLogin::from_env(),
+                stale_after: Some(self.boot_stale_after()),
                 ..Default::default()
             };
         }
         crate::tenancy::migrate_v2::FleetOptions {
             migrator: crate::tenancy::migrate_v2::MigratorLogin::from_env(),
+            stale_after: Some(self.boot_stale_after()),
             ..Default::default()
         }
     }
@@ -1894,18 +1896,11 @@ impl Cli {
             gate.router(),
             drain,
         ));
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let on_signal = {
-            let stop = stop.clone();
-            tokio::spawn(async move {
-                crate::shutdown::shutdown_signal().await;
-                stop.store(true, std::sync::atomic::Ordering::SeqCst);
-            })
-        };
+        let on_signal = crate::shutdown::StopOnSignal::listen();
         let dir = self.migrations_dir.clone();
         let stale_after = self.boot_stale_after();
         let booted = async {
-            boot.run(boot_migrate_v2(&pool, &dir, stop, stale_after))
+            boot.run(boot_migrate_v2(&pool, &dir, on_signal.flag(), stale_after))
                 .await?;
             run_boot_hooks(self.seed.take(), self.before_serve.take(), &pool)
                 .await
@@ -1913,7 +1908,7 @@ impl Cli {
             self.assemble_app(app_pool)
         }
         .await;
-        on_signal.abort();
+        drop(on_signal);
         match booted {
             Ok(app) => gate.open(app),
             Err(e) => {
@@ -1942,18 +1937,15 @@ impl Cli {
         // on the other.
         let on_shutdown = self.on_shutdown.take();
         // A v2 project migrates its registry and fleet before it serves (8.3).
+        // It waits on a live holder's heartbeat, never a flat lock timeout (6.11).
         let fleet_boot = match self.boot_migrate() {
-            BootMigrate::Run { lock_timeout }
+            BootMigrate::Run { .. }
                 if matches!(
                     crate::migrate::ProjectEngine::of_project(&self.migrations_dir)?,
                     crate::migrate::ProjectEngine::V2 { .. }
                 ) =>
             {
-                Some((
-                    lock_timeout,
-                    self.migrations_dir.clone(),
-                    self.boot_fleet_options(),
-                ))
+                Some((self.migrations_dir.clone(), self.boot_fleet_options()))
             }
             _ => None,
         };
@@ -2019,11 +2011,9 @@ impl Cli {
                 })
                 .await?;
         }
-        if let Some((lock_timeout, dir, fleet)) = fleet_boot {
+        if let Some((dir, fleet)) = fleet_boot {
             builder.fleet = fleet;
-            builder
-                .serve_after_fleet(&self.bind, dir, lock_timeout)
-                .await?;
+            builder.serve_after_fleet(&self.bind, dir).await?;
         } else {
             builder.serve(&self.bind).await?;
         }
@@ -2041,18 +2031,15 @@ impl Cli {
         // request time (schema-mode is PG-only by language).
         let on_shutdown = self.on_shutdown.take();
         // A v2 project migrates its registry and fleet before it serves (8.3).
+        // It waits on a live holder's heartbeat, never a flat lock timeout (6.11).
         let fleet_boot = match self.boot_migrate() {
-            BootMigrate::Run { lock_timeout }
+            BootMigrate::Run { .. }
                 if matches!(
                     crate::migrate::ProjectEngine::of_project(&self.migrations_dir)?,
                     crate::migrate::ProjectEngine::V2 { .. }
                 ) =>
             {
-                Some((
-                    lock_timeout,
-                    self.migrations_dir.clone(),
-                    self.boot_fleet_options(),
-                ))
+                Some((self.migrations_dir.clone(), self.boot_fleet_options()))
             }
             _ => None,
         };
@@ -2126,11 +2113,9 @@ impl Cli {
                 })
                 .await?;
         }
-        if let Some((lock_timeout, dir, fleet)) = fleet_boot {
+        if let Some((dir, fleet)) = fleet_boot {
             builder.fleet = fleet;
-            builder
-                .serve_after_fleet(&self.bind, dir, lock_timeout)
-                .await?;
+            builder.serve_after_fleet(&self.bind, dir).await?;
         } else {
             builder.serve(&self.bind).await?;
         }

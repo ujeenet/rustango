@@ -945,7 +945,7 @@ pub(crate) async fn boot_checks<DB: Database>(pools: &TenantPools<DB>) -> Result
             ));
         }
         let mut conn = pg.registry().acquire().await?;
-        super::schema_role::revoke_public_writes(&mut conn).await?;
+        super::schema_role::revoke_public_writes_beside_others(&mut conn).await?;
         super::schema_role::refuse_writable(&mut conn, "public", "then `ensure-tenant-roles`")
             .await?;
     }
@@ -1386,6 +1386,16 @@ impl<DB: Database> TenantPools<DB> {
         self.resolve_secret(reference).await
     }
 
+    /// The URL the migration engine opens a database-mode tenant with for
+    /// one step: resolved and tagged as its pools are, so a purge ends it too.
+    ///
+    /// # Errors
+    /// As [`Self::resolved_database_url`].
+    pub(crate) async fn tagged_database_url(&self, org: &Org) -> Result<String, TenancyError> {
+        let url = self.resolved_database_url(org).await?;
+        Ok(tag_org_url(org, &url).into_owned())
+    }
+
     /// A `database_url` value (literal or secret reference) as a literal URL.
     pub(crate) async fn resolve_secret(&self, reference: &str) -> Result<String, TenancyError> {
         Ok(self.secrets.resolve(reference).await?)
@@ -1487,8 +1497,7 @@ impl<DB: Database> TenantPools<DB> {
                 "secrets resolver resolved tenant URL",
             );
             let connect_start = std::time::Instant::now();
-            let tag = org.id.get().map(|id| tenant_session_tag(*id));
-            let url = tag_postgres_url(&url, tag.as_deref());
+            let url = tag_org_url(org, &url);
             // Held connections keep no idle ones: `min` is the queries' pool's.
             let min = match of {
                 PoolUse::Queries => self.config.database_pool_min_connections,
@@ -2570,6 +2579,12 @@ pub(crate) fn tenant_session_tag(org_id: i64) -> String {
     format!("rustango-tenant:{org_id}")
 }
 
+/// `url` with `org`'s session tag, as every tenant connection carries it.
+fn tag_org_url<'a>(org: &Org, url: &'a str) -> std::borrow::Cow<'a, str> {
+    let tag = org.id.get().map(|id| tenant_session_tag(*id));
+    tag_postgres_url(url, tag.as_deref())
+}
+
 /// Add `application_name=<tag>` to a Postgres URL: a startup parameter, not
 /// a session `SET`, so it never leaks. Last in the query, so it wins.
 fn tag_postgres_url<'a>(url: &'a str, tag: Option<&str>) -> std::borrow::Cow<'a, str> {
@@ -2594,7 +2609,7 @@ fn tag_postgres_url<'a>(url: &'a str, tag: Option<&str>) -> std::borrow::Cow<'a,
 /// has no explicit `mode=` setting. sqlx-sqlite honors this exactly
 /// like `create_if_missing(true)`. `:memory:`, URIs that already
 /// pin `mode=`, and non-SQLite URLs pass through unchanged.
-fn ensure_sqlite_creates(url: &str) -> std::borrow::Cow<'_, str> {
+pub(crate) fn ensure_sqlite_creates(url: &str) -> std::borrow::Cow<'_, str> {
     // SQLite scheme is `sqlite:` or `sqlite://`; PG is `postgres:`/
     // `postgresql:`; MySQL is `mysql:`/`mariadb:`. Match strictly so
     // we don't accidentally rewrite a non-SQLite URL that happens to
