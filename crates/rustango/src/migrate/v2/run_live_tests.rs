@@ -6081,17 +6081,19 @@ async fn every_rollback_blocker_is_printed(b: B) {
     let Some(db) = fresh(b).await else { return };
     let pool = &db.pool;
     let (_root, dir) = project();
-    let gone = |id: &str| {
-        json!([{"op": "data_sql", "v": 1, "id": id, "tables": {"write": ["rv_author"]},
-            "up": {"any": "UPDATE {{t:rv_author}} SET {{c:name}} = 'x' WHERE 1 = 0"},
-            "down": {"irreversible": "test"}}])
-    };
-    put(&dir, "0003_x", &v2("0003_x", &["0002_bio"], gone("x_v1")));
-    put(&dir, "0004_y", &v2("0004_y", &["0003_x"], gone("y_v1")));
+    let raw = json!([{"op": "raw_sql", "v": 1, "id": "x_raw", "state": [],
+        "up": {"any": "UPDATE rv_author SET name = name WHERE 1 = 0"}}]);
+    let drop = json!([{"op": "drop_column", "v": 1, "table": "rv_author", "column": "bio",
+        "was": {"column": "bio", "ty": "string", "max_length": 80, "nullable": true}}]);
+    put(&dir, "0003_x", &v2("0003_x", &["0002_bio"], raw));
+    put(&dir, "0004_y", &v2("0004_y", &["0003_x"], drop));
     migrate(pool, &dir, &opts()).await.unwrap();
     let e = downgrade(pool, &dir, 2, &opts()).await.unwrap_err();
     let msg = e.to_string();
-    assert!(msg.contains("x_v1") && msg.contains("y_v1"), "{msg}");
+    assert!(
+        msg.contains("x_raw") && msg.contains("rv_author.bio"),
+        "{msg}"
+    );
 }
 
 /// A raw op with `tx: autocommit` and `probe: "state"` rolls back: its

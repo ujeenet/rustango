@@ -225,6 +225,7 @@ impl std::fmt::Display for Hit {
 ///
 /// # Errors
 /// Driver failures.
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn probe(pool: &Pool, needs: &[Need]) -> Result<Vec<Hit>, crate::sql::ExecError> {
     let d = pool.dialect();
     let q = |n: &str| d.quote_ident(n);

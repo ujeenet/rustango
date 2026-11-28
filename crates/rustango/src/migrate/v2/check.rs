@@ -42,6 +42,7 @@ const DOCS: &str = "see the defaults table in the migrations docs";
 ///
 /// # Errors
 /// The first load, replay or render error.
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn check(
     dir: &Path,
     backends: &[Backend],

@@ -26,9 +26,9 @@ pub(crate) struct History<'r> {
 /// A body that does not decode.
 pub(crate) fn body(row: &Row) -> Result<File, LoadError> {
     let at = format!("ledger:{}:{}", row.app, row.id);
-    let raw: serde_json::Value = serde_json::from_str(&row.applied_body)
+    let json: serde_json::Value = serde_json::from_str(&row.applied_body)
         .map_err(|e| LoadError::new(Code::File, &at, e.to_string()))?;
-    super::format::decode(&raw, &at)
+    super::format::decode(&json, &at)
 }
 
 /// Whether checkpoint `c` stands for `f`: a file it replaces, or an older
