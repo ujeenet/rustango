@@ -855,6 +855,73 @@ async fn stop_mid_run_then_resume(b: B) {
     assert_eq!(columns(pool, "rv_author").await, ["id", "name", "bio"]);
 }
 
+/// `dbmigrate apply` on one database after a shutdown signal: the unit in
+/// flight ends, the ledger says `stopped`, the command fails; a rerun
+/// finishes (6.11).
+async fn cli_apply_stops_on_a_shutdown(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let (_root, dir) = project();
+    let signalled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let mut out = Vec::new();
+    let e = super::super::cli::apply(pool, &dir, &[], &mut out, signalled)
+        .await
+        .expect_err("a stopped apply fails");
+    assert!(e.to_string().contains(STOPPED), "{e}");
+    assert_eq!(columns(pool, "rv_author").await, ["id", "name"]);
+    let row = Ledger::default_names()
+        .rows(pool)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(
+        (row.state, row.error_class.as_deref()),
+        (RowState::Failed, Some("stopped"))
+    );
+    let calm = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    super::super::cli::apply(pool, &dir, &[], &mut out, calm)
+        .await
+        .unwrap();
+    assert_eq!(columns(pool, "rv_author").await, ["id", "name", "bio"]);
+}
+
+/// A boot waiter waits on a live holder past the flat lock timeout boot
+/// sets for engine v1: only a stale heartbeat ends its wait (6.11).
+async fn a_boot_waiter_outlasts_the_flat_lock_timeout(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let (_root, dir) = project();
+    let (held_tx, held) = tokio::sync::oneshot::channel::<()>();
+    let hpool = Pool::connect(&db.url).await.unwrap();
+    let holder = tokio::spawn(async move {
+        crate::migrate::with_migrate_lock_held_v2(
+            &hpool,
+            &crate::migrate::LockScope::Session,
+            || async move {
+                held_tx.send(()).unwrap();
+                tokio::time::sleep(Duration::from_millis(2500)).await;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        hpool.close().await;
+    });
+    held.await.unwrap();
+    let booting = Options {
+        stale_after: Some(Duration::from_secs(60)),
+        ..Options::default()
+    };
+    let rep = crate::migrate::with_lock_timeout(
+        Duration::from_secs(1),
+        migrate(&db.pool, &dir, &booting),
+    )
+    .await
+    .expect("waits on a live holder");
+    assert_eq!(rep.applied.len(), 2, "{rep:?}");
+    holder.await.unwrap();
+}
+
 /// Every 2.6 default passes `check` online on its own backend.
 async fn defaults_pass_check_online(b: B) {
     let Some(db) = fresh(b).await else { return };
@@ -4522,6 +4589,8 @@ per_backend!(
     adopt_column_indexes_verify_or_create,
     every_database_and_database_targets,
     upgrade_from_0_69_runs_no_ddl,
+    cli_apply_stops_on_a_shutdown,
+    a_boot_waiter_outlasts_the_flat_lock_timeout,
 );
 
 /// Legacy SQLite datetime text is swept before the first data unit, so a

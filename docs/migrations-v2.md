@@ -47,6 +47,11 @@ A project switches once with `adopt`; after that the engine v1 verbs refuse it.
 
 A flag a verb does not know is refused; nothing runs.
 
+SIGTERM or Ctrl-C during `apply` (or an engine v2 boot) finishes the unit in flight, records the migration as
+`stopped`, and exits non-zero; the next run resumes. A booting replica waits on the migrate lock as long as the
+holder's heartbeat is fresh (refreshed every 30 s) and exits non-zero only when it is older than
+`[migrate] boot_stale_after_secs` (120 s); `[server] migrate_lock_timeout_secs` applies to engine v1 only.
+
 ## Targets
 
 A file's `target` picks where it runs. `tenant` runs on the single database or on every tenant; `registry` runs once

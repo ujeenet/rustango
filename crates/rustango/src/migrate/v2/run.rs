@@ -630,7 +630,7 @@ async fn run_system(pool: &Pool, run_id: &str, opts: &Options) -> Result<Vec<Str
 /// head, unowned tables), a failed unit, or a lost lock.
 pub(crate) async fn migrate(pool: &Pool, dir: &Path, opts: &Options) -> Result<Report, RunError> {
     let project = load_project(dir)?;
-    migrate_project(pool, &project, true, opts).await
+    Box::pin(migrate_project(pool, &project, true, opts)).await
 }
 
 /// [`migrate`] over a project loaded once, as a fleet run does.
@@ -643,7 +643,8 @@ pub(crate) async fn migrate_loaded(
     project: &Project,
     opts: &Options,
 ) -> Result<Report, RunError> {
-    migrate_project(pool, project, true, opts).await
+    // Boxed: a fleet nests it deep, past a debug test thread's 2 MiB stack.
+    Box::pin(migrate_project(pool, project, true, opts)).await
 }
 
 /// [`migrate`] for `embed_migrations!` entries: no system chain, as engine
@@ -657,7 +658,7 @@ pub(crate) async fn migrate_embedded(
     opts: &Options,
 ) -> Result<Report, RunError> {
     let project = super::load::load_embedded(entries)?;
-    migrate_project(pool, &project, false, opts).await
+    Box::pin(migrate_project(pool, &project, false, opts)).await
 }
 
 async fn migrate_project(
@@ -784,10 +785,11 @@ async fn migrate_project(
             Ok((applied, planned, None, warnings, system))
         },
     );
+    // A boot waiter waits on the holder's heartbeat, never a flat lock timeout (6.11).
     let (applied, planned, stopped, long_moves, system) = match opts.stale_after {
         None => run.await?,
         Some(stale) => tokio::select! {
-            r = run => r?,
+            r = crate::migrate::with_lock_timeout(std::time::Duration::MAX, run) => r?,
             e = stale_holder(pool, &ledger, stale, &got_lock) => return Err(e),
         },
     };
@@ -1409,10 +1411,25 @@ async fn heartbeats(
     run_id: &str,
     every: std::time::Duration,
 ) -> std::convert::Infallible {
+    // Display and boot waiters only (6.2).
+    beat_every(every, || ledger.touch(pool, run_id)).await
+}
+
+/// Run `beat` every `every`, best effort; never returns. The single
+/// database and the fleet record both refresh their heartbeat with it.
+pub(crate) async fn beat_every<F, Fut>(
+    every: std::time::Duration,
+    beat: F,
+) -> std::convert::Infallible
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<(), MigrateError>>,
+{
     loop {
         tokio::time::sleep(every).await;
-        // Best effort: display and boot waiters only (6.2).
-        let _ = ledger.touch(pool, run_id).await;
+        if let Err(e) = beat().await {
+            tracing::warn!(target: "rustango::migrate", error = %e, "heartbeat failed");
+        }
     }
 }
 
@@ -1424,25 +1441,60 @@ async fn stale_holder(
     stale: std::time::Duration,
     got_lock: &std::sync::atomic::AtomicBool,
 ) -> RunError {
-    let every = (stale / 4).clamp(
-        std::time::Duration::from_millis(100),
-        std::time::Duration::from_secs(5),
-    );
+    let probe = || async {
+        // The ledger may not exist yet: keep waiting.
+        let row = ledger.stale_running(pool, stale).await.ok().flatten();
+        row.map(|(app, id, age)| (format!("`{app}:{id}`"), age))
+    };
+    let (holder, age) = stale_lock_holder(stale, got_lock, probe).await;
+    RunError::Db(MigrateError::Validation(format!(
+        "the migrate lock is held by a run of {holder} whose heartbeat is {age}s old: it looks \
+         hung; stopping instead of waiting on it"
+    )))
+}
+
+/// A waiter's watch on the lock holder (6.11): resolves with `(holder, age)`
+/// once `probe` reports the same holder's heartbeat older than `stale` for
+/// a while (a live holder that just took the lock first takes over a dead
+/// run's row), as long as this run still waits; pends once it holds the
+/// lock. The single database and the fleet both wait with it.
+pub(crate) async fn stale_lock_holder<F, Fut>(
+    stale: std::time::Duration,
+    got_lock: &std::sync::atomic::AtomicBool,
+    probe: F,
+) -> (String, i64)
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Option<(String, i64)>>,
+{
+    use std::sync::atomic::Ordering::SeqCst;
+    use std::time::{Duration, Instant};
+    let every = (stale / 4).clamp(Duration::from_millis(100), Duration::from_secs(5));
+    let confirm = (stale / 2).min(Duration::from_secs(10)).max(every);
+    let mut seen: Option<(String, Instant)> = None;
+    let mut logged = Instant::now();
     loop {
         tokio::time::sleep(every).await;
-        if got_lock.load(std::sync::atomic::Ordering::SeqCst) {
+        if got_lock.load(SeqCst) {
             return std::future::pending().await;
         }
-        match ledger.stale_running(pool, stale).await {
-            Ok(Some((app, id, age))) => {
-                return RunError::Db(MigrateError::Validation(format!(
-                    "the migrate lock is held by a run of `{app}:{id}` whose heartbeat is {age}s \
-                     old: it looks hung; stopping instead of waiting on it"
-                )))
+        let found = probe().await;
+        if got_lock.load(SeqCst) {
+            return std::future::pending().await;
+        }
+        match (found, &seen) {
+            (Some((holder, age)), Some((was, since)))
+                if *was == holder && since.elapsed() >= confirm =>
+            {
+                return (holder, age);
             }
-            Ok(None) => {}
-            // The ledger may not exist yet; keep waiting.
-            Err(_) => {}
+            (Some((holder, _)), Some((was, _))) if *was == holder => {}
+            (Some((holder, _)), _) => seen = Some((holder, Instant::now())),
+            (None, _) => seen = None,
+        }
+        if logged.elapsed() >= Duration::from_secs(30) {
+            logged = Instant::now();
+            tracing::info!(target: "rustango::migrate", "still waiting for the migrate lock");
         }
     }
 }

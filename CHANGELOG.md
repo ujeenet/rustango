@@ -52,7 +52,8 @@ Migrations engine v2: `manage dbmigrate`, data steps, batched moves with resume,
 - On MySQL an FK whose `ON DELETE` changes is swapped under `LOCK TABLES`, so no write reaches the table while it has no FK.
 - Under tenancy, `dbmigrate apply --plan`, `status`, `check --drift` and `down` never create a missing tenant schema; the plan reports it.
 - A SIGTERM during a fleet run (CLI or boot) stops each tenant after its unit in flight, marks the run `stopped` and exits non-zero, instead of killing the CLI at once or migrating on after the boot server closed.
-- A booting replica waits while the fleet run's heartbeat is fresh, now refreshed every 30 s, instead of giving up after the flat migrate lock timeout.
+- A booting replica, single database or tenancy, waits while the holder's heartbeat is fresh (the fleet's now refreshed every 30 s) instead of giving up after the flat migrate lock timeout.
+- Single-database `dbmigrate apply` stops after the unit in flight on SIGTERM and exits non-zero, instead of dying at once.
 - A refused fleet run (another plan's unfinished run, a tenant blocker) no longer runs the registry chain, the extension move or tenant set-up first.
 - Database-mode tenants no longer keep a cached pool open each during a fleet run: connections are opened per step and follow `--parallel`.
 - A rerun of a fleet `down N` after a failure stops at the targets of the first run instead of rolling back one more file; the failure names `--to`.

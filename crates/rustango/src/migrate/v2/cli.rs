@@ -223,7 +223,11 @@ pub(crate) async fn run<W: Write + Send, F: Fleet>(
             writeln!(w, "Wrote {}", path.display()).map_err(io)
         }
         ("make", _) => make(pool, matches!(route, Route::Fleet(_)), dir, rest, w),
-        ("apply", Route::Single(pool)) => apply(pool, dir, rest, w).await,
+        ("apply", Route::Single(pool)) => {
+            // SIGTERM or Ctrl-C: the unit in flight finishes, then it stops (6.11).
+            let on_signal = crate::shutdown::StopOnSignal::listen();
+            apply(pool, dir, rest, w, on_signal.flag()).await
+        }
         ("down", Route::Single(pool)) => down(pool, dir, rest, w).await,
         ("status", Route::Single(pool)) => status(pool, dir, rest, w).await,
         ("check", Route::Single(pool)) if rest.iter().any(|a| a == "--drift") => {
@@ -498,11 +502,14 @@ pub(crate) fn write_back<W: Write + ?Sized>(
     Ok(())
 }
 
-async fn apply<W: Write>(
+/// `apply` on one database; `stop` set by a shutdown signal ends it after
+/// the unit in flight, with an error.
+pub(crate) async fn apply<W: Write>(
     pool: &Pool,
     dir: &Path,
     args: &[String],
     w: &mut W,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(), MigrateError> {
     crate::cli_args::parse(args, &APPLY)?;
     let accept_step_change = match value(args, "--accept-step-change")? {
@@ -545,6 +552,7 @@ async fn apply<W: Write>(
         accept_failover: value(args, "--accept-failover")?.map(str::to_owned),
         resume_forward: args.iter().any(|a| a == "--resume-forward"),
         up_to: target.map(str::to_owned),
+        stop: Some(stop.clone()),
         ..super::run::Options::default()
     };
     // An applied target with later rows means rolling back (decision 6).
@@ -586,6 +594,12 @@ async fn apply<W: Write>(
     }
     if let Some(why) = &report.stopped {
         writeln!(w, "{}: {why}", super::run::STOPPED).map_err(io)?;
+        if stop.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(MigrateError::Validation(format!(
+                "{}: a shutdown signal stopped the run",
+                super::run::STOPPED
+            )));
+        }
     } else if !opts.dry_run && report.applied.is_empty() {
         writeln!(w, "Nothing to apply.").map_err(io)?;
     }

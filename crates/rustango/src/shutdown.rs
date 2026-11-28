@@ -17,52 +17,66 @@
 /// server then stops accepting connections and lets the requests
 /// already running finish.
 pub async fn shutdown_signal() {
+    stop_requested().await;
+}
+
+/// [`shutdown_signal`] with its handlers installed now, before the first
+/// poll: a signal right after cannot kill the process unhandled.
+fn stop_requested() -> impl std::future::Future<Output = ()> + Send + 'static {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
 
-        // If we cannot install the handler, fall back to Ctrl-C.
-        // Hanging forever would be worse.
-        let mut term = match signal(SignalKind::terminate()) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(
-                    target: "rustango::shutdown",
-                    error = %e,
-                    "could not install a SIGTERM handler; Ctrl-C only",
-                );
-                let _ = tokio::signal::ctrl_c().await;
-                tracing::info!(target: "rustango::shutdown", signal = "SIGINT", "shutting down");
-                return;
-            }
-        };
-
-        let signal_name = tokio::select! {
-            _ = tokio::signal::ctrl_c() => "SIGINT",
-            _ = term.recv() => "SIGTERM",
-        };
-        tracing::info!(target: "rustango::shutdown", signal = signal_name, "shutting down");
+        let (term, int) = (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::interrupt()),
+        );
+        async move {
+            // If we cannot install the handler, fall back to Ctrl-C.
+            // Hanging forever would be worse.
+            let (mut term, mut int) = match (term, int) {
+                (Ok(t), Ok(i)) => (t, i),
+                (Err(e), _) | (_, Err(e)) => {
+                    tracing::warn!(
+                        target: "rustango::shutdown",
+                        error = %e,
+                        "could not install a SIGTERM handler; Ctrl-C only",
+                    );
+                    let _ = tokio::signal::ctrl_c().await;
+                    tracing::info!(target: "rustango::shutdown", signal = "SIGINT", "shutting down");
+                    return;
+                }
+            };
+            let signal_name = tokio::select! {
+                _ = int.recv() => "SIGINT",
+                _ = term.recv() => "SIGTERM",
+            };
+            tracing::info!(target: "rustango::shutdown", signal = signal_name, "shutting down");
+        }
     }
 
     #[cfg(windows)]
     {
-        let signal_name = match WindowsStop::listen() {
-            Ok(mut stop) => stop.recv().await,
-            Err(e) => {
-                tracing::warn!(
-                    target: "rustango::shutdown",
-                    error = %e,
-                    "could not install the console handlers; Ctrl-C only",
-                );
-                let _ = tokio::signal::ctrl_c().await;
-                "CTRL_C"
-            }
-        };
-        tracing::info!(target: "rustango::shutdown", signal = signal_name, "shutting down");
+        let listened = WindowsStop::listen();
+        async move {
+            let signal_name = match listened {
+                Ok(mut stop) => stop.recv().await,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "rustango::shutdown",
+                        error = %e,
+                        "could not install the console handlers; Ctrl-C only",
+                    );
+                    let _ = tokio::signal::ctrl_c().await;
+                    "CTRL_C"
+                }
+            };
+            tracing::info!(target: "rustango::shutdown", signal = signal_name, "shutting down");
+        }
     }
 
     #[cfg(not(any(unix, windows)))]
-    {
+    async {
         let _ = tokio::signal::ctrl_c().await;
         tracing::info!(target: "rustango::shutdown", signal = "SIGINT", "shutting down");
     }
@@ -70,19 +84,18 @@ pub async fn shutdown_signal() {
 
 /// A flag [`shutdown_signal`] sets: a migrate run reading it stops after
 /// the unit in flight (6.11). Dropping it stops listening.
-#[cfg_attr(not(any(feature = "manage", feature = "tenancy")), allow(dead_code))]
 pub(crate) struct StopOnSignal {
     flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     task: tokio::task::JoinHandle<()>,
 }
 
-#[cfg_attr(not(any(feature = "manage", feature = "tenancy")), allow(dead_code))]
 impl StopOnSignal {
     pub(crate) fn listen() -> Self {
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let set = flag.clone();
+        let stopped = stop_requested();
         let task = tokio::spawn(async move {
-            shutdown_signal().await;
+            stopped.await;
             set.store(true, std::sync::atomic::Ordering::SeqCst);
         });
         Self { flag, task }

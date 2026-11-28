@@ -516,8 +516,9 @@ where
     let result: Result<Result<FleetReport, TenancyError>, crate::migrate::MigrateError> =
         match fo.stale_after {
             None => locked.await,
+            // Waits on the holder's heartbeat, never a flat lock timeout (6.11).
             Some(stale) => tokio::select! {
-                r = locked => r,
+                r = crate::migrate::with_lock_timeout(std::time::Duration::MAX, locked) => r,
                 e = stale_fleet_holder(&registry, stale, &got_lock) => return Err(e),
             },
         };
@@ -526,51 +527,24 @@ where
 
 /// Resolves with an error once the fleet lock's holder has a fleet record
 /// whose heartbeat is older than `stale`, while this run still waits; pends
-/// after that. The same stale record must stay so for `stale / 2`: a live
-/// holder that just took the lock closes a dead run's record first.
+/// after that ([`run::stale_lock_holder`]).
 async fn stale_fleet_holder(
     registry: &crate::sql::Pool,
     stale: std::time::Duration,
     got_lock: &std::sync::atomic::AtomicBool,
 ) -> TenancyError {
-    use std::sync::atomic::Ordering::SeqCst;
-    let every = (stale / 4).clamp(
-        std::time::Duration::from_millis(100),
-        std::time::Duration::from_secs(5),
-    );
-    let mut seen: Option<(String, std::time::Instant)> = None;
-    let mut logged = std::time::Instant::now();
-    loop {
-        tokio::time::sleep(every).await;
-        if got_lock.load(SeqCst) {
-            return std::future::pending().await;
-        }
-        // A missing record table or a read error: keep waiting.
-        let found = crate::migrate::v2::ledger::fleet_stale(registry, stale)
+    // A missing record table or a read error: keep waiting.
+    let probe = || async {
+        crate::migrate::v2::ledger::fleet_stale(registry, stale)
             .await
             .ok()
-            .flatten();
-        if got_lock.load(SeqCst) {
-            return std::future::pending().await;
-        }
-        match (found, &seen) {
-            (Some((run, age)), Some((was, since)))
-                if *was == run && since.elapsed() >= (stale / 2).max(every) =>
-            {
-                return TenancyError::Validation(format!(
-                    "the fleet lock is held by fleet run {run} whose heartbeat is {age}s old: it \
-                     looks hung; stopping instead of waiting on it"
-                ));
-            }
-            (Some((run, _)), Some((was, _))) if *was == run => {}
-            (Some((run, _)), _) => seen = Some((run, std::time::Instant::now())),
-            (None, _) => seen = None,
-        }
-        if logged.elapsed() >= std::time::Duration::from_secs(30) {
-            logged = std::time::Instant::now();
-            tracing::info!(target: "rustango::tenancy", "still waiting for the fleet lock");
-        }
-    }
+            .flatten()
+    };
+    let (run, age) = run::stale_lock_holder(stale, got_lock, probe).await;
+    TenancyError::Validation(format!(
+        "the fleet lock is held by fleet run {run} whose heartbeat is {age}s old: it looks hung; \
+         stopping instead of waiting on it"
+    ))
 }
 
 /// `fut` while the fleet record `run_id`'s heartbeat is refreshed every
@@ -594,13 +568,10 @@ async fn fleet_heartbeats(
     run_id: &str,
     every: std::time::Duration,
 ) -> std::convert::Infallible {
-    loop {
-        tokio::time::sleep(every).await;
-        // Best effort: waiters only read it.
-        if let Err(e) = crate::migrate::v2::ledger::fleet_beat(registry, run_id).await {
-            tracing::warn!(target: "rustango::tenancy", error = %e, "fleet heartbeat failed");
-        }
-    }
+    run::beat_every(every, || {
+        crate::migrate::v2::ledger::fleet_beat(registry, run_id)
+    })
+    .await
 }
 
 /// The fleet's tenants by slug order: every org (or the active ones), and
