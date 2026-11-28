@@ -95,7 +95,7 @@ impl Scope {
     /// `<table>` or `<table> AS <alias>`, as a FROM item.
     fn write_from(self, b: &mut Sql<'_>) {
         let alias = (self.name != self.model.table).then_some(self.name);
-        b.write_table(self.model.table, alias);
+        b.write_table(self.model.table_schema, self.model.table, alias);
     }
 
     /// An explicit `<table>.` reference to this scope's own table reads
@@ -259,6 +259,24 @@ impl<'d> Sql<'d> {
         self.d.push_quoted_ident(&mut self.sql, name);
     }
 
+    /// `<schema>.<table>`, or `<table>` when the model names no schema
+    /// (`#[rustango(schema = "…")]`, #2820). Only where a table is the
+    /// FROM, JOIN or DML target: a qualified table is still exposed under
+    /// its bare name, so `<table>.<column>` references stay as they are.
+    pub(super) fn write_table_name(&mut self, schema: Option<&str>, name: &str) {
+        if let Some(schema) = schema {
+            self.write_ident(schema);
+            self.sql.push('.');
+        }
+        self.write_ident(name);
+    }
+
+    /// The model's table as a DML target: `INSERT INTO` / `UPDATE` /
+    /// `DELETE FROM` this.
+    fn write_model_table(&mut self, model: &ModelSchema) {
+        self.write_table_name(model.table_schema, model.table);
+    }
+
     /// A column of the current scope, under its qualifier if one is set.
     fn write_scope_col(&mut self, col: &str) {
         let table = self.qualify_alias(col);
@@ -268,17 +286,17 @@ impl<'d> Sql<'d> {
     /// [`Self::write_ident`] for a table a query reads: every FROM and JOIN
     /// item goes through here, so MySQL knows which subqueries hit 1093.
     /// `alias` is written as ` AS <alias>`.
-    fn write_table(&mut self, name: &str, alias: Option<&str>) {
+    fn write_table(&mut self, schema: Option<&str>, name: &str, alias: Option<&str>) {
         let target = self.dml_target == Some(name);
         // A correlated derived table fails on MariaDB; a derived target does not.
         let derive = target && self.derive_dml_target == Some(self.scope_stack.len());
         self.read_dml_target |= target && !derive;
         if derive {
             self.sql.push_str("(SELECT * FROM ");
-            self.write_ident(name);
+            self.write_table_name(schema, name);
             self.sql.push(')');
         } else {
-            self.write_ident(name);
+            self.write_table_name(schema, name);
         }
         if let Some(alias) = alias.or(derive.then_some(name)) {
             self.sql.push_str(" AS ");
@@ -1600,6 +1618,7 @@ fn write_model_joins(b: &mut Sql<'_>, joins: &[crate::core::Join]) -> Result<(),
         b.sql.push_str(kind_kw);
         b.sql.push(' ');
         b.write_table(
+            join.target.table_schema,
             join.target.table,
             Some(&crate::core::joins::sql_label(join.alias)),
         );
@@ -2267,7 +2286,7 @@ fn write_insert_values(
     }
 
     b.sql.push_str("INSERT INTO ");
-    b.write_ident(query.model.table);
+    b.write_model_table(query.model);
 
     if query.columns.is_empty() {
         b.sql.push_str(b.d.default_values_clause());
@@ -2351,7 +2370,7 @@ pub(super) fn write_bulk_insert(
     let rows = ValueRows::from(rows);
 
     b.sql.push_str("INSERT INTO ");
-    b.write_ident(query.model.table);
+    b.write_model_table(query.model);
 
     if query.columns.is_empty() {
         let pk = query
@@ -2426,7 +2445,7 @@ pub(super) fn write_update(b: &mut Sql<'_>, query: &UpdateQuery) -> Result<(), S
     b.dml_target = Some(query.model.table);
     let r = (|| {
         b.sql.push_str("UPDATE ");
-        b.write_ident(query.model.table);
+        b.write_model_table(query.model);
         b.sql.push_str(" SET ");
 
         let mut first = true;
@@ -4508,7 +4527,7 @@ pub(super) fn write_delete(b: &mut Sql<'_>, query: &DeleteQuery) -> Result<(), S
     b.dml_target = Some(query.model.table);
     let r = (|| {
         b.sql.push_str("DELETE FROM ");
-        b.write_ident(query.model.table);
+        b.write_model_table(query.model);
         write_where(b, &query.where_clause, Some(query.model))?;
         Ok(())
     })();
@@ -4611,7 +4630,7 @@ pub(super) fn write_bulk_update_sqlite(
         b.sql.push(')');
     }
     b.sql.push_str(") UPDATE ");
-    b.write_ident(query.model.table);
+    b.write_model_table(query.model);
     b.sql.push_str(" SET ");
     let mut first_col = true;
     for col in &query.update_columns {
@@ -4670,7 +4689,7 @@ pub(super) fn write_bulk_update_pg(
     let (query, pk_field, rows) = split_bulk_update(query)?;
 
     b.sql.push_str("UPDATE ");
-    b.write_ident(query.model.table);
+    b.write_model_table(query.model);
     b.sql.push_str(" SET ");
     let mut first = true;
     for col in &query.update_columns {
@@ -4972,7 +4991,8 @@ fn write_rel_correlation(
     b.read_outer(b.scope_stack.len());
     // A self relation must not hide the outer row.
     let alias = (table == outer_table).then_some(SELF_ALIAS);
-    b.write_table(table, alias);
+    let schema = crate::core::ModelEntry::for_table(table).and_then(|e| e.schema.table_schema);
+    b.write_table(schema, table, alias);
     let table = alias.unwrap_or(table);
     b.sql.push_str(" WHERE ");
     match correlation {
@@ -4998,7 +5018,7 @@ fn write_rel_correlation(
                 b.sql.push_str(" = (SELECT ");
                 b.write_ident(ct.ct_pk);
                 b.sql.push_str(" FROM ");
-                b.write_table(ct.ct_table, None);
+                b.write_table(None, ct.ct_table, None);
                 b.sql.push_str(" WHERE ");
                 b.write_ident(ct.ct_table_col);
                 b.sql.push_str(" = ");
@@ -5024,7 +5044,7 @@ fn write_rel_correlation(
             b.sql.push_str(" FROM ");
             // One subquery deeper, so never derived (see `with_derived_dml_target`).
             let derive = b.derive_dml_target.take();
-            b.write_table(through, None);
+            b.write_table(None, through, None);
             b.derive_dml_target = derive;
             b.sql.push_str(" WHERE ");
             b.write_ident(through);

@@ -779,6 +779,7 @@ mod tests {
         ModelSchema {
             name: "Post",
             table: "posts",
+            table_schema: None,
             fields: Box::leak(Box::new([id_field, fk_field])),
             display: None,
             app_label: None,

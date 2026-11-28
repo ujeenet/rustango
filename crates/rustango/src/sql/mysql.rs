@@ -1382,7 +1382,7 @@ fn write_mysql_bulk_update(
         .collect();
 
     b.sql.push_str("UPDATE ");
-    b.write_ident(query.model.table);
+    b.write_table_name(query.model.table_schema, query.model.table);
     b.sql.push_str(" INNER JOIN (");
     // Both spellings bind the rows in the same order.
     let (mut my, mut maria) = (String::from("VALUES "), String::new());
@@ -2287,6 +2287,7 @@ mod tests {
         Box::leak(Box::new(crate::core::ModelSchema {
             name: table,
             table,
+            table_schema: None,
             fields: leaked,
             display: None,
             app_label: None,

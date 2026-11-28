@@ -1201,10 +1201,21 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         }
     }
 
+    if let Some((_, span)) = &container.table_schema {
+        if container.managed {
+            return Err(syn::Error::new(
+                *span,
+                "`schema = \"…\"` needs `managed = false`: migrations do not create \
+                 or alter tables outside the connection's database",
+            ));
+        }
+    }
+
     let model_impl = model_impl_tokens(
         struct_name,
         &model_name,
         &table,
+        container.table_schema.as_ref().map(|(s, _)| s.as_str()),
         display.as_deref(),
         app_label.as_deref(),
         container.admin.as_ref(),
@@ -2886,6 +2897,7 @@ fn model_impl_tokens(
     struct_name: &syn::Ident,
     model_name: &str,
     table: &str,
+    table_schema: Option<&str>,
     display: Option<&str>,
     app_label: Option<&str>,
     admin: Option<&AdminAttrs>,
@@ -2969,6 +2981,7 @@ fn model_impl_tokens(
     let required_db_vendor_tokens = optional_str(required_db_vendor);
     let default_related_name_tokens = optional_str(default_related_name);
     let db_table_comment_tokens = optional_str(db_table_comment);
+    let table_schema_tokens = optional_str(table_schema);
     let get_latest_by_tokens = match get_latest_by {
         Some((col, desc)) => {
             quote!(::core::option::Option::Some((#col, #desc)))
@@ -3203,6 +3216,7 @@ fn model_impl_tokens(
                 #root::core::ModelSchema::from_parts(#root::core::ModelSchemaParts {
                     name: #model_name,
                     table: #table,
+                    table_schema: #table_schema_tokens,
                     fields: #fields_slice,
                     display: #display_tokens,
                     app_label: #app_label_tokens,
@@ -8417,6 +8431,9 @@ fn from_row_impl_tokens(
 
 struct ContainerAttrs {
     table: Option<String>,
+    /// `#[rustango(schema = "…")]`: the database (`MySQL`) or schema
+    /// holding the table, when it is not the connection's (#2820).
+    table_schema: Option<(String, proc_macro2::Span)>,
     display: Option<(String, proc_macro2::Span)>,
     /// Explicit app label from `#[rustango(app = "blog")]`.
     /// Recorded on the emitted `ModelSchema.app_label`. When unset,
@@ -9037,6 +9054,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         default_order: Vec::new(),
         is_view: false,
         managed: true,
+        table_schema: None,
         verbose_name: None,
         verbose_name_plural: None,
         base_manager_name: None,
@@ -9767,6 +9785,15 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 } else {
                     out.is_view = true;
                 }
+                return Ok(());
+            }
+            if meta.path.is_ident("schema") {
+                // The database (MySQL) / schema holding the table, #2820:
+                //   #[rustango(table = "t", schema = "other_db", managed = false)]
+                let s: LitStr = meta.value()?.parse()?;
+                let name = s.value();
+                validate_sql_identifier(&name, "schema", s.span())?;
+                out.table_schema = Some((name, s.span()));
                 return Ok(());
             }
             if meta.path.is_ident("managed") {
@@ -11018,6 +11045,7 @@ const CONTAINER_ATTR_KEYS: &[&str] = &[
     "permissions",
     "view",
     "managed",
+    "schema",
     "verbose_name",
     "verbose_name_plural",
     "db_table_comment",

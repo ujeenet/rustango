@@ -769,6 +769,17 @@ impl M2MRelation {
 pub struct ModelSchema {
     pub name: &'static str,
     pub table: &'static str,
+    /// The database (`MySQL`) or schema (`Postgres`; `SQLite`: an attached
+    /// database) holding `table`, from `#[rustango(schema = "…")]`.
+    /// `None` means the connection's default, which is every model
+    /// before this existed. When set, every query names the table
+    /// `<schema>.<table>`; columns stay `<table>.<column>`, since a
+    /// qualified table is still exposed under its bare name.
+    ///
+    /// The qualifier is fixed: it is not resolved per tenant. Only
+    /// `managed = false` models may set it, because migrations neither
+    /// diff nor create tables outside the connection's database.
+    pub table_schema: Option<&'static str>,
     pub fields: &'static [FieldSchema],
     pub display: Option<&'static str>,
     /// App label from `#[rustango(app = "blog")]`. When `None`,
@@ -1084,6 +1095,7 @@ impl ModelSchema {
         Self {
             name,
             table,
+            table_schema: None,
             fields: &[],
             display: None,
             app_label: None,
@@ -2053,6 +2065,7 @@ impl FieldSchema {
 pub struct ModelSchemaParts {
     pub name: &'static str,
     pub table: &'static str,
+    pub table_schema: Option<&'static str>,
     pub fields: &'static [FieldSchema],
     pub display: Option<&'static str>,
     pub app_label: Option<&'static str>,
@@ -2094,6 +2107,7 @@ impl ModelSchema {
         let ModelSchemaParts {
             name,
             table,
+            table_schema,
             fields,
             display,
             app_label,
@@ -2129,6 +2143,7 @@ impl ModelSchema {
         Self {
             name,
             table,
+            table_schema,
             fields,
             display,
             app_label,

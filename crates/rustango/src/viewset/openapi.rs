@@ -748,6 +748,7 @@ mod tests {
         static MS: ModelSchema = ModelSchema {
             name: "Post",
             table: "posts",
+            table_schema: None,
             fields: FIELDS,
             display: None,
             app_label: None,

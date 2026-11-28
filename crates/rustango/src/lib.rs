@@ -1612,6 +1612,42 @@ pub use axum as __axum;
 /// }
 /// # fn main() {}
 /// ```
+///
+/// `schema = "…"` names the database (`MySQL`) or schema holding a table that
+/// is not on the connection's own; queries then name it `schema.table`
+/// (#2820). Migrations never touch such a table, so it must be unmanaged:
+///
+/// ```
+/// #[derive(rustango::Model)]
+/// #[rustango(table = "doc_kinds", schema = "config_db", managed = false)]
+/// pub struct Kind {
+///     #[rustango(primary_key)]
+///     pub id: rustango::Auto<i64>,
+/// }
+/// # fn main() {}
+/// ```
+///
+/// ```compile_fail
+/// #[derive(rustango::Model)]
+/// #[rustango(table = "doc_kinds", schema = "config_db")]
+/// pub struct Kind {
+///     #[rustango(primary_key)]
+///     pub id: rustango::Auto<i64>,
+/// }
+/// # fn main() {}
+/// ```
+///
+/// A schema name follows the table-name rule, `[A-Za-z_][A-Za-z0-9_]*`:
+///
+/// ```compile_fail
+/// #[derive(rustango::Model)]
+/// #[rustango(table = "doc_kinds", schema = "config-db", managed = false)]
+/// pub struct Kind {
+///     #[rustango(primary_key)]
+///     pub id: rustango::Auto<i64>,
+/// }
+/// # fn main() {}
+/// ```
 pub use rustango_macros::Model;
 
 /// `#[derive(TextEnum)]` — an enum field stored as text. See

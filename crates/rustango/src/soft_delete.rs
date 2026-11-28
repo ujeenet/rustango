@@ -332,6 +332,7 @@ mod tests {
     static MODEL_WITH_SD: ModelSchema = ModelSchema {
         name: "Post",
         table: "posts",
+        table_schema: None,
         fields: FIELDS_WITH_SD,
         display: None,
         app_label: None,
@@ -368,6 +369,7 @@ mod tests {
     static MODEL_WITHOUT_SD: ModelSchema = ModelSchema {
         name: "Tag",
         table: "tags",
+        table_schema: None,
         fields: FIELDS_WITH_SD, // same fields, but no soft_delete_column
         display: None,
         app_label: None,

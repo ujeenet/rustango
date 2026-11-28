@@ -1298,6 +1298,7 @@ mod composite_fk_snapshot_tests {
         static MS: ModelSchema = ModelSchema {
             name: "Demo",
             table: "demo",
+            table_schema: None,
             fields: &FIELDS,
             display: None,
             app_label: None,
@@ -1380,6 +1381,7 @@ mod composite_fk_snapshot_tests {
         static MANAGED: ModelSchema = ModelSchema {
             name: "Managed",
             table: "managed_table",
+            table_schema: None,
             fields: &FIELDS,
             display: None,
             app_label: None,
@@ -1415,6 +1417,7 @@ mod composite_fk_snapshot_tests {
         static UNMANAGED: ModelSchema = ModelSchema {
             name: "Unmanaged",
             table: "unmanaged_table",
+            table_schema: None,
             fields: &FIELDS,
             display: None,
             app_label: None,
@@ -1490,6 +1493,7 @@ mod composite_fk_snapshot_tests {
         static MS: ModelSchema = ModelSchema {
             name: "Plain",
             table: "plain",
+            table_schema: None,
             fields: &FIELDS,
             display: None,
             app_label: None,
@@ -1697,6 +1701,7 @@ mod generated_as_and_db_comment_capture {
         static MS: ModelSchema = ModelSchema {
             name: "Item",
             table: "items",
+            table_schema: None,
             fields: &FIELDS,
             display: None,
             app_label: None,

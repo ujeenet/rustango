@@ -1948,6 +1948,7 @@ pub async fn truncate(
     pool: &Pool,
     model: &'static crate::core::ModelSchema,
 ) -> Result<u64, ExecError> {
+    refuse_qualified(model, "truncate")?;
     run_truncate(pool, model.table, TruncateMode::Plain).await
 }
 
@@ -1961,9 +1962,27 @@ pub async fn truncate_cascade(
     pool: &Pool,
     model: &'static crate::core::ModelSchema,
 ) -> Result<(), ExecError> {
+    refuse_qualified(model, "truncate_cascade")?;
     run_truncate(pool, model.table, TruncateMode::Cascade)
         .await
         .map(drop)
+}
+
+/// Truncate names the table bare and looks referencing tables up in the
+/// connection's own catalog, so on a model in another database it would
+/// empty a same-named table here. Refused until it can name the right one.
+fn refuse_qualified(
+    model: &'static crate::core::ModelSchema,
+    operation: &'static str,
+) -> Result<(), ExecError> {
+    match model.table_schema {
+        Some(schema) => Err(ExecError::QualifiedTableUnsupported {
+            operation,
+            schema,
+            table: model.table,
+        }),
+        None => Ok(()),
+    }
 }
 
 async fn run_truncate(

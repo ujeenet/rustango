@@ -5032,6 +5032,7 @@ mod tests {
         Box::leak(Box::new(ModelSchema {
             name: "Post",
             table: "posts",
+            table_schema: None,
             fields: Box::leak(Box::new([
                 crate::core::FieldSchema {
                     name: "id",
@@ -5128,6 +5129,7 @@ mod tests {
         Box::leak(Box::new(ModelSchema {
             name: "Post",
             table: "posts",
+            table_schema: None,
             fields: Box::leak(Box::new([
                 crate::core::FieldSchema {
                     name: "id",
@@ -5598,6 +5600,7 @@ mod tests {
         let no_pk: &'static ModelSchema = Box::leak(Box::new(ModelSchema {
             name: "Audit",
             table: "audits",
+            table_schema: None,
             fields: Box::leak(Box::new([crate::core::FieldSchema {
                 name: "msg",
                 column: "msg",
@@ -6060,6 +6063,7 @@ mod tests {
         let uuid_schema: &'static ModelSchema = Box::leak(Box::new(ModelSchema {
             name: "Doc",
             table: "docs",
+            table_schema: None,
             fields: Box::leak(Box::new([crate::core::FieldSchema {
                 name: "id",
                 column: "id",
@@ -6133,6 +6137,7 @@ mod tests {
         Box::leak(Box::new(ModelSchema {
             name: "Slug",
             table: "slugs",
+            table_schema: None,
             fields: Box::leak(Box::new([crate::core::FieldSchema {
                 name: "slug",
                 column: "slug",

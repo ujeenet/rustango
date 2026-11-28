@@ -853,6 +853,7 @@ mod tests {
     static MODEL: ModelSchema = ModelSchema {
         name: "demo",
         table: "demo",
+        table_schema: None,
         fields: FIELDS,
         display: None,
         app_label: None,

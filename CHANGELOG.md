@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added
+
+- `#[rustango(schema = "other_db")]` puts a model on a table in another database (MySQL) or schema on the same server: queries name it `other_db.table` wherever it is the FROM, JOIN or write target, so querysets, relations, ViewSets and the admin reach it. Unmanaged models only (`managed = false`), and the name is fixed, not per tenant. `Model::truncate` / `truncate_cascade` refuse such a model with `ExecError::QualifiedTableUnsupported` instead of emptying a same-named table on the connection's database. `ModelSchema` gains `table_schema` (#2820).
+
 ## [0.71.0] — 2026-11-27
 
 Migrations engine v2 does not support MariaDB (MySQL 8.0.16+ only); MariaDB projects keep using engine v1.

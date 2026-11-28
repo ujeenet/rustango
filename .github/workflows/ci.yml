@@ -1738,6 +1738,7 @@ jobs:
           binary(=migrate_autodetect_tri) |
           binary(=migrate_runner_tri) |
           binary(=media_tags_mysql_live) |
+          binary(=schema_qualified_mysql_live) |
           binary(=media_collection_race_tri) |
           binary(=media_purge_tri) |
           binary(=media_listing_bounds_tri) |

@@ -264,6 +264,16 @@ pub enum ExecError {
         reason: &'static str,
     },
 
+    /// An operation that cannot yet reach a table in another database or
+    /// schema (`#[rustango(schema = "…")]`, #2820), refused rather than
+    /// run against a same-named table in the connection's own database.
+    #[error("`{operation}` is not supported on `{schema}.{table}`, a table outside the connection's database")]
+    QualifiedTableUnsupported {
+        operation: &'static str,
+        schema: &'static str,
+        table: &'static str,
+    },
+
     /// A plain truncate refused: rows in another table still reference it
     /// under an FK whose `ON DELETE` does not let them go.
     #[error("cannot truncate `{table}`: other rows still reference it; use `truncate_cascade` to empty those tables too")]

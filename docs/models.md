@@ -470,10 +470,49 @@ above; this is the complete list, including advanced/PostgreSQL-specific ones.
 | `fk_composite(...)` / `generic_fk(...)` | spec | composite FK / generic (content-type) FK |
 | `m2m(...)` / `generic_m2m(...)` | spec | many-to-many / generic many-to-many relation |
 | `managed` | `true` / `false` | `false` = the table is yours; migrations skip it |
+| `schema` | `"other_db"` | the table is in another database (MySQL) or schema on the same server; queries name it `other_db.table`. Needs `managed = false`; see [Tables in another database](#tables-in-another-database) |
 | `view` | flag | the model reads a database view |
 | `permissions` | flag / `true` / `false` | opt in to (or out of) the generated permissions |
 | `extra_permissions` | `"codename:Label, …"` | extra permission codenames |
 | `verbose_name` / `verbose_name_plural` | `"Label"` | human model name in admin/forms |
+
+### Tables in another database
+
+A tenant's connection points at one database. When some of its tables
+live in a sibling database on the same MySQL server, name it with
+`schema`:
+
+```rust
+#[derive(Model)]
+#[rustango(table = "metadata_entity_types", schema = "entity_config", managed = false)]
+pub struct MetadataEntityType {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 255)]
+    pub name: String,
+}
+```
+
+Every query names the table `` `entity_config`.`metadata_entity_types` ``
+wherever it is the FROM, JOIN or write target, so querysets, relations
+(`select_related`, FKs from your own tables), ViewSets, the admin and
+permissions work on it like on any other model. Columns keep the bare
+`metadata_entity_types.column` form; a qualified table is still exposed
+under its own name. Postgres reads `schema` as a schema and SQLite as an
+attached database, with the same SQL.
+
+Limits:
+
+- **Unmanaged only.** Migrations neither create nor diff a table outside
+  the connection's database, so `schema` without `managed = false` does
+  not compile.
+- **Fixed, not per tenant.** The name is the same for every tenant. It
+  suits deployments where each tenant's server has the same database
+  names; it is not a way to route tenants.
+- **No `truncate`.** `Model::truncate` and `truncate_cascade` return
+  `ExecError::QualifiedTableUnsupported` instead of emptying a
+  same-named table in the connection's database.
+- The connection's login needs rights on the other database.
 
 ### Field-level (on a field)
 
