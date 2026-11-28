@@ -1860,6 +1860,35 @@ async fn rollback_is_planned_up_front(b: B) {
     assert_eq!(ledger_snapshot(&db3.pool).await, before);
 }
 
+/// A pooled SQLite connection that cached the schema before another one
+/// added a column still drops it (CI: `no such column: ""bio""`).
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn a_stale_sqlite_connection_drops_a_new_column() {
+    let db = fresh(B::Lite).await.unwrap();
+    let create = "CREATE TABLE rv_author (id INTEGER PRIMARY KEY, name TEXT)";
+    raw_execute_pool(&db.pool, create, Vec::new())
+        .await
+        .unwrap();
+    // This connection caches the schema without `bio`; another adds it.
+    let mut stale = db.pool.acquire().await.unwrap();
+    let mut tx = stale.begin().await.unwrap();
+    crate::sql::raw_execute_tx(&mut tx, "SELECT * FROM rv_author", Vec::new())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let other = Pool::connect(&db.url).await.unwrap();
+    let add = "ALTER TABLE rv_author ADD COLUMN \"bio\" VARCHAR(80)";
+    raw_execute_pool(&other, add, Vec::new()).await.unwrap();
+    other.close().await;
+    let mut tx = schema_tx(&mut stale).await.unwrap();
+    let drop = "ALTER TABLE rv_author DROP COLUMN \"bio\"";
+    crate::sql::raw_execute_tx(&mut tx, drop, Vec::new())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+}
+
 /// A custom ledger name keeps its case on every query (review fix 11), and
 /// adopt reads the app's own v1 ledger (review fix 7).
 async fn custom_ledgers_keep_their_names(b: B) {
@@ -2041,6 +2070,80 @@ async fn a_mariadb_server_is_refused() {
         "{e:?}"
     );
     pool.close().await;
+    let msg = e.to_string();
+    assert!(
+        msg.contains("MySQL 8.0.16+") && msg.contains("engine v1, `manage migrate`"),
+        "{msg}"
+    );
+    // Every verb refuses before it writes: no v2 table, no file changed.
+    let db = fresh(B::My).await.unwrap();
+    let v2_tables = || async {
+        let n: Vec<(i64,)> = crate::sql::raw_query_pool(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() \
+             AND LOCATE('rustango_migrations_v2', table_name) > 0",
+            Vec::new(),
+            &db.pool,
+        )
+        .await
+        .unwrap();
+        n[0].0
+    };
+    let e = downgrade(&db.pool, &dir, 1, &opts())
+        .await
+        .expect_err("refused");
+    assert!(
+        matches!(e, RunError::Db(MigrateError::UnsupportedServer { .. })),
+        "{e:?}"
+    );
+    assert_eq!(v2_tables().await, 0, "down created the ledger");
+    let v1 = tempfile::tempdir().unwrap();
+    let v1dir = v1.path().join("migrations");
+    std::fs::create_dir_all(&v1dir).unwrap();
+    let initial = crate::migrate::file::Migration {
+        name: "0001_initial".into(),
+        created_at: String::new(),
+        prev: None,
+        atomic: true,
+        scope: crate::migrate::MigrationScope::Tenant,
+        replaces: Vec::new(),
+        merges: Vec::new(),
+        snapshot: crate::migrate::SchemaSnapshot::default(),
+        forward: Vec::new(),
+    };
+    crate::migrate::file::write(&v1dir.join("0001_initial.json"), &initial).unwrap();
+    let empty = tempfile::tempdir().unwrap();
+    let files = |d: &Path| -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    for (d, verb) in [
+        (&dir, vec!["down", "1"]),
+        (&dir, vec!["down", "--to", "0001_author"]),
+        (&v1dir, vec!["adopt"]),
+        (&empty.path().to_path_buf(), vec!["make"]),
+        (&dir, vec!["status"]),
+    ] {
+        let before = files(d);
+        let args: Vec<String> = verb.iter().map(|s| (*s).to_owned()).collect();
+        let e = crate::migrate::v2::cli::run::<_, crate::migrate::v2::cli::NoFleet>(
+            crate::migrate::v2::cli::Route::Single(&db.pool),
+            d,
+            &args,
+            &mut Vec::new(),
+        )
+        .await
+        .map_or_else(|e| e, |()| panic!("{verb:?} ran on MariaDB"));
+        assert!(
+            matches!(e, MigrateError::UnsupportedServer { .. }),
+            "{verb:?}: {e:?}"
+        );
+        assert_eq!(files(d), before, "{verb:?} changed files");
+        assert_eq!(v2_tables().await, 0, "{verb:?} created the ledger");
+    }
 }
 
 /// A run dropped mid-unit (SIGTERM, task abort, a timeout) frees the
@@ -4586,6 +4689,7 @@ per_backend!(
     portable_defaults_render_per_backend,
     v1_framework_tables_adopt_cleanly,
     old_framework_fks_repair_then_switch,
+    v1_repairs_old_framework_fks,
     adopt_column_verifies_adds_or_refuses,
     adopt_column_indexes_verify_or_create,
     every_database_and_database_targets,
@@ -5279,10 +5383,21 @@ async fn fk_identity(pool: &Pool, table: &str) -> String {
             "SELECT CAST(string_agg(CAST(oid AS TEXT), ',' ORDER BY oid) AS TEXT) FROM pg_constraint \
              WHERE conrelid = CAST('{table}' AS regclass) AND contype = 'f'"
         ),
-        crate::sql::DialectKind::Mysql => format!(
-            "SELECT CAST(TABLE_ID AS CHAR) FROM information_schema.INNODB_TABLES \
-             WHERE NAME = CONCAT(DATABASE(), '/{table}')"
-        ),
+        crate::sql::DialectKind::Mysql => {
+            let v: Vec<(String,)> =
+                crate::sql::raw_query_pool("SELECT CAST(VERSION() AS CHAR)", Vec::new(), pool)
+                    .await
+                    .unwrap();
+            let innodb = if crate::sql::mysql::is_mariadb(&v[0].0) {
+                "INNODB_SYS_TABLES"
+            } else {
+                "INNODB_TABLES"
+            };
+            format!(
+                "SELECT CAST(TABLE_ID AS CHAR) FROM information_schema.{innodb} \
+                 WHERE NAME = CONCAT(DATABASE(), '/{table}')"
+            )
+        }
         _ => format!("SELECT CAST(rootpage AS TEXT) FROM sqlite_master WHERE name = '{table}'"),
     };
     let rows: Vec<(String,)> = crate::sql::raw_query_pool(&sql, Vec::new(), pool)
@@ -5300,21 +5415,16 @@ async fn fk_identities(pool: &Pool, fks: &[(String, String)]) -> Vec<String> {
 }
 
 /// A database an older release left (QA B1): framework FKs with no action
-/// where the models say CASCADE. The v2 switch refuses it, naming the FK;
-/// engine v1 `migrate` repairs it; then the switch passes. A database that
-/// already has the action gets no DDL from the repair step.
-async fn old_framework_fks_repair_then_switch(b: B) {
-    let Some(db) = fresh(b).await else { return };
-    let pool = &db.pool;
-    let v1 = tempfile::tempdir().unwrap();
-    let dir = v1.path().join("migrations");
-    std::fs::create_dir_all(&dir).unwrap();
-    let sys = v1.path().join("system").join("migrations");
+/// where the models say CASCADE. Writes that v1 project under `root` and
+/// returns the FKs; `None` in builds with no such FK.
+async fn old_framework_fks(b: B, pool: &Pool, root: &Path) -> Option<Vec<(String, String)>> {
+    std::fs::create_dir_all(root.join("migrations")).unwrap();
+    let sys = root.join("system").join("migrations");
     let fks = old_system_chain(&sys);
     if fks.is_empty() {
         // Narrow builds (plain `sqlite`) compile no framework model with an FK.
         eprintln!("skip: no framework FK with an action in this build");
-        return;
+        return None;
     }
     // What the older release ran: that chain as shipped, no catch-up step.
     let shipped = crate::migrate::make::SystemChain::shipped(sys.clone());
@@ -5324,52 +5434,43 @@ async fn old_framework_fks_repair_then_switch(b: B) {
     .await
     .unwrap_or_else(|e| panic!("{b:?}: {e}"));
     for (t, c) in &fks {
-        assert_eq!(
-            on_delete_of(pool, t, c).await,
-            "NO ACTION",
-            "{b:?}: {t}.{c}"
+        // MariaDB reports no action as RESTRICT.
+        let got = on_delete_of(pool, t, c).await;
+        assert!(
+            matches!(got.as_str(), "NO ACTION" | "RESTRICT"),
+            "{b:?}: {t}.{c} is {got}"
         );
     }
-    let shipped = fk_identities(pool, &fks).await;
-    let v2root = tempfile::tempdir().unwrap();
-    let v2dir = v2root.path().join("migrations");
-    put(
-        &v2dir,
-        "0001_author",
-        &v2("0001_author", &[], json!([author()])),
-    );
-    let e = migrate(pool, &v2dir, &opts())
-        .await
-        .expect_err("drifted FKs");
-    assert_eq!(e.code(), Some(Code::Drift), "{b:?}: {e}");
-    let msg = e.to_string();
-    assert!(
-        msg.contains("on_delete") && msg.contains("manage migrate"),
-        "{b:?}: {msg}"
-    );
+    Some(fks)
+}
+
+/// Engine v1 `migrate` repairs those FKs in place; on a database that has
+/// the actions, the pending repair step is recorded with no DDL.
+async fn v1_repair_of_old_fks(b: B, pool: &Pool, root: &Path, fks: &[(String, String)]) {
+    let dir = root.join("migrations");
+    let sys = root.join("system").join("migrations");
+    let shipped = fk_identities(pool, fks).await;
     let mut out = Vec::new();
     crate::migrate::manage::run_with_writer(pool, &dir, vec!["migrate".to_owned()], &mut out)
         .await
         .unwrap_or_else(|e| panic!("{b:?}: {e}"));
-    for (t, c) in &fks {
+    for (t, c) in fks {
         assert_eq!(on_delete_of(pool, t, c).await, "CASCADE", "{b:?}: {t}.{c}");
     }
     // Safe on large tables: MySQL re-adds each FK in place, never copying the table.
     if b == B::My {
         assert_eq!(
-            fk_identities(pool, &fks).await,
+            fk_identities(pool, fks).await,
             shipped,
             "a table was copied"
         );
     }
-    // The repair is idempotent: on a database that has the actions, the
-    // pending step is recorded with no DDL.
     let repair = crate::migrate::file::list_dir(&sys)
         .unwrap()
         .into_iter()
         .find(|m| m.name.ends_with("_repair_on_delete"))
         .unwrap_or_else(|| panic!("{b:?}: no repair step written"));
-    let before = fk_identities(pool, &fks).await;
+    let before = fk_identities(pool, fks).await;
     let ledger = crate::migrate::runner::SYSTEM_LEDGER_TABLE;
     raw_execute_pool(
         pool,
@@ -5395,7 +5496,46 @@ async fn old_framework_fks_repair_then_switch(b: B) {
         .await
         .unwrap()
         .contains(&repair.name));
-    assert_eq!(fk_identities(pool, &fks).await, before, "{b:?}: DDL ran");
+    assert_eq!(fk_identities(pool, fks).await, before, "{b:?}: DDL ran");
+}
+
+/// Engine v1 alone repairs old framework FKs; MariaDB too, which engine v2
+/// refuses (CI's mariadb shards run this one).
+async fn v1_repairs_old_framework_fks(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let v1 = tempfile::tempdir().unwrap();
+    let Some(fks) = old_framework_fks(b, &db.pool, v1.path()).await else {
+        return;
+    };
+    v1_repair_of_old_fks(b, &db.pool, v1.path(), &fks).await;
+}
+
+/// The v2 switch refuses a database with old framework FKs, naming the
+/// FK; engine v1 `migrate` repairs it; then the switch passes.
+async fn old_framework_fks_repair_then_switch(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let v1 = tempfile::tempdir().unwrap();
+    let Some(fks) = old_framework_fks(b, pool, v1.path()).await else {
+        return;
+    };
+    let v2root = tempfile::tempdir().unwrap();
+    let v2dir = v2root.path().join("migrations");
+    put(
+        &v2dir,
+        "0001_author",
+        &v2("0001_author", &[], json!([author()])),
+    );
+    let e = migrate(pool, &v2dir, &opts())
+        .await
+        .expect_err("drifted FKs");
+    assert_eq!(e.code(), Some(Code::Drift), "{b:?}: {e}");
+    let msg = e.to_string();
+    assert!(
+        msg.contains("on_delete") && msg.contains("manage migrate"),
+        "{b:?}: {msg}"
+    );
+    v1_repair_of_old_fks(b, pool, v1.path(), &fks).await;
     migrate(pool, &v2dir, &opts())
         .await
         .unwrap_or_else(|e| panic!("{b:?}: {e}"));

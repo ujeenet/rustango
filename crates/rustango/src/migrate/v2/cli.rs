@@ -9,7 +9,8 @@ use super::LoadError;
 use crate::migrate::MigrateError;
 use crate::sql::Pool;
 
-/// The verbs; `make`, `sql` and `check --offline` never dial the database.
+/// The verbs; `make`, `sql` and `check --offline` need no database (a
+/// MariaDB server that answers still refuses them).
 pub(crate) const VERBS: &[&str] = &[
     "make", "apply", "down", "status", "check", "sql", "adopt", "squash",
 ];
@@ -29,7 +30,6 @@ const HELP: &str = "manage dbmigrate <verb>   migrations engine v2
 ";
 
 /// Whether `args` (after `dbmigrate`) needs no connection.
-#[cfg(any(feature = "manage", all(feature = "tenancy", feature = "postgres")))]
 pub(crate) fn pool_free(args: &[String]) -> bool {
     match args.first().map(String::as_str) {
         Some("make" | "sql" | "help" | "--help" | "-h") | None => true,
@@ -216,6 +216,20 @@ pub(crate) async fn run<W: Write + Send, F: Fleet>(
     let verb = args.first().map_or("", String::as_str);
     let rest = args.get(1..).unwrap_or_default();
     let pool = &route.pool();
+    if !matches!(verb, "" | "help" | "--help" | "-h") {
+        let check = super::ledger::refuse_unsupported(pool);
+        if pool_free(args) {
+            // An offline verb never needs the server: refused when it answers.
+            let probe = std::time::Duration::from_secs(3);
+            if let Ok(Err(e @ MigrateError::UnsupportedServer { .. })) =
+                tokio::time::timeout(probe, check).await
+            {
+                return Err(e);
+            }
+        } else {
+            check.await?;
+        }
+    }
     match (verb, route) {
         ("make", _) if value(rest, "--rebase")?.is_some() => rebase(pool, dir, rest, w).await,
         ("make", _) if rest.iter().any(|a| a == "--merge") => {

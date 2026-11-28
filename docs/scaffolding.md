@@ -54,7 +54,7 @@ cargo rustango new <name> [--template api|fullstack|tenant]
 
 - **`<name>`** — the project (and crate) name. It must be a valid Cargo crate name (`[A-Za-z_][A-Za-z0-9_-]*`), and the target directory must not already exist.
 - **`--template` / `-t`** — which starter to scaffold (default: **fullstack**).
-- **`--backend` / `-b`** — which database the project runs on (default: **postgres**).
+- **`--backend` / `-b`** — which database the project runs on (default: **postgres**). `mariadb` is an alias of `mysql`; a MariaDB project stays on migrations engine v1 (`makemigrations`, `migrate`), as engine v2 needs MySQL 8.0.16+.
 - **`--features` / `-F`** — extra **Rustango** features, comma- or space-separated.
 - **`--alias rgo`** — name the dependency `rgo` instead of `rustango` (see [A shorter name](#a-shorter-name-rgo)).
 - **`--interactive` / `-i`** — pick from menus instead. A bare `cargo rustango new` on a terminal does the same.

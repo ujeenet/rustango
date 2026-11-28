@@ -3,6 +3,10 @@
 Engine v2 projects run every migration command through `manage dbmigrate <verb>`.
 A project switches once with `adopt`; after that the engine v1 verbs refuse it.
 
+Engine v2 runs on PostgreSQL, SQLite and MySQL 8.0.16+. It does not support MariaDB: every verb, `adopt`
+included, refuses a MariaDB server before it writes anything. A MariaDB project stays on engine v1
+(`manage migrate`, `makemigrations`).
+
 ## Verbs
 
 | Verb | What it does |

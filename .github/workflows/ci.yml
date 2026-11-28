@@ -1565,10 +1565,11 @@ jobs:
         # MariaDB speaks the same protocol, but not the same SQL.
         db: [mysql, mariadb]
         # Migrations engine v2 supports MySQL 8 only: on MariaDB its lib tests
-        # are skipped, all but the one that checks it refuses the server.
+        # are skipped, all but the one that checks it refuses the server and
+        # the engine v1 FK repair test that lives there.
         include:
           - db: mariadb
-            v2_skip: " - (binary(=rustango) & test(/^(migrate::v2|tenancy::migrate_v2)::/) & not test(/a_mariadb_server_is_refused/))"
+            v2_skip: " - (binary(=rustango) & test(/^(migrate::v2|tenancy::migrate_v2)::/) & not test(/a_mariadb_server_is_refused|v1_repairs_old_framework_fks/))"
     services:
       mysql:
         # GHCR mirror, see `postgres_test`.

@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [0.71.0] — 2026-11-27
 
-Migrations engine v2 does not support MariaDB (MySQL 8.0.16+ only); MariaDB projects keep using engine v1.
+Migrations engine v2 does not support MariaDB (MySQL 8.0.16+ only): every `dbmigrate` verb, `adopt` and `make` included, refuses it before writing a table or a file. MariaDB projects keep using engine v1 (`manage migrate`).
 
 Migrations engine v2: `manage dbmigrate`, data steps, batched moves with resume, planned rollback, tenancy fleets, squash and merge, and the framework's system tables on v2. See `docs/migrations-v2.md` and UPGRADING.
 
@@ -74,6 +74,8 @@ Migrations engine v2: `manage dbmigrate`, data steps, batched moves with resume,
 - `make --rebase` replays the moved project before it removes the original file; a bad rebase keeps it. The two-leaf error names the `make --merge` and `make --rebase` commands.
 - `make --fill` for a column that already exists is refused instead of ignored.
 - A database that ran part of a squashed range is told to migrate with the last release of the app from before the squash.
+- Engine v1 `migrate` on MariaDB runs the `repair_on_delete` system step instead of failing on `Unknown column 'EXPRESSION'`.
+- Engine v2 on SQLite: a pooled connection that cached the schema before another one added a column can drop or rename it.
 
 ## [0.70.0] — 2026-11-22
 

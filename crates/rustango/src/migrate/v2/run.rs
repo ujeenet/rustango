@@ -1200,6 +1200,18 @@ fn backoff(tries: u32) -> std::time::Duration {
     std::time::Duration::from_millis(base / 2 + rand % (base / 2 + 1))
 }
 
+/// A schema unit's transaction. SQLite checks `DROP`/`RENAME COLUMN` against
+/// the connection's cached schema, never re-read: a schema read reloads it.
+async fn schema_tx(
+    conn: &mut crate::sql::PoolConn,
+) -> Result<crate::sql::PoolTx<'_>, MigrateError> {
+    let mut tx = conn.begin().await?;
+    if tx.dialect().kind() == crate::sql::DialectKind::Sqlite {
+        raw_execute_tx(&mut tx, "SELECT COUNT(*) FROM sqlite_master", Vec::new()).await?;
+    }
+    Ok(tx)
+}
+
 /// One attempt of a data unit failed: run it again, or give up.
 enum Attempt {
     Retry(String),
@@ -3075,7 +3087,7 @@ impl Runner<'_> {
     /// The statements and the fenced position update in one transaction.
     async fn tx_unit(&self, k: (&str, &str), u: &Unit, n: i64) -> Result<(), RunError> {
         let mut conn = self.pool.acquire().await?;
-        let mut tx = conn.begin().await?;
+        let mut tx = schema_tx(&mut conn).await?;
         for s in &u.sql {
             raw_execute_tx(&mut tx, s, Vec::new()).await?;
         }

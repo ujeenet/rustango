@@ -287,16 +287,27 @@ mod my {
     const WHERE: &str = "TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?";
 
     pub(super) async fn read(pool: &Pool, table: &str) -> Result<Option<LiveTable>, CatalogError> {
-        let head: Vec<(String,)> = raw_query_pool(
+        let head: Vec<(String, String)> = raw_query_pool(
             &format!(
-                "SELECT CAST(TABLE_COMMENT AS CHAR) FROM information_schema.TABLES WHERE {WHERE}"
+                "SELECT CAST(TABLE_COMMENT AS CHAR), CAST(VERSION() AS CHAR) \
+                 FROM information_schema.TABLES WHERE {WHERE}"
             ),
             t(table),
             pool,
         )
         .await?;
-        let Some((comment,)) = head.into_iter().next() else {
+        let Some((comment, version)) = head.into_iter().next() else {
             return Ok(None);
+        };
+        // MariaDB has no functional indexes nor unenforced checks, so no
+        // `STATISTICS.EXPRESSION` / `TABLE_CONSTRAINTS.ENFORCED` (v1 FK repair reads here).
+        let (expression, enforced) = if crate::sql::mysql::is_mariadb(&version) {
+            ("NULL", "1")
+        } else {
+            (
+                "CAST(EXPRESSION AS CHAR)",
+                "CAST(tc.ENFORCED = 'YES' AS SIGNED)",
+            )
         };
         type ColRow = (
             String,
@@ -347,7 +358,7 @@ mod my {
         let stats: Vec<(String, i64, Option<String>, Option<String>, String)> = raw_query_pool(
             &format!(
                 "SELECT CAST(INDEX_NAME AS CHAR), CAST(NON_UNIQUE AS SIGNED), CAST(COLUMN_NAME AS CHAR), \
-                 CAST(EXPRESSION AS CHAR), CAST(INDEX_TYPE AS CHAR) \
+                 {expression}, CAST(INDEX_TYPE AS CHAR) \
                  FROM information_schema.STATISTICS WHERE {WHERE} ORDER BY INDEX_NAME, SEQ_IN_INDEX"
             ),
             t(table),
@@ -376,11 +387,12 @@ mod my {
             });
         }
         let checks: Vec<(String, String, i64)> = raw_query_pool(
-            "SELECT CAST(tc.CONSTRAINT_NAME AS CHAR), CAST(cc.CHECK_CLAUSE AS CHAR), \
-             CAST(tc.ENFORCED = 'YES' AS SIGNED) \
-             FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc \
-               ON cc.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME \
-             WHERE tc.TABLE_SCHEMA = DATABASE() AND tc.TABLE_NAME = ? AND tc.CONSTRAINT_TYPE = 'CHECK' ORDER BY 1",
+            &format!(
+                "SELECT CAST(tc.CONSTRAINT_NAME AS CHAR), CAST(cc.CHECK_CLAUSE AS CHAR), {enforced} \
+                 FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc \
+                   ON cc.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME \
+                 WHERE tc.TABLE_SCHEMA = DATABASE() AND tc.TABLE_NAME = ? AND tc.CONSTRAINT_TYPE = 'CHECK' ORDER BY 1"
+            ),
             t(table),
             pool,
         )
