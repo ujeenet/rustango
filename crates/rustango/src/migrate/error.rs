@@ -132,7 +132,8 @@ pub enum MigrateError {
 
     /// Engine v2 met a server it does not support.
     #[error(
-        "migrations engine v2 supports MySQL 8.0.16+; MariaDB is not supported (server {server})"
+        "migrations engine v2 needs MySQL 8.0.16+ and refuses MariaDB (server {server}): \
+         a MariaDB project keeps engine v1, `manage migrate`"
     )]
     #[non_exhaustive]
     UnsupportedServer {

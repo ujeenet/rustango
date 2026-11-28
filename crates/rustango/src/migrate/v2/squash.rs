@@ -170,10 +170,12 @@ pub(crate) fn squash(
         let l = &project.files[i];
         let mine = range_set.contains(&i);
         if mine {
-            replaces.push(l.file.id.clone());
-            replaces.extend(l.file.replaces.iter().cloned());
             if l.file.kind == Kind::Checkpoint {
-                // Its state comes in whole; its kept data ops stay kept.
+                // Only real files are replaced: an older squash stands in
+                // for its own, which a database may have run one by one.
+                replaces.extend(l.file.replaces.iter().cloned());
+                // Its state comes in whole; its kept data ops stay kept,
+                // under the same rule as the range's own.
                 irreversible = true;
                 apply_file(&mut state, &l.file, &l.at, &ctx)?;
                 if let Some(doc) = &l.file.state {
@@ -182,9 +184,13 @@ pub(crate) fn squash(
                 }
                 let raw: Value = serde_json::from_str(&l.body)
                     .map_err(|e| err(Code::File, &l.at, e.to_string()))?;
+                for n in 0..l.file.operations.len() {
+                    refuse_changed_later(&project, &range, i, n, &l.at)?;
+                }
                 kept.extend(raw["operations"].as_array().cloned().unwrap_or_default());
                 continue;
             }
+            replaces.push(l.file.id.clone());
             let raw: Value =
                 serde_json::from_str(&l.body).map_err(|e| err(Code::File, &l.at, e.to_string()))?;
             for (n, env) in l.file.operations.iter().enumerate() {
@@ -413,7 +419,13 @@ pub(crate) fn prune(
         return Err(err(Code::State, &c.at, msg));
     }
     let mut removed = Vec::new();
-    for id in &c.file.replaces {
+    // Every file it stands for: the replaced ones and any older squash.
+    let gone = project
+        .replaced
+        .iter()
+        .filter(|((app, _), by)| *app == c.file.app && *by == &c.file.id)
+        .map(|((_, id), _)| id);
+    for id in gone {
         let p = folder.join(format!("{id}.json"));
         if p.exists() {
             std::fs::remove_file(&p)

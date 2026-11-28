@@ -10,6 +10,7 @@ pub(crate) mod commute;
 pub(crate) mod data;
 pub(crate) mod format;
 pub(crate) mod graph;
+pub(crate) mod history;
 pub(crate) mod invert;
 pub(crate) mod json;
 pub(crate) mod ledger;

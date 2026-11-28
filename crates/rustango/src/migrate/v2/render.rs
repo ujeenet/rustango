@@ -572,6 +572,18 @@ fn fk_clause(d: &dyn Dialect, fk: &FkDef) -> String {
     s
 }
 
+/// What backend `b` cannot build of `ix`; such an index needs `skipped_on`.
+pub(crate) fn unsupported(ix: &IndexDef, b: Backend) -> Option<&'static str> {
+    let btree = matches!(ix.method.as_str(), "" | "btree");
+    match b {
+        Backend::Postgres => None,
+        Backend::Mysql if ix.predicate.is_some() => Some("a partial index"),
+        _ if !ix.include.is_empty() => Some("INCLUDE"),
+        _ if !btree => Some("a non-btree method"),
+        _ => None,
+    }
+}
+
 fn skipped(ix: &IndexDef, b: Backend) -> bool {
     ix.skipped_on.contains(&b)
 }
@@ -845,15 +857,7 @@ impl Render<'_> {
         if skipped(ix, self.b) {
             return Ok(());
         }
-        let btree = matches!(ix.method.as_str(), "" | "btree");
-        let bad = match self.b {
-            Backend::Postgres => None,
-            Backend::Mysql if ix.predicate.is_some() => Some("a partial index"),
-            _ if !ix.include.is_empty() => Some("INCLUDE"),
-            _ if !btree => Some("a non-btree method"),
-            _ => None,
-        };
-        match bad {
+        match unsupported(ix, self.b) {
             Some(what) => Err(self.err(
                 Code::Dialect,
                 format!(
@@ -1320,6 +1324,36 @@ impl Render<'_> {
                     )
                 }
             }
+            Op::AddCompositeFk { table, fk } => {
+                let t = self.table(self.after, table)?;
+                if lite {
+                    return Ok(self.rebuild(&t, &[]));
+                }
+                let add = format!("ALTER TABLE {} ADD {}", q(d, table), fk_clause(d, fk));
+                if pg && self.existed(table) {
+                    self.validate_later(table, &fk.name, add)
+                } else {
+                    self.ddl(
+                        vec![add],
+                        vec![Expect::Fk {
+                            table: table.clone(),
+                            fk: fk.clone(),
+                        }],
+                    )
+                }
+            }
+            Op::DropCompositeFk { table, was } => {
+                if lite {
+                    return Ok(self.rebuild(&*self.table(self.after, table)?, &[]));
+                }
+                self.ddl(
+                    vec![self.drop_constraint(table, &was.name, "FOREIGN KEY")],
+                    vec![Expect::NoFk {
+                        table: table.clone(),
+                        name: was.name.clone(),
+                    }],
+                )
+            }
             Op::DropFk { table, was, .. } => {
                 if lite {
                     return Ok(self.rebuild(&*self.table(self.after, table)?, &[]));
@@ -1604,6 +1638,14 @@ impl Render<'_> {
                     fk: fk.state(column),
                 }),
                 Op::DropFk { table, was, .. } => out.push(Expect::NoFk {
+                    table: table.clone(),
+                    name: was.name.clone(),
+                }),
+                Op::AddCompositeFk { table, fk } => out.push(Expect::Fk {
+                    table: table.clone(),
+                    fk: fk.clone(),
+                }),
+                Op::DropCompositeFk { table, was } => out.push(Expect::NoFk {
                     table: table.clone(),
                     name: was.name.clone(),
                 }),

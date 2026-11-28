@@ -3,7 +3,7 @@
 //! back. A hit is a blocker printed with the query that finds the rows.
 
 use super::format::{Op, OpEnvelope};
-use super::state::{CheckBody, State};
+use super::state::{Backend, CheckBody, State};
 use crate::sql::{DialectKind, Pool};
 
 /// What a reverse op needs the current rows to satisfy.
@@ -17,12 +17,15 @@ pub(crate) enum Need {
         table: String,
         name: String,
         columns: Vec<String>,
+        /// A partial index's predicate: only those rows must be unique.
+        predicate: Option<String>,
+        skipped_on: Vec<Backend>,
     },
     Parent {
         table: String,
-        column: String,
+        columns: Vec<String>,
         to: String,
-        on: String,
+        on: Vec<String>,
     },
     Check {
         table: String,
@@ -33,6 +36,14 @@ pub(crate) enum Need {
         table: String,
         column: String,
         max: u32,
+    },
+    /// An integer type narrows back: every value must fit its range.
+    Range {
+        table: String,
+        column: String,
+        ty: String,
+        min: i64,
+        max: i64,
     },
     /// An archive refills a column that goes back to NOT NULL: every row
     /// needs an archived value (7.5).
@@ -52,6 +63,7 @@ impl Need {
             | Self::Parent { table, .. }
             | Self::Check { table, .. }
             | Self::MaxLength { table, .. }
+            | Self::Range { table, .. }
             | Self::Archived { table, .. } => table,
         }
     }
@@ -59,9 +71,11 @@ impl Need {
     fn columns(&self) -> Vec<&str> {
         match self {
             Self::NotNull { column, .. }
-            | Self::Parent { column, .. }
-            | Self::MaxLength { column, .. } => vec![column],
-            Self::Unique { columns, .. } => columns.iter().map(String::as_str).collect(),
+            | Self::MaxLength { column, .. }
+            | Self::Range { column, .. } => vec![column],
+            Self::Unique { columns, .. } | Self::Parent { columns, .. } => {
+                columns.iter().map(String::as_str).collect()
+            }
             Self::Archived { key, .. } => vec![key],
             Self::Check { .. } => Vec::new(),
         }
@@ -84,6 +98,19 @@ pub(crate) fn needs(op: &Op) -> Vec<Need> {
                     column: column.clone(),
                 });
             }
+            if let Some(c) = &changes.ty {
+                if let (Some(from), Some(to)) = (int_range(&c.from), int_range(&c.to)) {
+                    if to.0 > from.0 || to.1 < from.1 {
+                        out.push(Need::Range {
+                            table: table.clone(),
+                            column: column.clone(),
+                            ty: c.to.clone(),
+                            min: to.0,
+                            max: to.1,
+                        });
+                    }
+                }
+            }
             if let Some(c) = &changes.max_length {
                 if let Some(to) = c.to.filter(|to| c.from.is_none_or(|from| from > *to)) {
                     out.push(Need::MaxLength {
@@ -95,16 +122,22 @@ pub(crate) fn needs(op: &Op) -> Vec<Need> {
             }
             out
         }
-        Op::AddIndex { table, index, .. } if index.unique && index.predicate.is_none() => {
-            vec![Need::Unique {
-                table: table.clone(),
-                name: index.name.clone(),
-                columns: index.columns.clone(),
-            }]
-        }
+        Op::AddIndex { table, index, .. } if index.unique => vec![Need::Unique {
+            table: table.clone(),
+            name: index.name.clone(),
+            columns: index.columns.clone(),
+            predicate: index.predicate.clone(),
+            skipped_on: index.skipped_on.clone(),
+        }],
         Op::AddFk { table, column, fk } => vec![Need::Parent {
             table: table.clone(),
-            column: column.clone(),
+            columns: vec![column.clone()],
+            to: fk.to.clone(),
+            on: vec![fk.on.clone()],
+        }],
+        Op::AddCompositeFk { table, fk } => vec![Need::Parent {
+            table: table.clone(),
+            columns: fk.columns.clone(),
             to: fk.to.clone(),
             on: fk.on.clone(),
         }],
@@ -126,6 +159,16 @@ pub(crate) fn needs(op: &Op) -> Vec<Need> {
             archive: archive.clone(),
         }],
         _ => Vec::new(),
+    }
+}
+
+/// The values an integer type holds.
+fn int_range(ty: &str) -> Option<(i64, i64)> {
+    match ty {
+        "i16" => Some((i16::MIN.into(), i16::MAX.into())),
+        "i32" => Some((i32::MIN.into(), i32::MAX.into())),
+        "i64" => Some((i64::MIN, i64::MAX)),
+        _ => None,
     }
 }
 
@@ -182,6 +225,7 @@ impl std::fmt::Display for Hit {
 ///
 /// # Errors
 /// Driver failures.
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn probe(pool: &Pool, needs: &[Need]) -> Result<Vec<Hit>, crate::sql::ExecError> {
     let d = pool.dialect();
     let q = |n: &str| d.quote_ident(n);
@@ -197,15 +241,26 @@ pub(crate) async fn probe(pool: &Pool, needs: &[Need]) -> Result<Vec<Hit>, crate
                 table,
                 name,
                 columns,
+                predicate,
+                skipped_on,
             } => {
+                if skipped_on.contains(&Backend::of(d.kind())) {
+                    continue;
+                }
                 let cols: Vec<&str> = columns.iter().map(String::as_str).collect();
-                let dup = super::super::ensure::has_duplicate_keys(pool, table, &cols)
-                    .await
-                    .map_err(crate::sql::ExecError::Driver)?;
+                let dup = super::super::ensure::has_duplicate_keys(
+                    pool,
+                    table,
+                    &cols,
+                    predicate.as_deref(),
+                )
+                .await
+                .map_err(crate::sql::ExecError::Driver)?;
                 if dup {
                     let list: Vec<String> = columns.iter().map(|c| q(c)).collect();
-                    let set: Vec<String> =
+                    let mut set: Vec<String> =
                         list.iter().map(|c| format!("{c} IS NOT NULL")).collect();
+                    set.extend(predicate.as_ref().map(|p| format!("({p})")));
                     let list = list.join(", ");
                     hits.push(Hit {
                         why: format!(
@@ -222,18 +277,32 @@ pub(crate) async fn probe(pool: &Pool, needs: &[Need]) -> Result<Vec<Hit>, crate
             }
             Need::Parent {
                 table,
-                column,
+                columns,
                 to,
                 on,
-            } => (
-                format!(
-                    "{c} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {} AS p WHERE p.{} = {t}.{c})",
-                    q(to),
-                    q(on),
-                    c = q(column)
-                ),
-                format!("the FK `{table}.{column}` → `{to}` comes back, but rows point nowhere"),
-            ),
+            } => {
+                let set: Vec<String> = columns
+                    .iter()
+                    .map(|c| format!("{t}.{} IS NOT NULL", q(c)))
+                    .collect();
+                let eq: Vec<String> = columns
+                    .iter()
+                    .zip(on)
+                    .map(|(c, o)| format!("p.{} = {t}.{}", q(o), q(c)))
+                    .collect();
+                (
+                    format!(
+                        "{} AND NOT EXISTS (SELECT 1 FROM {} AS p WHERE {})",
+                        set.join(" AND "),
+                        q(to),
+                        eq.join(" AND ")
+                    ),
+                    format!(
+                        "the FK `{table}.{}` → `{to}` comes back, but rows point nowhere",
+                        columns.join(", ")
+                    ),
+                )
+            }
             Need::Check { table, name, body } => (
                 format!("NOT ({})", body.sql(d)),
                 format!("check `{name}` on `{table}` comes back, but rows break it"),
@@ -255,6 +324,16 @@ pub(crate) async fn probe(pool: &Pool, needs: &[Need]) -> Result<Vec<Hit>, crate
                     "`{table}.{column}` comes back NOT NULL from its archive, but rows have no \
                      archived value"
                 ),
+            ),
+            Need::Range {
+                table,
+                column,
+                ty,
+                min,
+                max,
+            } => (
+                format!("{c} < {min} OR {c} > {max}", c = q(column)),
+                format!("`{table}.{column}` narrows back to {ty}, but values outside it exist"),
             ),
             Need::MaxLength { table, column, max } => {
                 let len = match d.kind() {

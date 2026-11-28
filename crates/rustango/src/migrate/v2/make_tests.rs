@@ -378,3 +378,121 @@ fn portable_model_defaults_are_typed() {
     assert_eq!(pd("prefs"), (json!("empty_object"), None));
     assert!(make(&dir, &dir, &m, &opts()).unwrap().is_none());
 }
+
+/// A partial index is written skipped on MySQL, and a skip is no change:
+/// `make` stays stable however the file spells it (item 28).
+#[test]
+fn a_partial_index_is_skipped_where_it_cannot_be_built() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("migrations");
+    let mut m = models(json!({}));
+    m.indexes = serde_json::from_value(
+        json!([{"name": "mk_author_live_email", "table": "mk_author",
+        "columns": ["email"], "unique": true, "method": "btree", "where_clause": "rank > 0"}]),
+    )
+    .unwrap();
+    let made = make(&dir, &dir, &m, &opts()).unwrap().unwrap();
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(&made.path).unwrap()).unwrap();
+    let ix = v["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|o| o["indexes"].as_array().cloned().unwrap_or_default())
+        .find(|i| i["name"] == "mk_author_live_email")
+        .unwrap();
+    assert_eq!(ix["skipped_on"], json!(["mysql"]));
+    super::super::render::render_project(
+        &super::super::load::load_project(&dir).unwrap(),
+        Backend::Mysql,
+    )
+    .unwrap();
+    assert!(make(&dir, &dir, &m, &opts()).unwrap().is_none());
+    // A hand-written skip for SQLite too is still no change.
+    let mut text = std::fs::read_to_string(&made.path).unwrap();
+    text = text.replace("\"mysql\"\n", "\"mysql\",\n\"sqlite\"\n");
+    std::fs::write(&made.path, text).unwrap();
+    assert!(make(&dir, &dir, &m, &opts()).unwrap().is_none());
+}
+
+/// A many-to-many junction is a plain table: written, replayed, and
+/// dropped like one; adopt captures it as engine v1 created it.
+#[test]
+fn many_to_many_junctions_are_tables() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("migrations");
+    let mut m = models(json!({}));
+    m.m2m_tables = serde_json::from_value(json!([{"through": "mk_book_authors",
+        "src_table": "mk_book", "src_col": "book_id", "dst_table": "mk_author",
+        "dst_col": "author_id"}]))
+    .unwrap();
+    make(&dir, &dir, &m, &opts()).unwrap().unwrap();
+    let state = super::super::load::replay(&super::super::load::load_project(&dir).unwrap())
+        .unwrap()
+        .states
+        .remove(&Target::Tenant)
+        .unwrap();
+    let j = state.tables.get("mk_book_authors").unwrap();
+    let pk: Vec<&str> = j.primary_key().collect();
+    assert_eq!(pk, ["book_id", "author_id"]);
+    assert!(j.fks.iter().all(|f| f.on_delete == OnDelete::Cascade));
+    assert!(j
+        .fks
+        .iter()
+        .any(|f| f.name == "mk_book_authors_book_id_fkey"));
+    assert!(make(&dir, &dir, &m, &opts()).unwrap().is_none());
+    m.m2m_tables.clear();
+    let made = make(&dir, &dir, &m, &opts()).unwrap().unwrap();
+    assert_eq!(ops_of(&made.path), ["drop_table"]);
+}
+
+/// `--fill` for a column that already exists is refused, never ignored.
+#[test]
+fn a_fill_for_an_existing_column_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("migrations");
+    make(&dir, &dir, &models(json!({})), &opts())
+        .unwrap()
+        .unwrap();
+    let mut m = models(json!({}));
+    m.tables[0].fields[3].nullable = false;
+    let mut o = opts();
+    o.fills.insert("mk_author.rank".into(), "0".into());
+    let e = make(&dir, &dir, &m, &o).unwrap_err();
+    assert_eq!(e.code, Code::Fill, "{e}");
+    assert!(e.msg.contains("already exists"), "{e}");
+}
+
+/// The `mod` line `make --data-rust` prints compiles from the crate root.
+#[test]
+fn the_data_steps_mod_line_compiles_from_the_crate_root() {
+    assert_eq!(mod_line(Path::new("app/src")), "mod data_steps;");
+    assert_eq!(
+        mod_line(Path::new("app")),
+        "#[path = \"../data_steps/mod.rs\"] mod data_steps;"
+    );
+}
+
+/// A composite FK is written as `add_composite_fk` after its covering
+/// index, replays, and is stable; dropping it writes `drop_composite_fk`.
+#[test]
+fn composite_fks_are_written() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("migrations");
+    let mut m = models(json!({}));
+    m.tables[1].fields.push(
+        serde_json::from_value(field("author_email", "string", json!({"max_length": 100})))
+            .unwrap(),
+    );
+    m.tables[1].composite_fks = serde_json::from_value(json!([{"name": "writer",
+        "to": "mk_author", "from": ["author_id", "author_email"], "on": ["id", "email"]}]))
+    .unwrap();
+    m.indexes = serde_json::from_value(json!([{"name": "mk_author_id_email", "table": "mk_author",
+        "columns": ["id", "email"], "unique": true, "method": "btree"}]))
+    .unwrap();
+    let made = make(&dir, &dir, &m, &opts()).unwrap().unwrap();
+    assert!(ops_of(&made.path).contains(&"add_composite_fk".to_owned()));
+    assert!(make(&dir, &dir, &m, &opts()).unwrap().is_none());
+    m.tables[1].composite_fks.clear();
+    let made = make(&dir, &dir, &m, &opts()).unwrap().unwrap();
+    assert!(ops_of(&made.path).contains(&"drop_composite_fk".to_owned()));
+}

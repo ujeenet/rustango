@@ -767,6 +767,24 @@ pub(crate) fn refuse_server(version: &str) -> Result<(), MigrateError> {
     Ok(())
 }
 
+/// Every v2 verb and every ledger creation passes here first, so a refused
+/// server holds no v2 table and no file changed (design item 29).
+///
+/// # Errors
+/// A MariaDB server, or driver failures.
+pub(crate) async fn refuse_unsupported(pool: &Pool) -> Result<(), MigrateError> {
+    #[cfg(feature = "mysql")]
+    #[allow(irrefutable_let_patterns)] // MySQL-only builds
+    if let Pool::Mysql(my) = pool {
+        let version: String = sqlx::query_scalar("SELECT CAST(VERSION() AS CHAR)")
+            .fetch_one(my)
+            .await?;
+        refuse_server(&version)?;
+    }
+    let _ = pool;
+    Ok(())
+}
+
 impl Ledger {
     /// Whether the ledger table exists. Every v2 contact reads the ledger
     /// first, so an unsupported server is refused here, in the same query.
@@ -802,6 +820,7 @@ impl Ledger {
     /// # Errors
     /// Driver failures.
     pub(crate) async fn ensure(&self, pool: &Pool) -> Result<(), MigrateError> {
+        refuse_unsupported(pool).await?;
         let d = pool.dialect();
         for t in [
             ledger_table(&self.table),
@@ -1805,11 +1824,11 @@ mod tests {
                 matches!(&e, super::MigrateError::UnsupportedServer { server } if server == v),
                 "{e:?}"
             );
+            let msg = e.to_string();
             assert!(
-                e.to_string().starts_with(
-                    "migrations engine v2 supports MySQL 8.0.16+; MariaDB is not supported"
-                ),
-                "{e}"
+                msg.starts_with("migrations engine v2 needs MySQL 8.0.16+ and refuses MariaDB")
+                    && msg.ends_with("a MariaDB project keeps engine v1, `manage migrate`"),
+                "{msg}"
             );
         }
         super::refuse_server("8.0.46").unwrap();

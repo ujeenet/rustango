@@ -160,7 +160,7 @@ The switch is one way: v2 rollback stops at the adopt checkpoint. A database beh
 
 On MySQL an engine v1 step that changes an FK's `ON DELETE` (the repair above included) now swaps the FK under `LOCK TABLES`: the migrate user needs the `LOCK TABLES` privilege.
 
-- Migrations engine v2 does not support MariaDB (it needs MySQL 8.0.16+): its runs refuse with `MigrateError::UnsupportedServer`. MariaDB projects keep using engine v1, which still works in 0.71.0: do not switch them to v2.
+- Migrations engine v2 does not support MariaDB (it needs MySQL 8.0.16+): every `dbmigrate` verb refuses it with `MigrateError::UnsupportedServer` before writing a table or a file (`adopt` and `make` too). MariaDB projects keep using engine v1 (`manage migrate`), which still works in 0.71.0. Offline `make` (no reachable database) cannot tell and writes the file.
 - The engine v1 verbs (`migrate`, `makemigrations`, `downgrade`, `migrate-tenants`, `migrate-registry`, …) and the v1 runner APIs refuse a project with an engine v2 migration file (top-level `engine` or `format` key) with `MigrateError::EngineV2`, which names the `dbmigrate` verb to run (its new `instead` field), or `MigrateError::MixedEngine` when v1 and v2 files sit together. Boot (`runserver`, `Builder::migrate`) runs such a project on engine v2; `file::list_dir`, `file::load` and `file::parse` refuse the file itself. `embed_migrations!` fails to compile on a mixed folder. The `system` folder does not decide the engine; an engine v2 file there is refused with `MigrateError::SystemChainV2`.
 - A v1 migrate on a database holding the engine v2 ledger (`__rustango_migrations_v2`, or `<ledger>_v2`) is refused with `MigrateError::SwitchedToV2`; `runserver` and `Builder::migrate` log a warning and serve without migrating.
 - `migrate_embedded_pool` parses every entry before it takes the lock, so a bad entry no longer creates the ledger.
@@ -188,6 +188,9 @@ On MySQL an engine v1 step that changes an FK's `ON DELETE` (the repair above in
 - With `RUSTANGO_TENANT_MIGRATOR` on Postgres, a tenant whose login owns its own database is refused: make the migrator the owner (`ALTER DATABASE <db> OWNER TO <migrator>`) or run the fleet as a superuser.
 - `--canary` (and `fleet_canaries`) refuses a slug no tenant has, and canaries run in the order given.
 - Database-mode tenants are migrated over short-lived connections instead of the app's cached tenant pools.
+- Engine v2 `make --fill t.c=…` for a column that already exists is refused (it was ignored); set its NULL rows in a data step first.
+- Engine v2 `make` writes `skipped_on` on partial, `INCLUDE` and non-btree indexes for the backends that cannot build them; an existing file without it still fails to load on such a backend until you add it.
+- A second engine v2 `squash` no longer lists the earlier checkpoint in `replaces`. A checkpoint written by a pre-release 0.71.0 build keeps working.
 - `ContentType` now declares its `(app_label, model_name)` unique index, so on engine v1 the next `migrate` writes a system step that adds it (an index already there is kept), and `ContentType::upsert` targets that pair instead of the primary key.
 
 ## 0.70.0

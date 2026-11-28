@@ -44,6 +44,7 @@ impl TipPlanner {
     ///
     /// # Errors
     /// A file that does not replay.
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
     pub(crate) fn new(project: &Project, target: Target) -> Result<Self, LoadError> {
         let order = project.order.get(&target).cloned().unwrap_or_default();
         let mut tip = State::default();
@@ -147,10 +148,7 @@ fn undo(s: &mut State, op: &Op, at: &str, target: Target) -> Result<(), LoadErro
             "an adopt op has no state inverse",
         )),
         Op::RawSql { .. } | Op::StateOnly { .. } => {
-            for (i, nested) in op.nested(at)?.iter().enumerate().rev() {
-                undo(s, nested, &format!("{at}/state/{i}"), target)?;
-            }
-            Ok(())
+            super::invert::undo_nested(s, &op.nested(at)?, at, target).map(drop)
         }
         _ => {
             for inv in invert(op, s, Allow { data_loss: true }, at)? {

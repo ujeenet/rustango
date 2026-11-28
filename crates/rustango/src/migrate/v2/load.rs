@@ -39,6 +39,8 @@ pub(crate) struct Project {
     /// `(app, id)` a squash checkpoint replaces → that checkpoint's id
     /// (9.6). Their files, when still on disk, are not in `files`.
     pub(crate) replaced: BTreeMap<(String, String), String>,
+    /// The replaced `(app, id)`s whose files are still on disk (7.7).
+    pub(crate) kept: std::collections::BTreeSet<(String, String)>,
 }
 
 /// Each target's final state, and the state hash before and after each file.
@@ -112,7 +114,7 @@ pub(crate) fn system_project() -> Result<Project, LoadError> {
     Ok(Project {
         files,
         order,
-        replaced: BTreeMap::new(),
+        ..Project::default()
     })
 }
 
@@ -228,15 +230,38 @@ fn refuse_framework_writes(files: &[Loaded]) -> Result<(), LoadError> {
 
 /// Squash checkpoints stand for the ids they replace, at load (9.6): the
 /// replaced files leave the graph, and every `parents`, `depends_on` and
-/// `requires` naming one names the checkpoint.
+/// `requires` naming one names the checkpoint. An older squash checkpoint
+/// whose files a newer one replaces is replaced by it too.
 fn remap_replaced(project: &mut Project) {
     for l in &project.files {
         for id in &l.file.replaces {
-            project
-                .replaced
-                .insert((l.file.app.clone(), id.clone()), l.file.id.clone());
+            let k = (l.file.app.clone(), id.clone());
+            // The widest checkpoint wins: it stands for the narrower one.
+            let wider = project.replaced.get(&k).is_none_or(|c| {
+                project
+                    .files
+                    .iter()
+                    .find(|o| o.file.app == l.file.app && &o.file.id == c)
+                    .is_none_or(|o| o.file.replaces.len() < l.file.replaces.len())
+            });
+            if wider {
+                project.replaced.insert(k, l.file.id.clone());
+            }
         }
     }
+    for l in &project.files {
+        if let Some(outer) = superseded_by(&project.files, &l.file) {
+            project
+                .replaced
+                .insert((l.file.app.clone(), l.file.id.clone()), outer);
+        }
+    }
+    project.kept = project
+        .files
+        .iter()
+        .map(|l| (l.file.app.clone(), l.file.id.clone()))
+        .filter(|k| project.replaced.contains_key(k))
+        .collect();
     if project.replaced.is_empty() {
         return;
     }
@@ -273,6 +298,23 @@ fn remap_replaced(project: &mut Project) {
             }
         }
     }
+}
+
+/// The squash checkpoint that replaces every file `c` replaces, when `c`
+/// is an older squash checkpoint of the same app.
+pub(crate) fn superseded_by(files: &[Loaded], c: &super::format::File) -> Option<String> {
+    if c.replaces.is_empty() {
+        return None;
+    }
+    files
+        .iter()
+        .find(|o| {
+            o.file.app == c.app
+                && o.file.id != c.id
+                && o.file.replaces.len() > c.replaces.len()
+                && c.replaces.iter().all(|r| o.file.replaces.contains(r))
+        })
+        .map(|o| o.file.id.clone())
 }
 
 /// One DAG per target, each in canonical order. An app's `database` files

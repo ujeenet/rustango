@@ -2997,7 +2997,7 @@ mod tests {
     }
 
     /// Boot never resumes a half rolled back migration: it stops with
-    /// "finish `downgrade` first" (7.6).
+    /// "finish `manage dbmigrate down` first" (7.6).
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn v2_boot_refuses_a_rolling_back_row() {
@@ -3030,7 +3030,11 @@ mod tests {
         let e = boot_migrate_v2(&pool, &dir, stop(), BOOT_STALE_AFTER)
             .await
             .expect_err("refused");
-        assert!(e.to_string().contains("finish `downgrade` first"), "{e}");
+        assert!(
+            e.to_string()
+                .contains("finish `manage dbmigrate down` first"),
+            "{e}"
+        );
     }
 
     /// One plain HTTP/1.0 GET: the status code, or `None` when nothing listens.

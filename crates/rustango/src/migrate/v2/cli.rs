@@ -9,7 +9,8 @@ use super::LoadError;
 use crate::migrate::MigrateError;
 use crate::sql::Pool;
 
-/// The verbs; `make`, `sql` and `check --offline` never dial the database.
+/// The verbs; `make`, `sql` and `check --offline` need no database (a
+/// MariaDB server that answers still refuses them).
 pub(crate) const VERBS: &[&str] = &[
     "make", "apply", "down", "status", "check", "sql", "adopt", "squash",
 ];
@@ -29,7 +30,6 @@ const HELP: &str = "manage dbmigrate <verb>   migrations engine v2
 ";
 
 /// Whether `args` (after `dbmigrate`) needs no connection.
-#[cfg(any(feature = "manage", all(feature = "tenancy", feature = "postgres")))]
 pub(crate) fn pool_free(args: &[String]) -> bool {
     match args.first().map(String::as_str) {
         Some("make" | "sql" | "help" | "--help" | "-h") | None => true,
@@ -216,6 +216,20 @@ pub(crate) async fn run<W: Write + Send, F: Fleet>(
     let verb = args.first().map_or("", String::as_str);
     let rest = args.get(1..).unwrap_or_default();
     let pool = &route.pool();
+    if !matches!(verb, "" | "help" | "--help" | "-h") {
+        let check = super::ledger::refuse_unsupported(pool);
+        if pool_free(args) {
+            // An offline verb never needs the server: refused when it answers.
+            let probe = std::time::Duration::from_secs(3);
+            if let Ok(Err(e @ MigrateError::UnsupportedServer { .. })) =
+                tokio::time::timeout(probe, check).await
+            {
+                return Err(e);
+            }
+        } else {
+            check.await?;
+        }
+    }
     match (verb, route) {
         ("make", _) if value(rest, "--rebase")?.is_some() => rebase(pool, dir, rest, w).await,
         ("make", _) if rest.iter().any(|a| a == "--merge") => {
@@ -589,7 +603,8 @@ pub(crate) async fn apply<W: Write>(
     for warning in &report.warnings {
         writeln!(w, "warning: {warning}").map_err(io)?;
     }
-    for id in &report.applied {
+    // A plan applies nothing: it prints the SQL only.
+    for id in report.applied.iter().filter(|_| !opts.dry_run) {
         writeln!(w, "Applied {id}").map_err(io)?;
     }
     if let Some(why) = &report.stopped {
@@ -788,6 +803,10 @@ async fn check<W: Write>(
     writeln!(w, "No issues found.").map_err(io)
 }
 
+/// What `check --drift` says for a database with no applied row: it
+/// compared nothing, so it never says "No drift".
+pub(crate) const NOTHING_APPLIED: &str = "No migration is applied here: nothing to compare.";
+
 /// `check --drift [--target registry]`: the catalog against the state at
 /// this database's applied set (S6); any difference fails.
 async fn drift<W: Write>(
@@ -801,8 +820,12 @@ async fn drift<W: Write>(
         None | Some("tenant") => Target::Tenant,
         Some(other) => return Err(usage(format!("--target {other}: `registry` or `tenant`"))),
     };
-    let project = super::load::load_project(dir).map_err(load)?;
-    let found = drift_lines(pool, &project, target).await?;
+    // Files that do not load are refused, as on every other verb.
+    super::load::load_project(dir).map_err(load)?;
+    let Some(found) = drift_lines(pool, target).await? else {
+        writeln!(w, "{NOTHING_APPLIED}").map_err(io)?;
+        return Ok(());
+    };
     for m in &found {
         writeln!(w, "{m}").map_err(io)?;
     }
@@ -815,40 +838,39 @@ async fn drift<W: Write>(
     writeln!(w, "No drift.").map_err(io)
 }
 
-/// Each difference between `pool`'s catalog and `target`'s state at the
-/// migrations its ledger applied (S6).
+/// Each difference between `pool`'s catalog and `target`'s state after the
+/// rows its ledger applied, replayed from their stored bodies with the
+/// squash marker rule (S6, item 28); `None` when no row of `target` is
+/// applied, so nothing was compared.
 ///
 /// # Errors
-/// A load error, or reading the ledger or catalog.
+/// A stored body that does not replay, or reading the ledger or catalog.
 pub(crate) async fn drift_lines(
     pool: &Pool,
-    project: &super::load::Project,
     target: Target,
-) -> Result<Vec<String>, MigrateError> {
-    let done: std::collections::HashSet<(String, String)> = super::ledger::Ledger::default_names()
-        .rows(pool)
-        .await?
-        .into_iter()
+) -> Result<Option<Vec<String>>, MigrateError> {
+    let rows = super::ledger::Ledger::default_names().rows(pool).await?;
+    let applied: Vec<&super::ledger::Row> = rows
+        .iter()
         .filter(|r| r.state == super::ledger::RowState::Applied)
-        .map(|r| (r.app, r.id))
         .collect();
-    let applied: std::collections::BTreeSet<usize> = project
-        .order
-        .get(&target)
-        .into_iter()
-        .flatten()
-        .copied()
-        .filter(|&i| {
-            let f = &project.files[i].file;
-            done.contains(&(f.app.clone(), f.id.clone()))
-        })
+    let mut hist = super::history::History::read(applied).map_err(load)?;
+    let mine: Vec<usize> = (0..hist.len())
+        .filter(|&p| hist.bodies[p].target == target)
         .collect();
-    let planner = super::plan::TipPlanner::new(project, target).map_err(load)?;
-    let state = planner.state_at(project, &applied).map_err(load)?;
+    if mine.is_empty() {
+        return Ok(None);
+    }
+    hist.keep(&mine);
+    let ctx = super::replay::Ctx {
+        target,
+        registry: None,
+    };
+    let state = hist.state_before(hist.len(), &ctx).map_err(load)?;
     let found = super::probe::drift(pool, &state)
         .await
         .map_err(|e| MigrateError::Validation(e.to_string()))?;
-    Ok(found.iter().map(ToString::to_string).collect())
+    Ok(Some(found.iter().map(ToString::to_string).collect()))
 }
 
 /// `sql <id> [--dialect pg|mysql|sqlite|all]`: by default the backend of

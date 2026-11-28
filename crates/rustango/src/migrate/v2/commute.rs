@@ -209,6 +209,11 @@ pub(crate) fn keys(op: &Op, at: &str) -> Result<Keys, LoadError> {
             k.writes.insert(name(&was.name));
             k.reads.insert(col(t, column));
         }
+        Op::AddCompositeFk { table: t, fk: f } | Op::DropCompositeFk { table: t, was: f } => {
+            k.writes.insert(name(&f.name));
+            k.reads.extend(f.columns.iter().map(|c| col(t, c)));
+            k.reads.insert(table(&f.to));
+        }
         Op::AddIndex {
             table: t, index, ..
         } => {

@@ -74,10 +74,11 @@ pub(crate) fn order(nodes: &[Node<'_>]) -> Result<Vec<usize>, LoadError> {
             Code::Graph,
             nodes[ids[0]].at,
             format!(
-                "app `{app}` has {} leaves ({}); merge them with a migration whose parents \
-                 are all of them, or rebase one onto the other",
+                "app `{app}` has {} leaves ({}); merge them: `manage dbmigrate make --merge`, \
+                 or move one onto the other: `manage dbmigrate make --rebase {}`",
                 ids.len(),
-                names.join(", ")
+                names.join(", "),
+                names.last().copied().unwrap_or_default()
             ),
         ));
     }

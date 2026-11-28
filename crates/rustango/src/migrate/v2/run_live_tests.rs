@@ -1860,6 +1860,35 @@ async fn rollback_is_planned_up_front(b: B) {
     assert_eq!(ledger_snapshot(&db3.pool).await, before);
 }
 
+/// A pooled SQLite connection that cached the schema before another one
+/// added a column still drops it (CI: `no such column: ""bio""`).
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn a_stale_sqlite_connection_drops_a_new_column() {
+    let db = fresh(B::Lite).await.unwrap();
+    let create = "CREATE TABLE rv_author (id INTEGER PRIMARY KEY, name TEXT)";
+    raw_execute_pool(&db.pool, create, Vec::new())
+        .await
+        .unwrap();
+    // This connection caches the schema without `bio`; another adds it.
+    let mut stale = db.pool.acquire().await.unwrap();
+    let mut tx = stale.begin().await.unwrap();
+    crate::sql::raw_execute_tx(&mut tx, "SELECT * FROM rv_author", Vec::new())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let other = Pool::connect(&db.url).await.unwrap();
+    let add = "ALTER TABLE rv_author ADD COLUMN \"bio\" VARCHAR(80)";
+    raw_execute_pool(&other, add, Vec::new()).await.unwrap();
+    other.close().await;
+    let mut tx = schema_tx(&mut stale).await.unwrap();
+    let drop = "ALTER TABLE rv_author DROP COLUMN \"bio\"";
+    crate::sql::raw_execute_tx(&mut tx, drop, Vec::new())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+}
+
 /// A custom ledger name keeps its case on every query (review fix 11), and
 /// adopt reads the app's own v1 ledger (review fix 7).
 async fn custom_ledgers_keep_their_names(b: B) {
@@ -2041,6 +2070,80 @@ async fn a_mariadb_server_is_refused() {
         "{e:?}"
     );
     pool.close().await;
+    let msg = e.to_string();
+    assert!(
+        msg.contains("MySQL 8.0.16+") && msg.contains("engine v1, `manage migrate`"),
+        "{msg}"
+    );
+    // Every verb refuses before it writes: no v2 table, no file changed.
+    let db = fresh(B::My).await.unwrap();
+    let v2_tables = || async {
+        let n: Vec<(i64,)> = crate::sql::raw_query_pool(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() \
+             AND LOCATE('rustango_migrations_v2', table_name) > 0",
+            Vec::new(),
+            &db.pool,
+        )
+        .await
+        .unwrap();
+        n[0].0
+    };
+    let e = downgrade(&db.pool, &dir, 1, &opts())
+        .await
+        .expect_err("refused");
+    assert!(
+        matches!(e, RunError::Db(MigrateError::UnsupportedServer { .. })),
+        "{e:?}"
+    );
+    assert_eq!(v2_tables().await, 0, "down created the ledger");
+    let v1 = tempfile::tempdir().unwrap();
+    let v1dir = v1.path().join("migrations");
+    std::fs::create_dir_all(&v1dir).unwrap();
+    let initial = crate::migrate::file::Migration {
+        name: "0001_initial".into(),
+        created_at: String::new(),
+        prev: None,
+        atomic: true,
+        scope: crate::migrate::MigrationScope::Tenant,
+        replaces: Vec::new(),
+        merges: Vec::new(),
+        snapshot: crate::migrate::SchemaSnapshot::default(),
+        forward: Vec::new(),
+    };
+    crate::migrate::file::write(&v1dir.join("0001_initial.json"), &initial).unwrap();
+    let empty = tempfile::tempdir().unwrap();
+    let files = |d: &Path| -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    for (d, verb) in [
+        (&dir, vec!["down", "1"]),
+        (&dir, vec!["down", "--to", "0001_author"]),
+        (&v1dir, vec!["adopt"]),
+        (&empty.path().to_path_buf(), vec!["make"]),
+        (&dir, vec!["status"]),
+    ] {
+        let before = files(d);
+        let args: Vec<String> = verb.iter().map(|s| (*s).to_owned()).collect();
+        let e = crate::migrate::v2::cli::run::<_, crate::migrate::v2::cli::NoFleet>(
+            crate::migrate::v2::cli::Route::Single(&db.pool),
+            d,
+            &args,
+            &mut Vec::new(),
+        )
+        .await
+        .map_or_else(|e| e, |()| panic!("{verb:?} ran on MariaDB"));
+        assert!(
+            matches!(e, MigrateError::UnsupportedServer { .. }),
+            "{verb:?}: {e:?}"
+        );
+        assert_eq!(files(d), before, "{verb:?} changed files");
+        assert_eq!(v2_tables().await, 0, "{verb:?} created the ledger");
+    }
 }
 
 /// A run dropped mid-unit (SIGTERM, task abort, a timeout) frees the
@@ -3842,7 +3945,8 @@ async fn example_d_rolls_back_from_mid_batch(b: B) {
                 // Boot (the same run) never resumes a half rolled back row.
                 let e = migrate(pool, &dir, &opts()).await.expect_err("refused");
                 assert!(
-                    e.to_string().contains("finish `downgrade` first"),
+                    e.to_string()
+                        .contains("finish `manage dbmigrate down` first"),
                     "{c:?}: {e}"
                 );
                 downgrade_to(pool, &dir, "steps:0001_user", &opts())
@@ -4585,12 +4689,21 @@ per_backend!(
     portable_defaults_render_per_backend,
     v1_framework_tables_adopt_cleanly,
     old_framework_fks_repair_then_switch,
+    v1_repairs_old_framework_fks,
     adopt_column_verifies_adds_or_refuses,
     adopt_column_indexes_verify_or_create,
     every_database_and_database_targets,
     upgrade_from_0_69_runs_no_ddl,
     cli_apply_stops_on_a_shutdown,
     a_boot_waiter_outlasts_the_flat_lock_timeout,
+    a_squash_marker_rolls_back_what_follows,
+    rollback_preflight_sees_narrowing_and_partial_uniques,
+    every_rollback_blocker_is_printed,
+    a_raw_op_with_a_state_probe_rolls_back,
+    a_second_squash_replaces_only_real_files,
+    a_default_only_change_checks_the_real_type,
+    a_v1_many_to_many_project_adopts_and_makes,
+    a_composite_fk_applies_and_rolls_back,
 );
 
 /// Legacy SQLite datetime text is swept before the first data unit, so a
@@ -5270,10 +5383,21 @@ async fn fk_identity(pool: &Pool, table: &str) -> String {
             "SELECT CAST(string_agg(CAST(oid AS TEXT), ',' ORDER BY oid) AS TEXT) FROM pg_constraint \
              WHERE conrelid = CAST('{table}' AS regclass) AND contype = 'f'"
         ),
-        crate::sql::DialectKind::Mysql => format!(
-            "SELECT CAST(TABLE_ID AS CHAR) FROM information_schema.INNODB_TABLES \
-             WHERE NAME = CONCAT(DATABASE(), '/{table}')"
-        ),
+        crate::sql::DialectKind::Mysql => {
+            let v: Vec<(String,)> =
+                crate::sql::raw_query_pool("SELECT CAST(VERSION() AS CHAR)", Vec::new(), pool)
+                    .await
+                    .unwrap();
+            let innodb = if crate::sql::mysql::is_mariadb(&v[0].0) {
+                "INNODB_SYS_TABLES"
+            } else {
+                "INNODB_TABLES"
+            };
+            format!(
+                "SELECT CAST(TABLE_ID AS CHAR) FROM information_schema.{innodb} \
+                 WHERE NAME = CONCAT(DATABASE(), '/{table}')"
+            )
+        }
         _ => format!("SELECT CAST(rootpage AS TEXT) FROM sqlite_master WHERE name = '{table}'"),
     };
     let rows: Vec<(String,)> = crate::sql::raw_query_pool(&sql, Vec::new(), pool)
@@ -5291,21 +5415,16 @@ async fn fk_identities(pool: &Pool, fks: &[(String, String)]) -> Vec<String> {
 }
 
 /// A database an older release left (QA B1): framework FKs with no action
-/// where the models say CASCADE. The v2 switch refuses it, naming the FK;
-/// engine v1 `migrate` repairs it; then the switch passes. A database that
-/// already has the action gets no DDL from the repair step.
-async fn old_framework_fks_repair_then_switch(b: B) {
-    let Some(db) = fresh(b).await else { return };
-    let pool = &db.pool;
-    let v1 = tempfile::tempdir().unwrap();
-    let dir = v1.path().join("migrations");
-    std::fs::create_dir_all(&dir).unwrap();
-    let sys = v1.path().join("system").join("migrations");
+/// where the models say CASCADE. Writes that v1 project under `root` and
+/// returns the FKs; `None` in builds with no such FK.
+async fn old_framework_fks(b: B, pool: &Pool, root: &Path) -> Option<Vec<(String, String)>> {
+    std::fs::create_dir_all(root.join("migrations")).unwrap();
+    let sys = root.join("system").join("migrations");
     let fks = old_system_chain(&sys);
     if fks.is_empty() {
         // Narrow builds (plain `sqlite`) compile no framework model with an FK.
         eprintln!("skip: no framework FK with an action in this build");
-        return;
+        return None;
     }
     // What the older release ran: that chain as shipped, no catch-up step.
     let shipped = crate::migrate::make::SystemChain::shipped(sys.clone());
@@ -5315,52 +5434,43 @@ async fn old_framework_fks_repair_then_switch(b: B) {
     .await
     .unwrap_or_else(|e| panic!("{b:?}: {e}"));
     for (t, c) in &fks {
-        assert_eq!(
-            on_delete_of(pool, t, c).await,
-            "NO ACTION",
-            "{b:?}: {t}.{c}"
+        // MariaDB reports no action as RESTRICT.
+        let got = on_delete_of(pool, t, c).await;
+        assert!(
+            matches!(got.as_str(), "NO ACTION" | "RESTRICT"),
+            "{b:?}: {t}.{c} is {got}"
         );
     }
-    let shipped = fk_identities(pool, &fks).await;
-    let v2root = tempfile::tempdir().unwrap();
-    let v2dir = v2root.path().join("migrations");
-    put(
-        &v2dir,
-        "0001_author",
-        &v2("0001_author", &[], json!([author()])),
-    );
-    let e = migrate(pool, &v2dir, &opts())
-        .await
-        .expect_err("drifted FKs");
-    assert_eq!(e.code(), Some(Code::Drift), "{b:?}: {e}");
-    let msg = e.to_string();
-    assert!(
-        msg.contains("on_delete") && msg.contains("manage migrate"),
-        "{b:?}: {msg}"
-    );
+    Some(fks)
+}
+
+/// Engine v1 `migrate` repairs those FKs in place; on a database that has
+/// the actions, the pending repair step is recorded with no DDL.
+async fn v1_repair_of_old_fks(b: B, pool: &Pool, root: &Path, fks: &[(String, String)]) {
+    let dir = root.join("migrations");
+    let sys = root.join("system").join("migrations");
+    let shipped = fk_identities(pool, fks).await;
     let mut out = Vec::new();
     crate::migrate::manage::run_with_writer(pool, &dir, vec!["migrate".to_owned()], &mut out)
         .await
         .unwrap_or_else(|e| panic!("{b:?}: {e}"));
-    for (t, c) in &fks {
+    for (t, c) in fks {
         assert_eq!(on_delete_of(pool, t, c).await, "CASCADE", "{b:?}: {t}.{c}");
     }
     // Safe on large tables: MySQL re-adds each FK in place, never copying the table.
     if b == B::My {
         assert_eq!(
-            fk_identities(pool, &fks).await,
+            fk_identities(pool, fks).await,
             shipped,
             "a table was copied"
         );
     }
-    // The repair is idempotent: on a database that has the actions, the
-    // pending step is recorded with no DDL.
     let repair = crate::migrate::file::list_dir(&sys)
         .unwrap()
         .into_iter()
         .find(|m| m.name.ends_with("_repair_on_delete"))
         .unwrap_or_else(|| panic!("{b:?}: no repair step written"));
-    let before = fk_identities(pool, &fks).await;
+    let before = fk_identities(pool, fks).await;
     let ledger = crate::migrate::runner::SYSTEM_LEDGER_TABLE;
     raw_execute_pool(
         pool,
@@ -5386,7 +5496,46 @@ async fn old_framework_fks_repair_then_switch(b: B) {
         .await
         .unwrap()
         .contains(&repair.name));
-    assert_eq!(fk_identities(pool, &fks).await, before, "{b:?}: DDL ran");
+    assert_eq!(fk_identities(pool, fks).await, before, "{b:?}: DDL ran");
+}
+
+/// Engine v1 alone repairs old framework FKs; MariaDB too, which engine v2
+/// refuses (CI's mariadb shards run this one).
+async fn v1_repairs_old_framework_fks(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let v1 = tempfile::tempdir().unwrap();
+    let Some(fks) = old_framework_fks(b, &db.pool, v1.path()).await else {
+        return;
+    };
+    v1_repair_of_old_fks(b, &db.pool, v1.path(), &fks).await;
+}
+
+/// The v2 switch refuses a database with old framework FKs, naming the
+/// FK; engine v1 `migrate` repairs it; then the switch passes.
+async fn old_framework_fks_repair_then_switch(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let v1 = tempfile::tempdir().unwrap();
+    let Some(fks) = old_framework_fks(b, pool, v1.path()).await else {
+        return;
+    };
+    let v2root = tempfile::tempdir().unwrap();
+    let v2dir = v2root.path().join("migrations");
+    put(
+        &v2dir,
+        "0001_author",
+        &v2("0001_author", &[], json!([author()])),
+    );
+    let e = migrate(pool, &v2dir, &opts())
+        .await
+        .expect_err("drifted FKs");
+    assert_eq!(e.code(), Some(Code::Drift), "{b:?}: {e}");
+    let msg = e.to_string();
+    assert!(
+        msg.contains("on_delete") && msg.contains("manage migrate"),
+        "{b:?}: {msg}"
+    );
+    v1_repair_of_old_fks(b, pool, v1.path(), &fks).await;
     migrate(pool, &v2dir, &opts())
         .await
         .unwrap_or_else(|e| panic!("{b:?}: {e}"));
@@ -5923,4 +6072,406 @@ async fn a_replaced_mysql_fk_holds_writes_off() {
         checks_and_locks_back(&mut conn).await;
     })
     .await;
+}
+
+// ---- QA stage 3 (item 28) ----
+
+async fn drift_of(pool: &Pool) -> Option<Vec<String>> {
+    super::super::cli::drift_lines(pool, Target::Tenant)
+        .await
+        .unwrap()
+}
+
+/// A squash checkpoint recorded over files the database ran is a marker
+/// (item 28): `down 1` and `--to` it roll back what follows, drift reads
+/// the history; past it, with the files kept, it goes with them.
+async fn a_squash_marker_rolls_back_what_follows(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    thirty_files(&dir);
+    migrate(pool, &dir, &opts()).await.unwrap();
+    let mid = fresh(b).await.unwrap();
+    let to_ten = Options {
+        up_to: Some("0010_s10".into()),
+        ..opts()
+    };
+    migrate(&mid.pool, &dir, &to_ten).await.unwrap();
+    super::super::squash::squash(&dir, &dir, "project", "0001_s1", "0020_s20").unwrap();
+    // Between squash and apply, drift compares the history.
+    assert_eq!(drift_of(pool).await, Some(Vec::new()), "{b:?}");
+    let rep = migrate(pool, &dir, &opts()).await.unwrap();
+    assert_eq!(rep.applied, ["0020_squash"]);
+    assert_eq!(drift_of(pool).await, Some(Vec::new()), "{b:?}");
+    let back = downgrade(pool, &dir, 1, &opts()).await.unwrap();
+    assert_eq!(back.rolled_back, ["0030_s30"], "{b:?}");
+    let back = downgrade_to(pool, &dir, "0020_squash", &opts())
+        .await
+        .unwrap();
+    assert_eq!(back.rolled_back.len(), 9, "{:?}", back.rolled_back);
+    assert_eq!(back.rolled_back[0], "0029_s29");
+    assert_eq!(drift_of(pool).await, Some(Vec::new()), "{b:?}");
+    assert_eq!(
+        migrate(pool, &dir, &opts()).await.unwrap().applied.len(),
+        10
+    );
+    // Past the marker, with the replaced files on disk: it goes too.
+    let back = downgrade_to(pool, &dir, "0019_s19", &opts()).await.unwrap();
+    assert!(
+        back.rolled_back
+            .ends_with(&["0020_squash".into(), "0020_s20".into()]),
+        "{:?}",
+        back.rolled_back
+    );
+    assert_eq!(drift_of(pool).await, Some(Vec::new()), "{b:?}");
+    // Mid-range: refused, naming the release to use (9.6).
+    let e = migrate(&mid.pool, &dir, &opts()).await.unwrap_err();
+    assert_eq!(e.code(), Some(Code::Behind), "{e}");
+    assert!(e.to_string().contains("last release of your app"), "{e}");
+    // After prune it still compares what ran, from the stored bodies.
+    super::super::squash::prune(
+        &dir,
+        &dir,
+        "0020_squash",
+        &super::super::squash::PruneGate::Assumed,
+    )
+    .unwrap();
+    assert_eq!(drift_of(&mid.pool).await, Some(Vec::new()), "{b:?}");
+    raw_execute_pool(&mid.pool, "ALTER TABLE sq_t3 DROP COLUMN c9", Vec::new())
+        .await
+        .unwrap();
+    assert!(
+        drift_of(&mid.pool).await.is_some_and(|d| !d.is_empty()),
+        "{b:?}"
+    );
+    let empty = fresh(b).await.unwrap();
+    assert_eq!(drift_of(&empty.pool).await, None, "nothing compared");
+}
+
+/// Rollback preflight (7.1): an integer narrowing back and a partial unique
+/// coming back are blockers before any statement, every one printed.
+async fn rollback_preflight_sees_narrowing_and_partial_uniques(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    let ix = json!({"name": "pf_code_live", "columns": ["code"], "unique": true,
+        "where": "n > 0", "skipped_on": ["mysql"]});
+    let mut add = ix.clone();
+    add["op"] = json!("add_index");
+    add["v"] = json!(1);
+    add["table"] = json!("pf_t");
+    put(
+        &dir,
+        "0001_t",
+        &v2(
+            "0001_t",
+            &[],
+            json!([{"op": "create_table", "v": 1, "table": {"name": "pf_t", "scope": "tenant",
+            "fields": [{"column": "id", "ty": "i64", "primary_key": true, "nullable": false},
+                       {"column": "n", "ty": "i32", "nullable": true},
+                       {"column": "code", "ty": "string", "max_length": 20, "nullable": true}]}},
+            add]),
+        ),
+    );
+    put(
+        &dir,
+        "0002_wide",
+        &v2(
+            "0002_wide",
+            &["0001_t"],
+            json!([{"op": "alter_column", "v": 1, "table": "pf_t", "column": "n",
+            "changes": {"ty": {"from": "i32", "to": "i64"}}}]),
+        ),
+    );
+    put(
+        &dir,
+        "0003_free",
+        &v2(
+            "0003_free",
+            &["0002_wide"],
+            json!([{"op": "drop_index", "v": 1, "table": "pf_t", "name": "pf_code_live",
+            "was": ix}]),
+        ),
+    );
+    migrate(pool, &dir, &opts()).await.unwrap();
+    raw_execute_pool(
+        pool,
+        "INSERT INTO pf_t (id, n, code) VALUES (1, 5000000000, 'a'), (2, 1, 'b'), (3, 2, 'b')",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    for dry_run in [true, false] {
+        let o = Options { dry_run, ..opts() };
+        let e = downgrade(pool, &dir, 3, &o).await.unwrap_err();
+        assert_eq!(e.code(), Some(Code::Blocked), "{b:?}: {e}");
+        let msg = e.to_string();
+        assert!(msg.contains("narrows back to i32"), "{msg}");
+        if b != B::My {
+            assert!(msg.contains("unique `pf_code_live`"), "{msg}");
+        }
+    }
+    assert_eq!(rows(pool).await.len(), 3, "nothing ran");
+}
+
+/// Every static blocker is printed, not the first.
+async fn every_rollback_blocker_is_printed(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let (_root, dir) = project();
+    let raw = json!([{"op": "raw_sql", "v": 1, "id": "x_raw", "state": [],
+        "up": {"any": "UPDATE rv_author SET name = name WHERE 1 = 0"}}]);
+    let drop = json!([{"op": "drop_column", "v": 1, "table": "rv_author", "column": "bio",
+        "was": {"column": "bio", "ty": "string", "max_length": 80, "nullable": true}}]);
+    put(&dir, "0003_x", &v2("0003_x", &["0002_bio"], raw));
+    put(&dir, "0004_y", &v2("0004_y", &["0003_x"], drop));
+    migrate(pool, &dir, &opts()).await.unwrap();
+    let e = downgrade(pool, &dir, 2, &opts()).await.unwrap_err();
+    let msg = e.to_string();
+    assert!(
+        msg.contains("x_raw") && msg.contains("rv_author.bio"),
+        "{msg}"
+    );
+}
+
+/// A raw op with `tx: autocommit` and `probe: "state"` rolls back: its
+/// inverse reverses the declared state, which the probe then checks.
+async fn a_raw_op_with_a_state_probe_rolls_back(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    put(
+        &dir,
+        "0001_author",
+        &v2("0001_author", &[], json!([author()])),
+    );
+    put(
+        &dir,
+        "0002_ix",
+        &v2("0002_ix", &["0001_author"], raw_index()),
+    );
+    migrate(pool, &dir, &opts()).await.unwrap();
+    downgrade(pool, &dir, 1, &opts())
+        .await
+        .unwrap_or_else(|e| panic!("{b:?}: {e}"));
+    let t = super::super::catalog::read_table(pool, "rv_author")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!t.indexes.iter().any(|i| i.name == "rv_raw_ix"), "{b:?}");
+}
+
+/// A second squash over the first lists only real files, so a database
+/// that ran them one by one records it; its kept data ops follow the rule.
+async fn a_second_squash_replaces_only_real_files(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    let seed = json!({"op": "data_sql", "v": 1, "id": "seed_v1", "tables": {"write": ["s2_a"]},
+        "up": {"any": "INSERT INTO {{t:s2_a}} ({{c:id}}) VALUES (1)"},
+        "down": {"any": "DELETE FROM {{t:s2_a}}"}});
+    let create = |t: &str| {
+        json!({"op": "create_table", "v": 1, "table": {"name": t, "scope": "tenant",
+            "fields": [{"column": "id", "ty": "i64", "primary_key": true, "nullable": false}]}})
+    };
+    let col = |t: &str, c: &str| {
+        json!({"op": "add_column", "v": 1, "table": t,
+            "column": {"column": c, "ty": "i32", "nullable": true}})
+    };
+    let files = [
+        ("0001_a", json!([create("s2_a"), seed])),
+        ("0002_b", json!([create("s2_b")])),
+        ("0003_c", json!([col("s2_b", "c")])),
+        ("0004_d", json!([col("s2_b", "d")])),
+        ("0005_e", json!([col("s2_a", "e")])),
+    ];
+    let mut parent: Vec<&str> = Vec::new();
+    for (id, ops) in &files {
+        put(&dir, id, &v2(id, &parent, ops.clone()));
+        parent = vec![id];
+    }
+    migrate(pool, &dir, &opts()).await.unwrap();
+    super::super::squash::squash(&dir, &dir, "project", "0001_a", "0003_c").unwrap();
+    // The first checkpoint's kept seed meets a later change to its table.
+    let refused =
+        super::super::squash::squash(&dir, &dir, "project", "0003_squash", "0005_e").unwrap_err();
+    assert_eq!(refused.code, Code::Checkpoint, "{refused}");
+    let path =
+        super::super::squash::squash(&dir, &dir, "project", "0003_squash", "0004_d").unwrap();
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        v["replaces"],
+        json!(["0001_a", "0002_b", "0003_c", "0004_d"]),
+        "{b:?}"
+    );
+    let rep = migrate(pool, &dir, &opts())
+        .await
+        .unwrap_or_else(|e| panic!("{b:?}: {e}"));
+    assert_eq!(rep.applied, ["0004_squash"]);
+    let removed = super::super::squash::prune(
+        &dir,
+        &dir,
+        "0004_squash",
+        &super::super::squash::PruneGate::Assumed,
+    )
+    .unwrap();
+    assert_eq!(
+        removed.len(),
+        5,
+        "the older checkpoint goes too: {removed:?}"
+    );
+    super::super::load::load_project(&dir).unwrap();
+}
+
+/// Online `check` reads a default-only change against the column's type.
+async fn a_default_only_change_checks_the_real_type(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    put(
+        &dir,
+        "0001_item",
+        &v2(
+            "0001_item",
+            &[],
+            json!([{"op": "create_table", "v": 1, "table": {"name": "ck_item", "scope": "tenant",
+            "fields": [{"column": "id", "ty": "i64", "primary_key": true, "nullable": false},
+                       {"column": "qty", "ty": "i32", "nullable": true, "default": "1"}]}}]),
+        ),
+    );
+    put(
+        &dir,
+        "0002_qty",
+        &v2(
+            "0002_qty",
+            &["0001_item"],
+            json!([{"op": "alter_column", "v": 1, "table": "ck_item", "column": "qty",
+            "changes": {"default": {"from": "1", "to": "2"}}}]),
+        ),
+    );
+    let found = super::super::check::check(&dir, &[backend_of(pool)], None, Some(pool))
+        .await
+        .unwrap();
+    assert!(
+        found
+            .iter()
+            .all(|f| f.severity != super::super::check::Severity::Error),
+        "{b:?}: {found:?}"
+    );
+}
+
+/// A v1 project with a many-to-many field adopts (the junction as v1 made
+/// it), then `make` a change, apply, roll back, drift clean throughout.
+async fn a_v1_many_to_many_project_adopts_and_makes(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    let table = |name: &str| {
+        json!({"name": name, "model": name, "fields": [
+            v1_field("id", "i64", json!({"primary_key": true, "auto": true, "nullable": false}))]})
+    };
+    let m2m = json!({"through": "mm_post_tags", "src_table": "mm_post", "src_col": "post_id",
+        "dst_table": "mm_tag", "dst_col": "tag_id"});
+    let snap = json!({"tables": [table("mm_post"), table("mm_tag")], "m2m_tables": [m2m.clone()]});
+    put(
+        &dir,
+        "0001_initial",
+        &json!({"name": "0001_initial", "created_at": "", "snapshot": snap,
+        "forward": [{"schema": {"CreateTable": "mm_post"}}, {"schema": {"CreateTable": "mm_tag"}},
+                    {"schema": {"CreateM2MTable": m2m}}]}),
+    );
+    crate::migrate::migrate_pool(pool, &dir).await.unwrap();
+    super::super::adopt::adopt(&dir, backend_of(pool)).unwrap();
+    let rep = migrate(pool, &dir, &opts())
+        .await
+        .unwrap_or_else(|e| panic!("{b:?}: {e}"));
+    assert_eq!(rep.applied, ["0002_adopt"]);
+    assert_eq!(drift_of(pool).await, Some(Vec::new()), "{b:?}");
+    let mut models: crate::migrate::snapshot::SchemaSnapshot =
+        serde_json::from_value(snap).unwrap();
+    models.tables[0].fields.push(
+        serde_json::from_value(v1_field("title", "string", json!({"max_length": 40}))).unwrap(),
+    );
+    let mk = super::super::make::MakeOptions {
+        backends: vec![backend_of(pool)],
+        ..super::super::make::MakeOptions::default()
+    };
+    super::super::make::make(&dir, &dir, &models, &mk)
+        .unwrap()
+        .unwrap();
+    assert_eq!(migrate(pool, &dir, &opts()).await.unwrap().applied.len(), 1);
+    assert_eq!(drift_of(pool).await, Some(Vec::new()), "{b:?}");
+    downgrade(pool, &dir, 1, &opts()).await.unwrap();
+    assert_eq!(drift_of(pool).await, Some(Vec::new()), "{b:?}");
+    assert_eq!(columns(pool, "mm_post_tags").await, ["post_id", "tag_id"]);
+}
+
+/// `add_composite_fk` applies, matches the catalog, probes its orphans on
+/// rollback and rolls back on every backend.
+async fn a_composite_fk_applies_and_rolls_back(b: B) {
+    let Some(db) = fresh(b).await else { return };
+    let pool = &db.pool;
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("migrations");
+    let i64c =
+        |c: &str, pk: bool| json!({"column": c, "ty": "i64", "primary_key": pk, "nullable": !pk});
+    put(
+        &dir,
+        "0001_t",
+        &v2(
+            "0001_t",
+            &[],
+            json!([{"op": "create_table", "v": 1, "table": {"name": "cf_parent", "scope": "tenant",
+                "fields": [i64c("a", true), i64c("b", true)]}},
+            {"op": "create_table", "v": 1, "table": {"name": "cf_child", "scope": "tenant",
+                "fields": [i64c("id", true), i64c("pa", false), i64c("pb", false)]},
+             "indexes": [{"name": "cf_child_pa_pb_idx", "columns": ["pa", "pb"]}]}]),
+        ),
+    );
+    let fk = json!({"name": "cf_child_parent_fkey", "columns": ["pa", "pb"], "to": "cf_parent",
+        "on": ["a", "b"]});
+    put(
+        &dir,
+        "0002_fk",
+        &v2(
+            "0002_fk",
+            &["0001_t"],
+            json!([{"op": "add_composite_fk", "v": 1, "table": "cf_child", "fk": fk}]),
+        ),
+    );
+    put(
+        &dir,
+        "0003_free",
+        &v2(
+            "0003_free",
+            &["0002_fk"],
+            json!([{"op": "drop_composite_fk", "v": 1, "table": "cf_child", "was": fk}]),
+        ),
+    );
+    migrate(pool, &dir, &opts())
+        .await
+        .unwrap_or_else(|e| panic!("{b:?}: {e}"));
+    assert_eq!(drift_of(pool).await, Some(Vec::new()), "{b:?}");
+    raw_execute_pool(
+        pool,
+        "INSERT INTO cf_child (id, pa, pb) VALUES (1, 7, 7)",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let e = downgrade(pool, &dir, 1, &opts()).await.unwrap_err();
+    assert!(e.to_string().contains("point nowhere"), "{b:?}: {e}");
+    raw_execute_pool(pool, "DELETE FROM cf_child", Vec::new())
+        .await
+        .unwrap();
+    downgrade(pool, &dir, 1, &opts()).await.unwrap();
+    assert_eq!(drift_of(pool).await, Some(Vec::new()), "{b:?}");
+    downgrade(pool, &dir, 1, &opts()).await.unwrap();
+    assert_eq!(drift_of(pool).await, Some(Vec::new()), "{b:?}");
 }
