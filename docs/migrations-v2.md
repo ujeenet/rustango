@@ -24,12 +24,13 @@ A project switches once with `adopt`; after that the engine v1 verbs refuse it.
 |---|---|---|
 | `--app <app>` | `make`, `squash --prune` | Work in that app's folder. |
 | `--rename t.old:new` / `--no-rename` | `make` | A drop and an add of one type: keep the data, or drop and add. |
-| `--fill t.c=<sql>` | `make` | Value written into existing rows by a new NOT NULL column. |
+| `--fill t.c=<sql>` | `make` | Value written into existing rows by a new NOT NULL column. A `--fill` for a column that already exists is refused. |
 | `--no-split` | `make` | Keep contract ops in the one file. |
 | `--merge` | `make` | Write a merge file over two leaves. Branches that do not commute are refused (`MV2-E033`). |
 | `--rebase <id> [--force]` | `make` | Move a leaf on top of the other one. Refused once a database ran it or a remote branch has it. |
 | `--data-rust <name>` | `make` | Write a `data_rust` op, its step stub and a test. |
 | `--check` | `make` | Fail when the models have changes no file has. |
+| `--backends pg,mysql,sqlite` | `make`, `check` | The backends the project runs on; every default must be one string on all of them. Default: the connected one. |
 | `--plan` / `--dry-run` | `apply`, `down` | Print what would run; write nothing. |
 | `--allow-rollback` | `apply` | Allow `apply <earlier id>` to roll back. |
 | `--resume-forward` | `apply` | Take a half rolled back file forward again. |
@@ -112,6 +113,76 @@ failed at its own boot: one that fails in a later CLI run is not parked on a run
   migrator the owner (`ALTER DATABASE <db> OWNER TO <migrator>`) or run as a superuser, else the tenant is refused
   with that fix. To take over objects the login made, the migrator needs its rights (`GRANT <login> TO <migrator>`).
   On MySQL the migrator needs `SELECT` on the `mysql` schema and `GRANT OPTION`.
+
+## Single database: expand, then contract
+
+`apply` on one database has no `--phase`. Deploy the expand file first with `apply <expand id>`, then run `apply`
+again (all files) once the code no longer needs what the contract file drops. `apply <id>` refuses an id no file
+has; nothing runs.
+
+## Writing a file by hand
+
+`make` writes schema ops. Write data and raw SQL ops by hand in a new file (the next number, `parents` set to the
+current leaf), then run `check`.
+
+```json
+{"engine": 2, "format": 1, "id": "0012_fill_slug", "app": "project", "target": "tenant",
+ "parents": ["0011_add_slug"],
+ "operations": [
+  {"op": "data_sql", "v": 1, "id": "fill_slug_v1",
+   "tables": {"read": ["post"], "write": ["post.slug"]},
+   "up": {"any": "UPDATE {{t:post}} SET {{c:slug}} = {{c:title}} WHERE {{c:slug}} IS NULL"},
+   "down": {"noop": "the column is dropped on rollback"},
+   "batch": {"table": "post", "key": "id", "size": 1000}},
+  {"op": "raw_sql", "v": 1, "id": "post_title_trgm",
+   "up": {"postgres": "CREATE INDEX post_title_trgm ON post USING gin (title gin_trgm_ops)"},
+   "down": {"postgres": "DROP INDEX post_title_trgm"},
+   "state": [{"op": "add_index", "v": 1, "table": "post", "name": "post_title_trgm",
+              "columns": ["title"], "method": "gin", "skipped_on": ["mysql", "sqlite"]}]}
+ ]}
+```
+
+- `data_sql`: `up` and `down` map a backend (`postgres`, `mysql`, `sqlite`) or `any` to one statement. Write
+  `{{t:table}}` and `{{c:column}}` for names (quoted per backend, checked against `tables`), and `{{?}}` for a
+  value from `binds`. `down` is SQL, `{"noop": "<why>"}` or `{"irreversible": "<why>"}`. `on_fresh: "skip"` leaves
+  the step out of a fresh install.
+- `batch: {table, key, size}` runs the step in batches of `size` rows by the unique `key`, each batch its own
+  transaction; the statement must use `{{batch_range}}` where the key range goes. A killed run resumes mid-move.
+- `raw_sql`: one statement per backend; a backend with no entry runs nothing. `state` lists the schema ops the SQL
+  performs, so replay and drift know about it; rollback runs `down` and reverses `state`. MySQL DDL, and anything
+  with `"tx": "autocommit"`, needs `"probe": "state"` (or a probe SQL) so a cut-off run can resume.
+- `skipped_on: [backend]` on an index (or an extension) says that backend does not have it: render, probe and drift
+  skip it there. `make` writes it for a partial, `INCLUDE` or non-btree index on the backends that cannot build one.
+
+## Rollback walls
+
+- Dropping a NOT NULL column with no default cannot be rolled back, even with `--accept-data-loss`: the column
+  cannot come back empty. Give the drop `"restore": "archive"`: the forward run copies the values into an archive
+  table, and rollback adds the column back and refills it.
+- `drop_table` and other `drop_column`s roll back only with `--accept-data-loss` (empty), or with a data op that
+  declares `restores` and puts the values back.
+- Rollback probes the rows before it runs anything: NULLs where NOT NULL comes back, duplicates for a unique index
+  (a partial one too), orphans for an FK, values too long or out of range for a narrower type, and broken checks.
+  Every blocker is printed, with the query that finds the rows.
+
+## Squash
+
+- `squash <app> <from>..<to>` starts at the app's root (the adopt checkpoint or the first file); another `from` is
+  refused (`MV2-E015`). To squash further later, squash again from the checkpoint: `squash <app> 0023_squash..0030_x`.
+  The new checkpoint replaces the files the old one did.
+- The checkpoint is named after `<to>`'s number: `0023_squash.json`.
+- A database that ran every replaced file records the checkpoint with no SQL; rollback and `check --drift` treat it
+  as sitting where the last replaced file ran, so `down` and `down --to <checkpoint>` work as on a fresh install.
+  While the replaced files are on disk, rollback below the checkpoint uses them; after `--prune` it stops there.
+- A database that ran only part of the replaced files is refused: migrate it with the last release of your app from
+  before the squash (it runs them one by one), then deploy this one.
+- `irreversible_below` is set when a replaced op could not be rolled back (or an older checkpoint was replaced):
+  rollback stops at the checkpoint.
+
+## Many-to-many fields
+
+A many-to-many junction table is a plain table in v2 files: `make` writes `create_table` (two NOT NULL columns typed
+as each end's primary key, both the primary key, a `CASCADE` FK each) and `drop_table`.
 
 ## Portable defaults
 

@@ -610,16 +610,17 @@ where
 {
     let rest: Vec<String> = args.iter().filter(|a| *a != "--drift").cloned().collect();
     super::args::no_args(&rest, "dbmigrate check --drift")?;
-    let project = crate::migrate::v2::load::load_project(dir)
+    crate::migrate::v2::load::load_project(dir)
         .map_err(|e| TenancyError::Migrate(MigrateError::Validation(e.to_string())))?;
     let mut found = 0usize;
     let mut each = |w: &mut (dyn Write + Send),
                     label: &str,
-                    r: Result<Vec<String>, String>|
+                    r: Result<Option<Vec<String>>, String>|
      -> Result<(), TenancyError> {
         match r {
-            Ok(diff) if diff.is_empty() => writeln!(w, "{label}: No drift.")?,
-            Ok(diff) => {
+            Ok(None) => writeln!(w, "{label}: {}", crate::migrate::v2::cli::NOTHING_APPLIED)?,
+            Ok(Some(diff)) if diff.is_empty() => writeln!(w, "{label}: No drift.")?,
+            Ok(Some(diff)) => {
                 found += diff.len();
                 for d in diff {
                     writeln!(w, "{label}: {d}")?;
@@ -633,20 +634,18 @@ where
         Ok(())
     };
     let registry = f.pools.registry_pool();
-    let reg = crate::migrate::v2::cli::drift_lines(&registry, &project, Target::Registry)
+    let reg = crate::migrate::v2::cli::drift_lines(&registry, Target::Registry)
         .await
         .map_err(|e| e.to_string());
     each(w, "registry", reg)?;
     for (slug, t) in fleet::targets(f.pools, f.registry_url, Tenants::All).await? {
         let r = match t {
             Reached::Unreachable(e) => Err(e.to_string()),
-            Reached::MissingSchema => Ok(vec!["schema missing".to_owned()]),
+            Reached::MissingSchema => Ok(Some(vec!["schema missing".to_owned()])),
             Reached::Target(t) => match t.open().await {
                 Err(e) => Err(e.to_string()),
                 Ok(open) => {
-                    let r =
-                        crate::migrate::v2::cli::drift_lines(&open.pool, &project, Target::Tenant)
-                            .await;
+                    let r = crate::migrate::v2::cli::drift_lines(&open.pool, Target::Tenant).await;
                     open.close().await;
                     r.map_err(|e| e.to_string())
                 }

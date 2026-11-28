@@ -468,6 +468,30 @@ pub(crate) enum OnFresh {
     Skip,
 }
 
+/// A `raw_sql` op's declared state: as the file writes it, or, for a
+/// rollback's inverse, the inverted ops (3.5).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(from = "Vec<Value>")]
+pub(crate) enum Declared {
+    Written(Vec<Value>),
+    Inverse(Vec<Op>),
+}
+
+impl From<Vec<Value>> for Declared {
+    fn from(v: Vec<Value>) -> Self {
+        Self::Written(v)
+    }
+}
+
+impl Declared {
+    pub(crate) fn is_empty(&self) -> bool {
+        match self {
+            Self::Written(v) => v.is_empty(),
+            Self::Inverse(v) => v.is_empty(),
+        }
+    }
+}
+
 /// The ops this release runs. Each op renders and replays only itself.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
@@ -548,6 +572,15 @@ pub(crate) enum Op {
         column: String,
         was: InlineFk,
     },
+    /// A multi-column FK (3.3), as state holds it.
+    AddCompositeFk {
+        table: String,
+        fk: super::state::FkDef,
+    },
+    DropCompositeFk {
+        table: String,
+        was: super::state::FkDef,
+    },
     /// Flat in the file (`table`, `concurrently` and the index keys);
     /// decoded by hand in `decode_op`.
     #[serde(skip_deserializing)]
@@ -584,7 +617,7 @@ pub(crate) enum Op {
         up: PerBackend,
         #[serde(default)]
         down: Option<PerBackend>,
-        state: Vec<Value>,
+        state: Declared,
         #[serde(default)]
         probe: Option<Probe>,
     },
@@ -669,13 +702,11 @@ pub(crate) enum Op {
 
 /// Ops the format defines that this release does not run yet: each gets
 /// goldens on three backends before it is enabled.
-const NOT_ENABLED: [&str; 9] = [
+const NOT_ENABLED: [&str; 7] = [
     "alter_check",
     "rename_constraint",
     "add_exclusion",
     "drop_exclusion",
-    "add_composite_fk",
-    "drop_composite_fk",
     "create_m2m",
     "drop_m2m",
     "verify",
@@ -688,7 +719,14 @@ impl Op {
     /// Nested state ops of `raw_sql` and `state_only`, decoded.
     pub(crate) fn nested(&self, at: &str) -> Result<Vec<Op>, LoadError> {
         let (key, raw) = match self {
-            Self::RawSql { state, .. } => ("state", state),
+            Self::RawSql {
+                state: Declared::Inverse(ops),
+                ..
+            } => return Ok(ops.clone()),
+            Self::RawSql {
+                state: Declared::Written(state),
+                ..
+            } => ("state", state),
             Self::StateOnly { ops, .. } => ("ops", ops),
             _ => return Ok(Vec::new()),
         };
@@ -1215,6 +1253,8 @@ pub(crate) fn op_name(op: &Op) -> &'static str {
         Op::AlterColumn { .. } => "alter_column",
         Op::AddFk { .. } => "add_fk",
         Op::DropFk { .. } => "drop_fk",
+        Op::AddCompositeFk { .. } => "add_composite_fk",
+        Op::DropCompositeFk { .. } => "drop_composite_fk",
         Op::AddIndex { .. } => "add_index",
         Op::DropIndex { .. } => "drop_index",
         Op::RenameIndex { .. } => "rename_index",

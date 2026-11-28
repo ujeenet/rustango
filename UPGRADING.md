@@ -188,6 +188,9 @@ On MySQL an engine v1 step that changes an FK's `ON DELETE` (the repair above in
 - With `RUSTANGO_TENANT_MIGRATOR` on Postgres, a tenant whose login owns its own database is refused: make the migrator the owner (`ALTER DATABASE <db> OWNER TO <migrator>`) or run the fleet as a superuser.
 - `--canary` (and `fleet_canaries`) refuses a slug no tenant has, and canaries run in the order given.
 - Database-mode tenants are migrated over short-lived connections instead of the app's cached tenant pools.
+- Engine v2 `make --fill t.c=…` for a column that already exists is refused (it was ignored); set its NULL rows in a data step first.
+- Engine v2 `make` writes `skipped_on` on partial, `INCLUDE` and non-btree indexes for the backends that cannot build them; an existing file without it still fails to load on such a backend until you add it.
+- A second engine v2 `squash` no longer lists the earlier checkpoint in `replaces`. A checkpoint written by a pre-release 0.71.0 build keeps working.
 - `ContentType` now declares its `(app_label, model_name)` unique index, so on engine v1 the next `migrate` writes a system step that adds it (an index already there is kept), and `ContentType::upsert` targets that pair instead of the primary key.
 
 ## 0.70.0

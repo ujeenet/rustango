@@ -61,6 +61,19 @@ Migrations engine v2: `manage dbmigrate`, data steps, batched moves with resume,
 - With a migrator login, a tenant database owned by the tenant login is refused up front with the fix, instead of failing in `REASSIGN OWNED`.
 - `--canary` refuses an unknown slug and keeps the given order.
 - Two replicas booting together on a fresh Postgres database no longer crash on "tuple concurrently updated" while revoking PUBLIC's rights.
+- Engine v2 rollback after a squash on a database that ran the replaced files: `down N`, `down --to <checkpoint>` and later files roll back as on a fresh install, and `check --drift` works before and after the checkpoint is applied (single database and tenancy).
+- Engine v2 `check --drift` replays what the ledger ran, so it still compares after `squash --prune`, and says "nothing to compare" instead of "No drift." when no migration is applied.
+- Engine v2 rollback probes an integer type narrowing back and a partial unique index coming back before anything runs, and prints every blocker, not the first.
+- An engine v2 `raw_sql` op with `tx: "autocommit"` and `probe: "state"` rolls back.
+- `dbmigrate apply <id>` with an id no file has runs nothing; `apply --plan` no longer prints "Applied".
+- A second `squash` over an earlier checkpoint lists only real files, so a database that ran them one by one records it, and checks the earlier checkpoint's kept data ops; `--prune` deletes the earlier checkpoint too.
+- Online `dbmigrate check` reads a default-only `alter_column` against the column's real type (MySQL refused an integer default as TEXT).
+- `dbmigrate make` writes `skipped_on` for a partial, `INCLUDE` or non-btree index on the backends that cannot build it, and a skip alone is no change, so `make --check` is stable.
+- `dbmigrate make` writes many-to-many junction tables and composite FKs (`add_composite_fk` / `drop_composite_fk`), and `adopt` takes over a v1 project that has them.
+- `make --data-rust` prints a `mod` line that compiles when the steps folder is outside `src/`.
+- `make --rebase` replays the moved project before it removes the original file; a bad rebase keeps it. The two-leaf error names the `make --merge` and `make --rebase` commands.
+- `make --fill` for a column that already exists is refused instead of ignored.
+- A database that ran part of a squashed range is told to migrate with the last release of the app from before the squash.
 
 ## [0.70.0] — 2026-11-22
 

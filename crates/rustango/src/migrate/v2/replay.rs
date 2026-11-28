@@ -323,6 +323,21 @@ pub(crate) fn apply(
             get(s, at, table)?;
             add_fk(s, at, ctx, table, fk.state(column), false)?;
         }
+        Op::AddCompositeFk { table, fk } => {
+            get(s, at, table)?;
+            add_fk(s, at, ctx, table, fk.clone(), false)?;
+        }
+        Op::DropCompositeFk { table, was } => {
+            let t = get_mut(s, at, table)?;
+            let n = t.fks.len();
+            t.fks.retain(|f| f != was);
+            if t.fks.len() == n {
+                return Err(fail(
+                    at,
+                    format!("drop_composite_fk `{}`: `was` differs", was.name),
+                ));
+            }
+        }
         Op::DropFk { table, column, was } => {
             let want = was.state(column);
             let t = get_mut(s, at, table)?;

@@ -55,6 +55,7 @@ pub(crate) fn is_contract_op(op: &Op) -> bool {
         | Op::DropIndex { .. }
         | Op::DropCheck { .. }
         | Op::DropFk { .. }
+        | Op::DropCompositeFk { .. }
         | Op::RenameTable { .. }
         | Op::RenameColumn { .. } => true,
         Op::AlterColumn { changes, .. } => {
@@ -150,7 +151,8 @@ pub(crate) fn make(
     } else {
         opts.backends.clone()
     };
-    let new = state_of(models, &backends, &at)?;
+    let new = keep_skips(&old, state_of(models, &backends, &at)?);
+    refuse_unused_fills(&old, &owned, &new, &opts.fills, &at)?;
     let others = other_apps(&project, &app);
     let plan = diff(&old, &owned, new, &others, opts, &at)?;
     if plan.ops.is_empty() {
@@ -407,9 +409,19 @@ mod tests {{
             format!("+ data_rust {app}:{step}"),
             format!("wrote {}", rs.display()),
             format!("added `pub mod {name};` to {}", mod_rs.display()),
-            "add `mod data_steps;` to your crate root once".to_owned(),
+            format!("add `{}` to your crate root once", mod_line(root)),
         ],
     })
+}
+
+/// The line that compiles `<root>/data_steps` from the crate root file: a
+/// plain `mod` when `root` is `src`, else a `#[path]` from `src/`.
+fn mod_line(root: &Path) -> String {
+    if root.file_name().is_some_and(|n| n == "src") {
+        "mod data_steps;".to_owned()
+    } else {
+        "#[path = \"../data_steps/mod.rs\"] mod data_steps;".to_owned()
+    }
 }
 
 /// Tables other apps own, each mapped to `<app>:<leaf>` for `depends_on`.
@@ -507,23 +519,83 @@ fn verify(
     Ok(())
 }
 
+/// `--fill` fills a NOT NULL column this file adds; one it would not use
+/// is refused, never ignored.
+fn refuse_unused_fills(
+    old: &State,
+    owned: &BTreeSet<String>,
+    new: &StateDoc,
+    fills: &BTreeMap<String, String>,
+    at: &str,
+) -> Result<(), LoadError> {
+    for key in fills.keys() {
+        let (t, c) = key.split_once('.').unwrap_or((key, ""));
+        let exists =
+            owned.contains(t) && old.tables.get(t).is_some_and(|tb| tb.column(c).is_some());
+        let added = new.tables.get(t).is_some_and(|tb| tb.column(c).is_some());
+        if exists || !added {
+            return Err(err(
+                Code::Fill,
+                at,
+                format!(
+                    "`--fill {key}` fills a column this migration adds, and `{key}` {}: for an \
+                     existing column, set its NULL rows in a data step first (`make --data-rust`), \
+                     then make it NOT NULL",
+                    if exists {
+                        "already exists"
+                    } else {
+                        "is not in the models"
+                    }
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// An index the chain already has, but for `skipped_on`, keeps the
+/// chain's `skipped_on`: a skip is no change (item 28).
+fn keep_skips(old: &State, mut new: StateDoc) -> StateDoc {
+    for t in new.tables.values_mut() {
+        let Some(was) = old.tables.get(t.name.as_str()) else {
+            continue;
+        };
+        for ix in &mut t.indexes {
+            if let Some(o) = was.indexes.iter().find(|o| {
+                o.name == ix.name
+                    && IndexDef {
+                        skipped_on: ix.skipped_on.clone(),
+                        ..(*o).clone()
+                    } == *ix
+            }) {
+                ix.skipped_on.clone_from(&o.skipped_on);
+            }
+        }
+    }
+    new
+}
+
 /// The models as v2 state. Defaults are the one string every backend in
-/// `backends` takes; min/max become checks. FK covering indexes are added
-/// by the differ, which knows the chain.
+/// `backends` takes; min/max become checks; a many-to-many junction is a
+/// plain table. FK covering indexes are added by the differ, which knows
+/// the chain.
 ///
 /// # Errors
-/// M2M tables, exclusions and composite FKs (a later release), and a
-/// default with no one spelling on `backends`.
+/// Exclusion constraints, and a default with no one spelling on `backends`.
 pub(crate) fn state_of(
     snap: &SchemaSnapshot,
     backends: &[Backend],
     at: &str,
 ) -> Result<StateDoc, LoadError> {
-    if !snap.m2m_tables.is_empty() || !snap.excludes.is_empty() {
+    if let Some(x) = snap.excludes.first() {
         return Err(err(
             Code::NotEnabled,
             at,
-            "many-to-many tables and exclusion constraints come in a later release",
+            format!(
+                "exclusion constraint `{}` on `{}`: `make` cannot write exclusion constraints; \
+                 add it with a hand-written `raw_sql` op (Postgres only)",
+                x.name, x.table
+            ),
         ));
     }
     let mut doc = StateDoc::default();
@@ -533,39 +605,104 @@ pub(crate) fn state_of(
         .iter()
         .filter(|t| !t.name.starts_with(FRAMEWORK_PREFIX))
     {
-        if !t.composite_fks.is_empty() {
-            return Err(err(
-                Code::NotEnabled,
-                at,
-                format!("table `{}`: composite FKs come in a later release", t.name),
-            ));
-        }
         let mut state = table_of(t, snap, backends, at)?;
         for f in &t.fields {
             let Some(rel) = &f.fk else { continue };
-            if rel.to.starts_with(FRAMEWORK_PREFIX) {
-                let e = externs
-                    .entry(rel.to.clone())
-                    .or_insert_with(|| ExternTable {
-                        table: rel.to.clone(),
-                        columns: Vec::new(),
-                        unique_sets: Vec::new(),
-                        owner: ExternOwner::System,
-                    });
-                if !e.columns.iter().any(|c| c.name == rel.on) {
-                    e.columns.push(ExternColumn {
-                        name: rel.on.clone(),
-                        ty: f.ty.clone(),
-                        unique: true,
-                    });
-                }
-            }
+            extern_end(&mut externs, &rel.to, &rel.on, &f.ty);
         }
         state.indexes.sort_by(|a, b| a.name.cmp(&b.name));
         doc.tables.insert(state.name.clone(), state);
     }
+    for m in &snap.m2m_tables {
+        let state = junction_of(m, snap, &mut externs, at)?;
+        doc.tables.insert(state.name.clone(), state);
+    }
     doc.externs = externs;
     Ok(doc)
+}
+
+/// A framework table an FK points at is extern (design item 20).
+fn extern_end(externs: &mut BTreeMap<String, ExternTable>, to: &str, on: &str, ty: &str) {
+    if !to.starts_with(FRAMEWORK_PREFIX) {
+        return;
+    }
+    let e = externs.entry(to.to_owned()).or_insert_with(|| ExternTable {
+        table: to.to_owned(),
+        columns: Vec::new(),
+        unique_sets: Vec::new(),
+        owner: ExternOwner::System,
+    });
+    if !e.columns.iter().any(|c| c.name == on) {
+        e.columns.push(ExternColumn {
+            name: on.to_owned(),
+            ty: ty.to_owned(),
+            unique: true,
+        });
+    }
+}
+
+/// A many-to-many junction as engine v1 creates it: one NOT NULL column
+/// per end, typed as that end's primary key, both the primary key, and a
+/// CASCADE FK each.
+fn junction_of(
+    m: &crate::migrate::snapshot::M2MTableSnapshot,
+    snap: &SchemaSnapshot,
+    externs: &mut BTreeMap<String, ExternTable>,
+    at: &str,
+) -> Result<TableState, LoadError> {
+    let mut columns = Vec::new();
+    let mut fks = Vec::new();
+    for (table, col) in [(&m.src_table, &m.src_col), (&m.dst_table, &m.dst_col)] {
+        let pk = snap
+            .tables
+            .iter()
+            .find(|t| &t.name == table)
+            .and_then(|t| t.fields.iter().find(|f| f.primary_key))
+            .ok_or_else(|| {
+                err(
+                    Code::State,
+                    at,
+                    format!(
+                        "junction `{}`: `{table}` has no primary key in the models",
+                        m.through
+                    ),
+                )
+            })?;
+        extern_end(externs, table, &pk.column, &pk.ty);
+        columns.push(ColumnDef {
+            column: col.clone(),
+            ty: pk.ty.clone(),
+            nullable: false,
+            max_length: pk.max_length,
+            primary_key: true,
+            auto: false,
+            default: None,
+            portable_default: None,
+            generated_as: None,
+            comment: None,
+            case_insensitive: false,
+            sealed: false,
+        });
+        fks.push(FkDef {
+            name: crate::migrate::ddl::fk_constraint_name(&m.through, col),
+            columns: vec![col.clone()],
+            to: table.clone(),
+            on: vec![pk.column.clone()],
+            on_delete: OnDelete::Cascade,
+            to_ty: None,
+        });
+    }
+    Ok(TableState {
+        name: m.through.clone(),
+        scope: Target::Tenant,
+        columns,
+        indexes: Vec::new(),
+        checks: Vec::new(),
+        fks,
+        comment: None,
+        pg_pkey: Some(pg_object_name(&m.through, None, "pkey", |_| false)),
+        pg_sequence: None,
+    })
 }
 
 fn on_delete(raw: Option<&str>, at: &str) -> Result<OnDelete, LoadError> {
@@ -626,8 +763,19 @@ pub(crate) fn table_of(
             });
         }
     }
+    for cf in &t.composite_fks {
+        // Named as engine v1 names it.
+        fks.push(FkDef {
+            name: crate::migrate::ddl::fk_constraint_name(&t.name, &cf.name),
+            columns: cf.from.clone(),
+            to: cf.to.clone(),
+            on: cf.on.clone(),
+            on_delete: OnDelete::NoAction,
+            to_ty: None,
+        });
+    }
     for i in snap.indexes.iter().filter(|i| i.table == t.name) {
-        indexes.push(IndexDef {
+        let mut ix = IndexDef {
             name: i.name.clone(),
             columns: i.columns.clone(),
             unique: i.unique,
@@ -640,7 +788,13 @@ pub(crate) fn table_of(
             include: i.include.clone(),
             skipped_on: Vec::new(),
             constraint: false,
-        });
+        };
+        // Skipped where a backend cannot build it, so the file loads there.
+        ix.skipped_on = Backend::ALL
+            .into_iter()
+            .filter(|&b| super::render::unsupported(&ix, b).is_some())
+            .collect();
+        indexes.push(ix);
     }
     for c in snap.checks.iter().filter(|c| c.table == t.name) {
         checks.push(CheckDef {
@@ -773,6 +927,28 @@ pub(crate) fn field_json(c: &ColumnDef, fk: Option<&FkDef>) -> Value {
     v
 }
 
+/// The op that adds (or drops) `f` on `table`, and its line: `add_fk` for
+/// one column, `add_composite_fk` for several (3.3).
+fn fk_op(add: bool, table: &str, f: &FkDef) -> (Value, String) {
+    let (kind, payload) = match (add, f.columns.len()) {
+        (true, 1) => (
+            "add_fk",
+            json!({"table": table, "column": f.columns[0], "fk": inline_fk(f)}),
+        ),
+        (false, 1) => (
+            "drop_fk",
+            json!({"table": table, "column": f.columns[0], "was": inline_fk(f)}),
+        ),
+        (true, _) => ("add_composite_fk", json!({"table": table, "fk": f})),
+        (false, _) => ("drop_composite_fk", json!({"table": table, "was": f})),
+    };
+    let mark = if add { '+' } else { '-' };
+    (
+        op(kind, payload),
+        format!("{mark} {kind} {table}.{}", f.name),
+    )
+}
+
 pub(crate) fn inline_fk(fk: &FkDef) -> Value {
     let mut v = json!({"name": fk.name, "to": fk.to, "on": fk.on[0]});
     if fk.on_delete != OnDelete::NoAction {
@@ -813,11 +989,19 @@ fn diff(
     // gets `<t>_<c>_idx` when nothing covers it.
     for t in new.tables.values_mut() {
         let before = old_of(&t.name);
-        for fk in t.fks.clone() {
-            if t.indexes
-                .iter()
-                .any(|i| i.columns.first() == fk.columns.first())
-                || t.primary_key().next() == fk.columns.first().map(String::as_str)
+        // Wider FKs first: their index covers a narrower one on its lead.
+        let mut fks = t.fks.clone();
+        fks.sort_by_key(|f| std::cmp::Reverse(f.columns.len()));
+        for fk in fks {
+            // Covered when the FK columns lead an index or the primary key.
+            let leads = |cols: &[&str]| {
+                cols.len() >= fk.columns.len() && cols.iter().zip(&fk.columns).all(|(a, b)| a == b)
+            };
+            let pk: Vec<&str> = t.primary_key().collect();
+            if leads(&pk)
+                || t.indexes
+                    .iter()
+                    .any(|i| leads(&i.columns.iter().map(String::as_str).collect::<Vec<_>>()))
             {
                 continue;
             }
@@ -832,13 +1016,13 @@ fn diff(
                 (Some(_), Some(b)) => match b
                     .indexes
                     .iter()
-                    .find(|i| i.columns.first() == fk.columns.first())
+                    .find(|i| leads(&i.columns.iter().map(String::as_str).collect::<Vec<_>>()))
                 {
                     Some(ix) => ix.clone(),
                     None => continue,
                 },
                 _ => IndexDef {
-                    name: pg_object_name(&t.name, Some(&fk.columns[0]), "idx", |_| false),
+                    name: pg_object_name(&t.name, Some(&fk.columns.join("_")), "idx", |_| false),
                     columns: fk.columns.clone(),
                     unique: false,
                     method: "btree".into(),
@@ -919,11 +1103,9 @@ fn diff(
         for f in &b.fks {
             let same = mine.iter().any(|n| *n == f);
             if !same || touches(name, f) {
-                drop_fks.push(op(
-                    "drop_fk",
-                    json!({"table": name, "column": f.columns[0], "was": inline_fk(f)}),
-                ));
-                lines.push((1, format!("- drop_fk {name}.{}", f.name)));
+                let (o, line) = fk_op(false, name, f);
+                drop_fks.push(o);
+                lines.push((1, line));
             }
         }
     }
@@ -957,14 +1139,13 @@ fn diff(
             fields.push(field_json(c, fk));
         }
         for f in &t.fks {
-            let inline =
-                f.to != t.name && (exists.contains(&f.to) || new.externs.contains_key(&f.to));
+            let inline = f.columns.len() == 1
+                && f.to != t.name
+                && (exists.contains(&f.to) || new.externs.contains_key(&f.to));
             if !inline {
-                add_fks.push(op(
-                    "add_fk",
-                    json!({"table": t.name, "column": f.columns[0], "fk": inline_fk(f)}),
-                ));
-                lines.push((11, format!("+ add_fk {}.{}", t.name, f.name)));
+                let (o, line) = fk_op(true, &t.name, f);
+                add_fks.push(o);
+                lines.push((11, line));
             }
             if !owned.contains(&f.to) && !new.tables.contains_key(&f.to) {
                 if let Some(dep) = others.get(&f.to) {
@@ -1126,11 +1307,9 @@ fn diff(
         }
         for f in &t.fks {
             if !b.fks.contains(f) || touches(name, f) {
-                add_fks.push(op(
-                    "add_fk",
-                    json!({"table": name, "column": f.columns[0], "fk": inline_fk(f)}),
-                ));
-                lines.push((11, format!("+ add_fk {name}.{}", f.name)));
+                let (o, line) = fk_op(true, name, f);
+                add_fks.push(o);
+                lines.push((11, line));
                 if !owned.contains(&f.to) && !new.tables.contains_key(&f.to) {
                     if let Some(dep) = others.get(&f.to) {
                         depends_on.insert(dep.clone());

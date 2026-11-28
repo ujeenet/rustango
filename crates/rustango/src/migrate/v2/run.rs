@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use super::format::{File, Kind, Op, OpEnvelope, Phase};
+use super::history::History;
 use super::invert::{invert, Allow};
 use super::ledger::{Ledger, Row, RowState};
 use super::load::{load_project, Loaded, Project};
@@ -193,7 +194,6 @@ impl From<RunError> for MigrateError {
 }
 
 impl RunError {
-    #[cfg(any(test, feature = "tenancy"))]
     pub(crate) fn code(&self) -> Option<Code> {
         match self {
             Self::Load(e) => Some(e.code),
@@ -296,10 +296,7 @@ pub(crate) async fn head_after_down(
     steps: usize,
 ) -> Result<Option<String>, RunError> {
     let rows = Ledger::of(opts).rows(pool).await?;
-    Ok(rows
-        .len()
-        .checked_sub(steps + 1)
-        .map(|i| format!("{}:{}", rows[i].app, rows[i].id)))
+    Ok(History::read(rows.iter().collect())?.head_after(steps))
 }
 
 /// The steps [`downgrade`] takes on `pool` to leave `head` the newest row
@@ -314,13 +311,7 @@ pub(crate) async fn steps_to_head(
     head: Option<&str>,
 ) -> Result<usize, RunError> {
     let rows = Ledger::of(opts).rows(pool).await?;
-    Ok(match head {
-        None => rows.len(),
-        Some(h) => rows
-            .iter()
-            .position(|r| names(h, &r.app, &r.id))
-            .map_or(0, |at| rows.len() - at - 1),
-    })
+    Ok(History::read(rows.iter().collect())?.steps_to(head))
 }
 
 /// A file's `requires` (8.4): `registry:<id>` from a tenant run needs that
@@ -668,6 +659,7 @@ async fn migrate_project(
     opts: &Options,
 ) -> Result<Report, RunError> {
     super::step::refuse_duplicates().map_err(|e| refused(Code::Unresolved, "data steps", e))?;
+    refuse_unknown_target(project, opts)?;
     // Registry files belong to a tenancy run, never a single database's.
     if opts.run_as == RunAs::Single {
         if let Some(f) = project
@@ -860,6 +852,25 @@ async fn migrate_project(
     })
 }
 
+/// `apply <id>` names a file of this project: a typo never runs everything.
+fn refuse_unknown_target(project: &Project, opts: &Options) -> Result<(), RunError> {
+    let Some(t) = opts.up_to.as_deref() else {
+        return Ok(());
+    };
+    if project
+        .files
+        .iter()
+        .any(|f| names(t, &f.file.app, &f.file.id))
+    {
+        return Ok(());
+    }
+    let why = match project.replaced.iter().find(|((a, i), _)| names(t, a, i)) {
+        Some(((app, _), by)) => format!("`{t}` is replaced by the squash checkpoint `{app}:{by}`"),
+        None => format!("no migration `{t}` in this project"),
+    };
+    Err(refused(Code::Graph, t, format!("{why}; nothing ran")))
+}
+
 /// The v1 ledger an adopt checkpoint reads (9.2): the run's custom one, else
 /// the default; empty when absent.
 async fn legacy_applied(
@@ -948,7 +959,7 @@ pub(crate) async fn downgrade_to(
 }
 
 /// Whether `target` (`<app>:<id>` or `<id>`) names `(app, id)`.
-fn names(target: &str, app: &str, id: &str) -> bool {
+pub(crate) fn names(target: &str, app: &str, id: &str) -> bool {
     match target.split_once(':') {
         Some((a, i)) => a == app && i == id,
         None => target == id,
@@ -966,15 +977,7 @@ pub(crate) async fn applied_after(
     target: &str,
 ) -> Result<Option<Vec<String>>, RunError> {
     let rows = Ledger::of(opts).rows(pool).await?;
-    let Some(pos) = rows.iter().position(|r| names(target, &r.app, &r.id)) else {
-        return Ok(None);
-    };
-    Ok(Some(
-        rows[pos + 1..]
-            .iter()
-            .map(|r| format!("{}:{}", r.app, r.id))
-            .collect(),
-    ))
+    Ok(History::read(rows.iter().collect())?.after(target))
 }
 
 /// Whether a data op among `earlier` (with a real down) declares that it
@@ -1001,26 +1004,6 @@ fn restored(earlier: &[OpEnvelope], drop: &Op) -> bool {
     })
 }
 
-/// The rows applied after `pos` that descend from it over `parents` (same
-/// app) and `depends_on` (any app), in `seq` order (7.1 step 1).
-fn descendants(rows: &[&Row], bodies: &[File], pos: usize) -> Vec<usize> {
-    let mut set: Vec<(String, String)> = vec![(rows[pos].app.clone(), rows[pos].id.clone())];
-    let mut out = Vec::new();
-    for i in pos + 1..rows.len() {
-        let f = &bodies[i];
-        let hit = f
-            .parents
-            .iter()
-            .any(|p| set.contains(&(rows[i].app.clone(), p.clone())))
-            || f.depends_on.iter().any(|d| set.contains(d));
-        if hit {
-            set.push((rows[i].app.clone(), rows[i].id.clone()));
-            out.push(i);
-        }
-    }
-    out
-}
-
 /// How far a rollback goes.
 #[derive(Clone, Copy)]
 enum Back<'a> {
@@ -1035,7 +1018,7 @@ async fn rollback(
     opts: &Options,
 ) -> Result<Report, RunError> {
     // A project that does not load is refused before the lock.
-    load_project(dir)?;
+    let project = load_project(dir)?;
     let ledger = Ledger::of(opts);
     let run_id = new_run_id();
     let own = opts.database.is_none();
@@ -1059,7 +1042,7 @@ async fn rollback(
             sweep: None,
             adopted_later: Vec::new(),
         };
-        let done = runner.downgrade(back).await?;
+        let done = runner.downgrade(back, &project).await?;
         Ok((done, runner.planned))
     })
     .await?;
@@ -1730,8 +1713,8 @@ impl Runner<'_> {
                             return Err(refused(
                                 Code::State,
                                 &f.at,
-                                "this migration is half rolled back: finish `downgrade` first, \
-                                 or `apply --resume-forward` to go forward again",
+                                "this migration is half rolled back: finish `manage dbmigrate \
+                                 down` first, or `apply --resume-forward` to go forward again",
                             ))
                         }
                         RowState::Running | RowState::Failed if self.opts.dry_run => {
@@ -3292,17 +3275,22 @@ impl Runner<'_> {
         let mut after = state.clone();
         apply_file(&mut after, &f.file, &f.at, &self.ctx())?;
         let rows = self.ledger.rows(self.pool).await?;
-        let done: std::collections::HashSet<&str> = rows
+        // A recorded checkpoint stands for the files it replaced.
+        let mut done: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for r in rows
             .iter()
             .filter(|r| r.app == f.file.app && r.state == RowState::Applied)
-            .map(|r| r.id.as_str())
-            .collect();
+        {
+            done.insert(r.id.clone());
+            let body = super::history::body(r)?;
+            done.extend(body.replaces);
+        }
         let missing: Vec<&str> = f
             .file
             .replaces
             .iter()
             .map(String::as_str)
-            .filter(|id| !done.contains(id))
+            .filter(|id| !done.contains(*id))
             .collect();
         let k = key(&f.file);
         let hashes = (state.hash(memo), after.hash(memo));
@@ -3313,11 +3301,14 @@ impl Runner<'_> {
                 Code::Behind,
                 &f.at,
                 format!(
-                    "this database ran part of what `{}:{}` replaces; missing {}: apply them \
-                     with a release that still has those files, then migrate",
+                    "this database ran part of what `{}:{}` replaces; missing {}. This release \
+                     runs them only as that checkpoint: migrate with the last release of your \
+                     app from before `{}` was added (it runs them one by one), then deploy this \
+                     one",
                     f.file.app,
                     f.file.id,
-                    missing.join(", ")
+                    missing.join(", "),
+                    f.file.id
                 ),
             ));
         } else {
@@ -3385,44 +3376,35 @@ impl Runner<'_> {
     }
 
     /// Plan every rollback first (each inverse and blocker), then run them,
-    /// newest first: a blocker anywhere runs zero statements (7.1).
-    async fn downgrade(&mut self, back: Back<'_>) -> Result<Vec<String>, RunError> {
+    /// newest first: a blocker anywhere runs zero statements, and every
+    /// blocker is printed (7.1).
+    #[allow(clippy::too_many_lines)]
+    async fn downgrade(
+        &mut self,
+        back: Back<'_>,
+        project: &Project,
+    ) -> Result<Vec<String>, RunError> {
         let rows = self.ledger.rows(self.pool).await?;
         // Applied rows, and a partial one: its forward work in effect rolls back (7.6).
         let applied: Vec<&Row> = rows
             .iter()
             .filter(|r| r.state != RowState::RollingBack)
             .collect();
-        let mut bodies = Vec::with_capacity(applied.len());
-        for r in &applied {
-            let at = format!("ledger:{}:{}", r.app, r.id);
-            bodies.push(body(r, &at)?);
-        }
-        // Rows a squash checkpoint row stands for: its state holds them.
-        let superseded: std::collections::HashSet<(String, String)> = bodies
-            .iter()
-            .flat_map(|f: &File| f.replaces.iter().map(|id| (f.app.clone(), id.clone())))
-            .collect();
+        let mut hist = History::read(applied)?;
         // A half-finished rollback finishes first and counts as a step.
-        let resuming = rows.len() - applied.len();
-        // Rows come in `seq` order; the chosen ones newest first.
+        let resuming = rows.len() - hist.len();
+        // The chosen positions, newest first.
         let chosen: Vec<usize> = match back {
-            Back::Steps(n) => (0..applied.len())
-                .rev()
-                .take(n.saturating_sub(resuming))
-                .collect(),
+            Back::Steps(n) => hist.last_steps(n.saturating_sub(resuming)),
             Back::To(to) => {
-                let pos = applied
-                    .iter()
-                    .position(|r| names(to, &r.app, &r.id))
-                    .ok_or_else(|| {
-                        refused(Code::State, to, format!("`{to}` is not applied here"))
-                    })?;
-                let set = descendants(&applied, &bodies, pos);
+                let pos = hist.position(to).ok_or_else(|| {
+                    refused(Code::State, to, format!("`{to}` is not applied here"))
+                })?;
+                let set = hist.descendants(pos);
                 let others: Vec<String> = set
                     .iter()
-                    .filter(|&&i| applied[i].app != applied[pos].app)
-                    .map(|&i| format!("{}:{}", applied[i].app, applied[i].id))
+                    .filter(|&&i| hist.rows[i].app != hist.rows[pos].app)
+                    .map(|&i| format!("{}:{}", hist.rows[i].app, hist.rows[i].id))
                     .collect();
                 if !others.is_empty() && !self.opts.cascade {
                     return Err(refused(
@@ -3441,49 +3423,53 @@ impl Runner<'_> {
         // What each chosen row has in effect: its whole body, or a partial
         // row's prefix.
         for &idx in &chosen {
-            let at = format!("ledger:{}:{}", applied[idx].app, applied[idx].id);
-            bodies[idx] = self
-                .in_effect(applied[idx], bodies[idx].clone(), &at)
+            let at = format!("ledger:{}:{}", hist.rows[idx].app, hist.rows[idx].id);
+            hist.bodies[idx] = self
+                .in_effect(hist.rows[idx], hist.bodies[idx].clone(), &at)
                 .await?;
         }
+        // Static blockers (7.1 step 5): all of them, not the first.
+        let mut blockers: Vec<RunError> = Vec::new();
         let mut misses = Vec::new();
         for &idx in &chosen {
-            misses.extend(super::data::misses(&bodies[idx], self.b, true));
+            if hist.bodies[idx].kind != Kind::Checkpoint {
+                misses.extend(super::data::misses(&hist.bodies[idx], self.b, true));
+            }
         }
-        super::data::refuse_misses(&misses, "rollback plan")?;
+        if let Err(e) = super::data::refuse_misses(&misses, "rollback plan") {
+            blockers.push(e.into());
+        }
         let mut plan: Vec<(&Row, Vec<Unit>)> = Vec::new();
         let mut in_effect_ops: Vec<usize> = Vec::new();
         let mut downs: Vec<File> = Vec::new();
         for &idx in &chosen {
-            let row = applied[idx];
+            let row = hist.rows[idx];
             let at = format!("ledger:{}:{}", row.app, row.id);
-            let file = bodies[idx].clone();
+            let file = hist.bodies[idx].clone();
             if file.kind == Kind::Checkpoint {
-                return Err(refused(
-                    Code::Floor,
-                    &at,
-                    match &file.base {
-                        Some(base) => format!(
-                            "v2 rollback stops at the switch point (`{}:{}`, from v1 `{}`)",
-                            row.app, row.id, base.legacy
-                        ),
-                        None => format!(
-                            "v2 rollback stops at the squash checkpoint: squashed at `{}:{}`",
-                            row.app, row.id
-                        ),
-                    },
-                ));
-            }
-            // State before it: every earlier stored body, in apply order.
-            let mut state = State::default();
-            for (r, f) in applied[..idx].iter().zip(&bodies) {
-                if superseded.contains(&(r.app.clone(), r.id.clone())) {
+                // A marker over replaced files still on disk only goes (7.7).
+                let kept = file
+                    .replaces
+                    .iter()
+                    .all(|r| project.kept.contains(&(file.app.clone(), r.clone())));
+                if hist.is_marker(idx) && kept {
+                    plan.push((row, Vec::new()));
+                    in_effect_ops.push(0);
                     continue;
                 }
-                let at = format!("ledger:{}:{}", r.app, r.id);
-                apply_file(&mut state, f, &at, &self.ctx())?;
+                blockers.push(floor(row, &file, hist.is_marker(idx)));
+                continue;
             }
-            let (down, of) = self.down_file(&file, &state, &at)?;
+            // State before it: the stored bodies before it, in plan order.
+            let state = hist.state_before(idx, &self.ctx())?;
+            let (down, of) = match self.down_file(&file, &state, &at) {
+                Ok(d) => d,
+                Err(e) if blocker(&e) => {
+                    blockers.push(e);
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             let mut after = state.clone();
             apply_file(&mut after, &file, &at, &self.ctx())?;
             let (mut units, _) = render_plan(&after, &down, &at, &self.ctx(), self.b)?;
@@ -3511,29 +3497,35 @@ impl Runner<'_> {
             downs.push(down);
         }
         // Data probes before any statement (7.1 step 6): every hit is a blocker.
-        if !plan.is_empty() {
-            let mut now = State::default();
-            for (r, f) in applied.iter().zip(&bodies) {
-                if superseded.contains(&(r.app.clone(), r.id.clone())) {
-                    continue;
-                }
-                let at = format!("ledger:{}:{}", r.app, r.id);
-                apply_file(&mut now, f, &at, &self.ctx())?;
-            }
+        let mut hits = Vec::new();
+        if !downs.is_empty() {
+            let now = hist.state_before(hist.len(), &self.ctx())?;
             let ops: Vec<&OpEnvelope> = downs.iter().flat_map(|f| &f.operations).collect();
             let needs = super::preflight::checkable(&ops, &now);
-            let hits = super::preflight::probe(self.pool, &needs).await?;
-            if !hits.is_empty() {
-                let list: Vec<String> = hits.iter().map(|h| format!("  - {h}")).collect();
-                return Err(refused(
-                    Code::Blocked,
-                    "rollback plan",
-                    format!(
-                        "the rows do not fit the schema the rollback restores; nothing ran:\n{}",
-                        list.join("\n")
-                    ),
-                ));
-            }
+            hits = super::preflight::probe(self.pool, &needs).await?;
+        }
+        if blockers.len() == 1 && hits.is_empty() {
+            return Err(blockers.remove(0));
+        }
+        if !blockers.is_empty() || !hits.is_empty() {
+            let list: Vec<String> =
+                blockers
+                    .iter()
+                    .map(ToString::to_string)
+                    .chain(hits.iter().map(|h| {
+                        format!("the rows do not fit the schema the rollback restores: {h}")
+                    }))
+                    .map(|l| format!("  - {l}"))
+                    .collect();
+            return Err(refused(
+                Code::Blocked,
+                "rollback plan",
+                format!(
+                    "{} blocker(s); nothing ran:\n{}",
+                    list.len(),
+                    list.join("\n")
+                ),
+            ));
         }
         // `--plan`: every blocker above was checked; nothing runs.
         if self.opts.dry_run {
@@ -3744,11 +3736,37 @@ impl Runner<'_> {
     }
 }
 
-/// The file a ledger row ran: its stored body, decoded.
-fn body(row: &Row, at: &str) -> Result<File, RunError> {
-    let raw: serde_json::Value = serde_json::from_str(&row.applied_body)
-        .map_err(|e| refused(Code::File, at, e.to_string()))?;
-    Ok(super::format::decode(&raw, at)?)
+/// Why a rollback stops at a checkpoint (7.7): the switch point, or a
+/// squash checkpoint whose replaced files are gone.
+fn floor(row: &Row, file: &File, marker: bool) -> RunError {
+    let at = format!("ledger:{}:{}", row.app, row.id);
+    refused(
+        Code::Floor,
+        &at,
+        match &file.base {
+            Some(base) => format!(
+                "v2 rollback stops at the switch point (`{}:{}`, from v1 `{}`)",
+                row.app, row.id, base.legacy
+            ),
+            None if marker => format!(
+                "v2 rollback stops at the squash checkpoint: squashed at `{}:{}`; its replaced \
+                 files were pruned, so the rows they ran cannot be rolled back with this release",
+                row.app, row.id
+            ),
+            None => format!(
+                "v2 rollback stops at the squash checkpoint: squashed at `{}:{}`",
+                row.app, row.id
+            ),
+        },
+    )
+}
+
+/// Whether a rollback plan error is a blocker, listed with the others.
+fn blocker(e: &RunError) -> bool {
+    matches!(
+        e.code(),
+        Some(Code::Blocked | Code::Floor | Code::NotEnabled | Code::Unresolved)
+    )
 }
 
 /// The class of an error, for the ledger: never driver text or row values.

@@ -5224,7 +5224,7 @@ async fn refuse_duplicate_keys(
         {
             continue;
         }
-        match super::ensure::has_duplicate_keys(pool, table, &columns).await {
+        match super::ensure::has_duplicate_keys(pool, table, &columns, None).await {
             Ok(false) => {}
             Ok(true) => {
                 let q = |n: &str| pool.dialect().quote_ident(n);

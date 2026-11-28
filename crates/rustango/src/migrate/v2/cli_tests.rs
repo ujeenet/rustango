@@ -311,3 +311,56 @@ fn help_lists_the_dbmigrate_verbs() {
         .unwrap();
     assert!(String::from_utf8(out).unwrap().contains("dbmigrate <verb>"));
 }
+
+/// `apply --plan` prints SQL and never "Applied"; `apply <id>` with an id
+/// no file has runs nothing.
+#[tokio::test]
+async fn a_plan_applies_nothing_and_an_unknown_id_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("migrations");
+    v2_project(&dir);
+    let pool = sqlite(tmp.path()).await;
+    let out = cli(&pool, &dir, &["dbmigrate", "apply", "--plan"])
+        .await
+        .unwrap();
+    assert!(
+        out.contains("CREATE TABLE") && !out.contains("Applied"),
+        "{out}"
+    );
+    let e = cli(&pool, &dir, &["dbmigrate", "apply", "0009_typo"])
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("no migration `0009_typo`"), "{e}");
+    let status = cli(&pool, &dir, &["dbmigrate", "status"]).await.unwrap();
+    assert!(!status.contains("[X]"), "nothing ran: {status}");
+}
+
+/// The two-leaf error names both fixes as commands; a rebase that does
+/// not replay is refused and the original file stays.
+#[tokio::test]
+async fn two_leaves_name_the_fixes_and_a_bad_rebase_keeps_the_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("migrations");
+    v2_project(&dir);
+    // Both leaves add the same column: either order fails to replay.
+    let leaf = |id: &str| {
+        json!({"engine": 2, "format": 1, "id": id, "app": "project", "parents": ["0002_n"],
+            "target": "tenant", "operations": [{"op": "add_column", "v": 1, "table": "cl_t",
+            "column": {"column": "same", "ty": "i32", "nullable": true}}]})
+    };
+    for id in ["0003_a", "0003_b"] {
+        std::fs::write(dir.join(format!("{id}.json")), leaf(id).to_string()).unwrap();
+    }
+    let pool = sqlite(tmp.path()).await;
+    let e = cli(&pool, &dir, &["dbmigrate", "apply"]).await.unwrap_err();
+    let msg = e.to_string();
+    assert!(
+        msg.contains("make --merge") && msg.contains("make --rebase 0003_b"),
+        "{msg}"
+    );
+    cli(&pool, &dir, &["dbmigrate", "make", "--rebase", "0003_b"])
+        .await
+        .unwrap_err();
+    assert!(dir.join("0003_b.json").exists(), "the original stays");
+    assert!(!dir.join("0004_b.json").exists());
+}

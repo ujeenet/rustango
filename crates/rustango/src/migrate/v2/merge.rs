@@ -149,14 +149,17 @@ pub(crate) fn rebase(
     body["parents"] = serde_json::json!([onto.file.id]);
     let path = folder.join(format!("{new_id}.json"));
     write(&path, &body)?;
+    // The original steps aside (not loaded), and goes only once the moved
+    // project loads and replays: a bad rebase never loses the file.
     let old = mine.path.clone();
-    std::fs::remove_file(&old).map_err(|e| err(Code::Io, &mine.at, e.to_string()))?;
-    if let Err(e) = super::load::load_project(dir) {
-        // Put the file back as it was.
+    let aside = old.with_extension("json.rebase");
+    std::fs::rename(&old, &aside).map_err(|e| err(Code::Io, &mine.at, e.to_string()))?;
+    if let Err(e) = super::load::load_project(dir).and_then(|p| super::load::replay(&p)) {
         let _ = std::fs::remove_file(&path);
-        let _ = std::fs::write(&old, &original);
+        let _ = std::fs::rename(&aside, &old);
         return Err(e);
     }
+    std::fs::remove_file(&aside).map_err(|e| err(Code::Io, &mine.at, e.to_string()))?;
     Ok(path)
 }
 

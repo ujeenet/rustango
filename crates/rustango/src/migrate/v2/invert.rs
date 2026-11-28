@@ -3,7 +3,7 @@
 
 use super::format::{Change, ColumnChanges, Field, InlineFk, Op, TableDef};
 use super::format::{DataDown, RustDown};
-use super::state::{State, TableState};
+use super::state::{State, TableState, Target};
 use super::{Code, LoadError};
 
 /// What a rollback may undo.
@@ -77,6 +77,35 @@ fn swap<T: Clone>(c: &Option<Change<T>>) -> Option<Change<T>> {
 
 fn blocked(at: &str, msg: impl Into<String>) -> LoadError {
     LoadError::new(Code::Blocked, at, msg)
+}
+
+/// Undo `nested` state ops on `s`, the state after them, newest first:
+/// the inverse ops in run order. Data ops change no state.
+///
+/// # Errors
+/// A nested op with no state inverse, or one that does not replay.
+pub(crate) fn undo_nested(
+    s: &mut State,
+    nested: &[Op],
+    at: &str,
+    target: Target,
+) -> Result<Vec<Op>, LoadError> {
+    let ctx = super::replay::Ctx {
+        target,
+        registry: None,
+    };
+    let mut out = Vec::new();
+    for (i, n) in nested.iter().enumerate().rev() {
+        if matches!(n, Op::DataSql { .. } | Op::DataRust { .. }) {
+            continue;
+        }
+        let at = format!("{at}/state/{i}");
+        for inv in invert(n, s, Allow { data_loss: true }, &at)? {
+            super::replay::apply(s, &inv, &at, &ctx, &[])?;
+            out.push(inv);
+        }
+    }
+    Ok(out)
 }
 
 /// The ops that undo `op`, given the state just after it.
@@ -251,6 +280,14 @@ pub(crate) fn invert(op: &Op, after: &State, allow: Allow, at: &str) -> Result<V
             column: column.clone(),
             fk: was.clone(),
         }],
+        Op::AddCompositeFk { table, fk } => vec![Op::DropCompositeFk {
+            table: table.clone(),
+            was: fk.clone(),
+        }],
+        Op::DropCompositeFk { table, was } => vec![Op::AddCompositeFk {
+            table: table.clone(),
+            fk: was.clone(),
+        }],
         Op::AddIndex {
             table,
             index,
@@ -386,13 +423,15 @@ pub(crate) fn invert(op: &Op, after: &State, allow: Allow, at: &str) -> Result<V
                     ));
                 }
             }
-            // Its declared state is not replayed back: the rollback recomputes
-            // state from the remaining stored bodies.
+            // Its declared state reverses too, so a `state` probe has what
+            // the reverse leaves to check.
+            let mut s = after.clone();
+            let back = undo_nested(&mut s, &op.nested(at)?, at, Target::Tenant)?;
             vec![Op::RawSql {
                 id: id.clone(),
                 up: down.clone(),
                 down: Some(up.clone()),
-                state: Vec::new(),
+                state: super::format::Declared::Inverse(back),
                 probe: probe.clone(),
             }]
         }

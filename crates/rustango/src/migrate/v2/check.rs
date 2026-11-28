@@ -4,7 +4,8 @@
 use std::path::Path;
 
 use super::format::Op;
-use super::state::{Backend, CheckBody, ColumnDef};
+use super::replay::Ctx;
+use super::state::{Backend, CheckBody, ColumnDef, State};
 use super::LoadError;
 use crate::migrate::snapshot::SchemaSnapshot;
 use crate::sql::Pool;
@@ -57,76 +58,95 @@ pub(crate) async fn check(
     // and every hand-written check expression.
     let mut exprs: Vec<(String, ColumnDef, String)> = Vec::new();
     let mut checks: Vec<(String, String)> = Vec::new();
-    for f in &project.files {
-        let mut ops: Vec<Op> = f.file.operations.iter().map(|e| e.op.clone()).collect();
-        for e in &f.file.operations {
-            ops.extend(e.op.nested(&f.at)?);
+    // Each target in canonical order, so an op sees the state it runs on.
+    let all = &project.files;
+    let files = project
+        .order
+        .iter()
+        .flat_map(|(target, idx)| idx.iter().map(move |&i| (*target, &all[i])));
+    let mut states: std::collections::BTreeMap<super::state::Target, State> =
+        std::collections::BTreeMap::new();
+    for (target, f) in files {
+        let state = states.entry(target).or_default();
+        let ctx = Ctx {
+            target,
+            registry: None,
+        };
+        // A checkpoint brings its state in whole; its kept ops are data ops.
+        if f.file.kind == super::format::Kind::Checkpoint {
+            super::replay::apply_file(state, &f.file, &f.at, &ctx)?;
         }
-        for op in &ops {
-            let mut col = |table: &str, c: &ColumnDef, text: &Option<String>| {
-                if let Some(t) = text {
-                    let at = format!("{}: {table}.{}", f.at, c.column);
-                    exprs.push((at, c.clone(), t.clone()));
-                }
-            };
-            match op {
-                Op::CreateTable {
-                    table, checks: ks, ..
-                }
-                | Op::AdoptTable {
-                    table, checks: ks, ..
-                } => {
-                    for fd in &table.fields {
-                        col(&table.name, &fd.column, &fd.column.default);
+        let mut created: Vec<String> = Vec::new();
+        for (i, env) in f.file.operations.iter().enumerate() {
+            if f.file.kind == super::format::Kind::Checkpoint {
+                break;
+            }
+            let op_at = format!("{}#/operations/{i}", f.at);
+            let mut after = state.clone();
+            let here: Vec<&str> = created.iter().map(String::as_str).collect();
+            super::replay::apply(&mut after, &env.op, &op_at, &ctx, &here)?;
+            if let Op::CreateTable { table, .. } = &env.op {
+                created.push(table.name.clone());
+            }
+            let mut ops = vec![env.op.clone()];
+            ops.extend(env.op.nested(&f.at)?);
+            for op in &ops {
+                let mut col = |table: &str, c: &ColumnDef, text: &Option<String>| {
+                    if let Some(t) = text {
+                        let at = format!("{}: {table}.{}", f.at, c.column);
+                        exprs.push((at, c.clone(), t.clone()));
                     }
-                    for k in ks {
+                };
+                match op {
+                    Op::CreateTable {
+                        table, checks: ks, ..
+                    }
+                    | Op::AdoptTable {
+                        table, checks: ks, ..
+                    } => {
+                        for fd in &table.fields {
+                            col(&table.name, &fd.column, &fd.column.default);
+                        }
+                        for k in ks {
+                            if let CheckBody::Sql(e) = &k.body {
+                                checks.push((format!("{}: check `{}`", f.at, k.name), e.clone()));
+                            }
+                        }
+                    }
+                    Op::AddCheck { check: k, .. } => {
                         if let CheckBody::Sql(e) = &k.body {
                             checks.push((format!("{}: check `{}`", f.at, k.name), e.clone()));
                         }
                     }
-                }
-                Op::AddCheck { check: k, .. } => {
-                    if let CheckBody::Sql(e) = &k.body {
-                        checks.push((format!("{}: check `{}`", f.at, k.name), e.clone()));
+                    Op::AddColumn {
+                        table,
+                        column,
+                        fill,
+                    } => {
+                        col(table, &column.column, &column.column.default);
+                        col(table, &column.column, fill);
                     }
-                }
-                Op::AddColumn {
-                    table,
-                    column,
-                    fill,
-                } => {
-                    col(table, &column.column, &column.column.default);
-                    col(table, &column.column, fill);
-                }
-                Op::AlterColumn {
-                    table,
-                    column,
-                    changes,
-                    ..
-                } => {
-                    if let Some(ch) = &changes.default {
-                        let c = ColumnDef {
-                            portable_default: None,
-                            column: column.clone(),
-                            ty: changes
-                                .ty
-                                .as_ref()
-                                .map_or_else(|| "string".to_owned(), |t| t.to.clone()),
-                            nullable: true,
-                            max_length: None,
-                            primary_key: false,
-                            auto: false,
-                            default: None,
-                            generated_as: None,
-                            comment: None,
-                            case_insensitive: false,
-                            sealed: false,
-                        };
-                        col(table, &c, &ch.to);
+                    // A default-only change checks against the column's real type.
+                    Op::AlterColumn {
+                        table,
+                        column,
+                        changes,
+                        ..
+                    } => {
+                        if let (Some(ch), Some(c)) = (
+                            &changes.default,
+                            after
+                                .tables
+                                .get(table.as_str())
+                                .and_then(|t| t.column(column)),
+                        ) {
+                            col(table, c, &ch.to);
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
+            *state = after;
         }
         if let Some(doc) = &f.file.state {
             for t in doc.tables.values() {
